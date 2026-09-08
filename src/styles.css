@@ -1,0 +1,1720 @@
+/* Palette shared with aa.wezterm.lua so the two read as one family.
+   Chrome speaks the terminal's own language: mono labels, prompt glyphs,
+   a block cursor in the wordmark. Everything else stays quiet. */
+:root {
+  --bg: #0a0f1b;
+  --panel: #0e1626;
+  --raise: #141e33;
+  --line: #1c2a45;
+  --line-strong: #2a3c5c;
+  --text: #dce4f0;
+  --muted: #94a6c8;
+  --faint: #6e82a6;
+  --accent: #d97757;
+  --accent-dim: rgba(217, 119, 87, 0.14);
+  --ok: #6fbf73;
+  --err: #f85149;
+  --warn: #e3b341;
+  --mono: "Cascadia Mono", Consolas, "Courier New", monospace;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.muted {
+  color: var(--muted);
+}
+.spacer {
+  flex: 1;
+}
+
+/* --- controls ----------------------------------------------------------- */
+button {
+  font: inherit;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
+}
+button:hover {
+  color: var(--text);
+  background: var(--raise);
+  border-color: var(--line);
+}
+button:disabled,
+button:disabled:hover {
+  opacity: 0.35;
+  cursor: default;
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+button.primary {
+  color: var(--accent);
+  border-color: var(--line);
+}
+button.primary:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+input {
+  font: inherit;
+  color: var(--text);
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  min-width: 0;
+  transition: border-color 0.12s;
+}
+input:hover {
+  border-color: var(--line-strong);
+}
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+:is(button, .thread):focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* --- toolbars ----------------------------------------------------------- */
+#bar,
+#wsbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+#bar {
+  height: 44px;
+}
+#wsbar {
+  height: 34px;
+  font-size: 12px;
+}
+
+.mark {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+.brand {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--text);
+  user-select: none;
+}
+.brand .cursor {
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  background: var(--accent);
+  animation: blink 1.1s steps(1) infinite;
+}
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+#wspath {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the tail of a long path visible */
+  text-align: left;
+}
+
+/* --- body: thread sidebar + the current thread's panes ------------------ */
+#body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+#main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+#work {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Thread bar: name, branch chip, stats, then the folder giving way first. */
+#wsname {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+.chip {
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-style: normal;
+  color: var(--muted);
+  white-space: nowrap;
+}
+#wsstat {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.add {
+  color: var(--ok);
+}
+.del {
+  color: var(--err);
+}
+#waiting,
+#waiting:hover {
+  color: var(--warn);
+  border-color: var(--warn);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+#changes-btn.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* --- thread sidebar ------------------------------------------------------ */
+/* Orca's shape: rows grouped under the checkout they were cut from. A row is
+   name, then agent and branch underneath, with one dot for the whole thread. */
+#side {
+  flex: none;
+  width: 230px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+#side-filter {
+  margin: 8px 8px 2px;
+  padding: 4px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+#side-filter::placeholder {
+  color: var(--faint);
+}
+#threads {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 6px 8px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  font-family: var(--mono);
+  font-size: 12px;
+  user-select: none;
+}
+.side-head {
+  display: flex;
+  align-items: center;
+  padding: 2px 4px 6px 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.side-head button {
+  margin-left: auto;
+  padding: 0 6px;
+  font-size: 14px;
+  line-height: 1;
+}
+.chev {
+  flex: none;
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  margin: 3px 4px 0 0;
+  transition: transform 0.12s;
+}
+.folded > .chev {
+  transform: rotate(-90deg);
+  margin-top: 1px;
+}
+.repo {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.repo > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.repo > b {
+  font-weight: 400;
+  color: var(--faint);
+}
+.repo:hover {
+  color: var(--muted);
+}
+.repo {
+  padding: 10px 8px 4px;
+  color: var(--faint);
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-head + .repo {
+  padding-top: 2px;
+}
+.thread {
+  padding: 5px 6px 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
+}
+.thread:hover {
+  color: var(--text);
+  background: var(--raise);
+}
+.thread.on {
+  color: var(--text);
+  background: var(--raise);
+  border-color: var(--line-strong);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+}
+.thread .chip {
+  padding: 0 4px;
+  font-size: 9px;
+}
+.thread-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 12px;
+}
+.thread-line .thread-sub {
+  flex: 1;
+  padding-left: 0;
+}
+.thread-stat {
+  flex: none;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.thread-top .fold {
+  flex: none;
+  width: 14px;
+  padding: 0;
+  margin-left: -4px;
+  border: none;
+  background: none;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1;
+}
+.thread-top .fold:hover {
+  color: var(--text);
+}
+.thread-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dragging {
+  opacity: 0.4;
+}
+.drop-before {
+  box-shadow: 0 -2px 0 0 var(--accent);
+}
+.drop-after {
+  box-shadow: 0 2px 0 0 var(--accent);
+}
+.thread-top .more {
+  opacity: 0;
+}
+.thread:hover .thread-top .more,
+.thread.on .thread-top .more {
+  opacity: 1;
+}
+.thread-top .more:hover {
+  color: var(--text);
+}
+.menu-item.danger:hover {
+  color: var(--err);
+}
+.thread-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.thread-top::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-strong);
+  transition: background-color 0.12s;
+}
+.thread.on .thread-top::before {
+  background: var(--accent);
+}
+.thread[data-state="busy"] .thread-top::before {
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.thread[data-state="dead"] .thread-top::before {
+  background: var(--err);
+}
+/* A pane in there is waiting on you — last, so it wins on the dot. */
+.thread[data-state="waiting"] .thread-top::before {
+  background: var(--warn);
+  animation: none;
+}
+.thread[data-state="waiting"] {
+  color: var(--warn);
+}
+.thread-top > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-n {
+  flex: none;
+  color: var(--faint);
+  font-size: 10px;
+}
+.thread-top button {
+  flex: none;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  opacity: 0;
+}
+.thread:hover .thread-top button {
+  opacity: 1;
+}
+.thread-top button:hover {
+  color: var(--err);
+  background: none;
+}
+.thread-sub {
+  display: block;
+  padding-left: 12px;
+  color: var(--faint);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread[data-state="waiting"] .thread-sub {
+  color: var(--warn);
+  opacity: 0.8;
+}
+.thread-sub:empty {
+  display: none;
+}
+/* One row per pane under its thread, Orca's agent list. Same dot language as
+   the thread row; the active pane of the current thread is the lit one. */
+.agents {
+  margin-top: 3px;
+}
+.agent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 6px;
+  border-radius: 4px;
+  color: var(--faint);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.12s, background-color 0.12s;
+}
+.agent::before {
+  content: "";
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+/* Provider marks: the sidebar row and the pane header carry one each. */
+.ico {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  opacity: 0.85;
+}
+.pane-head .ico {
+  width: 11px;
+  height: 11px;
+}
+.agent > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+.agent.on {
+  color: var(--text);
+}
+.agent.on::before {
+  background: var(--accent);
+}
+.agent[data-state="busy"]::before {
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.agent[data-state="dead"]::before {
+  background: var(--err);
+}
+.agent[data-state="waiting"] {
+  color: var(--warn);
+}
+.agent[data-state="waiting"]::before {
+  background: var(--warn);
+  animation: none;
+}
+
+/* --- new thread dialog --------------------------------------------------- */
+#keys table {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+#keys td {
+  padding: 3px 14px 3px 0;
+  color: var(--muted);
+  vertical-align: top;
+}
+#keys td:first-child {
+  color: var(--accent);
+  white-space: nowrap;
+}
+#new,
+#rename,
+#keys {
+  min-width: 360px;
+  max-width: 92vw;
+  padding: 16px 18px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+#new::backdrop,
+#rename::backdrop,
+#keys::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+#new h2,
+#rename h2,
+#keys h2 {
+  margin: 0 0 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+}
+#new label,
+#rename label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+#new label > :is(input, select),
+#rename label > input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+#new select {
+  padding: 3px 6px;
+  color: var(--text);
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+#new .err {
+  min-height: 1.4em;
+  margin: 4px 0 8px;
+  color: var(--err);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.new-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* --- pane grid ---------------------------------------------------------- */
+#stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.grid {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  gap: 7px;
+  padding: 7px;
+}
+
+#empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+}
+.empty-mark {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--mono);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--text);
+  user-select: none;
+}
+.empty-mark img {
+  width: 40px;
+  height: 40px;
+}
+#empty p {
+  margin: 0;
+}
+#empty code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+#empty button {
+  margin-top: 8px;
+  padding: 6px 16px;
+}
+
+/* --- "+" pane menu ------------------------------------------------------- */
+#add-pane {
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1;
+  padding: 3px 12px;
+}
+
+#pane-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 190px;
+  max-width: 300px;
+  padding: 5px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+/* Themes, startups and prefixes all grow without limit — scroll rather than
+   run off the bottom of the window. */
+#menu-list {
+  max-height: 60vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 4px 5px 9px;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.12s, background-color 0.12s;
+}
+.menu-item:hover {
+  color: var(--text);
+  background: var(--raise);
+}
+.menu-item > span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-item::before {
+  content: "❯";
+  color: var(--accent);
+  font-size: 10px;
+}
+.menu-item button {
+  padding: 0 5px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+.menu-item:hover button {
+  opacity: 1;
+}
+.menu-item button:hover {
+  color: var(--err);
+  background: none;
+}
+/* The ⏎ toggle is state, not an action: a prefix that sends itself says so
+   without being hovered, so one glance covers the whole list. */
+.menu-item button.on,
+.menu-item button.on:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+/* The prefix dictation is currently using. */
+.menu-item.on {
+  color: var(--text);
+}
+.menu-item.on::before {
+  content: "●";
+  font-size: 8px;
+}
+/* Theme rows carry a swatch: accent disc, ringed in that theme's own
+   background so a dark and a light palette are told apart at a glance. */
+.menu-item .swatch {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1px solid;
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+#menu-add {
+  width: 100%;
+  margin-top: 5px;
+  padding: 4px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+#menu-add::placeholder {
+  color: var(--faint);
+}
+
+/* Ctrl+F, parked over the active pane's top-right corner. */
+#find {
+  position: fixed;
+  z-index: 50;
+  width: 220px;
+  padding: 4px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--panel);
+  border-color: var(--line-strong);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+#find::placeholder {
+  color: var(--faint);
+}
+
+/* Zoom: the chosen pane fills the stage, siblings stay alive but hidden. */
+.grid.zooming .pane {
+  display: none;
+}
+.grid.zooming .pane.zoom {
+  display: flex;
+  position: absolute;
+  inset: 7px;
+}
+
+/* Resize handles sitting in the grid gaps. */
+.split {
+  position: absolute;
+  z-index: 5;
+  touch-action: none;
+  border-radius: 3px;
+  transition: background-color 0.12s;
+}
+.split.v {
+  width: 7px;
+  top: 7px;
+  bottom: 7px;
+  cursor: col-resize;
+}
+.split.h {
+  height: 7px;
+  left: 7px;
+  right: 7px;
+  cursor: row-resize;
+}
+.split:hover,
+.split:active {
+  background: var(--accent-dim);
+}
+
+.pane.drop {
+  border-color: var(--accent);
+  border-style: dashed;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.pane.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-dim), 0 2px 14px rgba(0, 0, 0, 0.35);
+}
+
+/* Claude finished a turn here. Outranks .active — the whole point is that it
+   catches your eye across a grid of panes. */
+.pane.waiting,
+.pane.waiting.active {
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px rgba(227, 179, 65, 0.22), 0 2px 14px rgba(0, 0, 0, 0.35);
+}
+.pane.waiting .pane-title {
+  color: var(--warn);
+}
+/* The process is gone; Enter in the pane brings it back. */
+.pane.dead .pane-title::before {
+  color: var(--err);
+}
+
+.pane-head {
+  /* Queried below: sixteen panes across leave a header narrower than its own
+     contents, and something has to give before the title does. */
+  container-type: inline-size;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 10px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+  user-select: none;
+  cursor: grab;
+}
+.pane.active .pane-head {
+  color: var(--muted);
+}
+.pane-head button {
+  padding: 0 6px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.75;
+  transition: opacity 0.12s, color 0.12s;
+}
+.pane-head button:first-of-type {
+  margin-left: auto;
+}
+.pane:hover .pane-head button {
+  opacity: 1;
+}
+.pane-head button:hover {
+  color: var(--err);
+  background: none;
+}
+/* Dictation. Recording pulses in the theme's accent and keeps its border lit —
+   an open mic you forgot about should be visible from across the room. The
+   pulse and the border are what say "recording"; the colour is the palette's. */
+/* Wide enough for the longest state, so the toolbar doesn't shuffle sideways
+   every time the label changes. */
+#dictate {
+  min-width: 96px;
+  text-align: center;
+}
+/* A prefix is a command — mono, and clipped rather than allowed to push the
+   rest of the bar around. */
+#prefix {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+}
+/* Same clamp: the list takes typed-in codes, so the label is user-supplied and
+   #wsbar is a flex row with nowhere to wrap. */
+#lang {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#dictate.rec,
+#dictate.rec:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+/* Transcribing: same accent, but flat and unbordered — the pulse is the only
+   thing that means "the mic is still open". */
+#dictate.busy {
+  color: var(--accent);
+}
+#dictate.err {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+/* The wave: floats over the panes while the mic is open, gone the moment it
+   closes. Nothing to click and nothing to focus — it only reports. */
+#wave {
+  position: fixed;
+  z-index: 50;
+  left: 50%;
+  bottom: 26px;
+  translate: -50% 0; /* own property, so the entry animation keeps transform */
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 44px;
+  padding: 0 18px;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  border: 1px solid var(--line-strong);
+  border-radius: 24px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  animation: rise 0.16s ease-out;
+}
+#wave i {
+  width: 3px;
+  height: 100%;
+  /* Accent, not --err: every palette's red is the same red, so the wave read as
+     un-themed. Same accent as the pulsing #dictate button it belongs to. */
+  background: var(--accent);
+  border-radius: 2px;
+  transform: scaleY(0.05);
+  /* Just past the 60 ms poll: the bars glide between samples instead of stepping. */
+  transition: transform 70ms linear;
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+/* Context gauge: how full this pane's claude session is. The bar is the
+   element's own background, so there's nothing inside it but the number. */
+.ctx {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+  background: linear-gradient(to right, var(--accent-dim) var(--pct, 0%), transparent 0);
+}
+.ctx:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
+}
+.ctx.warm {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.ctx.hot {
+  color: var(--err);
+  border-color: var(--err);
+}
+/* Pane config: one labelled dropdown per setting. The OS draws the popup, so
+   there is nothing here to size, scroll or keep on screen. */
+.cfg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 9px;
+  color: var(--muted);
+}
+.cfg-row > span {
+  flex: none;
+  width: 40px;
+}
+.cfg-row select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cfg-row select:hover {
+  border-color: var(--line-strong);
+}
+.cfg-row select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* Per-session numbers in the context list, right-aligned past the flexed label. */
+.usage-n {
+  flex: none;
+  color: var(--faint);
+  font-weight: 400;
+}
+.menu-item:hover .usage-n {
+  color: var(--muted);
+}
+/* Plan chip: the 5-hour session window, so one glance says how much room is left
+   before anything stops. */
+#plan {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+/* Severities as the API reports them; `normal` keeps the button's own colours. */
+.sev-warning {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.sev-critical,
+.sev-exceeded {
+  color: var(--err);
+  border-color: var(--err);
+}
+/* One plan limit: name and percentage, a bar, and when it resets. */
+.limit {
+  padding: 7px 9px 8px;
+}
+.limit-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text);
+}
+.limit-top span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.limit-top b {
+  flex: none;
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 11px;
+}
+.limit-bar {
+  display: block;
+  height: 4px;
+  margin: 6px 0 4px;
+  border-radius: 3px;
+  background: var(--line);
+}
+/* The fill, so the track stays visible behind it. */
+.limit-bar::before {
+  content: "";
+  display: block;
+  width: var(--pct, 0%);
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.limit.sev-warning .limit-bar::before {
+  background: var(--warn);
+}
+.limit.sev-critical .limit-bar::before,
+.limit.sev-exceeded .limit-bar::before {
+  background: var(--err);
+}
+.limit small {
+  color: var(--faint);
+  font-size: 10px;
+}
+/* Context profile. The sparkline is the window over time — one point per turn,
+   scaled to the session's own peak, so the shape is the reading. Vertical rules
+   are compactions: where the line falls off a cliff, that is why. */
+.spark {
+  height: 34px;
+  margin: 2px 9px 4px;
+}
+.spark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.spark polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke; /* the viewBox is stretched, the line isn't */
+}
+.spark line {
+  stroke: var(--err);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+  vector-effect: non-scaling-stroke;
+}
+/* What produced the tokens, as one bar of the whole. Segments are theme
+   variables, so a palette swap carries — see HUES in main.ts. */
+.stack {
+  display: flex;
+  height: 6px;
+  margin: 4px 9px 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--line);
+}
+.stack i {
+  min-width: 1px; /* a 0.2% slice still says it is there */
+}
+.leg {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 2px 9px;
+  color: var(--muted);
+}
+.leg i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+.leg span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.leg b {
+  flex: none;
+  color: var(--faint);
+  font-weight: 400;
+  font-size: 11px;
+}
+
+/* Section headings and errors: reading matter, not rows you can click. */
+.menu-note {
+  padding: 4px 9px 5px;
+  color: var(--faint);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+/* Too narrow for everything: drop the gauge and the config button before the
+   title, which is the only thing saying which pane this is. Zoom or widen the
+   pane to get them back — the gauge's number is in its menu, and the plan chip
+   is unaffected. */
+@container (max-width: 200px) {
+  .pane-head .ctx,
+  .pane-head .cfg {
+    display: none;
+  }
+}
+
+.pane-title {
+  min-width: 0; /* OSC-0 titles get long — shrink to ellipsis, never push the buttons out */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-title::before {
+  content: "●";
+  color: var(--line-strong);
+  margin-right: 7px;
+  font-size: 9px;
+  vertical-align: 1px;
+}
+.pane.busy .pane-title::before {
+  color: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pane-term {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0 4px 12px;
+  background: var(--bg);
+}
+.pane-term .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brand .cursor,
+  .pane.busy .pane-title::before {
+    animation: none;
+  }
+  /* Only the entrance — the bars themselves are the reading, not decoration. */
+  #wave {
+    animation: none;
+  }
+}
+
+/* Narrow window: the toolbar buttons need the width more than the brand does,
+   and the panes need it more than the sidebar — it narrows to names only. */
+@media (max-width: 760px) {
+  .brand {
+    display: none;
+  }
+  #side {
+    width: 130px;
+  }
+  #side-filter {
+    display: none;
+  }
+  #changes {
+    width: 220px;
+  }
+  #wspath {
+    display: none;
+  }
+  .thread-sub,
+  .agents {
+    display: none;
+  }
+}
+
+/* --- diff tabs ----------------------------------------------------------- */
+#tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 30px;
+  padding: 0 8px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  user-select: none;
+}
+#tabs .tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  max-width: 220px;
+  padding: 0 4px 0 10px;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+#tabs .tab > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#tabs .tab:hover {
+  color: var(--text);
+}
+#tabs .tab.on {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+#tabs .tab button {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--faint);
+  opacity: 0;
+}
+#tabs .tab:hover button {
+  opacity: 1;
+}
+#tabs .tab button:hover {
+  color: var(--err);
+}
+
+/* --- changes panel ------------------------------------------------------- */
+#changes {
+  flex: none;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.changes-top {
+  padding: 10px 10px 8px;
+  border-bottom: 1px solid var(--line);
+}
+#pr-btn {
+  margin-bottom: 8px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-color: var(--line);
+}
+.commit-row {
+  display: flex;
+  gap: 4px;
+}
+.commit-row #commit-btn {
+  flex: 1;
+}
+.commit-row #commit-more {
+  flex: none;
+  padding: 3px 8px;
+}
+.changes-ref {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 600;
+}
+.changes-ref > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#changes-base {
+  min-height: 1.3em;
+  font-size: 10px;
+}
+#commit-msg {
+  display: block;
+  width: 100%;
+  margin: 8px 0 6px;
+  padding: 5px 8px;
+  resize: vertical;
+  font: inherit;
+  color: var(--text);
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+#commit-msg:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+#commit-btn {
+  width: 100%;
+}
+#changes-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 6px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.changes-h {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 4px 4px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  cursor: pointer;
+  user-select: none;
+}
+.changes-h > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap; /* the header's own buttons must not push it onto a second line */
+}
+.changes-h a {
+  flex: none;
+}
+.changes-h a {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--faint);
+}
+.changes-h a:hover {
+  color: var(--accent);
+}
+.dir {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.dir > span {
+  flex: 1;
+}
+.dir > b {
+  font-weight: 400;
+  color: var(--faint);
+}
+.dir:hover {
+  color: var(--text);
+}
+.file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none; /* shift-click picks rows, not text */
+}
+.file:hover {
+  background: var(--raise);
+}
+.file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-name i {
+  font-style: normal;
+  color: var(--faint);
+}
+.file-stat {
+  flex: none;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.file-stat b {
+  display: inline-block;
+  width: 1.2em;
+  text-align: right;
+  font-weight: 600;
+}
+.st-M,
+.st-R,
+.st-T {
+  color: var(--warn);
+}
+.st-A,
+.st-U {
+  color: var(--ok);
+}
+.st-D {
+  color: var(--err);
+}
+
+/* Stage / unstage / discard, on the row they act on. They take the stat's
+   place on hover so a 300px panel doesn't have to grow a scrollbar. */
+.acts {
+  flex: none;
+  display: none;
+  gap: 1px;
+}
+.file:hover .acts,
+.file.sel .acts,
+.dir:hover .acts,
+.changes-h:hover .acts {
+  display: flex;
+}
+.file:hover .file-stat,
+.dir:hover > b {
+  display: none;
+}
+.acts button {
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1.35;
+  border: none;
+}
+.acts button:hover {
+  color: var(--accent);
+  background: var(--raise);
+}
+.file.sel {
+  background: var(--accent-dim);
+}
+.sel-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: 6px 0 2px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  color: var(--muted);
+  background: var(--raise);
+}
+.sel-bar > span {
+  flex: 1;
+}
+/* git stopped half way through something: the one bar worth interrupting for. */
+.sel-bar.warn {
+  color: var(--warn);
+  background: var(--accent-dim);
+}
+.sel-bar.warn button {
+  color: var(--warn);
+}
+.sel-bar button {
+  padding: 1px 6px;
+  font-size: 10px;
+}
+
+.commit {
+  padding: 2px 6px;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.commit:hover {
+  background: var(--raise);
+  color: var(--text);
+}
+.commit b {
+  color: var(--faint);
+  font-weight: 400;
+}
+
+/* One file's diff over the stage. */
+#diff {
+  position: absolute;
+  inset: 7px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 12px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+}
+#diff-body {
+  flex: 1;
+  margin: 0;
+  padding: 8px 12px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+#diff-body {
+  padding: 0 0 8px;
+}
+#diff-body .line {
+  display: flex;
+  white-space: pre;
+  min-width: max-content; /* the tint spans the widest line, not the viewport */
+}
+#diff-body .line i {
+  flex: none;
+  width: 44px;
+  padding-right: 8px;
+  text-align: right;
+  font-style: normal;
+  color: var(--faint);
+  user-select: none;
+}
+#diff-body .line i + i {
+  border-right: 1px solid var(--line);
+  margin-right: 10px;
+}
+#diff-body .line.hunk,
+#diff-body .line.meta {
+  padding-left: 12px;
+}
+#diff-body .line.hunk i,
+#diff-body .line.meta i {
+  display: none;
+}
+#diff-body .line.hunk {
+  margin-top: 4px;
+  background: var(--raise);
+}
+#diff-body .line.hunk button {
+  margin-left: 12px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  border: none;
+  opacity: 0;
+}
+#diff-body .line.hunk:hover button,
+#diff-body .line.hunk button:focus {
+  opacity: 1;
+}
+#diff-body .line.hunk button:hover {
+  color: var(--accent);
+}
+#diff-body .add {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+#diff-body .del {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+#diff-body .hunk {
+  color: var(--accent);
+}
+#diff-body .meta {
+  color: var(--faint);
+}
+
+/* --- small chrome -------------------------------------------------------- */
+/* "3/17" parked at the find box's left edge, same tint as its placeholder. */
+#find-n {
+  position: fixed;
+  z-index: 51;
+  pointer-events: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+#find-n:empty {
+  display: none;
+}
+#toast {
+  position: fixed;
+  z-index: 60;
+  right: 14px;
+  bottom: 14px;
+  max-width: 480px;
+  padding: 8px 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--err);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  animation: rise 0.16s ease-out;
+}
+.thread-age {
+  flex: none;
+  color: var(--faint);
+  font-size: 10px;
+}
+.changes-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+.changes-tools #pr-btn {
+  margin-bottom: 0;
+}
+#changes-refresh,
+#changes-more {
+  padding: 0 6px;
+  font-size: 13px;
+}

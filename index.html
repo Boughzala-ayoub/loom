@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <link rel="icon" href="/src/logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>loom</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <header id="bar">
+      <img src="/src/logo.svg" class="mark" alt="" />
+      <span class="brand">loom<span class="cursor"></span></span>
+      <span class="spacer"></span>
+      <button id="waiting" class="hidden warn" title="Jump to the next pane waiting on you (F3)"></button>
+      <button id="plan" class="hidden" title="Claude plan usage"></button>
+      <button id="new-thread" class="primary" title="Cut a new thread: a worktree with an agent in it">+ Thread</button>
+    </header>
+
+    <div id="body">
+      <!-- Threads, grouped under the checkout they were cut from. Rows are built in main.ts. -->
+      <aside id="side">
+        <input id="side-filter" spellcheck="false" placeholder="Search threads…" title="Filter by name, branch or agent title" />
+        <div id="threads"></div>
+      </aside>
+
+      <div id="main">
+        <div id="wsbar">
+          <span id="wsname"></span>
+          <span id="wsbranch" class="chip hidden"></span>
+          <span id="wsstat"></span>
+          <span id="wspath" class="muted"></span>
+          <span class="spacer"></span>
+          <button id="prefix" title="What dictation types before the transcript">/prompt ▾</button>
+          <button id="dictate" title="Dictate into the focused pane — click, or hold F4">◉ speak</button>
+          <button id="lang" title="Language dictation transcribes as">English ▾</button>
+          <button id="theme" title="Colour theme">◑ loom</button>
+          <button id="layout" title="Cycle pane layout: grid / rows / columns">▥ cols</button>
+          <button id="vscode" title="Open this thread in VS Code (F5)">VS Code</button>
+          <button id="changes-btn" title="Changes in this thread's worktree">⎇</button>
+          <button id="wsmore" title="Thread actions">⋯</button>
+          <button id="add-pane" class="primary" title="Add a pane to this thread">+</button>
+        </div>
+
+        <!-- Diff tabs beside the panes, shown only while a thread has some. -->
+        <div id="tabs" class="hidden"></div>
+
+        <div id="work">
+          <main id="stage">
+            <div id="empty">
+              <div class="empty-mark"><img src="/src/logo.svg" alt="" />loom</div>
+              <p>Cut a thread — a git worktree with <code>claude</code>, <code>codex</code> or <code>opencode</code> running in it.</p>
+              <button id="open-first" class="primary">New thread…</button>
+            </div>
+            <!-- One file's diff, over the panes. Esc or ✕ closes. -->
+            <div id="diff" class="hidden">
+              <div class="diff-head">
+                <span id="diff-name"></span>
+                <span class="spacer"></span>
+                <button id="diff-close" title="Close (Esc)">✕</button>
+              </div>
+              <pre id="diff-body"></pre>
+            </div>
+          </main>
+
+          <!-- Orca's right-hand side: what the thread changed, and a commit box. -->
+          <aside id="changes" class="hidden">
+            <div class="changes-top">
+              <div class="changes-tools">
+                <button id="pr-btn" title="Push the branch and open GitHub's compare page">⎇ Create PR</button>
+                <span class="spacer"></span>
+                <button id="changes-more" title="Fetch, pull, push, branch, stash, amend">⋯</button>
+                <button id="changes-refresh" title="Re-read git now">↻</button>
+              </div>
+              <div class="changes-ref">
+                <span id="changes-branch"></span>
+                <span id="changes-stat"></span>
+              </div>
+              <div id="changes-base" class="muted"></div>
+              <textarea id="commit-msg" rows="2" placeholder="Message" spellcheck="false"></textarea>
+              <div class="commit-row">
+                <button id="commit-btn" class="primary" title="git add -A && git commit">✓ Commit</button>
+                <button id="commit-more" class="primary" title="Commit options">▾</button>
+              </div>
+            </div>
+            <div id="changes-body"></div>
+          </aside>
+        </div>
+      </div>
+    </div>
+
+    <div id="pane-menu" class="hidden">
+      <div id="menu-list"></div>
+      <input id="menu-add" spellcheck="false" placeholder="add a command…" title="Enter adds it to the list" />
+    </div>
+
+    <input
+      id="find"
+      class="hidden"
+      spellcheck="false"
+      placeholder="find…"
+      title="Enter / Shift+Enter — Esc closes"
+    />
+
+    <span id="find-n" class="hidden-empty"></span>
+    <div id="toast" class="hidden"></div>
+
+    <!-- Bars are built in main.ts; an empty box beats 28 lines of <i>. -->
+    <div id="wave" class="hidden" aria-hidden="true"></div>
+
+    <dialog id="rename">
+      <form id="rename-form" method="dialog">
+        <h2>Rename thread</h2>
+        <label>name <input id="rename-name" spellcheck="false" autocomplete="off" /></label>
+        <div class="new-actions">
+          <button type="button" id="rename-cancel" formnovalidate>Cancel</button>
+          <button type="submit" class="primary">Rename</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="keys">
+      <h2>Keys</h2>
+      <table>
+        <tr><td>F1</td><td>this list</td></tr>
+        <tr><td>F2</td><td>zoom the focused pane</td></tr>
+        <tr><td>F3</td><td>jump to the next pane waiting on you</td></tr>
+        <tr><td>F4 (hold)</td><td>dictate into the focused agent</td></tr>
+        <tr><td>F5</td><td>open the thread in VS Code</td></tr>
+        <tr><td>Ctrl+Tab / Ctrl+Shift+Tab</td><td>next / previous thread</td></tr>
+        <tr><td>Ctrl+1 … Ctrl+9</td><td>jump to that thread</td></tr>
+        <tr><td>Ctrl+Alt+←↑↓→</td><td>move focus between panes</td></tr>
+        <tr><td>Ctrl+B</td><td>show / hide the sidebar</td></tr>
+        <tr><td>Ctrl+Shift+G</td><td>show / hide changes</td></tr>
+        <tr><td>Ctrl+click / Shift+click a change</td><td>pick several files to stage, unstage or discard at once</td></tr>
+        <tr><td>Ctrl+F</td><td>find in the focused pane</td></tr>
+        <tr><td>Ctrl+= / Ctrl+− / Ctrl+0, Ctrl+wheel</td><td>font size</td></tr>
+        <tr><td>Alt+↑ / Alt+↓</td><td>scroll an agent's screen</td></tr>
+        <tr><td>Enter in a dead pane</td><td>relaunch it</td></tr>
+        <tr><td>drag a pane header</td><td>swap panes; drag a sidebar row to reorder</td></tr>
+      </table>
+      <div class="new-actions"><button id="keys-close" class="primary">Close</button></div>
+    </dialog>
+
+    <!-- New thread. Native dialog: Esc closes it, focus stays inside, the OS draws the selects. -->
+    <dialog id="new">
+      <form id="new-form" method="dialog">
+        <h2>New thread</h2>
+        <label>repo <select id="new-repo"></select></label>
+        <label>
+          name
+          <input id="new-name" spellcheck="false" autocomplete="off" placeholder="blank = open the checkout itself" />
+        </label>
+        <label>agent <select id="new-agent"></select></label>
+        <label>base <input id="new-base" spellcheck="false" autocomplete="off" placeholder="HEAD · a branch, tag, or a new branch to create" /></label>
+        <label>panes <input id="new-count" type="number" min="1" max="16" value="1" /></label>
+        <p id="new-err" class="err"></p>
+        <div class="new-actions">
+          <button type="button" id="new-cancel" formnovalidate>Cancel</button>
+          <button type="submit" id="new-go" class="primary">Create</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

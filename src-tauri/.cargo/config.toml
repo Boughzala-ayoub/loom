@@ -1,0 +1,30 @@
+# whisper-rs-sys generates its FFI bindings with bindgen, which needs
+# libclang.dll (its bundled fallback bindings are Linux-generated and fail the
+# struct-layout asserts on MSVC). Rather than a 2.5 GB LLVM install, the DLL
+# comes from a pip package unpacked next to the crate:
+#
+#   cd src-tauri && pip install --target .build libclang
+#
+# ~80 MB, no admin, nothing installed system-wide. `relative` resolves against
+# this file's parent directory, so a moved checkout still builds.
+[env]
+LIBCLANG_PATH = { value = ".build/clang/native", relative = true }
+
+# Without these, `tauri build` ships whisper.cpp compiled /Od with asserts on —
+# dictation runs several times slower than under `tauri dev`, which gets /O2.
+#
+# cmake-rs strips every -O//O out of the flags it forwards ("let cmake deal with
+# optimization"), then overwrites CMAKE_<LANG>_FLAGS_<CMAKE_BUILD_TYPE> anyway,
+# taking CMake's own /O2 with it. whisper-rs-sys sets CMAKE_BUILD_TYPE=Release
+# for a release build but RelWithDebInfo for a debug one, while always building
+# --config Release — so in debug the clobbering lands on a config nothing uses
+# and the optimized flags survive by accident. Release isn't so lucky.
+#
+# cmake-rs skips a var the caller already defined, and whisper-rs-sys forwards
+# every CMAKE_* env var into the build, so claiming these two slots is enough.
+# The values are CMake's stock Release flags, i.e. exactly what `tauri dev`
+# already compiles with. /MD must stay: it has to match Rust's CRT.
+# ponytail: env vars because whisper-rs-sys exposes no other seam. Delete once
+# cmake-rs stops overwriting the config it is about to build.
+CMAKE_C_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"

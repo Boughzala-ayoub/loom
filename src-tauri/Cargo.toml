@@ -1,0 +1,53 @@
+[package]
+name = "loom"
+version = "3.0.0"
+description = "Multi-folder agentic terminal workspace"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "loom_lib"
+# rlib only: main.rs links this crate, nothing else does. The template's
+# staticlib/cdylib are for iOS/Android, and a staticlib archives every
+# dependency's object code — 781 MB in debug, relinked on every build, consumed
+# by nothing. Put them back if this ever targets mobile.
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Debug: full debuginfo for every dependency is what makes target\debug reach
+# double-digit GB. Line tables keep panic backtraces pointing at file:line —
+# what this codebase actually debugs with — and drop variable inspection.
+# ponytail: raise to 2 if you ever attach a real debugger.
+[profile.dev]
+debug = "line-tables-only"
+
+# Release: one codegen unit + LTO + abort-on-panic strips a few MB off the binary.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+portable-pty = "0.9"
+whisper-rs = "0.16.0"
+# cpal accepts windows-core ">=0.61, <=0.62" but pairs it with the `windows`
+# crate, which tao/wry hold at 0.61 — left alone the resolver maxes windows-core
+# to 0.62 and cpal stops compiling on mismatched COM traits. Cargo.lock pins it
+# back to 0.61.2; if `cargo update` ever breaks the build here, that's why:
+#   cargo update -p windows-core@0.62.x --precise 0.61.2
+cpal = "0.18.1"

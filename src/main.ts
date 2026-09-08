@@ -1,0 +1,3562 @@
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
+import { homeDir, join } from "@tauri-apps/api/path";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { confirm, open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
+import { SearchAddon } from "@xterm/addon-search";
+import { WebLinksAddon } from "@xterm/addon-web-links";
+import { proofFor, statusFor, flat, foot } from "./apply";
+import { agentOf, launch, type Agent } from "./agent";
+import { icon } from "./icons";
+import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type Sec, type Stat, type Node as Tree } from "./gitparse";
+import { wheelInit } from "./scroll";
+import { dropText } from "./drop";
+import "@xterm/xterm/css/xterm.css";
+
+const MAX_PANES = 16;
+
+/** Absolute or workspace-relative file path with an optional :line. The
+ * dot-extension is what keeps prose (and "10:30") from lighting up. */
+const PATH_RE = /(?:[A-Za-z]:)?[\\/]?(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z]\w{0,7}(?::\d+)?/g;
+const ABS_RE = /^(?:[A-Za-z]:|[\\/])/;
+
+/** The live value of a palette custom property — one source of truth for the
+ * bits of chrome CSS can't reach (xterm's own theme, find decorations). */
+const cssVar = (n: string) =>
+  getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+/** Match highlight in the pane's own palette; both ruler colors are required.
+ * A function, not a const: the palette moves when the theme does. */
+const findOpts = () => ({
+  decorations: {
+    matchBackground: cssVar("--line-strong"),
+    matchOverviewRuler: cssVar("--line-strong"),
+    activeMatchBackground: cssVar("--accent"),
+    activeMatchColorOverviewRuler: cssVar("--accent"),
+  },
+});
+
+/** A palette override. `vars` are set inline on <html>, so an empty one means
+ * "whatever :root says" — that's the default theme, and it keeps the stylesheet
+ * the single source of truth for it (no flash of the wrong palette on boot). */
+type Theme = { label: string; scheme?: "light"; vars: Record<string, string> };
+/** The default theme's swatch colours, read from :root before any override can
+ * land — an empty `vars` has nothing of its own to show. */
+const BASE: Record<string, string> = {
+  "--accent": cssVar("--accent"),
+  "--line-strong": cssVar("--line-strong"),
+  "--bg": cssVar("--bg"),
+};
+const THEMES: Theme[] = [
+  { label: "loom", vars: {} },
+  {
+    label: "graphite",
+    vars: {
+      "--bg": "#131315",
+      "--panel": "#191a1d",
+      "--raise": "#232428",
+      "--line": "#2b2d32",
+      "--line-strong": "#3d4046",
+      "--text": "#e4e4e7",
+      "--muted": "#a1a1aa",
+      "--faint": "#71717a",
+      "--accent": "#d97757",
+      "--accent-dim": "rgba(217, 119, 87, 0.14)",
+      "--ok": "#4ade80",
+      "--err": "#f87171",
+      "--warn": "#fbbf24",
+    },
+  },
+  {
+    label: "solarized",
+    vars: {
+      "--bg": "#002b36",
+      "--panel": "#04303b",
+      "--raise": "#073642",
+      "--line": "#0d4552",
+      "--line-strong": "#586e75",
+      "--text": "#93a1a1",
+      "--muted": "#839496",
+      "--faint": "#657b83",
+      "--accent": "#cb4b16",
+      "--accent-dim": "rgba(203, 75, 22, 0.16)",
+      "--ok": "#859900",
+      "--err": "#dc322f",
+      "--warn": "#b58900",
+    },
+  },
+  {
+    label: "gruvbox",
+    vars: {
+      "--bg": "#1d2021",
+      "--panel": "#282828",
+      "--raise": "#32302f",
+      "--line": "#3c3836",
+      "--line-strong": "#504945",
+      "--text": "#ebdbb2",
+      "--muted": "#bdae93",
+      "--faint": "#928374",
+      "--accent": "#fe8019",
+      "--accent-dim": "rgba(254, 128, 25, 0.14)",
+      "--ok": "#b8bb26",
+      "--err": "#fb4934",
+      "--warn": "#fabd2f",
+    },
+  },
+  {
+    label: "dracula",
+    vars: {
+      "--bg": "#21222c",
+      "--panel": "#282a36",
+      "--raise": "#343746",
+      "--line": "#44475a",
+      "--line-strong": "#6272a4",
+      "--text": "#f8f8f2",
+      "--muted": "#b4b6c4",
+      "--faint": "#7c81a0",
+      "--accent": "#bd93f9",
+      "--accent-dim": "rgba(189, 147, 249, 0.16)",
+      "--ok": "#50fa7b",
+      "--err": "#ff5555",
+      "--warn": "#f1fa8c",
+    },
+  },
+  {
+    label: "nord",
+    vars: {
+      "--bg": "#2e3440",
+      "--panel": "#333b48",
+      "--raise": "#3b4252",
+      "--line": "#434c5e",
+      "--line-strong": "#4c566a",
+      "--text": "#eceff4",
+      "--muted": "#d8dee9",
+      "--faint": "#7b88a1",
+      "--accent": "#88c0d0",
+      "--accent-dim": "rgba(136, 192, 208, 0.16)",
+      "--ok": "#a3be8c",
+      "--err": "#bf616a",
+      "--warn": "#ebcb8b",
+    },
+  },
+  {
+    label: "tokyo",
+    vars: {
+      "--bg": "#1a1b26",
+      "--panel": "#1f2030",
+      "--raise": "#292e42",
+      "--line": "#2f3549",
+      "--line-strong": "#3b4261",
+      "--text": "#c0caf5",
+      "--muted": "#9aa5ce",
+      "--faint": "#565f89",
+      "--accent": "#7aa2f7",
+      "--accent-dim": "rgba(122, 162, 247, 0.16)",
+      "--ok": "#9ece6a",
+      "--err": "#f7768e",
+      "--warn": "#e0af68",
+    },
+  },
+  {
+    label: "catppuccin",
+    vars: {
+      "--bg": "#181825",
+      "--panel": "#1e1e2e",
+      "--raise": "#313244",
+      "--line": "#45475a",
+      "--line-strong": "#585b70",
+      "--text": "#cdd6f4",
+      "--muted": "#a6adc8",
+      "--faint": "#7f849c",
+      "--accent": "#cba6f7",
+      "--accent-dim": "rgba(203, 166, 247, 0.16)",
+      "--ok": "#a6e3a1",
+      "--err": "#f38ba8",
+      "--warn": "#f9e2af",
+    },
+  },
+  {
+    label: "one dark",
+    vars: {
+      "--bg": "#21252b",
+      "--panel": "#282c34",
+      "--raise": "#2f343d",
+      "--line": "#3e4451",
+      "--line-strong": "#4f5666",
+      "--text": "#abb2bf",
+      "--muted": "#8c93a1",
+      "--faint": "#5c6370",
+      "--accent": "#61afef",
+      "--accent-dim": "rgba(97, 175, 239, 0.16)",
+      "--ok": "#98c379",
+      "--err": "#e06c75",
+      "--warn": "#e5c07b",
+    },
+  },
+  {
+    label: "everforest",
+    vars: {
+      "--bg": "#2d353b",
+      "--panel": "#333c43",
+      "--raise": "#3d484d",
+      "--line": "#475258",
+      "--line-strong": "#56635f",
+      "--text": "#d3c6aa",
+      "--muted": "#a6b0a0",
+      "--faint": "#859289",
+      "--accent": "#e69875",
+      "--accent-dim": "rgba(230, 152, 117, 0.16)",
+      "--ok": "#a7c080",
+      "--err": "#e67e80",
+      "--warn": "#dbbc7f",
+    },
+  },
+  {
+    label: "rosé pine",
+    vars: {
+      "--bg": "#191724",
+      "--panel": "#1f1d2e",
+      "--raise": "#26233a",
+      "--line": "#302d43",
+      "--line-strong": "#403d52",
+      "--text": "#e0def4",
+      "--muted": "#908caa",
+      "--faint": "#6e6a86",
+      "--accent": "#c4a7e7",
+      "--accent-dim": "rgba(196, 167, 231, 0.16)",
+      "--ok": "#9ccfd8",
+      "--err": "#eb6f92",
+      "--warn": "#f6c177",
+    },
+  },
+  {
+    label: "solarized light",
+    scheme: "light",
+    vars: {
+      "--bg": "#fdf6e3",
+      "--panel": "#fbf2da",
+      "--raise": "#eee8d5",
+      "--line": "#e0d9c1",
+      "--line-strong": "#a9b3ad",
+      "--text": "#073642",
+      "--muted": "#586e75",
+      "--faint": "#839496",
+      "--accent": "#cb4b16",
+      "--accent-dim": "rgba(203, 75, 22, 0.12)",
+      "--ok": "#6b7a00",
+      "--err": "#dc322f",
+      "--warn": "#976f00",
+    },
+  },
+  {
+    label: "latte",
+    scheme: "light",
+    vars: {
+      "--bg": "#eff1f5",
+      "--panel": "#ffffff",
+      "--raise": "#e6e9ef",
+      "--line": "#dce0e8",
+      "--line-strong": "#bcc0cc",
+      "--text": "#4c4f69",
+      "--muted": "#6c6f85",
+      "--faint": "#8c8fa1",
+      "--accent": "#8839ef",
+      "--accent-dim": "rgba(136, 57, 239, 0.12)",
+      "--ok": "#40a02b",
+      "--err": "#d20f39",
+      "--warn": "#b0740e",
+    },
+  },
+  {
+    label: "paper",
+    scheme: "light",
+    vars: {
+      "--bg": "#fbfaf7",
+      "--panel": "#ffffff",
+      "--raise": "#f2f1ec",
+      "--line": "#e0ded7",
+      "--line-strong": "#c3c0b6",
+      "--text": "#23262b",
+      "--muted": "#5c626c",
+      "--faint": "#8a8f99",
+      "--accent": "#c0562f",
+      "--accent-dim": "rgba(192, 86, 47, 0.12)",
+      "--ok": "#2f7d32",
+      "--err": "#c22a24",
+      "--warn": "#8a6100",
+    },
+  },
+];
+let theme: Theme = THEMES[0];
+
+/** The 16 ANSI colours for a light background. xterm's defaults are a dark
+ * scheme's: bright yellow, bright white and cyan vanish on paper. Solarized's
+ * accents at their light-side values, with the greys turned around so "bright
+ * white" text — what every TUI uses for emphasis — is the darkest ink. */
+const LIGHT_ANSI = {
+  black: "#002b36",
+  red: "#dc322f",
+  green: "#6b7a00",
+  yellow: "#976f00",
+  blue: "#268bd2",
+  magenta: "#d33682",
+  cyan: "#1f8f8a",
+  white: "#657b83",
+  brightBlack: "#93a1a1",
+  brightRed: "#cb4b16",
+  brightGreen: "#586e75",
+  brightYellow: "#8a6100",
+  brightBlue: "#1c6fb0",
+  brightMagenta: "#6c71c4",
+  brightCyan: "#2aa198",
+  brightWhite: "#073642",
+};
+
+/** xterm draws itself, so it can't inherit the CSS palette — hand it over. */
+const termTheme = () => ({
+  background: cssVar("--bg"),
+  foreground: cssVar("--text"),
+  cursor: cssVar("--accent"),
+  selectionBackground: cssVar("--line-strong"),
+  ...(theme.scheme === "light" ? LIGHT_ANSI : {}),
+});
+
+function applyTheme(t: Theme) {
+  theme = t;
+  const root = document.documentElement;
+  // Clear first: themes need not define the same keys, and a leftover override
+  // from the last one would survive under :root.
+  for (const k of THEMES.flatMap((x) => Object.keys(x.vars))) root.style.removeProperty(k);
+  for (const [k, v] of Object.entries(t.vars)) root.style.setProperty(k, v);
+  root.style.colorScheme = t.scheme ?? "dark";
+  for (const p of threads.flatMap((t) => t.panes)) p.term.options.theme = termTheme();
+}
+
+/** A pane as saved: the command it booted with, the claude session it owns,
+ * and the session's last-known effort level (hook-reported; resume re-pins it). */
+type PaneState = { cmd: string; sid?: string; effort?: string };
+
+type Startup = { label: string; cmd: string };
+const DEFAULT_STARTUPS: Startup[] = [
+  { label: "claude", cmd: "claude" },
+  { label: "codex", cmd: "codex" },
+  { label: "opencode", cmd: "opencode" },
+  { label: "powershell", cmd: "" },
+  { label: "cmd", cmd: "cmd" },
+  { label: "git bash", cmd: '& "$env:ProgramFiles\\Git\\bin\\bash.exe" -i -l' },
+];
+let startups: Startup[] = [...DEFAULT_STARTUPS];
+let fontSize = 13; // Ctrl+= / Ctrl+- / Ctrl+0, global to every pane, persisted
+let paneCount = 1; // the new-thread form's pane count, persisted so it keeps your last pick
+
+const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
+  document.querySelector<T>(sel)!;
+
+let seq = 0;
+const uid = () => `${Date.now().toString(36)}-${seq++}`;
+const basename = (dir: string) => dir.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || dir;
+
+/** A line at the bottom right that goes away by itself — for errors that
+ * deserve a look but not a modal. */
+let toastTimer = 0;
+function toast(msg: string) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.remove("hidden");
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => t.classList.add("hidden"), 6000);
+}
+
+function mini(label: string, title: string, fn: () => void) {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.title = title;
+  b.onmousedown = (e) => e.preventDefault(); // don't steal terminal focus
+  b.onclick = (e) => {
+    e.stopPropagation();
+    fn();
+  };
+  return b;
+}
+
+/** Two-note blip: `from` for the first third, `to` for the rest, under one
+ * exponential decay so it reads as a single cue rather than two beeps.
+ * ponytail: WebAudio sine instead of shipping audio assets. */
+let audio: AudioContext | undefined;
+function chime(from: number, to: number, peak = 0.15, len = 0.3) {
+  audio ??= new AudioContext();
+  if (audio.state === "suspended") audio.resume(); // no gesture yet on restore
+  const t = audio.currentTime;
+  const osc = audio.createOscillator();
+  const gain = audio.createGain();
+  osc.frequency.setValueAtTime(from, t);
+  osc.frequency.setValueAtTime(to, t + len * 0.3);
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(peak, t + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + len);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(t);
+  osc.stop(t + len + 0.01);
+}
+/** Attention blip: a pane wants you. Louder and longer than the mic cues, which
+ * answer something you just did and shouldn't carry across the room. */
+const beep = () => chime(880, 1320);
+
+/** What a pane's claude session has spent — see src-tauri/src/usage.rs. `ctx` is
+ * the live context size, the token counts are the session's running totals. */
+type Usage = {
+  ctx: number;
+  window: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  turns: number;
+  mainTurns: number;
+  sid: string;
+  model: string;
+  effort: string;
+  /** From the statusline tee: what the pane runs RIGHT NOW, ahead of the
+   * transcript — follows a /model typed by hand the moment it runs. "" until
+   * the tee has fired. */
+  liveModel: string;
+  liveEffort: string;
+};
+
+/** What a pane's context is made of and how it got there — see the `Bucket` doc
+ * in src-tauri/src/usage.rs for what the numbers do and don't mean. `series` and
+ * `drops` are exact; `buckets` are a 4-chars-a-token estimate of what each origin
+ * has produced over the session, which is not the same as what is in the window
+ * now — Claude Code prunes what it sends and records nothing about what it cut. */
+type Bucket = { label: string; tokens: number };
+type Drop = { trigger: string; pre: number; post: number; turn: number };
+type Profile = { buckets: Bucket[]; series: number[]; drops: Drop[]; ctx: number; est: number };
+
+/** The pane whose profile the usage panel is showing, and its answer. Both are
+ * cleared when the panel opens and the answer lands a moment later — reading a
+ * whole transcript is not something to do on the 4s poll. */
+let profilePane: Pane | null = null;
+let profile: Profile | null = null;
+
+/** The models this account can use, straight from the API — a model Anthropic
+ * adds appears here on its own. Null until the fetch lands; MODELS is the
+ * offline fallback, the CLI's own alias list. `/effort`'s levels are a fixed
+ * vocabulary of the CLI, so they stay a list. Both settings are session-scoped:
+ * Claude Code applies them to the running conversation and does not persist. */
+type ModelOpt = { value: string; label: string; maxInput: number; maxOutput: number };
+let models: ModelOpt[] | null = null;
+const MODELS = ["opus[1m]", "sonnet[1m]", "fable[1m]", "haiku", "default"];
+const EFFORTS = ["low", "medium", "high", "xhigh", "max", "auto"];
+
+/** One row per family — newest only — and the big window wherever the model has
+ * one. Family is the word after "claude-" in the id, and the API answers newest
+ * first, so the first of each family is the current one; a new family or a new
+ * version of an old one lands here on its own. `[1m]` is how Claude Code opts
+ * into the larger window, and `maxInput` is what says a model has one, so no
+ * per-model knowledge is needed. */
+function modelRows(): { value: string; label: string; detail: string }[] {
+  if (!models?.length) return MODELS.map((v) => ({ value: v, label: v, detail: "" }));
+  const rows = [{ value: "default", label: "Default", detail: "" }];
+  const seen = new Set<string>();
+  for (const m of models) {
+    const family = m.value.replace(/^claude-/, "").split("-")[0];
+    if (seen.has(family)) continue;
+    seen.add(family);
+    const big = m.maxInput > 200_000;
+    rows.push({
+      value: big ? `${m.value}[1m]` : m.value,
+      label: m.label.replace(/^Claude /, ""), // "Claude Fable 5" → "Fable 5"
+      detail: tok(big ? m.maxInput : 200_000),
+    });
+  }
+  return rows;
+}
+
+/** A setting the config panel applied, and the main-thread turn count it was
+ * applied at. It stands until a turn past that reports one of its own. `was` is
+ * set when the command went into a running turn's queue: that turn keeps
+ * writing records under the old setting, so the stamp also holds until the
+ * transcript moves off what it reported at send time. */
+type Set_ = { v: string; at: number; was?: string };
+
+/** 48604 → "49k", 1000000 → "1M", 1600000 → "1.6M". Header space is a few
+ * characters wide, and a round million reads badly as "1.0M". */
+const tok = (n: number) =>
+  n >= 1e6
+    ? `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}M`
+    : n >= 1e3
+      ? `${Math.round(n / 1e3)}k`
+      : String(n);
+
+/** The account's plan limits — the same numbers Claude Code's own /usage panel
+ * shows. `label` arrives as the API's `kind`, except a model-scoped limit which
+ * already carries its model's name. See src-tauri/src/usage.rs. */
+type Limit = { label: string; group: string; percent: number; severity: string; resetsAt: string | null };
+/** `stale` = read off a statusline payload because the endpoint wouldn't answer,
+ * so it carries the two account-wide windows and nothing else. */
+type Plan = { tier: string; limits: Limit[]; stale: boolean };
+let plan: Plan | null = null;
+let planErr = "";
+
+const TIERS: Record<string, string> = {
+  default_claude_max_5x: "Max (5x)",
+  default_claude_max_20x: "Max (20x)",
+  default_claude_pro: "Pro",
+  default_claude_free: "Free",
+};
+const KIND_LABELS: Record<string, string> = { session: "Current session", weekly_all: "All models" };
+
+/** "Resets in 4 hr 8 min", the way the desktop app words it. Rounded to the
+ * minute before formatting a date: the API answers …T00:59:59Z where the app
+ * says 1:00 AM. */
+// The API sends a date string, the statusline payload unix seconds (usage.rs
+// falls back to it when the endpoint 429s) — no ISO parses to 0, so one `||`
+// takes both. 0 = no usable time.
+function resetMs(iso: string | null) {
+  if (!iso) return 0;
+  const at = Date.parse(iso) || Number(iso) * 1000;
+  return Number.isNaN(at) ? 0 : at;
+}
+
+function fmtReset(iso: string | null) {
+  const at = resetMs(iso);
+  if (!at) return "";
+  const left = at - Date.now();
+  if (left <= 0) return "Resetting now";
+  if (left < 864e5) {
+    const mins = Math.floor(left / 6e4);
+    if (mins < 1) return "Resets in under a minute";
+    const h = Math.floor(mins / 60);
+    return h ? `Resets in ${h} hr ${mins % 60} min` : `Resets in ${mins} min`;
+  }
+  const d = new Date(Math.round(at / 6e4) * 6e4);
+  const day = d.toLocaleDateString("en-US", { weekday: "short" });
+  return `Resets ${day} ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
+}
+
+/** The pane under a viewport point. Both drags need it: a header swap runs on
+ * mouse events, and a file drop arrives from the OS with a position and no
+ * element of its own. */
+function paneAt(x: number, y: number) {
+  const el = document.elementFromPoint(x, y)?.closest(".pane");
+  return current?.panes.find((p) => p.el === el) ?? null;
+}
+
+const MIC_TIP = "Dictate into the focused agent pane — click, or hold F4";
+const MIC_OFF = "Dictation needs a pane with an agent running";
+const MIC_LABEL = { "": "◉ speak", rec: "◉ listening", busy: "◌ working", err: "⚠ mic" };
+/** Typed into the pane the moment recording starts, so the dictation arrives as
+ * an argument to a slash command instead of a bare message. `enter` submits the
+ * finished transcript for you; without it you get a chance to fix a word. */
+type Prefix = { text: string; enter: boolean };
+let prefixes: Prefix[] = [
+  { text: "/prompt ", enter: false },
+  { text: "", enter: false },
+];
+let prefix: Prefix = prefixes[0];
+
+/** What whisper transcribes as. `""` detects per clip — a touch slower, and it
+ * can hear an accent as another language, which is why English leads. The menu's
+ * input takes any other code whisper knows ("ja", "ko", "hi", "nl"), so this is
+ * a starting set rather than the limit. */
+type Lang = { label: string; code: string };
+let langs: Lang[] = [
+  { label: "English", code: "en" },
+  { label: "auto", code: "" },
+  { label: "French", code: "fr" },
+  { label: "Arabic", code: "ar" },
+  { label: "Spanish", code: "es" },
+  { label: "German", code: "de" },
+];
+let lang: Lang = langs[0];
+
+/** The running recording: which pane it belongs to, and the prefix and language
+ * it opened with — swapping either mid-sentence must not change how this one
+ * ends. */
+let recording: { pane: Pane; prefix: Prefix; lang: Lang } | null = null;
+/** Start and stop run one at a time: a push-to-talk tap outruns the IPC round
+ * trip, and a stop dropped for being "too early" leaves the mic open for good. */
+let micChain: Promise<void> = Promise.resolve();
+const mic = (step: () => Promise<void>) => (micChain = micChain.then(step));
+
+/** The open-mic overlay. Bar heights are the mic's own peak, so it moves while
+ * you talk and lies flat while you don't — an animation on a loop would say
+ * "recording" just as convincingly with the mic muted. */
+const WAVE_BARS = 28;
+let waveTimer: number | undefined;
+let wavePhase = 0;
+
+function waveShow(on: boolean) {
+  if (on === !!waveTimer) return; // micState repaints on every buffer change
+  const el = $("#wave");
+  el.classList.toggle("hidden", !on);
+  if (!on) {
+    clearInterval(waveTimer);
+    waveTimer = undefined;
+    return;
+  }
+  if (!el.childElementCount)
+    el.append(...Array.from({ length: WAVE_BARS }, () => document.createElement("i")));
+  const bars = [...el.children] as HTMLElement[];
+  waveTimer = setInterval(async () => {
+    const lvl = await invoke<number>("dictate_level").catch(() => 0);
+    // Speech peaks around 0.2–0.6 and a quiet room near 0.02: linear leaves the
+    // wave flat for everything short of a shout.
+    const amp = Math.min(1, Math.sqrt(lvl) * 1.3);
+    wavePhase += 0.45;
+    bars.forEach((b, i) => {
+      const bell = Math.sin(((i + 0.5) / WAVE_BARS) * Math.PI); // taper to the ends
+      const ripple = 0.55 + 0.45 * Math.sin(wavePhase - i * 0.5); // travels outward
+      b.style.transform = `scaleY(${(0.05 + 0.95 * amp * bell * ripple).toFixed(3)})`;
+    });
+  }, 60);
+}
+
+let micUi: keyof typeof MIC_LABEL = "";
+let micErrTimer = 0;
+function micState(s = micUi, msg = "") {
+  micUi = s;
+  // A stale "⚠ mic" from an hour ago reads as currently broken: revert on its own.
+  clearTimeout(micErrTimer);
+  if (s === "err") micErrTimer = window.setTimeout(() => micUi === "err" && micState(""), 5000);
+  waveShow(s === "rec"); // every start/stop path lands here — F4, button, blur, close
+  const b = $<HTMLButtonElement>("#dictate");
+  const ready = !!current?.active?.agentUp;
+  b.className = s;
+  b.textContent = MIC_LABEL[s];
+  b.disabled = !s && !ready; // a running recording keeps its stop button either way
+  b.title = msg || (ready || s ? MIC_TIP : MIC_OFF);
+}
+/** The focused pane changed, or claude came up / exited in it. */
+const micRefresh = () => micState();
+
+async function micStart() {
+  const pane = current?.active;
+  if (recording || !pane?.agentUp) return;
+  // A config command is being typed into a pane right now — a dictation prefix
+  // pasted into the middle of it mangles both. Clears on the next press.
+  if (cfgBusy) return micState("err", "model/effort change in progress — try again");
+  try {
+    await invoke("dictate_start");
+    recording = { pane, prefix, lang };
+    if (prefix.text) pane.term.paste(prefix.text);
+    micState("rec");
+    chime(660, 990, 0.09, 0.18); // rising: mic open
+  } catch (e) {
+    micState("err", String(e));
+  }
+}
+
+async function micStop() {
+  const r = recording;
+  if (!r) return;
+  const { pane: p, prefix: pre } = r;
+  // null, not "": whisper takes Option<&str> and None is what means "detect".
+  const code = r.lang.code || null;
+  recording = null;
+  micState("busy");
+  chime(990, 660, 0.08, 0.18); // falling: mic closed
+  try {
+    const text = await invoke<string>("dictate_stop", { lang: code });
+    micState("");
+    if (text) {
+      p.term.paste(text); // not pty_write: paste honors bracketed-paste mode
+      if (pre.enter) invoke("pty_write", { id: p.id, data: "\r" });
+    } else if (pre.text) {
+      // A mis-tapped F4 with nothing said: take the prefix back out instead of
+      // leaving a bare "/prompt " in the input. Backspaces have to go raw — a
+      // DEL inside a bracketed paste is literal text, not a keypress.
+      // ponytail: blind, so it eats anything you typed into the pane while
+      // dictating. You weren't typing, you were talking.
+      invoke("pty_write", { id: p.id, data: "\x7f".repeat(pre.text.length) });
+    }
+    p.th.focusPane(p);
+  } catch (e) {
+    micState("err", String(e));
+  }
+}
+
+type LayoutMode = "grid" | "rows" | "cols";
+const LAYOUTS: LayoutMode[] = ["grid", "rows", "cols"];
+const LAYOUT_LABEL: Record<LayoutMode, string> = { grid: "▦ grid", rows: "▤ rows", cols: "▥ cols" };
+
+class Pane {
+  readonly id = uid();
+  readonly el = document.createElement("div");
+  readonly term = new Terminal({
+    fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
+    fontSize,
+    lineHeight: 1.25,
+    scrollback: 5000,
+    cursorBlink: true,
+    allowProposedApi: true, // parser.registerOscHandler
+    theme: termTheme(),
+  });
+  busy = false;
+  waiting = false; // the agent rang: turn finished / wants input
+  dead = false; // the process exited; Enter relaunches it
+  appTitle = ""; // OSC 0/2 from the running app
+  startup = ""; // command this pane booted with, persisted for restore
+  agent: Agent = "shell"; // what `startup` runs, see agent.ts
+  sid = ""; // and the claude session it owns, so the next launch resumes it
+  effort = ""; // session's effort per the last hook, "" until one reports
+  usage: Usage | null = null; // null until claude is up in this pane; zeroed until its first turn
+  lastOut = 0; // when the pty last drew anything, for settle()
+  lastIn = 0; // when you last typed, so an echo doesn't read as the agent working
+  /** What the config panel last set, each stamped with the turn count at the
+   * time. `/model` and `/effort` change nothing the transcript records until the
+   * next turn runs, so these are what the panel shows meanwhile. Stamped one by
+   * one: setting the effort says nothing about the model, and must not discard
+   * what was chosen for it. */
+  want: { model?: Set_; effort?: Set_ } | null = null;
+  readonly search = new SearchAddon();
+
+  private fit = new FitAddon();
+  private gl?: WebglAddon;
+  private host = document.createElement("div");
+  private title = document.createElement("span");
+  private gauge = document.createElement("span");
+  private cfg: HTMLButtonElement;
+  private unlisten: UnlistenFn[] = [];
+  private out = new Channel<string>();
+  private idle = 0;
+  /** This pane's own row under its thread in the sidebar — Orca lists each
+   * agent session under its worktree, and a thread with a claude and a codex
+   * in it wants both visible at a glance. */
+  readonly row = document.createElement("div");
+  private rowLabel = document.createElement("span");
+  /** Provider mark in the header and the sidebar row; swapped in start()
+   * once the agent is known. */
+  private ico: SVGSVGElement = icon("shell");
+  private rowIco: SVGSVGElement = icon("shell");
+
+  constructor(readonly th: Thread) {
+    this.el.className = "pane";
+    this.el.dataset.id = this.id; // for driving a pane from devtools
+    this.row.className = "agent";
+    this.row.onclick = (e) => {
+      e.stopPropagation(); // the thread row behind it would only re-show
+      if (this.th !== current) show(this.th);
+      // Zoomed, the zoom follows the pick — one agent at a time, like Orca.
+      if (this.th.zoomed && this.th.zoomed !== this) this.th.toggleZoom(this);
+      else this.th.focusPane(this);
+    };
+    this.row.append(this.rowIco, this.rowLabel);
+    this.host.className = "pane-term";
+    this.title.className = "pane-title";
+    this.gauge.className = "ctx hidden";
+    this.gauge.onmousedown = (e) => e.preventDefault(); // don't steal terminal focus
+    this.gauge.onclick = (e) => {
+      e.stopPropagation();
+      showMenu(this.gauge, usageMenu);
+      // showMenu toggles, so a second click on the same gauge closes the panel —
+      // only read the transcript when it actually opened.
+      if (!menu.classList.contains("hidden")) loadProfile(this);
+    };
+    this.cfg = mini("⚙", "Model and effort for this pane", () => {
+      if (cfgPane !== this) (cfgNote = ""), (cfgDone = null); // another pane's verdict isn't this one's
+      cfgPane = this; // the dropdowns hold the rest of the state
+      showMenu(this.cfg, configMenu);
+    });
+    this.cfg.classList.add("cfg", "hidden"); // until start() knows this pane runs claude
+    const head = document.createElement("div");
+    head.className = "pane-head";
+    head.append(
+      this.ico,
+      this.title,
+      this.gauge,
+      this.cfg,
+      mini("⛶", "Zoom (F2)", () => this.th.toggleZoom(this)),
+      mini("✕", "Close pane", () => this.th.closePane(this)),
+    );
+    this.el.append(head, this.host);
+    this.el.addEventListener("mousedown", () => this.th.focusPane(this));
+    // Right-click = paste, like a real terminal — no context menu. With a
+    // selection it copies instead (and clears it), so copy stays one click too.
+    this.host.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      // Claude Code takes the right-click from the pty and pastes itself —
+      // pasting here too would double it. Every other pane is ours, mouse
+      // tracking or not: a TUI that reports the click but ignores button 2
+      // (opencode) would otherwise have no paste at all.
+      if (this.claudeUp) return;
+      const sel = this.term.getSelection();
+      if (sel) {
+        navigator.clipboard.writeText(sel);
+        this.term.clearSelection();
+      } else {
+        navigator.clipboard.readText().then((t) => t && this.term.paste(t));
+      }
+    });
+    this.term.loadAddon(this.fit);
+    this.term.loadAddon(this.search);
+    this.term.loadAddon(new WebLinksAddon((_e, uri) => void openUrl(uri).catch(() => {})));
+    // Registered after web-links, so a URL still wins over the path shape inside it.
+    this.term.registerLinkProvider({
+      provideLinks: (y, cb) => {
+        const line = this.term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
+        cb(
+          [...line.matchAll(PATH_RE)].map((m) => ({
+            range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } },
+            text: m[0],
+            activate: () =>
+              void invoke("open_vscode", {
+                dir: this.th.dir,
+                goto: ABS_RE.test(m[0]) ? m[0] : `${this.th.dir}\\${m[0]}`,
+              }).catch((e) => console.error(e)),
+          })),
+        );
+      },
+    });
+
+    // Drag the header onto another pane to swap places (aa's F6 "move"). Mouse
+    // events, not HTML5 drag: dragDropEnabled gives the OS drag to the native
+    // side so file drops carry real paths, and on Windows that costs the page
+    // its dragstart. The pointer is all that is left.
+    head.addEventListener("mousedown", (e) => {
+      if (e.button || (e.target as HTMLElement).closest("button")) return;
+      const from = { x: e.clientX, y: e.clientY };
+      let dragging = false;
+      const move = (m: MouseEvent) => {
+        // A wobble while clicking a header is not a drag.
+        if (!dragging && Math.abs(m.clientX - from.x) + Math.abs(m.clientY - from.y) < 6) return;
+        dragging = true;
+        const over = paneAt(m.clientX, m.clientY);
+        for (const p of this.th.panes) p.el.classList.toggle("drop", p === over && p !== this);
+      };
+      const up = (u: MouseEvent) => {
+        removeEventListener("mousemove", move);
+        removeEventListener("mouseup", up);
+        for (const p of this.th.panes) p.el.classList.remove("drop");
+        const to = dragging && paneAt(u.clientX, u.clientY);
+        if (to) this.th.swap(this, to); // swap() no-ops on the pane you started from
+      };
+      addEventListener("mousemove", move);
+      addEventListener("mouseup", up);
+    });
+    head.addEventListener("dblclick", () => this.th.toggleZoom(this));
+  }
+
+  /** `sid` given = this pane is being restored, so resume that session. */
+  async start(startup: string, sid?: string) {
+    this.startup = startup;
+    this.agent = agentOf(startup);
+    for (const k of ["ico", "rowIco"] as const) {
+      const fresh = icon(this.agent);
+      this[k].replaceWith(fresh);
+      this[k] = fresh;
+    }
+    this.sid = sid ?? crypto.randomUUID();
+    this.cfg.classList.toggle("hidden", !this.isClaude); // nothing to configure in a shell
+    // An agent owns the alternate screen, and what scrolls off it is gone
+    // either way — a deep normal-buffer scrollback would only hold memory.
+    this.term.options.scrollback = this.agent === "shell" ? 5000 : 1500;
+    this.term.open(this.host);
+    this.gpu(this.th === current);
+    this.term.onTitleChange((t) => ((this.appTitle = t), this.paint()));
+    this.term.onData((d) => {
+      // A dead pane has nowhere to send keys; Enter brings the process back.
+      if (this.dead) return void (d === "\r" && this.spawn(true));
+      this.lastIn = Date.now();
+      this.seen(); // typing into the pane = you've seen it
+      invoke("pty_write", { id: this.id, data: d });
+    });
+    this.term.parser.registerOscHandler(133, (d) => (this.mark(d), true));
+    // Codex reports a finished turn (and an approval prompt) as OSC 9 — see
+    // CODEX_FLAGS in agent.ts. OSC 99 is the kitty notification opentui TUIs
+    // use; "p=?" there is a capability probe, not news.
+    this.term.parser.registerOscHandler(9, () => (this.wake(), true));
+    this.term.parser.registerOscHandler(99, (d) => (d.includes("p=?") || this.wake(), true));
+    // Claude rings BEL when a turn finishes (Stop hook / idle prompt).
+    this.term.onBell(() => this.wake());
+    this.fit.fit();
+
+    this.unlisten.push(
+      await listen<number>(`pty-exit:${this.id}`, (e) => {
+        this.dead = true;
+        this.busy = false;
+        this.term.write(`\r\n\x1b[90m[exited ${e.payload}] — Enter relaunches\x1b[0m\r\n`);
+        this.paint();
+      }),
+    );
+    // Channel, not an event: stdout is the hot path and channels skip the
+    // event bus' JSON round-trip through every other listener.
+    this.out.onmessage = (d) => {
+      this.lastOut = Date.now(); // settle() waits on this
+      this.term.write(d);
+      this.activity();
+    };
+    await this.spawn(!!sid);
+    new ResizeObserver(() => this.resize()).observe(this.host);
+  }
+
+  /** Start (or restart) the pane's process. `resume` = pick the session up
+   * where it was. For claude that means `--resume`, which exits on an id that
+   * was never written to — a pane opened and never used — so the transcript
+   * is checked first and a fresh `--session-id` boot takes over. */
+  async spawn(resume: boolean) {
+    if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
+    this.dead = false;
+    const can =
+      resume &&
+      (this.agent !== "claude" ||
+        (await invoke<boolean>("has_session", { dir: this.th.dir, sid: this.sid }).catch(() => false)));
+    await invoke("pty_spawn", {
+      id: this.id,
+      cwd: this.th.dir,
+      argv: launch(this.startup, this.sid, can, this.effort || undefined),
+      cols: this.term.cols,
+      rows: this.term.rows,
+      onOut: this.out,
+    }).catch((e) => {
+      this.dead = true;
+      this.term.write(`\r\n\x1b[31m${e}\x1b[0m — Enter retries\r\n`);
+    });
+    this.paint();
+  }
+
+  /** Agent panes have no OSC 133 to say "working": output that keeps coming
+   * is the signal, and 1.5 s of quiet ends it. Output right after a keystroke
+   * is the echo, not the agent — a real answer keeps drawing well past that. */
+  private activity() {
+    if (this.agent === "shell" || Date.now() - this.lastIn < 300) return;
+    clearTimeout(this.idle);
+    this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
+    if (this.busy || this.waiting) return;
+    this.busy = true;
+    this.paint();
+  }
+
+  /** GPU rendering, on only while this pane's thread is visible: a page gets
+   * ~16 WebGL contexts and hidden threads would eat them. Idempotent both
+   * ways; on context loss (or off) xterm falls back to the DOM renderer. */
+  gpu(on: boolean) {
+    if (on === !!this.gl) return;
+    if (!on) {
+      this.gl!.dispose();
+      this.gl = undefined;
+      return;
+    }
+    try {
+      const gl = new WebglAddon();
+      gl.onContextLoss(() => this.gpu(false));
+      this.term.loadAddon(gl);
+      this.gl = gl;
+    } catch {} // no WebGL → DOM renderer, still works
+  }
+
+  private raf = 0;
+  /** rAF-coalesced: splitter drags fire ResizeObserver per pointermove per pane —
+   * one fit per frame, and IPC only when the cell grid actually changed. */
+  resize() {
+    cancelAnimationFrame(this.raf);
+    this.raf = requestAnimationFrame(() => {
+      if (!this.host.clientWidth || !this.host.clientHeight) return;
+      const { cols, rows } = this.term;
+      this.fit.fit();
+      if (this.term.cols === cols && this.term.rows === rows) return;
+      invoke("pty_resize", {
+        id: this.id,
+        cols: this.term.cols,
+        rows: this.term.rows,
+      }).catch(() => {});
+    });
+  }
+
+  run(cmd: string) {
+    invoke("pty_write", { id: this.id, data: cmd + "\r" });
+    this.th.focusPane(this);
+  }
+
+  /** Alt+Arrow scrolling: hand xterm a wheel event on the element it already
+   * listens on and let it encode one for whatever the app negotiated. See
+   * scroll.ts for why this isn't a hand-written escape sequence. */
+  scroll(up: boolean) {
+    this.term.element?.dispatchEvent(
+      new WheelEvent("wheel", wheelInit(up, this.host.getBoundingClientRect())),
+    );
+  }
+
+  /** Turn finished: flag the pane yellow and blip, until you look at it.
+   * The marker carries the session's effort level — keep the last-known one
+   * (letters only: it lands on a command line at next boot). */
+  wake(effort?: string) {
+    if (effort && /^[a-z]+$/.test(effort) && effort !== this.effort) {
+      this.effort = effort;
+      save();
+    }
+    if (this.waiting) return;
+    this.waiting = true;
+    this.busy = false;
+    this.paint();
+    beep();
+    // Loom isn't on screen: flash the taskbar button too. Cleared in main().
+    if (!document.hasFocus())
+      getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
+  }
+
+  private seen() {
+    if (!this.waiting) return;
+    this.waiting = false;
+    this.paint();
+  }
+
+  paint(index = this.th.panes.indexOf(this)) {
+    // cmd.exe and powershell.exe title themselves with their own path until
+    // something under them sets one (codex never does) — the agent's name
+    // says more, and a shell's says nothing.
+    const app = /\.exe\s*$/i.test(this.appTitle) ? (this.agent === "shell" ? "" : this.agent) : this.appTitle;
+    const state = this.dead ? "exited" : this.busy ? "running" : this.waiting ? "waiting" : app;
+    this.title.textContent = String(index + 1).padStart(2, "0") + (state ? ` · ${state}` : "");
+    this.el.classList.toggle("busy", this.busy);
+    this.el.classList.toggle("waiting", this.waiting);
+    this.el.classList.toggle("dead", this.dead);
+    this.el.classList.toggle("active", this.th.active === this);
+    // The sidebar row: the agent, then whatever it titled itself — a shell's
+    // own path says nothing, so only a real title follows the name.
+    this.rowLabel.textContent = app && app !== this.agent ? `${this.agent} · ${app}` : this.agent;
+    this.row.title = this.appTitle;
+    this.row.dataset.state = this.dead ? "dead" : this.waiting ? "waiting" : this.busy ? "busy" : "";
+    this.row.classList.toggle("on", this.th === current && this.th.active === this);
+    this.th.paint(); // the thread row sums its panes
+    // Exiting or relaunching changes whether this pane can be dictated into.
+    if (this.th === current && this.th.active === this) micRefresh();
+  }
+
+  /** What the pane is showing, so a command can be checked for having taken.
+   * The visible rows only: a TUI keeps its answer on screen. */
+  screen() {
+    const buf = this.term.buffer.active;
+    let s = "";
+    for (let y = 0; y < this.term.rows; y++)
+      s += (buf.getLine(buf.viewportY + y)?.translateToString(true) ?? "") + "\n";
+    return s;
+  }
+
+  /** Wait until the pane has drawn nothing for `quiet` ms — long enough for a TUI
+   * to finish reacting to what it was just sent. Capped, because Claude Code
+   * redraws a spinner while it works and would otherwise never go quiet. */
+  async settle(quiet = 300, cap = 2500) {
+    const start = Date.now();
+    for (;;) {
+      const now = Date.now();
+      // Count from the send, not from the last byte: a reply that hasn't begun
+      // yet leaves lastOut in the past, and waiting on that alone returns at
+      // once — which is exactly how the second command used to get dropped.
+      const idle = now - Math.max(this.lastOut, start);
+      if (idle >= quiet || now - start >= cap) return;
+      await new Promise((r) => setTimeout(r, Math.min(quiet - idle, 100)));
+    }
+  }
+
+  /** Poll result for this pane's session, or null when no claude is running in
+   * it. A session that hasn't answered yet reads 0% — the statusline reports the
+   * window from startup, the context only once a turn has sent something. The
+   * bar is the element's own background, so the gauge is one node carrying a
+   * percentage. */
+  setUsage(u: Usage | null) {
+    // Only the gauge's own numbers gate the repaint — the rest of the poll
+    // (the live model and effort the config panel reads) still has to land, and
+    // before the first turn ctx and turns sit at 0 for as long as you take to
+    // type your first message.
+    const drawn = u?.ctx === this.usage?.ctx && u?.turns === this.usage?.turns;
+    this.usage = u;
+    if (drawn) return;
+    if (!u) return void (this.gauge.className = "ctx hidden");
+    const pct = Math.min(100, Math.round((u.ctx / u.window) * 100));
+    // 90% is about where Claude Code starts compacting on you.
+    this.gauge.className = `ctx${pct >= 90 ? " hot" : pct >= 70 ? " warm" : ""}`;
+    this.gauge.style.setProperty("--pct", `${pct}%`);
+    this.gauge.textContent = `${pct}%`;
+    this.gauge.title =
+      `Context ${tok(u.ctx)} of ${tok(u.window)} — ${pct}% full\n` +
+      `${u.turns} turns · ${tok(u.output)} out · ${tok(u.input + u.cacheWrite)} in · ` +
+      `${tok(u.cacheRead)} cached\nClick for what filled it`;
+  }
+
+  focus() {
+    this.seen();
+    this.term.focus();
+  }
+
+  /** Claude Code booted this pane and still has it running. Gates the config
+   * panel's slash commands and right-click paste, which claude does for
+   * itself. Not an alternate-screen test any more: Claude Code and Codex draw
+   * inline in the main buffer now, and an agent pane runs the agent bare, so
+   * the process being alive is the whole question. */
+  get claudeUp() {
+    return this.isClaude && !this.dead;
+  }
+
+  /** Any agent up — where dictation can type. */
+  get agentUp() {
+    return this.agent !== "shell" && !this.dead;
+  }
+
+  get isClaude() {
+    return this.agent === "claude";
+  }
+
+  async dispose() {
+    // Closing the pane mid-sentence: drop the recording, there's nowhere to put it.
+    if (recording?.pane === this) {
+      recording = null;
+      micState("");
+      mic(() => invoke("dictate_stop").then(() => {}, () => {}));
+    }
+    clearTimeout(this.idle);
+    this.unlisten.forEach((u) => u());
+    await invoke("pty_kill", { id: this.id }).catch(() => {});
+    this.term.dispose();
+    this.el.remove();
+    this.row.remove();
+  }
+
+  /** OSC 133 from shell-init.ps1. All it drives is the pane's busy state — ;C a
+   * command started, ;D it exited. A/B/E are emitted and ignored. */
+  private mark(data: string) {
+    const kind = data.split(";")[0];
+    if (kind !== "C" && kind !== "D") return;
+    this.busy = kind === "C";
+    this.paint();
+  }
+}
+
+/** A thread, as Orca has them: one branch of work in its own git worktree,
+ * with the agent (or agents) running there. `dir` is the worktree, `repo` the
+ * checkout it was cut from — the same path when the thread IS the checkout.
+ * Panes never outlive their thread. */
+class Thread {
+  readonly id = uid();
+  readonly grid = document.createElement("section");
+  readonly row = document.createElement("div");
+  readonly panes: Pane[] = [];
+  active: Pane | null = null;
+  zoomed: Pane | null = null;
+  layout: LayoutMode = "cols";
+  /** Agent rows tucked under the thread row; persisted. */
+  folded = false;
+  /** Diff tabs open over this thread's panes, and the one showing — null is
+   * the panes themselves. Orca keeps diffs as tabs beside the agent; so do we. */
+  tabs: DiffTab[] = [];
+  tab: DiffTab | null = null;
+  private label = document.createElement("span");
+  private sub = document.createElement("span");
+  private list = document.createElement("div");
+  private count = document.createElement("span");
+  private stat = document.createElement("span");
+  private age = document.createElement("span");
+  private fold = mini("▾", "Collapse agents", () => this.setFolded(!this.folded));
+  /** Lines changed against HEAD and files touched, from pollStats(). */
+  changed = { add: 0, del: 0, files: 0 };
+  private colW: number[] = [];
+  private rowH: number[] = [];
+
+  constructor(
+    readonly repo: string,
+    readonly dir: string,
+    public branch: string,
+    public name: string,
+  ) {
+    this.grid.className = "grid";
+    new ResizeObserver(() => this.placeSplitters()).observe(this.grid);
+    this.row.className = "thread";
+    this.row.title = dir;
+    this.row.dataset.id = this.id;
+    const top = document.createElement("div");
+    top.className = "thread-top";
+    this.label.className = "thread-name";
+    this.label.textContent = name;
+    this.count.className = "thread-n";
+    this.fold.classList.add("fold");
+    const more = mini("⋯", "Thread actions", () => showMenu(more, threadMenu(this)));
+    more.classList.add("more");
+    top.append(this.fold, this.label, this.count, more);
+    if (!this.isWorktree) {
+      const chip = document.createElement("i");
+      chip.className = "chip";
+      chip.textContent = "primary";
+      this.label.after(chip);
+    }
+    this.sub.className = "thread-sub";
+    this.stat.className = "thread-stat";
+    this.age.className = "thread-age";
+    const sub = document.createElement("div");
+    sub.className = "thread-line";
+    sub.append(this.sub, this.stat, this.age);
+    this.label.ondblclick = () => renameThread(this);
+    this.list.className = "agents";
+    this.row.append(top, sub, this.list);
+    this.row.onclick = () => show(this);
+    this.row.oncontextmenu = (e) => {
+      e.preventDefault();
+      showMenu(this.row, threadMenu(this));
+    };
+  }
+
+  /** Cut from a repo, or the repo's own checkout opened as a thread. */
+  get isWorktree() {
+    return this.dir !== this.repo;
+  }
+
+  setFolded(f: boolean, persist = true) {
+    this.folded = f;
+    this.list.classList.toggle("hidden", f);
+    this.fold.textContent = f ? "▸" : "▾";
+    this.fold.title = f ? "Show agents" : "Collapse agents";
+    if (persist) save();
+  }
+
+  rename(n: string) {
+    this.name = n;
+    this.label.textContent = n;
+    if (this === current) paintHead();
+    save();
+  }
+
+  /** "3m" since any pane here last drew, Orca's per-row age. Blank until
+   * something has happened this run — a restored thread has no history. */
+  paintAge() {
+    const last = Math.max(0, ...this.panes.map((p) => p.lastOut));
+    this.age.textContent = last ? ago(last) : "";
+  }
+
+  setStat(s: { add: number; del: number; files: number }) {
+    this.changed = s;
+    this.sub.textContent = this.branch;
+    this.stat.innerHTML = statHtml(s);
+    if (this === current) paintHead();
+  }
+
+  /** Does this row survive the sidebar filter? Name, branch, or an agent's title. */
+  matches(q: string) {
+    const hay = [this.name, this.branch, ...this.panes.map((p) => p.appTitle)].join(" ").toLowerCase();
+    return hay.includes(q);
+  }
+
+  async addPane(st: PaneState = { cmd: startups[0]?.cmd ?? "" }) {
+    if (this.panes.length >= MAX_PANES) return;
+    const p = new Pane(this);
+    if (st.effort) p.effort = st.effort;
+    this.panes.push(p);
+    this.grid.append(p.el);
+    this.relayout();
+    await p.start(st.cmd, st.sid);
+    this.focusPane(p);
+  }
+
+  async closePane(p: Pane) {
+    const i = this.panes.indexOf(p);
+    if (i === -1) return;
+    // A misclick on ✕ would otherwise kill a running agent on the spot.
+    if (p.agentUp && !(await confirm(`Close this ${p.agent} pane?`, { title: "Loom" }))) return;
+    if (this.zoomed === p) this.toggleZoom(p);
+    this.panes.splice(i, 1);
+    await p.dispose();
+    this.relayout();
+    this.focusPane(this.panes[Math.min(i, this.panes.length - 1)] ?? null);
+    save(); // else the pane is back on the next launch
+  }
+
+  /** Ctrl+Alt+Arrow: the pane whose box lies that way from the focused one,
+   * nearest first. Geometry, not grid index, so it follows the layout mode. */
+  focusToward(dir: "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown") {
+    const from = this.active;
+    if (!from) return;
+    const c = (p: Pane) => {
+      const r = p.el.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    };
+    const a = c(from);
+    let best: Pane | null = null;
+    let bestD = Infinity;
+    for (const p of this.panes) {
+      if (p === from) continue;
+      const b = c(p);
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const ok =
+        dir === "ArrowLeft" ? dx < -1 : dir === "ArrowRight" ? dx > 1 : dir === "ArrowUp" ? dy < -1 : dy > 1;
+      if (!ok) continue;
+      // Off-axis distance counts double: the pane straight across wins over a diagonal one.
+      const d = dir === "ArrowLeft" || dir === "ArrowRight" ? Math.abs(dx) + 2 * Math.abs(dy) : Math.abs(dy) + 2 * Math.abs(dx);
+      if (d < bestD) (bestD = d), (best = p);
+    }
+    if (best) this.focusPane(best);
+  }
+
+  focusPane(p: Pane | null) {
+    this.active = p;
+    this.panes.forEach((q, i) => q.paint(i));
+    p?.focus();
+    micRefresh(); // dictation follows the focused pane
+  }
+
+  /** The sidebar row: what runs here, on which branch, and whether it wants
+   * you. One state per row, worst first — a thread with a pane waiting is
+   * waiting whatever the others are up to. */
+  paint() {
+    this.count.textContent = this.panes.length > 1 ? String(this.panes.length) : "";
+    const state = this.panes.some((p) => p.waiting)
+      ? "waiting"
+      : this.panes.some((p) => p.busy)
+        ? "busy"
+        : this.panes.length && this.panes.every((p) => p.dead)
+          ? "dead"
+          : "";
+    this.row.dataset.state = state;
+    this.row.classList.toggle("on", this === current);
+    paintWaiting();
+  }
+
+  /** grid: square-ish tiling (1→1x1, 4→2x2). rows: one column, panes stacked.
+   * cols: one row, panes side by side. Track weights survive resizes but
+   * reset (re-balance) whenever the pane count changes shape. */
+  relayout() {
+    const n = this.panes.length || 1;
+    const cols = this.layout === "rows" ? 1 : this.layout === "cols" ? n : Math.ceil(Math.sqrt(n));
+    const rows = Math.ceil(n / cols);
+    if (this.colW.length !== cols) this.colW = Array(cols).fill(1);
+    if (this.rowH.length !== rows) this.rowH = Array(rows).fill(1);
+    this.grid.style.gridTemplateColumns = this.colW.map((w) => `${w}fr`).join(" ");
+    this.grid.style.gridTemplateRows = this.rowH.map((w) => `${w}fr`).join(" ");
+    for (const p of this.panes) this.list.append(p.row); // sidebar order = grid order
+    this.panes.forEach((p, i) => p.paint(i));
+    this.paint();
+    this.placeSplitters();
+  }
+
+  /** Swap two panes' grid positions (drop target ⇄ dragged pane). */
+  swap(a: Pane, b: Pane) {
+    const i = this.panes.indexOf(a);
+    const j = this.panes.indexOf(b);
+    if (i === -1 || j === -1 || i === j) return;
+    [this.panes[i], this.panes[j]] = [b, a];
+    for (const p of this.panes) this.grid.append(p.el); // DOM order = grid order
+    this.relayout();
+    this.focusPane(a);
+    save(); // the reorder is the saved pane order
+  }
+
+  /** aa's F2: the focused pane fills the stage; the others keep running hidden. */
+  toggleZoom(p: Pane) {
+    this.zoomed = this.zoomed === p ? null : p;
+    this.grid.classList.toggle("zooming", !!this.zoomed);
+    for (const q of this.panes) q.el.classList.toggle("zoom", q === this.zoomed);
+    this.placeSplitters();
+    this.panes.forEach((q) => q.resize()); // hidden panes no-op via the 0-size guard
+    this.focusPane(this.zoomed ?? p);
+  }
+
+  /** Drag handles over the grid gaps; dragging shifts weight between the two
+   * neighboring tracks. Positions are px, so they're replaced on any resize. */
+  private placeSplitters() {
+    this.grid.querySelectorAll(".split").forEach((e) => e.remove());
+    if (this.zoomed) return;
+    const PAD = 7; // .grid padding = gap
+    const place = (weights: number[], size: number, axis: "x" | "y") => {
+      const avail = size - 2 * PAD - (weights.length - 1) * PAD;
+      const total = weights.reduce((s, w) => s + w, 0);
+      if (avail <= 0 || !total) return;
+      let off = PAD;
+      for (let i = 1; i < weights.length; i++) {
+        off += (weights[i - 1] / total) * avail;
+        const s = document.createElement("div");
+        s.className = `split ${axis === "x" ? "v" : "h"}`;
+        s.style[axis === "x" ? "left" : "top"] = `${off}px`;
+        s.onpointerdown = (e) => this.dragSplit(e, s, weights, i, avail / total, axis);
+        this.grid.append(s);
+        off += PAD;
+      }
+    };
+    place(this.colW, this.grid.clientWidth, "x");
+    place(this.rowH, this.grid.clientHeight, "y");
+  }
+
+  private dragSplit(
+    e: PointerEvent,
+    el: HTMLElement,
+    weights: number[],
+    i: number,
+    pxPerFr: number,
+    axis: "x" | "y",
+  ) {
+    e.preventDefault();
+    const start = axis === "x" ? e.clientX : e.clientY;
+    const startOff = parseFloat(el.style[axis === "x" ? "left" : "top"]);
+    const [a, b] = [weights[i - 1], weights[i]];
+    const min = 0.15 * (a + b); // neither side collapses below ~15% of the pair
+    const prop = axis === "x" ? ("gridTemplateColumns" as const) : ("gridTemplateRows" as const);
+    el.setPointerCapture(e.pointerId);
+    el.onpointermove = (ev) => {
+      const d = ((axis === "x" ? ev.clientX : ev.clientY) - start) / pxPerFr;
+      weights[i - 1] = Math.min(Math.max(a + d, min), a + b - min);
+      weights[i] = a + b - weights[i - 1];
+      this.grid.style[prop] = weights.map((w) => `${w}fr`).join(" ");
+      el.style[axis === "x" ? "left" : "top"] = `${startOff + (weights[i - 1] - a) * pxPerFr}px`;
+    };
+    el.onpointerup = () => {
+      el.onpointermove = el.onpointerup = null;
+      this.placeSplitters();
+    };
+  }
+
+  async dispose() {
+    await Promise.all(this.panes.splice(0).map((p) => p.dispose()));
+    this.grid.remove();
+    this.row.remove();
+  }
+}
+
+// --- app state ------------------------------------------------------------
+const threads: Thread[] = [];
+let current: Thread | null = null;
+/** Checkouts threads get cut from, in sidebar order. Kept past their last
+ * thread so the new-thread form still offers them. */
+let repos: string[] = [];
+/** Project groups folded shut in the sidebar; persisted. */
+let reposFolded = new Set<string>();
+/** What the sidebar filter box holds, lower-cased. */
+let sideQuery = "";
+
+const save = () =>
+  invoke("save_state", {
+    json: JSON.stringify({
+      threads: threads.map((t) => ({
+        repo: t.repo,
+        dir: t.dir,
+        branch: t.branch,
+        name: t.name,
+        folded: t.folded || undefined,
+        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, effort: p.effort || undefined })),
+        layout: t.layout,
+      })),
+      repos,
+      reposFolded: [...reposFolded],
+      startups,
+      prefixes,
+      prefix: prefixes.indexOf(prefix),
+      langs,
+      lang: langs.indexOf(lang),
+      theme: theme.label,
+      fontSize,
+      paneCount,
+    }),
+  }).catch(() => {});
+
+function setFont(n: number) {
+  fontSize = Math.min(Math.max(n, 8), 24);
+  for (const p of threads.flatMap((t) => t.panes)) {
+    p.term.options.fontSize = fontSize;
+    p.resize();
+  }
+  save();
+}
+
+/** F3: cycle to the next pane waiting on you, wherever it lives. */
+function jumpWaiting() {
+  const all = threads.flatMap((t) => t.panes);
+  const waiting = all.filter((p) => p.waiting);
+  if (!waiting.length) return;
+  const i = current?.active ? all.indexOf(current.active) : -1;
+  const next = waiting.find((p) => all.indexOf(p) > i) ?? waiting[0];
+  if (next.th !== current) show(next.th);
+  next.th.focusPane(next); // focus → seen, clearing the flag
+}
+
+/** The header chip: how many panes want you, across every thread. One glance
+ * covers what a zoomed pane or another thread's tab would hide. */
+function paintWaiting() {
+  const n = threads.reduce((s, t) => s + t.panes.filter((p) => p.waiting).length, 0);
+  const b = $("#waiting");
+  b.classList.toggle("hidden", !n);
+  b.textContent = `${n} waiting`;
+}
+
+/** "now", "3m", "2h", "5d": how long ago `t` was. */
+function ago(t: number) {
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
+/** Ctrl+Tab / Ctrl+Shift+Tab: the thread after (before) this one, wrapping. */
+function cycleThread(back: boolean) {
+  if (!current || threads.length < 2) return;
+  const i = threads.indexOf(current);
+  show(threads[(i + (back ? -1 : 1) + threads.length) % threads.length]);
+}
+
+/** Drag a sidebar row up or down its own list, mouse events only (the OS
+ * owns HTML5 drag here, see the pane header). `peers` are the rows it may
+ * land among; `done` gets the target and whether to land after it. */
+function dragRow(el: HTMLElement, peers: () => HTMLElement[], done: (over: HTMLElement, after: boolean) => void) {
+  el.addEventListener("mousedown", (e) => {
+    if (e.button || (e.target as HTMLElement).closest("button, .agent, input")) return;
+    const from = { x: e.clientX, y: e.clientY };
+    let dragging = false;
+    let over: HTMLElement | null = null;
+    let after = false;
+    const clear = () => peers().forEach((p) => p.classList.remove("drop-before", "drop-after"));
+    const move = (m: MouseEvent) => {
+      if (!dragging && Math.abs(m.clientX - from.x) + Math.abs(m.clientY - from.y) < 6) return;
+      dragging = true;
+      el.classList.add("dragging");
+      clear();
+      over = null;
+      for (const p of peers()) {
+        const r = p.getBoundingClientRect();
+        if (p !== el && m.clientY >= r.top && m.clientY <= r.bottom) {
+          over = p;
+          after = m.clientY > r.top + r.height / 2;
+          p.classList.add(after ? "drop-after" : "drop-before");
+        }
+      }
+    };
+    const up = () => {
+      removeEventListener("mousemove", move);
+      removeEventListener("mouseup", up);
+      clear();
+      el.classList.remove("dragging");
+      if (dragging && over) done(over, after);
+      // A drag is not a click: the row would otherwise switch threads on drop.
+      if (dragging) el.addEventListener("click", (c) => c.stopImmediatePropagation(), { capture: true, once: true });
+    };
+    addEventListener("mousemove", move);
+    addEventListener("mouseup", up);
+  });
+}
+
+/** Move `x` next to `target` in `list`. */
+function moveNextTo<T>(list: T[], x: T, target: T, after: boolean) {
+  list.splice(list.indexOf(x), 1);
+  list.splice(list.indexOf(target) + (after ? 1 : 0), 0, x);
+}
+
+/** The sidebar: project groups in `repos` order, each folding, each row a
+ * thread in `threads` order; both reorder by drag. Rebuilt whole — it is a
+ * few dozen nodes, and the rows are the threads' own elements, so nothing
+ * is lost. The filter box hides what it doesn't match rather than rebuilding. */
+function renderSide() {
+  const side = $("#threads");
+  side.textContent = "";
+  const head = document.createElement("div");
+  head.className = "side-head";
+  head.textContent = "Projects";
+  head.append(mini("+", "New thread", newThread));
+  side.append(head);
+  const rowsOf = (repo: string) => threads.filter((t) => t.repo === repo);
+  for (const repo of repos.filter((r) => rowsOf(r).length)) {
+    const h = document.createElement("div");
+    h.className = "repo";
+    h.dataset.repo = repo;
+    h.title = repo;
+    const chev = document.createElement("i");
+    chev.className = "chev";
+    const name = document.createElement("span");
+    name.textContent = basename(repo);
+    const n = document.createElement("b");
+    n.textContent = String(rowsOf(repo).length);
+    h.append(chev, name, n);
+    const group = document.createElement("div");
+    group.className = "group";
+    group.append(...rowsOf(repo).map((t) => t.row));
+    const fold = (f: boolean) => {
+      h.classList.toggle("folded", f);
+      group.classList.toggle("hidden", f);
+    };
+    fold(reposFolded.has(repo));
+    h.onclick = () => {
+      const f = !reposFolded.has(repo);
+      f ? reposFolded.add(repo) : reposFolded.delete(repo);
+      fold(f);
+      save();
+    };
+    dragRow(h, () => [...side.querySelectorAll<HTMLElement>(".repo")], (over, after) => {
+      moveNextTo(repos, repo, over.dataset.repo!, after);
+      renderSide();
+      save();
+    });
+    for (const t of rowsOf(repo))
+      dragRow(t.row, () => rowsOf(repo).map((x) => x.row), (over, after) => {
+        moveNextTo(threads, t, threads.find((x) => x.id === over.dataset.id)!, after);
+        renderSide();
+        save();
+      });
+    side.append(h, group);
+  }
+  filterSide();
+}
+
+function filterSide() {
+  const q = sideQuery;
+  for (const t of threads) t.row.classList.toggle("hidden", !!q && !t.matches(q));
+  for (const h of $("#threads").querySelectorAll<HTMLElement>(".repo")) {
+    const any = threads.some((t) => t.repo === h.dataset.repo && (!q || t.matches(q)));
+    h.classList.toggle("hidden", !any);
+  }
+}
+
+function show(th: Thread | null) {
+  current = th;
+  for (const t of threads) {
+    t.grid.classList.toggle("hidden", t !== th);
+    t.paint();
+    t.panes.forEach((p) => p.gpu(t === th));
+  }
+  $("#empty").classList.toggle("hidden", threads.length > 0);
+  paintHead();
+  paintTabs();
+  void showTab();
+  if (changesOpen) void refreshChanges();
+  $("#layout").textContent = LAYOUT_LABEL[th?.layout ?? "cols"];
+  // The grid was display:none, so its terminals measured 0 — refit on reveal.
+  th?.panes.forEach((p) => p.resize());
+  th?.focusPane(th.active ?? th.panes[0] ?? null);
+}
+
+/** The thread bar: name, branch chip, change stats, and the Changes toggle's badge. */
+function paintHead() {
+  const th = current;
+  $("#wsname").textContent = th?.name ?? "";
+  $("#wsbranch").textContent = th?.branch ?? "";
+  $("#wsbranch").classList.toggle("hidden", !th?.branch);
+  $("#wsstat").innerHTML = th ? statHtml(th.changed) : "";
+  $("#wspath").textContent = th?.dir ?? "";
+  $("#wspath").title = th?.dir ?? "";
+  changesBtn.textContent = th?.changed.files ? `⎇ ${th.changed.files}` : "⎇";
+}
+
+type ThreadState = { repo: string; dir: string; branch: string; name: string; folded?: boolean };
+
+async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMode = "cols") {
+  const th = new Thread(st.repo, st.dir, st.branch, st.name);
+  th.layout = layout;
+  if (st.folded) th.setFolded(true, false);
+  threads.push(th); // before any await, so restore order is saved order
+  // A thread on the checkout itself follows whatever branch is checked out
+  // there, so ask git rather than trust what was saved.
+  if (st.dir === st.repo)
+    git(st.dir, "rev-parse", "--abbrev-ref", "HEAD")
+      .then((b) => ((th.branch = b.trim()), th.setStat(th.changed)))
+      .catch(() => {});
+  if (!repos.includes(st.repo)) repos.push(st.repo);
+  renderSide();
+  $("#stage").append(th.grid);
+  show(th);
+  // Parallel: a spawn is up to ~1s. addPane pushes its pane before the first
+  // await, so mapping in order still lands them in order.
+  await Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st)));
+  if (!th.panes.length) await th.addPane();
+  save();
+  void pollStats();
+  return th;
+}
+
+const git = (dir: string, ...args: string[]) => invoke<string>("git_run", { dir, args });
+
+/** Extra exit codes count as success — `git diff --no-index` says 1 for "they differ". */
+const gitOk = (dir: string, ok: number[], ...args: string[]) =>
+  invoke<string>("git_run", { dir, args, ok });
+
+/** Take a thread out of the list, and out of git as far as `mode` says:
+ * "close" keeps the worktree on disk, "worktree" removes the folder and keeps
+ * the branch, "all" deletes the branch too. Panes go first either way — a
+ * folder with a shell still in it cannot be removed. */
+async function removeThread(th: Thread, mode: "close" | "worktree" | "all") {
+  const what =
+    mode === "close"
+      ? `Close ${th.name}?`
+      : mode === "worktree"
+        ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n\nThe branch ${th.branch} is kept.`
+        : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n\nCommits only on that branch are lost.`;
+  if (th.panes.length || mode !== "close") {
+    if (!(await confirm(what, { title: "Loom", kind: mode === "all" ? "warning" : "info" }))) return;
+  }
+  const i = threads.indexOf(th);
+  threads.splice(i, 1);
+  await th.dispose();
+  renderSide();
+  show(threads[Math.min(i, threads.length - 1)] ?? null);
+  save();
+  if (mode === "close" || !th.isWorktree) return;
+  try {
+    await git(th.repo, "worktree", "remove", "--force", th.dir);
+    if (mode === "all" && th.branch) await git(th.repo, "branch", "-D", th.branch);
+  } catch (e) {
+    toast(String(e));
+  }
+}
+
+const renameDlg = $<HTMLDialogElement>("#rename");
+function renameThread(th: Thread) {
+  const input = $<HTMLInputElement>("#rename-name");
+  input.value = th.name;
+  renameDlg.showModal();
+  input.select();
+  $<HTMLFormElement>("#rename-form").onsubmit = (e) => {
+    e.preventDefault();
+    const v = input.value.trim();
+    if (v) th.rename(v);
+    renameDlg.close();
+  };
+}
+
+/** One row of a ⋯ menu: a label that closes the menu and does something. */
+function menuItem(list: HTMLElement, label: string, fn: () => void, danger = false) {
+  const d = document.createElement("div");
+  d.className = `menu-item${danger ? " danger" : ""}`;
+  const s = document.createElement("span");
+  s.textContent = label;
+  d.append(s);
+  d.onclick = () => (hideMenu(), fn());
+  list.append(d);
+}
+
+/** The ⋯ on a thread row, and right-click on it. */
+const threadMenu = (th: Thread): Menu => ({
+  placeholder: "",
+  rows: (list) => {
+    const item = (label: string, fn: () => void, danger = false) => menuItem(list, label, fn, danger);
+    item("Changes", () => (show(th), toggleChanges(true)));
+    item("Open in VS Code", () => void invoke("open_vscode", { dir: th.dir }).catch((e) => toast(String(e))));
+    item("Rename…", () => renameThread(th));
+    item(th.folded ? "Show agents" : "Collapse agents", () => th.setFolded(!th.folded));
+    item("Close thread" + (th.isWorktree ? " (keep worktree)" : ""), () => removeThread(th, "close"));
+    if (th.isWorktree) {
+      item("Delete worktree (keep branch)", () => removeThread(th, "worktree"), true);
+      item("Delete worktree and branch", () => removeThread(th, "all"), true);
+    }
+  },
+});
+
+// --- diff tabs: Orca opens a diff as a tab beside the agent; so do we -------
+// The strip sits over the stage and only shows while a thread has diff tabs.
+// The first tab is the panes; the rest each hold a loader that re-reads git
+// whenever the tab is shown, so a diff never goes stale behind a refresh.
+type DiffTab = { label: string; load: () => Promise<string>; sec?: Sec };
+const tabsEl = $("#tabs");
+const diffView = $("#diff");
+
+function openTab(th: Thread, label: string, load: () => Promise<string>, sec?: Sec) {
+  let t = th.tabs.find((x) => x.label === label);
+  if (!t) th.tabs.push((t = { label, load, sec }));
+  else ((t.load = load), (t.sec = sec));
+  th.tab = t;
+  if (th !== current) show(th);
+  else (paintTabs(), void showTab());
+}
+
+function closeTab(th: Thread, t: DiffTab) {
+  th.tabs.splice(th.tabs.indexOf(t), 1);
+  if (th.tab === t) th.tab = null;
+  if (th === current) (paintTabs(), void showTab());
+}
+
+function paintTabs() {
+  const th = current;
+  tabsEl.textContent = "";
+  tabsEl.classList.toggle("hidden", !th?.tabs.length);
+  if (!th?.tabs.length) return;
+  const mk = (label: string, on: boolean, pick: () => void, close?: () => void) => {
+    const b = document.createElement("div");
+    b.className = `tab${on ? " on" : ""}`;
+    const s = document.createElement("span");
+    s.textContent = label;
+    b.append(s);
+    b.onclick = pick;
+    b.onauxclick = (e) => e.button === 1 && close?.();
+    if (close) b.append(mini("✕", "Close", close));
+    tabsEl.append(b);
+  };
+  mk(`▦ ${th.name}`, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()));
+  for (const t of th.tabs)
+    mk(t.label, th.tab === t, () => ((th.tab = t), paintTabs(), void showTab()), () => closeTab(th, t));
+}
+
+/** Show the current thread's active tab: its panes, or a diff read fresh. */
+async function showTab() {
+  const th = current;
+  const t = th?.tab;
+  if (!th || !t) return void diffView.classList.add("hidden");
+  $("#diff-name").textContent = t.label;
+  const body = $("#diff-body");
+  diffView.classList.remove("hidden");
+  const text = await t.load().catch((e) => String(e));
+  if (current !== th || th.tab !== t) return; // moved on while git was answering
+  body.textContent = "";
+  const rows = diffRows(text);
+  // Which way a hunk moves depends on the side the tab is showing: an unstaged
+  // hunk goes into the index or out of the file, a staged one comes back out.
+  const moves: [string, string, string[]][] =
+    t.sec === "unstaged"
+      ? [
+          ["Stage", "Stage this hunk", ["apply", "--cached"]],
+          ["Discard", "Throw this hunk away", ["apply", "--reverse"]],
+        ]
+      : t.sec === "staged"
+        ? [["Unstage", "Take this hunk out of the index", ["apply", "--cached", "--reverse"]]]
+        : [];
+  // ponytail: 5000 rows is plenty to read; past that the file is the diff.
+  for (const r of rows.slice(0, 5000)) {
+    const d = document.createElement("div");
+    d.className = `line ${r.kind}`;
+    const o = document.createElement("i");
+    o.textContent = r.old ? String(r.old) : "";
+    const n = document.createElement("i");
+    n.textContent = r.neu ? String(r.neu) : "";
+    const s = document.createElement("span");
+    s.textContent = r.text || " ";
+    d.append(o, n, s);
+    if (r.kind === "hunk")
+      for (const [label, title, args] of moves) {
+        const i = rows.indexOf(r);
+        d.append(mini(label, title, () => void applyHunk(th, hunkPatch(rows, i), args)));
+      }
+    body.append(d);
+  }
+  if (rows.length > 5000) note(body, `… ${rows.length - 5000} more lines`);
+  if (!rows.length) note(body, "no differences");
+}
+
+/** Every file of a section as one diff, against the base that section is
+ * measured from: the index for staged rows, the file on disk for the rest.
+ * Untracked files have no base at all, so they go against nothing.
+ * That base is also what makes a hunk button meaningful — a diff of `HEAD`
+ * mixes both sides and cannot be applied to either. */
+const diffOf = (th: Thread, sec: Sec, paths: string[]) => async () => {
+  if (sec !== "untracked") return git(th.dir, "diff", ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
+  const parts: string[] = [];
+  for (const u of paths)
+    parts.push(await gitOk(th.dir, [1], "diff", "--no-index", "--", "/dev/null", u).catch((e) => String(e)));
+  return parts.join("\n");
+};
+
+/** Move one hunk. git reads the patch on stdin, so nothing hits the disk. */
+async function applyHunk(th: Thread, patch: string, args: string[]) {
+  if (!patch) return;
+  try {
+    await invoke("git_stdin", { dir: th.dir, args, patch });
+  } catch (e) {
+    toast(String(e));
+  }
+  await refreshChanges();
+  void pollStats();
+}
+
+// --- changes panel: Orca's right-hand side --------------------------------
+// Read from git on open and every poll while open. Sections fold, folders
+// fold, "View all" opens the whole section as one diff, a file opens its own.
+const changes = $("#changes");
+const changesBtn = $("#changes-btn");
+let changesOpen = false;
+const foldedSections = new Set<string>(["Commits"]);
+const foldedDirs = new Set<string>();
+
+function toggleChanges(on = !changesOpen) {
+  changesOpen = on;
+  changes.classList.toggle("hidden", !on);
+  changesBtn.classList.toggle("on", on);
+  current?.panes.forEach((p) => p.resize()); // the stage just changed width
+  if (on) void refreshChanges();
+}
+
+const LETTER: Record<string, string> = { M: "M", A: "A", D: "D", R: "R", C: "C", "?": "U", U: "U", T: "T" };
+
+// Staging, unstaging and discarding from the tree, so none of it needs a
+// shell. One section owns the selection at a time: the same path means a
+// different git command in each list, and mixing them is how work gets lost.
+let selSec: Sec | null = null;
+const sel = new Set<string>();
+let selAnchor = "";
+let hasStaged = false;
+
+const clearSel = () => ((sel.clear(), (selSec = null)), void refreshChanges());
+
+/** ctrl-click toggles rows in and out, shift-click takes the run since the
+ * last one, and a folder brings its whole subtree. */
+function select(sec: Sec, paths: string[], add: boolean, anchor = selAnchor) {
+  if (selSec !== sec) (sel.clear(), (selSec = sec));
+  const off = !add && paths.every((p) => sel.has(p));
+  for (const p of paths) off ? sel.delete(p) : sel.add(p);
+  selAnchor = anchor;
+  if (!sel.size) selSec = null;
+  void refreshChanges();
+}
+
+/** The rows between the last click and this one, in the order they are drawn. */
+const runTo = (order: string[], to: string) => {
+  const a = order.indexOf(selAnchor);
+  const b = order.indexOf(to);
+  return a < 0 || b < 0 ? [to] : order.slice(Math.min(a, b), Math.max(a, b) + 1);
+};
+
+/** The verbs a row carries: glyphs on hover, words in the selection bar.
+ * `files` is read at click time — the row may have been redrawn since. */
+function actBtns(sec: Sec, files: () => Change[], words = false) {
+  const b: HTMLButtonElement[] = [];
+  const add = (glyph: string, word: string, title: string, act: Act) =>
+    b.push(mini(words ? word : glyph, title, () => void doAct(sec, act, files())));
+  if (sec === "staged") add("−", "Unstage", "Unstage", "unstage");
+  else add("+", "Stage", "Stage", "stage");
+  if (sec === "untracked") add("✕", "Delete", "Delete — git has no copy of it", "discard");
+  else add("↺", "Discard", "Discard these changes", "discard");
+  return b;
+}
+
+/** Run one verb over some files, asking first when it throws work away. */
+async function doAct(sec: Sec, act: Act, files: Change[]) {
+  const th = current;
+  if (!th || !files.length) return;
+  const what = files.length === 1 ? files[0].path : `${files.length} files`;
+  if (act === "discard") {
+    const q =
+      sec === "untracked"
+        ? `Delete ${what}?\n\nUntracked — git has no copy to bring it back.`
+        : `Discard changes in ${what}?\n\nThis cannot be undone.`;
+    if (!(await confirm(q, { title: "Loom", kind: "warning" }))) return;
+  }
+  try {
+    for (const args of gitAct(sec, act, files)) await git(th.dir, ...args);
+  } catch (e) {
+    toast(String(e));
+  }
+  sel.clear();
+  selSec = null;
+  await refreshChanges();
+  void pollStats();
+}
+
+/** Right-click a file or folder: the verbs with names on them, plus the two
+ * things you would otherwise open a shell for. Hits the whole selection when
+ * the row is part of one. */
+const fileMenu = (th: Thread, sec: Sec, files: Change[]): Menu => ({
+  placeholder: "",
+  rows: (list) => {
+    const n = files.length > 1 ? ` ${files.length} files` : "";
+    const fight = files.every(conflicted);
+    if (fight) {
+      menuItem(list, `Keep ours${n}`, () => void resolve("--ours", files));
+      menuItem(list, `Keep theirs${n}`, () => void resolve("--theirs", files));
+    }
+    menuItem(list, fight ? `Mark resolved${n}` : sec === "staged" ? `Unstage${n}` : `Stage${n}`, () =>
+      void doAct(sec, !fight && sec === "staged" ? "unstage" : "stage", files),
+    );
+    menuItem(
+      list,
+      sec === "untracked" ? `Delete${n || " file"}` : `Discard changes${n}`,
+      () => void doAct(sec, "discard", files),
+      true,
+    );
+    menuItem(list, `Copy path${n}`, () => void navigator.clipboard.writeText(files.map((c) => c.path).join("\n")));
+    menuItem(list, "Open in VS Code", () =>
+      void invoke("open_vscode", { dir: th.dir, goto: files[0].path }).catch((e) => toast(String(e))),
+    );
+  },
+});
+
+/** One repo-wide git command from the ⋯: confirm when it can lose work, show
+ * the button busy while it runs, and put git's own words up when it refuses.
+ * Re-reads HEAD afterwards because half of these move the branch. */
+async function gitDo(ask: string, ...args: string[]) {
+  const th = current;
+  if (!th) return;
+  if (ask && !(await confirm(ask, { title: "Loom", kind: "warning" }))) return;
+  const b = $<HTMLButtonElement>("#changes-more");
+  b.disabled = true;
+  try {
+    await git(th.dir, ...args);
+  } catch (e) {
+    toast(String(e));
+  }
+  b.disabled = false;
+  th.branch = (await git(th.dir, "rev-parse", "--abbrev-ref", "HEAD").catch(() => th.branch)).trim() || th.branch;
+  th.setStat(th.changed);
+  save();
+  await refreshChanges();
+  void pollStats();
+}
+
+/** A conflicted file: both sides touched it and git wants a decision. */
+const conflicted = (c: Change) => c.x === "U" || c.y === "U" || (c.x === c.y && (c.x === "A" || c.x === "D"));
+
+/** Take one side of a conflict wholesale and mark it resolved. */
+async function resolve(side: "--ours" | "--theirs", files: Change[]) {
+  const th = current;
+  if (!th) return;
+  const paths = files.map((c) => c.path);
+  try {
+    await git(th.dir, "checkout", side, "--", ...paths);
+    await git(th.dir, "add", "--", ...paths);
+  } catch (e) {
+    toast(String(e));
+  }
+  await refreshChanges();
+  void pollStats();
+}
+
+/** Right-click a commit in the log. */
+const commitMenuFor = (sha: string): Menu => ({
+  placeholder: "",
+  rows: (list) => {
+    menuItem(list, "Revert this commit", () =>
+      void gitDo(`Revert ${sha}?\nA new commit undoing it lands on this branch.`, "-c", "core.editor=true", "revert", "--no-edit", sha),
+    );
+    menuItem(
+      list,
+      "Reset to here (keep changes)",
+      () => void gitDo(`Move the branch back to ${sha}?\nEverything after it stays in the tree, staged.`, "reset", "--soft", sha),
+      true,
+    );
+    menuItem(
+      list,
+      "Reset to here (throw changes away)",
+      () => void gitDo(`Reset hard to ${sha}?\nEvery change after it is lost.`, "reset", "--hard", sha),
+      true,
+    );
+    menuItem(list, "Copy SHA", () => void navigator.clipboard.writeText(sha));
+  },
+});
+
+/** Branches, newest first, with the input adding one. `switch` refuses while
+ * the tree is dirty or the branch is checked out in another worktree — git's
+ * complaint goes to the toast, which is the answer either way. */
+async function showBranches() {
+  const th = current;
+  if (!th) return;
+  const out = await git(th.dir, "branch", "--format=%(refname:short)", "--sort=-committerdate").catch(() => "");
+  const names = out.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 40);
+  showMenu($("#changes-more"), {
+    placeholder: "new branch…",
+    add: (v) => void gitDo("", "switch", "-c", v),
+    rows: (list) => {
+      if (!names.length) return note(list, "no branches yet");
+      for (const n of names)
+        menuItem(list, n === th.branch ? `${n} ✓` : n, () => void gitDo("", "switch", n));
+    },
+  });
+}
+
+/** The stash, applied rather than popped and picked by name: the stack is
+ * shared with every other worktree of this repo, so "the top one" is not
+ * necessarily yours. */
+async function showStashes() {
+  const th = current;
+  if (!th) return;
+  const out = await git(th.dir, "stash", "list", "--format=%gd%x09%gs").catch(() => "");
+  const rows = out.trim() ? out.trim().split("\n").map((l) => l.split("\t")) : [];
+  showMenu($("#changes-more"), {
+    placeholder: "",
+    rows: (list) => {
+      if (!rows.length) return note(list, "no stashes");
+      for (const [ref, msg] of rows) {
+        const d = document.createElement("div");
+        d.className = "menu-item";
+        const s = document.createElement("span");
+        s.textContent = `${ref}  ${msg ?? ""}`;
+        s.title = msg ?? ref;
+        d.append(
+          s,
+          mini("✕", "Drop this stash", () => (hideMenu(), void gitDo(`Drop ${ref}?`, "stash", "drop", ref))),
+        );
+        d.onclick = () => (hideMenu(), void gitDo("", "stash", "apply", ref));
+        list.append(d);
+      }
+    },
+  });
+}
+
+/** Amend with whatever is staged; the message box replaces the message when
+ * it has something in it. */
+async function amend() {
+  const box = $<HTMLTextAreaElement>("#commit-msg");
+  const m = box.value.trim();
+  await gitDo(
+    `Amend the last commit?\n${m ? "Its message becomes what is in the box." : "Its message is kept."}`,
+    "commit",
+    "--amend",
+    ...(m ? ["-m", m] : ["--no-edit"]),
+  );
+  box.value = "";
+}
+
+/** Everything git that isn't about one file: the ⋯ beside Create PR. */
+const repoMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    const th = current;
+    if (!th) return;
+    menuItem(list, "Fetch", () => void gitDo("", "fetch", "--all", "--prune"));
+    menuItem(list, "Pull (rebase)", () => void gitDo("", "pull", "--rebase", "--autostash"));
+    menuItem(list, "Push", () => void gitDo("", "push", "-u", "origin", "HEAD"));
+    menuItem(
+      list,
+      "Force push (with lease)",
+      () => void gitDo(`Force-push ${th.branch}?\nIt overwrites the remote branch unless someone else has pushed since you last fetched.`, "push", "--force-with-lease"),
+      true,
+    );
+    menuItem(list, "Switch branch…", () => void showBranches());
+    menuItem(list, "Amend last commit", () => void amend());
+    menuItem(list, "Undo last commit (keep changes)", () =>
+      void gitDo("Undo the last commit?\nIts changes come back as staged work.", "reset", "--soft", "HEAD~1"),
+    );
+    menuItem(list, "Stash all changes", () =>
+      void gitDo("", "stash", "push", "-u", "-m", `loom ${th.name}`),
+    );
+    menuItem(list, "Restore a stash…", () => void showStashes());
+  },
+};
+
+/** Continue / skip / abort, when git has stopped half way through something.
+ * `core.editor=true` because nothing here can pop an editor and wait. */
+function midwayBar(state: string) {
+  const bar = document.createElement("div");
+  bar.className = "sel-bar warn";
+  const label = document.createElement("span");
+  label.textContent = `${state} in progress`;
+  const btns =
+    state === "merge"
+      ? [
+          mini("Commit", "Finish the merge", () => void gitDo("", "-c", "core.editor=true", "commit", "--no-edit")),
+          mini("Abort", "Undo the merge", () => void gitDo("Abort the merge?", "merge", "--abort")),
+        ]
+      : state === "revert"
+        ? [
+            mini("Continue", "Finish the revert", () => void gitDo("", "-c", "core.editor=true", "revert", "--continue")),
+            mini("Abort", "Undo the revert", () => void gitDo("Abort the revert?", "revert", "--abort")),
+          ]
+        : [
+            mini("Continue", "Go on with the rebase", () => void gitDo("", "-c", "core.editor=true", "rebase", "--continue")),
+            mini("Skip", "Drop the commit being applied", () => void gitDo("Skip this commit?", "rebase", "--skip")),
+            mini("Abort", "Put the branch back", () => void gitDo("Abort the rebase?", "rebase", "--abort")),
+          ];
+  bar.append(label, ...btns);
+  return bar;
+}
+
+async function refreshChanges() {
+  const th = current;
+  if (!th || !changesOpen) return;
+  const body = $("#changes-body");
+  let status: Change[];
+  let unstaged: Map<string, Stat>;
+  let staged: Map<string, Stat>;
+  let upstream = "";
+  let log = "";
+  let span = "";
+  let midway = "";
+  try {
+    [status, unstaged, staged, upstream, log, span, midway] = await Promise.all([
+      git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(parseStatus),
+      git(th.dir, "diff", "--numstat").then(parseNumstat),
+      git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
+      git(th.dir, "rev-parse", "--abbrev-ref", "@{upstream}").then((s) => s.trim(), () => ""),
+      git(th.dir, "log", "--oneline", "-10").catch(() => ""),
+      git(th.dir, "rev-list", "--left-right", "--count", "@{upstream}...HEAD").then((s) => s.trim(), () => ""),
+      // What git stopped in the middle of. MERGE_HEAD and REVERT_HEAD are
+      // cleared by the commit that ends them; REBASE_HEAD is not, so a rebase
+      // has to be asked about directly.
+      Promise.all([
+        git(th.dir, "rev-parse", "-q", "--verify", "MERGE_HEAD").then(() => "merge", () => ""),
+        git(th.dir, "rev-parse", "-q", "--verify", "REVERT_HEAD").then(() => "revert", () => ""),
+        git(th.dir, "rebase", "--show-current-patch").then(() => "rebase", () => ""),
+      ]).then((r) => r.find(Boolean) ?? ""),
+    ]);
+  } catch (e) {
+    body.textContent = "";
+    note(body, String(e));
+    return;
+  }
+  if (th !== current) return; // switched threads while git was answering
+  const total = sumStat([...unstaged.values(), ...staged.values()]);
+  $("#changes-branch").textContent = th.branch || "(no branch)";
+  $("#changes-stat").innerHTML = statHtml(total);
+  const [behind, ahead] = span.split("\t");
+  const gap = +behind || +ahead ? `  ${+behind ? `↓${behind}` : ""}${+ahead ? ` ↑${ahead}` : ""}`.trimEnd() : "";
+  $("#changes-base").textContent = upstream ? `→ ${upstream}${gap}` : "→ not pushed yet";
+
+  body.textContent = "";
+  const tracked = status.filter((c) => c.x !== "?");
+  const secRows: Record<Sec, Change[]> = {
+    unstaged: tracked.filter((c) => c.y !== " "),
+    staged: tracked.filter((c) => c.x !== " "),
+    untracked: status.filter((c) => c.x === "?"),
+  };
+  hasStaged = secRows.staged.length > 0;
+  // Whatever was selected and has since been staged, discarded or committed
+  // is no longer in the section it was picked from.
+  if (selSec) {
+    const live = new Set(secRows[selSec].map((c) => c.path));
+    for (const p of sel) if (!live.has(p)) sel.delete(p);
+    if (!sel.size) selSec = null;
+  }
+  if (midway) body.append(midwayBar(midway));
+  if (selSec) {
+    const sec = selSec;
+    const bar = document.createElement("div");
+    bar.className = "sel-bar";
+    const n = document.createElement("span");
+    n.textContent = `${sel.size} selected`;
+    bar.append(
+      n,
+      ...actBtns(sec, () => secRows[sec].filter((c) => sel.has(c.path)), true),
+      mini("✕", "Clear the selection", clearSel),
+    );
+    body.append(bar);
+  }
+  const section = (title: string, sec: Sec, stats: Map<string, Stat>, letter: (c: Change) => string) => {
+    const rows = secRows[sec];
+    if (!rows.length) return;
+    const h = document.createElement("div");
+    h.className = `changes-h${foldedSections.has(title) ? " folded" : ""}`;
+    const chev = document.createElement("i");
+    chev.className = "chev";
+    const t = document.createElement("span");
+    t.textContent = `${title} ${rows.length}`;
+    const all = document.createElement("a");
+    all.textContent = "View all";
+    all.onclick = (e) => {
+      e.stopPropagation();
+      openTab(th, `${title} (all)`, diffOf(th, sec, rows.map((c) => c.path)), sec);
+    };
+    const hActs = document.createElement("span");
+    hActs.className = "acts";
+    hActs.append(...actBtns(sec, () => rows)); // on the header the verbs mean "all of it"
+    h.append(chev, t, all, hActs);
+    h.onclick = () => {
+      foldedSections.has(title) ? foldedSections.delete(title) : foldedSections.add(title);
+      void refreshChanges();
+    };
+    body.append(h);
+    if (foldedSections.has(title)) return;
+    const list = document.createElement("div");
+    list.className = "changes-list";
+    body.append(list);
+    const paths = rows.map((c) => c.path);
+    const order: string[] = []; // files in the order they end up on screen, for shift-click
+    const walk = (node: Tree, depth: number, into: HTMLElement) => {
+      for (const d of node.dirs) {
+        const key = `${title}:${d.path}`;
+        const under = () => rows.filter((c) => c.path === d.path || c.path.startsWith(`${d.path}/`));
+        const row = document.createElement("div");
+        row.className = `dir${foldedDirs.has(key) ? " folded" : ""}`;
+        row.style.paddingLeft = `${6 + depth * 12}px`;
+        row.innerHTML = `<i class="chev"></i><span>${esc(d.name)}</span><b>${d.count}</b>`;
+        const acts = document.createElement("span");
+        acts.className = "acts";
+        acts.append(...actBtns(sec, under));
+        row.append(acts);
+        row.onclick = (e) => {
+          if (e.ctrlKey || e.metaKey) return select(sec, under().map((c) => c.path), false);
+          foldedDirs.has(key) ? foldedDirs.delete(key) : foldedDirs.add(key);
+          void refreshChanges();
+        };
+        row.oncontextmenu = (e) => (e.preventDefault(), showMenu(row, fileMenu(th, sec, under())));
+        into.append(row);
+        if (!foldedDirs.has(key)) walk(d, depth + 1, into);
+      }
+      for (const f of node.files) {
+        const c = rows[f.i];
+        order.push(c.path);
+        const picked = selSec === sec && sel.has(c.path);
+        const row = document.createElement("div");
+        row.className = `file${picked ? " sel" : ""}`;
+        row.title = c.path;
+        row.style.paddingLeft = `${6 + depth * 12}px`;
+        const name = document.createElement("span");
+        name.className = "file-name";
+        name.textContent = f.name;
+        const acts = document.createElement("span");
+        acts.className = "acts";
+        acts.append(...actBtns(sec, () => [c]));
+        const st = document.createElement("span");
+        st.className = "file-stat";
+        const s = stats.get(c.path);
+        st.innerHTML = (s ? statHtml(s) + " " : "") + `<b class="st-${letter(c)}">${letter(c)}</b>`;
+        row.append(name, acts, st);
+        row.onclick = (e) => {
+          if (e.shiftKey) return select(sec, runTo(order, c.path), true);
+          if (e.ctrlKey || e.metaKey) return select(sec, [c.path], false, c.path);
+          // The label says which side, so a file open in both lists is two tabs.
+          openTab(th, `${f.name} (${sec === "staged" ? "staged" : "diff"})`, diffOf(th, sec, [c.path]), sec);
+        };
+        row.oncontextmenu = (e) => (
+          e.preventDefault(), showMenu(row, fileMenu(th, sec, picked ? rows.filter((x) => sel.has(x.path)) : [c]))
+        );
+        into.append(row);
+      }
+    };
+    walk(tree(paths), 0, list);
+  };
+  section("Changes", "unstaged", unstaged, (c) => LETTER[c.y] ?? c.y);
+  section("Staged changes", "staged", staged, (c) => LETTER[c.x] ?? c.x);
+  section("Untracked", "untracked", new Map(), () => "U"); // short: the header carries buttons now
+  if (!status.length) note(body, "working tree clean");
+  if (log.trim()) {
+    const h = document.createElement("div");
+    h.className = `changes-h${foldedSections.has("Commits") ? " folded" : ""}`;
+    h.innerHTML = `<i class="chev"></i><span>Commits</span>`;
+    h.onclick = () => {
+      foldedSections.has("Commits") ? foldedSections.delete("Commits") : foldedSections.add("Commits");
+      void refreshChanges();
+    };
+    body.append(h);
+    if (!foldedSections.has("Commits"))
+      for (const line of log.trim().split("\n")) {
+        const d = document.createElement("div");
+        d.className = "commit";
+        const [sha, ...msg] = line.split(" ");
+        d.innerHTML = `<b>${esc(sha)}</b> ${esc(msg.join(" "))}`;
+        d.title = "Show this commit — right-click to revert or reset";
+        d.onclick = () => openTab(th, `${sha} (commit)`, () => git(th.dir, "show", "--stat", "--patch", sha));
+        d.oncontextmenu = (e) => (e.preventDefault(), showMenu(d, commitMenuFor(sha)));
+        body.append(d);
+      }
+  }
+  // A diff tab on screen describes what the panel just re-read: keep them in step.
+  if (th.tab) void showTab();
+}
+
+const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
+const statHtml = (s: Stat) =>
+  s.add || s.del ? `<span class="add">+${s.add}</span> <span class="del">−${s.del}</span>` : "";
+
+function note(el: HTMLElement, text: string) {
+  const d = document.createElement("div");
+  d.className = "menu-note";
+  d.textContent = text;
+  el.append(d);
+}
+
+/** Commit everything the thread has changed, and push when asked. Orca's box
+ * does the same; the staged/unstaged split above is for reading. */
+async function commitAll(push = false, all = true) {
+  const th = current;
+  const msg = $<HTMLTextAreaElement>("#commit-msg");
+  if (!th || !msg.value.trim()) return msg.focus();
+  const btn = $<HTMLButtonElement>("#commit-btn");
+  btn.disabled = true;
+  let err = "";
+  try {
+    if (all) await git(th.dir, "add", "-A");
+    await git(th.dir, "commit", "-m", msg.value.trim());
+    msg.value = "";
+    if (push) await git(th.dir, "push", "-u", "origin", "HEAD");
+  } catch (e) {
+    err = String(e);
+  } finally {
+    btn.disabled = false;
+  }
+  await refreshChanges();
+  if (err) note($("#changes-body"), err); // under the list, where the eye already is
+  void pollStats();
+}
+
+const commitMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    const items: [string, boolean, boolean][] = [
+      ["Commit all", false, true],
+      ["Commit all & push", true, true],
+    ];
+    // Only worth offering once the panel has put something in the index.
+    if (hasStaged) items.push(["Commit staged", false, false], ["Commit staged & push", true, false]);
+    for (const [label, push, all] of items) menuItem(list, label, () => void commitAll(push, all));
+  },
+};
+
+/** Push the branch and open GitHub's compare page for it against the
+ * remote's default branch — the PR form, minus Orca's own editor for it. */
+async function createPR() {
+  const th = current;
+  if (!th) return;
+  const body = $("#changes-body");
+  try {
+    const url = (await git(th.dir, "remote", "get-url", "origin")).trim();
+    const m = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
+    if (!m) throw new Error(`origin is not on GitHub: ${url || "(no origin)"}`);
+    const head = (await git(th.dir, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").catch(() => "")).trim();
+    const base = head.replace(/^origin\//, "") || "main";
+    await git(th.dir, "push", "-u", "origin", "HEAD");
+    await openUrl(`https://github.com/${m[1]}/${m[2]}/compare/${base}...${encodeURIComponent(th.branch)}?expand=1`);
+  } catch (e) {
+    note(body, String(e));
+  }
+  void refreshChanges();
+}
+
+/** Sidebar and header stats: lines changed against HEAD plus the untracked
+ * count, per thread. Two quick git calls each, every 10 s; a folder that is
+ * not a repo answers nothing and stays blank. */
+async function pollStats() {
+  await Promise.all(
+    threads.map(async (th) => {
+      const [numstat, status] = await Promise.all([
+        git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => null),
+        git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(parseStatus, () => null),
+      ]);
+      if (!numstat || !status) return;
+      th.setStat({ ...sumStat(numstat.values()), files: status.length });
+    }),
+  );
+  if (changesOpen) void refreshChanges();
+}
+
+/** Where a new worktree goes: ~\loom\<repo>\<thread>, like Orca's own
+ * ~\orca\workspaces. Never inside the repo, where git would see it as untracked. */
+const worktreeDir = async (repo: string, slug: string) => join(await homeDir(), "loom", basename(repo), slug);
+
+/** Does `ref` name something in `repo`? Fetches it from origin first if not,
+ * so a branch that only exists on the remote still counts. */
+async function refExists(repo: string, ref: string) {
+  const ok = () => git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}").then(() => true, () => false);
+  if (await ok()) return true;
+  await git(repo, "fetch", "origin", ref).catch(() => {});
+  return ok();
+}
+
+/** Cut a thread from `repo`, or — no name given — open the checkout itself as
+ * one. A new name becomes branch `loom/<slug>` off `base` (HEAD when blank),
+ * suffixed -2, -3… when that name is already a branch or a folder. A `base`
+ * that names nothing, locally or on origin, is taken as a NEW branch name: the
+ * thread is created on it, off HEAD. */
+async function createThread(repo: string, name: string, cmd: string, base: string, n: number) {
+  let dir = repo;
+  let branch = "";
+  // A base with no name still means "cut me a worktree" — the branch names it.
+  name ||= base;
+  if (name) {
+    // A missing base becomes the branch itself — unless it is spelled like a
+    // remote ref (origin/x) that just isn't there, which is a typo, not a wish.
+    let fresh = "";
+    if (base && !(await refExists(repo, base))) {
+      const remotes = (await git(repo, "remote").catch(() => "")).split(/\r?\n/).filter(Boolean);
+      if (remotes.includes(base.split("/")[0])) throw new Error(`${base} is not a branch on that remote`);
+      fresh = base;
+      base = "";
+    }
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!slug) throw new Error("name needs a letter or digit in it");
+    // Folders deleted by hand leave git believing the worktree is still
+    // there, which blocks the same path from ever being used again.
+    await git(repo, "worktree", "prune").catch(() => {});
+    // A new thread is a new branch off `base`, the way Orca cuts one: a name
+    // already taken — by a branch or by a folder — gets a numeric suffix
+    // rather than silently reusing whatever was there, which would ignore the
+    // base you asked for. To continue an existing branch, name it as the base.
+    const taken = new Set(
+      (await git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/loom/"))
+        .split(/\r?\n/)
+        .filter(Boolean),
+    );
+    const dirs = new Set(threads.map((t) => t.dir.toLowerCase()));
+    for (let i = 1; ; i++) {
+      const cand = i === 1 ? slug : `${slug}-${i}`;
+      branch = fresh || `loom/${cand}`;
+      dir = await worktreeDir(repo, cand);
+      if (taken.has(branch) || dirs.has(dir.toLowerCase())) continue;
+      // git itself is the "does the folder exist" check: it refuses a
+      // non-empty one, and that is the one error worth trying the next name on.
+      try {
+        await git(repo, "worktree", "add", "-b", branch, dir, ...(base ? [base] : []));
+        break;
+      } catch (e) {
+        if (!/already exists/.test(String(e))) throw e;
+      }
+    }
+  } else {
+    const have = threads.find((t) => t.dir === dir);
+    if (have) return show(have);
+    branch = (await git(repo, "rev-parse", "--abbrev-ref", "HEAD").catch(() => "")).trim();
+  }
+  await openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd }));
+}
+
+/** "+ Thread": a native <dialog> — repo, name, agent, base branch, pane count.
+ * The repo list is what threads were cut from so far; "browse…" adds one. */
+const dlg = $<HTMLDialogElement>("#new");
+const dlgRepo = $<HTMLSelectElement>("#new-repo");
+const dlgErr = $("#new-err");
+
+function newThread() {
+  hideMenu();
+  dlgRepo.textContent = "";
+  for (const r of repos) dlgRepo.append(new Option(basename(r), r));
+  dlgRepo.append(new Option("browse…", ""));
+  const agent = $<HTMLSelectElement>("#new-agent");
+  agent.textContent = "";
+  for (const s of startups) agent.append(new Option(s.label, s.cmd));
+  $<HTMLInputElement>("#new-name").value = "";
+  $<HTMLInputElement>("#new-base").value = "";
+  $<HTMLInputElement>("#new-count").value = String(paneCount);
+  dlgErr.textContent = "";
+  dlg.showModal();
+  (repos.length ? $("#new-name") : dlgRepo).focus();
+}
+
+dlgRepo.onchange = async () => {
+  if (dlgRepo.value) return;
+  const dir = await pickFolder({ directory: true, multiple: false });
+  if (typeof dir !== "string") return void (dlgRepo.selectedIndex = 0);
+  // The checkout root, whichever folder inside it was picked. Not a repo at
+  // all is still fine — it opens as a plain folder thread, no worktrees.
+  const root = (await git(dir, "rev-parse", "--show-toplevel").catch(() => dir)).trim().replace(/\//g, "\\");
+  if (!repos.includes(root)) repos.push(root);
+  dlgRepo.insertBefore(new Option(basename(root), root), dlgRepo.lastElementChild);
+  dlgRepo.value = root;
+  $("#new-name").focus();
+};
+
+$("#new-cancel").onclick = () => dlg.close();
+
+$<HTMLFormElement>("#new-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const repo = dlgRepo.value;
+  if (!repo) return void (dlgErr.textContent = "pick a repo");
+  const n = Math.max(1, Math.min(parseInt($<HTMLInputElement>("#new-count").value, 10) || 1, MAX_PANES));
+  paneCount = n; // openThread save()s on the way out, so this rides along
+  const go = $<HTMLButtonElement>("#new-go");
+  go.disabled = true;
+  dlgErr.textContent = "creating…"; // a fetch can take a moment
+  try {
+    await createThread(
+      repo,
+      $<HTMLInputElement>("#new-name").value.trim(),
+      $<HTMLSelectElement>("#new-agent").value,
+      $<HTMLInputElement>("#new-base").value.trim(),
+      n,
+    );
+    dlg.close();
+  } catch (err) {
+    dlgErr.textContent = String(err);
+  } finally {
+    go.disabled = false;
+  }
+};
+
+// --- dropdown: one list + "add" input, shared by the startups and the ------
+// dictation prefixes. Only the rows and what Enter in the input adds differ.
+// A fixed list (themes) leaves `add` out, and the input goes with it.
+type Menu = { rows: (list: HTMLElement) => void; placeholder: string; add?: (v: string) => void };
+
+const menu = $("#pane-menu");
+const addBtn = $("#add-pane");
+const addInput = $<HTMLInputElement>("#menu-add");
+let anchor: HTMLElement = addBtn;
+let openMenu: Menu;
+
+function renderMenu() {
+  const list = $("#menu-list");
+  list.textContent = "";
+  cfgPaint = null; // only the config panel sets one, and only while it is up
+  openMenu.rows(list);
+  addInput.classList.toggle("hidden", !openMenu.add);
+  addInput.placeholder = openMenu.placeholder;
+}
+
+/** "+ pane" and "+ Folder": pick a startup command, or extend the list. */
+const startupMenu = (pick: (cmd: string) => void): Menu => ({
+  placeholder: "add a command…",
+  add: (v) => startups.push({ label: v, cmd: v }),
+  rows: (list) => {
+    for (const s of startups) {
+      const row = document.createElement("div");
+      row.className = "menu-item";
+      const lbl = document.createElement("span");
+      lbl.textContent = s.label;
+      lbl.title = s.cmd;
+      row.onclick = () => {
+        hideMenu();
+        pick(s.cmd);
+      };
+      row.append(
+        lbl,
+        mini("✕", "Remove from list", () => {
+          startups.splice(startups.indexOf(s), 1);
+          save();
+          renderMenu();
+        }),
+      );
+      list.append(row);
+    }
+  },
+});
+
+/** What dictation types before the transcript, and whether it presses Enter
+ * afterwards. `⏎` toggles that per prefix, so "/prompt " can send itself while
+ * a bare message waits for you to read it back. */
+const prefixMenu: Menu = {
+  placeholder: "add a prefix…",
+  // Trailing space or the transcript runs into the command name.
+  add: (v) => prefixes.push({ text: v.endsWith(" ") ? v : `${v} `, enter: false }),
+  rows: (list) => {
+    for (const p of prefixes) {
+      const row = document.createElement("div");
+      row.className = `menu-item${p === prefix ? " on" : ""}`;
+      const lbl = document.createElement("span");
+      lbl.textContent = p.text || "(no prefix)";
+      row.onclick = () => {
+        prefix = p;
+        hideMenu();
+        save();
+        paintPrefix();
+      };
+      const auto = mini("⏎", p.enter ? "Sends itself — click for manual Enter" : "Waits for your Enter — click to auto-send", () => {
+        p.enter = !p.enter;
+        save();
+        renderMenu();
+        paintPrefix();
+      });
+      auto.className = p.enter ? "on" : "";
+      row.append(lbl, auto);
+      // The last prefix is the fallback — removing it would leave nothing to pick.
+      if (prefixes.length > 1)
+        row.append(
+          mini("✕", "Remove from list", () => {
+            prefixes.splice(prefixes.indexOf(p), 1);
+            if (prefix === p) prefix = prefixes[0];
+            save();
+            renderMenu();
+            paintPrefix();
+          }),
+        );
+      list.append(row);
+    }
+  },
+};
+
+/** Which language whisper is told to expect. The add input takes a whisper
+ * language code, so anything it supports can be added without a rebuild. */
+const langMenu: Menu = {
+  placeholder: "add a code… (ja, ko, hi)",
+  add: (v) => langs.push({ label: v.toLowerCase(), code: v.toLowerCase() }),
+  rows: (list) => {
+    for (const l of langs) {
+      const row = document.createElement("div");
+      row.className = `menu-item${l === lang ? " on" : ""}`;
+      const lbl = document.createElement("span");
+      lbl.textContent = l.label;
+      lbl.title = l.code || "detected per clip";
+      row.onclick = () => {
+        lang = l;
+        hideMenu();
+        save();
+        paintLang();
+      };
+      row.append(lbl);
+      // Keep one: an empty list would leave nothing to dictate in.
+      if (langs.length > 1)
+        row.append(
+          mini("✕", "Remove from list", () => {
+            langs.splice(langs.indexOf(l), 1);
+            if (lang === l) lang = langs[0];
+            save();
+            renderMenu();
+            paintLang();
+          }),
+        );
+      list.append(row);
+    }
+  },
+};
+
+/** Model and effort for one pane. Both are slash commands in Claude Code, so
+ * applying them is just typing into the pane — the conversation carries on and
+ * nothing restarts. Staged rather than applied on click, because this changes
+ * what every following turn costs. Both are session-scoped: Claude Code does not
+ * write them to settings, so they last until the pane's session ends. */
+let cfgPane: Pane | null = null;
+/** Repaints the open config panel in place. Set while it is on screen, cleared
+ * by renderMenu when anything else takes the menu over. `force` also resets a
+ * focused select — only a failed apply asks for that. */
+let cfgPaint: ((force?: boolean) => void) | null = null;
+
+/** Outcome of a slash command: echoed back, or submitted but not yet echoed —
+ * a running turn queues the command and holds the echo until the turn ends.
+ * "lost" only ever comes from the pane itself failing (killed mid-apply). */
+type Sent = "ok" | "sent" | "lost";
+
+/** Submit `cmd` to the pane's claude and watch for its echo.
+ *
+ * Submission is deliberately blind: paste the whole command as one bracketed
+ * unit — the same path dictation uses, atomic where a character stream races
+ * the TUI's own input handling — then Enter. Every earlier attempt to VERIFY
+ * the input state on screen misfired, because the transcript re-renders past
+ * commands (and mid-turn queues them) in shapes indistinguishable from the
+ * live input line; meanwhile the submission itself never failed once. So
+ * nothing is retyped, ever — a "retry" of a command that did land runs it
+ * twice — and the echo in the bottom rows is the one signal trusted: quick
+ * when claude is idle, held until the turn ends when one is running (report
+ * "sent" rather than stall the queue — and give up much sooner when another
+ * pick is already waiting behind this one). */
+async function slash(p: Pane, cmd: string, confirmed: () => boolean): Promise<Sent> {
+  p.term.paste(cmd);
+  await p.settle(150, 1000); // let the input take it before the Enter
+  await invoke("pty_write", { id: p.id, data: "\r" });
+  for (const t0 = Date.now(); ; ) {
+    if (confirmed()) return "ok";
+    if (Date.now() - t0 >= (cfgQueued ? 1000 : 8000)) return "sent";
+    await new Promise((r) => setTimeout(r, 300));
+  }
+}
+
+/** One at a time, so there is never a second command to sequence behind the
+ * first. Picking from a list runs straight into this; the chain keeps two quick
+ * picks from overlapping, the same way the mic's does. `cfgQueued` counts picks
+ * waiting behind the running one — slash() shortens its echo watch when someone
+ * is, so a burst of picks doesn't serialize behind 8-second waits. */
+let cfgChain: Promise<void> = Promise.resolve();
+let cfgQueued = 0;
+const queueCfg = (step: () => Promise<void>) => {
+  cfgQueued++;
+  const run = () => (cfgQueued--, step());
+  cfgChain = cfgChain.then(run, run);
+};
+
+/** Status line under the selects: what is being applied, or why it wasn't. */
+let cfgNote = "";
+/** Resolves a lingering "sent" note: true once the pane's transcript shows the
+ * value landed. Checked on every panel repaint (the usage poll drives those). */
+let cfgDone: (() => boolean) | null = null;
+/** While a config command is being typed into a pane the mic stays shut — a
+ * dictation prefix pasted into the middle of "/model …" mangles both. */
+let cfgBusy = false;
+
+async function applyOne(p: Pane, kind: "model" | "effort", value: string) {
+  cfgDone = null; // a new verdict is coming; the old one must not clear it
+  // Dictation owns the pane's input while the mic is open, and the transcript
+  // lands only after stop — typing "/model …" into either would submit a
+  // half-dictated prompt. A live recording: say so and put the select back; a
+  // stop still transcribing: wait it out (micStop never waits on this chain,
+  // so there is no cycle to deadlock).
+  if (recording?.pane === p) {
+    cfgNote = "finish dictating first";
+    return void cfgPaint?.(true);
+  }
+  await micChain.catch(() => {});
+  // Same test dictation uses: claude booted this pane and still owns the alt
+  // screen. At a PowerShell prompt "/model x" would just run and error.
+  if (!p.claudeUp) {
+    cfgNote = "claude isn't running in this pane";
+    return void cfgPaint?.(true);
+  }
+  cfgNote = `applying /${kind} ${value}…`;
+  cfgPaint?.();
+  cfgBusy = true;
+  // Confirmed by either signal: the command's echo anywhere on the (joined)
+  // screen, or — stronger — the pane's own status bar showing the new value:
+  // Claude Code redraws it with the current model and effort, so it is state,
+  // not a one-shot line to race. The liveness check guards the screen read on
+  // a pane closed mid-apply.
+  const proof = proofFor(kind, value);
+  const status = statusFor(kind, value);
+  const confirmed = () =>
+    p.th.panes.includes(p) &&
+    (proof.test(flat(p.screen())) || (status?.test(foot(p.screen())) ?? false));
+  const got = await slash(p, `/${kind} ${value}`, confirmed).catch(() => "lost" as Sent);
+  cfgBusy = false;
+  if (got === "lost") {
+    // Only a pane failure lands here — the write itself threw.
+    cfgNote = `couldn't write to the pane — is it still open?`;
+  } else {
+    // In claude's hands either way — "sent" means a running turn holds it in
+    // the queue and it lands when the turn ends, so both count as applied.
+    if (kind === "effort") {
+      // Remember the level so a restored pane boots back into it — launch()
+      // re-pins effort on resume. "auto" means "whatever the model defaults
+      // to", so it clears the pin rather than leaving the old level to be
+      // re-applied on the next launch.
+      p.effort = value === "auto" ? "" : value;
+      save();
+    }
+    // The transcript only records these when a turn runs, so until then it
+    // still describes the previous setting — show what was applied meanwhile.
+    // For "sent" the running turn keeps writing records under the OLD setting,
+    // so the stamp also holds until the transcript moves off what it says now
+    // (`was`) — a record count alone would expire it mid-queue.
+    const t = p.usage;
+    p.want = {
+      ...p.want,
+      [kind]: {
+        v: value,
+        at: t?.mainTurns ?? 0,
+        ...(got === "sent" && { was: (kind === "model" ? t?.model : t?.effort) ?? "" }),
+      },
+    };
+    if (got === "ok") cfgNote = "";
+    else {
+      cfgNote = `/${kind} ${value} sent — waiting for claude to confirm`;
+      // Either on-screen signal turning up after the watch gave up, or the
+      // statusline tee / transcript reporting the value (both carry the bare
+      // id where the option carries "[1m]").
+      cfgDone = () => {
+        const u = p.usage;
+        return (
+          confirmed() ||
+          (kind === "model"
+            ? [u?.liveModel, u?.model].some((m) => !!m && value.startsWith(m))
+            : [u?.liveEffort, u?.effort].includes(value))
+        );
+      };
+    }
+  }
+  // The panel stays open, so redraw it — forced on a loss, or the select that
+  // was just picked (still focused) would keep claiming a value the pane never
+  // took.
+  if (!menu.classList.contains("hidden")) cfgPaint?.(got === "lost");
+}
+
+const configMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    const p = cfgPane;
+    if (!p) return;
+    /** What the pane is on. Normally the transcript, so it follows a /model
+     * typed straight into the pane too — but a setting applied since the last
+     * turn isn't recorded there yet, and until a real turn overtakes it what we
+     * asked for is the truth. Recomputed on every repaint, not captured. */
+    const now = () => {
+      const t = p.usage;
+      const ran = t?.mainTurns ?? 0;
+      const held = (s: Set_ | undefined, cur: string) =>
+        s && (ran <= s.at || (s.was !== undefined && cur === s.was)) ? s.v : "";
+      // Recent pick > statusline tee (live truth, follows hand-typed /model
+      // too) > transcript (last turn) > the hook-reported boot effort.
+      return {
+        model: held(p.want?.model, t?.model ?? "") || t?.liveModel || t?.model || "",
+        effort: held(p.want?.effort, t?.effort ?? "") || t?.liveEffort || t?.effort || p.effort || "",
+      };
+    };
+    const note = document.createElement("div");
+    note.className = "menu-note";
+    list.append(note);
+    const selects: { kind: "model" | "effort"; el: HTMLSelectElement }[] = [];
+
+    /** ponytail: a native <select>. It gets keyboard, type-ahead and scrolling
+     * for free, and the OS draws the popup — nothing to size or clamp. */
+    const pick = (
+      kind: "model" | "effort",
+      opts: { value: string; label: string; detail: string }[],
+      current: string,
+    ) => {
+      const row = document.createElement("label");
+      row.className = "cfg-row";
+      const name = document.createElement("span");
+      name.textContent = kind;
+      const sel = document.createElement("select");
+      for (const o of opts) {
+        const op = document.createElement("option");
+        op.value = o.value;
+        op.textContent = o.detail ? `${o.label} · ${o.detail}` : o.label;
+        sel.append(op);
+      }
+      // Open on what the pane is already using. The transcript reports a bare id
+      // where the option carries the [1m] suffix, so a prefix match is what
+      // recognises it.
+      const at =
+        opts.find((o) => o.value === current) ??
+        (current ? opts.find((o) => o.value.startsWith(current)) : undefined);
+      if (at) sel.value = at.value;
+      else if (current) {
+        // Running something the list doesn't offer — an older version, or a
+        // model picked by hand. Say so rather than showing the first row and
+        // claiming the pane is on that.
+        const own = document.createElement("option");
+        own.value = current;
+        own.textContent = `${current} (current)`;
+        sel.prepend(own);
+        sel.value = current;
+      }
+      // Picking is the whole gesture — no button to press afterwards.
+      sel.onchange = () => {
+        const v = sel.value; // the panel redraws, so read it now
+        queueCfg(() => applyOne(p, kind, v));
+      };
+      row.append(name, sel);
+      list.append(row);
+      selects.push({ kind, el: sel });
+    };
+
+    const open = now();
+    pick("model", modelRows(), open.model);
+    pick(
+      "effort",
+      EFFORTS.map((v) => ({ value: v, label: v, detail: "" })),
+      open.effort,
+    );
+
+    // Keep the open panel true to the pane: the usage poll calls this, so a turn
+    // finishing while you are looking at it moves the panel. In place rather
+    // than a rebuild, which would shut a dropdown mid-choice — and a control the
+    // pointer or keyboard is on is left alone for the same reason. `force` is
+    // the exception: a failed apply must snap the picked (still-focused) select
+    // back to what the pane really runs.
+    cfgPaint = (force = false) => {
+      if (cfgDone?.()) {
+        cfgNote = ""; // the sent change landed; the transcript confirms it
+        cfgDone = null;
+      }
+      const v = now();
+      note.textContent =
+        `now: ${v.model || "—"} · ${v.effort || "—"}` + (cfgNote ? ` — ${cfgNote}` : "");
+      for (const s of selects) {
+        const want = s.kind === "model" ? v.model : v.effort;
+        if (!want || (!force && document.activeElement === s.el)) continue;
+        const at = [...s.el.options].find((o) => o.value === want || o.value.startsWith(want));
+        if (at) s.el.value = at.value;
+      }
+    };
+    cfgPaint();
+  },
+};
+
+/** Every claude session Loom is running and what it has spent, opened from any
+ * pane's context gauge — the plan chip answers "how much is left", this answers
+ * "which pane is spending it". Rows are live panes, so clicking one goes there. */
+const usageMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    const note = (text: string) => {
+      const d = document.createElement("div");
+      d.className = "menu-note";
+      d.textContent = text;
+      list.append(d);
+    };
+    if (profilePane) profileRows(list, note);
+    const live = threads.flatMap((t) => t.panes).filter((p) => p.usage);
+    if (!live.length) return note("no claude session running");
+
+    note("context · tokens out");
+    for (const p of live) {
+      const u = p.usage!;
+      const d = document.createElement("div");
+      d.className = `menu-item${p === current?.active ? " on" : ""}`;
+      const lbl = document.createElement("span");
+      lbl.textContent = `${p.th.name} · ${String(p.th.panes.indexOf(p) + 1).padStart(2, "0")}`;
+      const val = document.createElement("b");
+      val.className = "usage-n";
+      val.textContent = `${tok(u.ctx)} · ${tok(u.output)}`;
+      d.title =
+        `${p.th.dir}\n${u.turns} turns · ${tok(u.output)} out · ` +
+        `${tok(u.input + u.cacheWrite)} in · ${tok(u.cacheRead)} cached`;
+      d.onclick = () => {
+        hideMenu();
+        if (p.th !== current) show(p.th);
+        p.th.focusPane(p);
+      };
+      d.append(lbl, val);
+      list.append(d);
+    }
+    // Totals span each session's whole history, not just this run of Loom —
+    // they're read from the transcript, which resuming appends to.
+    const sum = (f: (u: Usage) => number) => live.reduce((s, p) => s + f(p.usage!), 0);
+    note(
+      `${live.length} session${live.length > 1 ? "s" : ""} · ${tok(sum((u) => u.output))} out · ` +
+        `${tok(sum((u) => u.input + u.cacheWrite))} in · ${tok(sum((u) => u.cacheRead))} cached`,
+    );
+  },
+};
+
+/** Read one pane's transcript and repaint the panel when it lands. Every line of
+ * the file gets parsed, so this is asked for when the panel opens and never from
+ * a poll — the 4s one reads only what was appended and has to stay that cheap. */
+async function loadProfile(p: Pane) {
+  // Reopening the same pane keeps its last answer on screen while the fresh one
+  // is read — a big transcript takes long enough for the placeholder to blink.
+  if (profilePane !== p) profile = null;
+  profilePane = p;
+  renderMenu(); // the section says it's reading while it reads
+  place();
+  const got = await invoke<Profile | null>("context_profile", {
+    pane: p.id,
+    dir: p.th.dir,
+    sid: p.sid,
+  }).catch(() => null);
+  // A big transcript takes a moment, and the panel may have been closed or
+  // opened on another pane in the meantime.
+  if (profilePane !== p || openMenu !== usageMenu || menu.classList.contains("hidden")) return;
+  profile = got;
+  renderMenu();
+  place(); // the section just grew — keep the panel on screen
+}
+
+/** Four hues off the theme's own variables, so a palette swap carries. Past the
+ * fourth they repeat at half strength, which is enough to tell neighbouring
+ * slices apart without inventing colours the theme doesn't have. */
+const HUES = ["var(--accent)", "var(--warn)", "var(--ok)", "var(--muted)"];
+
+/** The profile section: what this pane's window has done over time, and what has
+ * been poured into it. Sits above the session list, for the pane whose gauge
+ * opened the panel. */
+function profileRows(list: HTMLElement, note: (text: string) => void) {
+  const p = profilePane!;
+  const seat = String(p.th.panes.indexOf(p) + 1).padStart(2, "0");
+  note(`${p.th.name} · ${seat}`);
+  if (!profile) return note("reading the transcript…");
+  const { series, drops, buckets, est } = profile;
+  if (!series.length) return note("no turns yet");
+
+  // --- the window over time. Exact: every point is what a turn really sent.
+  const [W, H] = [268, 34];
+  const top = Math.max(...series, 1); // never divide by a session that sent nothing
+  const x = (i: number) => (series.length < 2 ? W : (i / (series.length - 1)) * W);
+  const y = (v: number) => H - 1 - (v / top) * (H - 2);
+  const spark = document.createElement("div");
+  spark.className = "spark";
+  // Numbers only, so there is nothing here to escape.
+  spark.innerHTML =
+    `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+    drops
+      .map((d) => `<line x1="${x(d.turn)}" x2="${x(d.turn)}" y1="0" y2="${H}"/>`)
+      .join("") +
+    `<polyline points="${series.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ")}"/></svg>`;
+  spark.title =
+    `${series.length} turns · peak ${tok(top)} · now ${tok(series[series.length - 1])}` +
+    drops.map((d) => `\n${d.trigger} compaction: ${tok(d.pre)} → ${tok(d.post)}`).join("");
+  list.append(spark);
+  // The one thing here that is measured rather than estimated, so it gets said
+  // in numbers: a compaction is the context being thrown away on your behalf.
+  const lost = drops.reduce((n, d) => n + Math.max(0, d.pre - d.post), 0);
+  note(
+    drops.length
+      ? `peak ${tok(top)} · ${drops.length} compaction${drops.length > 1 ? "s" : ""}, ${tok(lost)} evicted`
+      : `peak ${tok(top)} · never compacted`,
+  );
+
+  // --- what produced it. An estimate, and of a different quantity than the
+  // gauge — see the Bucket doc in usage.rs.
+  if (!est) return;
+  const shown = buckets.slice(0, 8);
+  const rest = buckets.slice(8).reduce((n, b) => n + b.tokens, 0);
+  if (rest) shown.push({ label: `${buckets.length - 8} more`, tokens: rest });
+  const paint = (el: HTMLElement, i: number) => {
+    el.style.background = HUES[i % HUES.length];
+    el.style.opacity = i >= HUES.length ? "0.5" : "1";
+  };
+  const bar = document.createElement("div");
+  bar.className = "stack";
+  shown.forEach((b, i) => {
+    const seg = document.createElement("i");
+    seg.style.width = `${(b.tokens / est) * 100}%`;
+    paint(seg, i);
+    bar.append(seg);
+  });
+  list.append(bar);
+  for (const [i, b] of shown.entries()) {
+    const row = document.createElement("div");
+    row.className = "leg";
+    const dot = document.createElement("i");
+    paint(dot, i);
+    const lbl = document.createElement("span");
+    lbl.textContent = b.label;
+    const n = document.createElement("b");
+    n.textContent = `${tok(b.tokens)} · ${Math.round((b.tokens / est) * 100)}%`;
+    row.append(dot, lbl, n);
+    list.append(row);
+  }
+  // The caveat matters — these are not the gauge's tokens — but six lines of it
+  // buries the panel. One line, and the whole story on hover.
+  note(`${tok(est)} produced · estimated · not the live window`);
+  (list.lastElementChild as HTMLElement).title =
+    "What each origin generated over the whole session, at 4 chars a token.\n" +
+    "Not a breakdown of the context right now: Claude Code prunes the request " +
+    "it sends and the transcript never records what it cut.";
+}
+
+/** The plan panel: the 5-hour session window and the weekly limits, drawn the
+ * way Claude Code's /usage shows them. Read-only, so no add input. */
+const planMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    const note = (text: string) => {
+      const d = document.createElement("div");
+      d.className = "menu-note";
+      d.textContent = text;
+      list.append(d);
+    };
+    if (!plan?.limits.length) return note(planErr || "fetching plan usage…");
+
+    let group = "";
+    for (const l of plan.limits) {
+      // The weekly limits are a block of their own, exactly one heading deep.
+      if (l.group !== group && l.group === "weekly") note("WEEKLY LIMITS");
+      group = l.group;
+      const d = document.createElement("div");
+      d.className = `limit sev-${l.severity}`;
+      const top = document.createElement("div");
+      top.className = "limit-top";
+      const lbl = document.createElement("span");
+      lbl.textContent = KIND_LABELS[l.label] ?? l.label;
+      const pct = document.createElement("b");
+      pct.textContent = `${Math.round(l.percent)}% used`;
+      top.append(lbl, pct);
+      const bar = document.createElement("i");
+      bar.className = "limit-bar";
+      bar.style.setProperty("--pct", `${l.percent}%`);
+      const sub = document.createElement("small");
+      sub.textContent = fmtReset(l.resetsAt) || (l.percent === 0 ? "unused so far" : "");
+      d.append(top, bar, sub);
+      list.append(d);
+    }
+    // A failed refresh keeps the last good numbers on screen and says so, rather
+    // than blanking the panel — this endpoint rate-limits.
+    if (planErr) note(planErr);
+  },
+};
+
+/** The palette. Built in, so no add input — every row is one of THEMES. */
+const themeMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    for (const t of THEMES) {
+      const row = document.createElement("div");
+      row.className = `menu-item${t === theme ? " on" : ""}`;
+      const lbl = document.createElement("span");
+      lbl.textContent = t.label;
+      // A swatch of what you're picking, so the names don't have to carry it.
+      const dot = document.createElement("b");
+      dot.className = "swatch";
+      dot.style.background = t.vars["--accent"] ?? BASE["--accent"];
+      dot.style.borderColor = t.vars["--line-strong"] ?? BASE["--line-strong"];
+      dot.style.color = t.vars["--bg"] ?? BASE["--bg"]; // the ring, via currentColor
+      row.onclick = () => {
+        applyTheme(t);
+        hideMenu();
+        save();
+        paintTheme();
+      };
+      row.append(lbl, dot);
+      list.append(row);
+    }
+  },
+};
+
+/** The top-bar chip: the 5-hour session window, which is the one that moves while
+ * you work. The weeklies are a click away. Hidden until the first fetch answers. */
+function paintPlan() {
+  const b = $("#plan");
+  const s = plan?.limits.find((l) => l.group === "session") ?? plan?.limits[0];
+  if (!s) return void (b.className = "hidden");
+  b.className = `sev-${s.severity}`;
+  b.textContent = `◔ ${Math.round(s.percent)}%`;
+  b.title =
+    `${TIERS[plan!.tier] ?? plan!.tier}${plan!.tier ? " — " : ""}` +
+    `${KIND_LABELS[s.label] ?? s.label} ${Math.round(s.percent)}% used\n` +
+    `${fmtReset(s.resetsAt)}\nClick for the weekly limits too`;
+}
+
+/** Poll: the endpoint rate-limits hard and these numbers move slowly, so five
+ * minutes is as often as it's worth asking. A failure keeps the last good
+ * numbers and shows why underneath them. */
+async function pollPlan() {
+  try {
+    const got = await invoke<Plan>("plan_usage");
+    // A row whose reset time has passed describes a window that rolled over —
+    // its usage is back at zero, whatever the stale payload last said. This is
+    // how a pane idle since 1 AM used to read "47% used, Resetting now" all
+    // evening. Zeroed rather than dropped: at launch the newest payload on disk
+    // is the previous run's, and dropping its dead session row left the chip
+    // showing the weekly number until the next poll, five minutes later.
+    const rolled = (l: Limit): Limit => {
+      const at = resetMs(l.resetsAt);
+      return !at || at > Date.now()
+        ? l
+        : { ...l, percent: 0, severity: "ok", resetsAt: null };
+    };
+    // The statusline fallback knows the session window and the weekly total,
+    // never the per-model limits — so its rows win by label and the rest of the
+    // last good answer stands, rather than dropping "Fable" off the panel every
+    // time the endpoint says 429. Session first, so the chip and the panel's
+    // WEEKLY LIMITS heading keep their order whichever source a row came from.
+    const kept = (got.stale && plan ? plan.limits : []).filter(
+      (l) => !got.limits.some((g) => g.label === l.label),
+    );
+    plan = {
+      ...got,
+      tier: got.tier || plan?.tier || "",
+      limits: [...got.limits, ...kept].map(rolled).sort(
+        (a, b) => Number(b.group === "session") - Number(a.group === "session"),
+      ),
+    };
+    planErr = "";
+  } catch (e) {
+    planErr = String(e);
+  }
+  paintPlan();
+  if (!menu.classList.contains("hidden") && openMenu === planMenu) renderMenu();
+}
+
+function paintTheme() {
+  const b = $("#theme");
+  b.textContent = `◑ ${theme.label} ▾`;
+  b.title = `Colour theme: ${theme.label} — click to change`;
+}
+
+function paintLang() {
+  const b = $("#lang");
+  b.textContent = `${lang.label} ▾`;
+  b.title = lang.code
+    ? `Dictation is transcribed as ${lang.label} — click to change`
+    : "Dictation language is detected per clip — click to change";
+}
+
+function paintPrefix() {
+  const b = $("#prefix");
+  b.textContent = `${prefix.text.trim() || "no prefix"}${prefix.enter ? " ⏎" : ""} ▾`;
+  b.title = prefix.enter
+    ? "Dictation is sent the moment it lands — click to change"
+    : "Dictation is inserted and waits for your Enter — click to change";
+}
+
+const hideMenu = () => menu.classList.add("hidden");
+
+/** Park the panel under whatever opened it. Its own call because a panel can
+ * change size while open — the profile section arrives a moment after the rest —
+ * and a taller one has to be clamped again or it runs off the bottom. The menu
+ * must be visible first: display:none has no size to measure. */
+function place() {
+  const r = anchor.getBoundingClientRect();
+  const gap = 6;
+  // Right-aligned under whatever opened it, but kept on screen. The toolbar
+  // buttons always had room; a pane's context gauge can sit anywhere in the
+  // grid, so both edges have to be clamped.
+  const right = Math.min(window.innerWidth - r.right, window.innerWidth - menu.offsetWidth - gap);
+  menu.style.right = `${Math.max(gap, right)}px`;
+  menu.style.top = `${Math.max(gap, Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - gap))}px`;
+}
+
+function showMenu(at: HTMLElement, m: Menu) {
+  if (!menu.classList.contains("hidden") && at === anchor) return hideMenu();
+  anchor = at;
+  openMenu = m;
+  renderMenu();
+  menu.classList.remove("hidden");
+  place();
+}
+
+// --- Ctrl+F: one shared input parked over the active pane -----------------
+const find = $<HTMLInputElement>("#find");
+
+function closeFind() {
+  find.classList.add("hidden");
+  $("#find-n").textContent = "";
+  current?.active?.search.clearDecorations();
+  current?.active?.focus();
+}
+
+function toggleFind() {
+  const p = current?.active;
+  if (!p) return;
+  if (!find.classList.contains("hidden")) return closeFind();
+  const r = p.el.getBoundingClientRect();
+  find.style.top = `${r.top + 6}px`;
+  find.style.right = `${window.innerWidth - r.right + 6}px`;
+  find.classList.remove("hidden");
+  countFinds(p);
+  const n = $("#find-n");
+  n.textContent = "";
+  n.style.top = `${r.top + 11}px`;
+  n.style.right = `${window.innerWidth - r.right + 16}px`;
+  find.select();
+  find.focus();
+}
+
+find.onkeydown = (e) => {
+  if (e.key === "Escape") return closeFind();
+  const p = current?.active;
+  if (e.key !== "Enter" || !p || !find.value) return;
+  if (e.shiftKey) p.search.findPrevious(find.value, findOpts());
+  else p.search.findNext(find.value, findOpts());
+};
+// Search as you type: the first hit lands while the word is still being typed.
+find.oninput = () => {
+  const p = current?.active;
+  if (!p) return;
+  if (find.value) p.search.findNext(find.value, { ...findOpts(), incremental: true });
+  else (p.search.clearDecorations(), ($("#find-n").textContent = ""));
+};
+/** "3/17" beside the box, from whichever pane is being searched. Registered
+ * once per pane, the first time it is searched. */
+const findCounted = new WeakSet<Pane>();
+function countFinds(p: Pane) {
+  if (findCounted.has(p)) return;
+  findCounted.add(p);
+  p.search.onDidChangeResults(({ resultIndex, resultCount }) => {
+    if (current?.active !== p) return;
+    $("#find-n").textContent = !find.value ? "" : resultCount ? `${resultIndex + 1}/${resultCount}` : "none";
+  });
+}
+
+// --- boot -----------------------------------------------------------------
+async function main() {
+  // panes: PaneState[]; a bare string is the pre-session format, a number the
+  // pre-list one before that. `spaces` is the pre-thread format: a folder and
+  // its panes, which is what a thread on the checkout itself still is.
+  type Saved = { panes: number | (string | PaneState)[]; layout?: LayoutMode; startup?: string };
+  let saved: {
+    threads?: (Saved & ThreadState)[];
+    spaces?: (Saved & { dir: string })[];
+    repos?: string[];
+    reposFolded?: string[];
+    startups?: Startup[];
+    startup?: string;
+    prefixes?: Prefix[];
+    prefix?: number;
+    langs?: Lang[];
+    lang?: number;
+    theme?: string;
+    fontSize?: number;
+    paneCount?: number;
+  } = {};
+  try {
+    // strip a BOM: the file is hand-editable and Notepad/PowerShell add one
+    const raw = (await invoke<string>("load_state")).replace(/^﻿/, "").trim();
+    saved = JSON.parse(raw || "{}");
+  } catch {}
+  if (saved.startups?.length) startups = saved.startups;
+  if (saved.prefixes?.length) prefixes = saved.prefixes;
+  prefix = prefixes[saved.prefix ?? 0] ?? prefixes[0];
+  if (saved.langs?.length) langs = saved.langs;
+  lang = langs[saved.lang ?? 0] ?? langs[0];
+  // Before the first Pane too: its Terminal is built from the live palette.
+  applyTheme(THEMES.find((t) => t.label === saved.theme) ?? THEMES[0]);
+  // Before any Pane exists — the Terminal is built with it. Hand-editable file.
+  fontSize = Math.min(Math.max(saved.fontSize ?? fontSize, 8), 24);
+  paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
+  repos = saved.repos ?? [];
+  reposFolded = new Set(saved.reposFolded ?? []);
+
+  for (const id of ["#new-thread", "#open-first"]) $(id).onclick = newThread;
+  addBtn.onclick = () =>
+    current &&
+    showMenu(
+      addBtn,
+      startupMenu((cmd) => void current!.addPane({ cmd }).then(save)),
+    );
+  window.addEventListener("mousedown", (e) => {
+    const t = e.target as Node;
+    if (!menu.contains(t) && !anchor.contains(t)) hideMenu();
+  });
+  // No webview context menu anywhere else either; real inputs keep theirs.
+  window.addEventListener("contextmenu", (e) => {
+    if (!(e.target as HTMLElement).closest("input")) e.preventDefault();
+  });
+  addInput.onkeydown = (e) => {
+    if (e.key !== "Enter") return;
+    const v = addInput.value.trim();
+    if (!v) return;
+    openMenu.add?.(v);
+    addInput.value = "";
+    save();
+    renderMenu();
+  };
+  changesBtn.onmousedown = (e) => e.preventDefault();
+  changesBtn.onclick = () => toggleChanges();
+  $("#diff-close").onclick = () => current?.tab && closeTab(current, current.tab);
+  $("#commit-btn").onclick = () => void commitAll();
+  $("#commit-more").onclick = () => showMenu($("#commit-more"), commitMenu);
+  $("#pr-btn").onclick = () => void createPR();
+  $("#changes-refresh").onclick = () => void (pollStats(), refreshChanges());
+  $("#changes-more").onclick = () => showMenu($("#changes-more"), repoMenu);
+  $("#wsmore").onclick = () => current && showMenu($("#wsmore"), threadMenu(current));
+  $("#waiting").onclick = jumpWaiting;
+  $("#rename-cancel").onclick = () => renameDlg.close();
+  $("#keys-close").onclick = () => $<HTMLDialogElement>("#keys").close();
+  $<HTMLInputElement>("#side-filter").oninput = (e) => {
+    sideQuery = (e.target as HTMLInputElement).value.trim().toLowerCase();
+    filterSide();
+  };
+  $("#vscode").onclick = () =>
+    current && invoke("open_vscode", { dir: current.dir }).catch((e) => toast(String(e)));
+  const dictate = $("#dictate");
+  const prefixBtn = $("#prefix");
+  const langBtn = $("#lang");
+  const themeBtn = $("#theme");
+  // keep pane focus
+  for (const b of [dictate, prefixBtn, langBtn, themeBtn]) b.onmousedown = (e) => e.preventDefault();
+  dictate.onclick = () => mic(recording ? micStop : micStart);
+  prefixBtn.onclick = () => showMenu(prefixBtn, prefixMenu);
+  langBtn.onclick = () => showMenu(langBtn, langMenu);
+  themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
+  micState("");
+  paintPrefix();
+  paintLang();
+  paintTheme();
+  $("#layout").onclick = () => {
+    if (!current) return;
+    current.layout = LAYOUTS[(LAYOUTS.indexOf(current.layout) + 1) % LAYOUTS.length];
+    current.relayout();
+    $("#layout").textContent = LAYOUT_LABEL[current.layout];
+    save();
+  };
+
+  // A file dropped from another app lands at the prompt of the pane it was
+  // dropped on, unsubmitted, so you can type around it. The OS owns this drag
+  // (see dragDropEnabled), so it arrives as an event with real paths and a
+  // position in physical pixels rather than as a drop on any element.
+  void getCurrentWebview().onDragDropEvent(({ payload }) => {
+    const at =
+      payload.type === "leave"
+        ? null
+        : paneAt(payload.position.x / devicePixelRatio, payload.position.y / devicePixelRatio);
+    const over = payload.type === "enter" || payload.type === "over" ? at : null;
+    for (const p of current?.panes ?? []) p.el.classList.toggle("drop", p === over);
+    if (payload.type !== "drop" || !at) return;
+    const text = dropText(payload.paths);
+    if (!text) return;
+    current!.focusPane(at);
+    at.term.paste(text); // not pty_write: paste honors bracketed-paste mode
+  });
+
+  // Ctrl+wheel over the panes: the terminal font-size gesture. Capture, so
+  // xterm never turns it into a scroll.
+  $("#stage").addEventListener(
+    "wheel",
+    (e) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      setFont(fontSize + (e.deltaY < 0 ? 1 : -1));
+    },
+    { capture: true, passive: false },
+  );
+
+  // Taskbar flash from Pane.wake() stays lit until you come back.
+  window.addEventListener("focus", () =>
+    getCurrentWindow().requestUserAttention(null).catch(() => {}),
+  );
+
+  // Push to talk: F4 down starts (below), F4 up stops. Leaving the window counts
+  // as letting go — a keyup that never arrives would leave the mic open.
+  window.addEventListener("keyup", (e) => e.key === "F4" && mic(micStop), true);
+  window.addEventListener("blur", () => {
+    if (recording) mic(micStop);
+  });
+
+  // Same keys as aa (F2 zoom, F3 next waiting pane, F5 VS Code), Ctrl+Tab
+  // between threads, plus Ctrl+F
+  // find and Ctrl+= / - / 0 font size. Capture phase so xterm never sees them.
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key === "Escape") return hideMenu(); // not consumed: dialogs use it too
+      if (e.key === "F1") $<HTMLDialogElement>("#keys").showModal();
+      else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "g") toggleChanges();
+      else if (e.ctrlKey && e.key === "b") $("#side").classList.toggle("hidden");
+      else if (e.key === "F2" && current?.active) current.toggleZoom(current.active);
+      else if (e.key === "F3") jumpWaiting();
+      else if (e.ctrlKey && e.key === "Tab") cycleThread(e.shiftKey);
+      else if (e.ctrlKey && !e.altKey && /^[1-9]$/.test(e.key) && threads[+e.key - 1]) show(threads[+e.key - 1]);
+      else if (e.ctrlKey && e.altKey && e.key.startsWith("Arrow") && current)
+        current.focusToward(e.key as "ArrowLeft");
+      // Alt+F4 is the window's, and autorepeat would restart the recording.
+      else if (e.key === "F4" && !e.altKey && !e.repeat) mic(micStart);
+      else if (e.key === "F5" && current)
+        invoke("open_vscode", { dir: current.dir }).catch((e) => toast(String(e)));
+      else if (e.ctrlKey && e.key === "f" && current?.active) toggleFind();
+      // "=" or "+" depending on layout.
+      else if (e.ctrlKey && (e.key === "=" || e.key === "+")) setFont(fontSize + 1);
+      else if (e.ctrlKey && e.key === "-") setFont(fontSize - 1);
+      else if (e.ctrlKey && e.key === "0") setFont(13);
+      // Claude Code owns the alt screen, so this is the only way to scroll it
+      // off the keyboard. Consumed here or xterm forwards ESC[1;3A to the pty.
+      else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && current?.active)
+        current.active.scroll(e.key === "ArrowUp");
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true,
+  );
+
+  // Claude's Stop/Notification hooks drop $TEMP\loom-wait\$env:LOOM_PANE; drain
+  // it into pane.wake(). ponytail: a 250ms poll of one temp dir, no file watcher.
+  setInterval(async () => {
+    const wakes = await invoke<[string, string][]>("take_wakes").catch(() => []);
+    if (!wakes.length) return;
+    const effortById = new Map(wakes);
+    for (const p of threads.flatMap((t) => t.panes)) {
+      const e = effortById.get(p.id);
+      if (e !== undefined) p.wake(e);
+    }
+  }, 250);
+
+  // Context and token totals, read from Claude Code's own transcripts.
+  // ponytail: a 4s poll beside the wake one — the Rust side reads only what was
+  // appended since last time, so an idle pane costs a metadata() call.
+  const pollUsage = async () => {
+    const panes = threads.flatMap((t) => t.panes).filter((p) => p.isClaude);
+    if (!panes.length) return;
+    const got = await invoke<Record<string, Usage>>("session_usage", {
+      panes: panes.map((p) => [p.id, p.th.dir, p.sid]),
+    }).catch(() => ({}) as Record<string, Usage>);
+    let moved = false;
+    for (const p of panes) {
+      const u = got[p.id] ?? null;
+      // The pane's claude reported a different session than the one it booted
+      // with — /clear, or a claude started by hand. Follow it, so the gauge stays
+      // on the live conversation and the next launch resumes that one.
+      if (u?.sid && u.sid !== p.sid) {
+        p.sid = u.sid;
+        moved = true;
+      }
+      p.setUsage(u);
+    }
+    if (moved) save();
+    // A turn that finished during this poll changes what the config panel should
+    // say, and it may well be open in front of you.
+    if (!menu.classList.contains("hidden")) cfgPaint?.();
+  };
+  setInterval(pollUsage, 4000);
+  setInterval(pollStats, 10_000);
+  setInterval(() => threads.forEach((t) => t.paintAge()), 30_000);
+
+  const planBtn = $("#plan");
+  planBtn.onmousedown = (e) => e.preventDefault();
+  // The tooltip carries a countdown, so it goes stale between polls and stops
+  // agreeing with the panel, which recomputes on every open. Rebuilding it as
+  // the pointer arrives costs nothing and lands well before the tooltip shows.
+  planBtn.onmouseenter = paintPlan;
+  planBtn.onclick = () => {
+    showMenu(planBtn, planMenu);
+    // While the panel is up it says all of this and more; leaving the tooltip on
+    // would only float it over the top. The mouseenter above puts it back.
+    if (menu.classList.contains("hidden")) paintPlan();
+    else planBtn.title = "";
+  };
+  pollPlan();
+  setInterval(pollPlan, 5 * 60_000);
+  // Once a launch is plenty: the roster changes on Anthropic's schedule, not
+  // yours, and the panel falls back to the CLI's aliases if this never answers.
+  invoke<ModelOpt[]>("model_options")
+    .then((m) => (models = m))
+    .catch(() => {});
+
+  show(null);
+  // Parallel too: openThread pushes its thread before awaiting, so sidebar
+  // order stays saved order. Each one show()s itself as it starts, hence the
+  // explicit show() after — the first saved thread is the one you land on.
+  const restore =
+    saved.threads ?? (saved.spaces ?? []).map((w) => ({ ...w, repo: w.dir, branch: "", name: basename(w.dir) }));
+  await Promise.all(
+    restore.map((w) => {
+      const panes: PaneState[] = Array.isArray(w.panes)
+        ? w.panes.map((p) => (typeof p === "string" ? { cmd: p } : p))
+        : Array(Math.max(w.panes, 1)).fill({
+            cmd: w.startup ?? saved.startup ?? startups[0]?.cmd ?? "",
+          });
+      return openThread(w, panes, w.layout);
+    }),
+  );
+  show(threads[0] ?? null);
+  pollUsage(); // restored panes shouldn't sit blank for the first interval
+  pollStats();
+}
+
+main();

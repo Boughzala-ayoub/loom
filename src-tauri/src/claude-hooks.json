@@ -1,0 +1,21 @@
+{
+  "_comment": "Loaded per pane via `claude --settings` (see session.ts). Additive — the user's own settings still apply. SessionStart fires on startup, resume, /clear and compact, which is every moment a pane's session id can change, so this marker is the only reliable answer to 'which transcript is this pane on'. Same shape as the wake markers in %TEMP%\\loom-wait. The statusLine is a tee (loom-status.ps1, path templated in by pty_spawn): Claude Code pushes fresh model/effort into it on every state change, the tee drops that in %TEMP%\\loom-status and then chains to the user's own statusline so their bar still draws.",
+  "statusLine": {
+    "type": "command",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"__LOOM_STATUS__\""
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "timeout": 10,
+            "command": "if ($env:LOOM_PANE) { try { $h = [Console]::In.ReadToEnd() | ConvertFrom-Json; if ($h.transcript_path) { $d = \"$env:TEMP\\loom-tx\"; New-Item -ItemType Directory -Force -Path $d | Out-Null; Set-Content -LiteralPath \"$d\\$env:LOOM_PANE\" -Value $h.transcript_path -Encoding ascii -NoNewline } } catch {} }"
+          }
+        ]
+      }
+    ]
+  }
+}
