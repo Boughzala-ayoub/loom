@@ -11,8 +11,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const Loom = async () => ({
+export const Loom = async ({ client }) => ({
+  "chat.message": async ({ sessionID }) => {
+    // A user message identifies the selected session, including /sessions.
+    if (!process.env.LOOM_PANE) return;
+    try {
+      const session = await client.session.get({ path: { id: sessionID } });
+      if (session.data && !session.data.parentID) remember(sessionID);
+    } catch {}
+  },
   event: async ({ event }) => {
+    if (event.type === "session.created" && !event.properties?.info?.parentID) {
+      remember(event.properties?.info?.id);
+    }
     const pane = process.env.LOOM_PANE;
     if (!pane || event.type !== "session.idle") return;
     try {
@@ -22,3 +33,12 @@ export const Loom = async () => ({
     } catch {}
   },
 });
+
+function remember(sessionID) {
+  const file = process.env.LOOM_SESSION_FILE;
+  if (!file || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionID ?? "")) return;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, sessionID);
+  } catch {}
+}

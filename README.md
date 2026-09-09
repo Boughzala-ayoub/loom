@@ -41,8 +41,10 @@ are Linux-generated and fail their layout asserts on MSVC, so bindgen has to run
 
 ## Using it
 
-`+ Thread` opens the new-thread form: pick a repo (or browse to one), give the
-thread a name, pick the agent, optionally a base ref and a pane count. Loom
+`+ Thread` opens the new-thread form. **Open checkout** starts an agent in
+the existing folder. **Create worktree** creates a separate folder and branch.
+Pick a project or browse to one, choose an agent, and give worktrees a thread
+name. **Advanced options** contains the base ref and pane count. Loom
 creates the branch `loom/<name>` off the base (HEAD when blank) and checks it
 out as a worktree under `~\loom\<repo>\<name>`, then starts the agent there.
 A name that is already a branch or a folder gets `-2`, `-3` appended, the way
@@ -50,30 +52,41 @@ Orca names a second worktree, so the base you asked for is always the base you
 get. To continue an existing branch, put it in the base field. A base that
 names nothing, locally or on origin after a fetch, is taken as a new branch
 name: the thread is created on that branch, off HEAD. Spelling it like a
-remote ref (`origin/x`) that isn't there is refused as a typo. Leave the name
-blank to open the checkout itself as a thread, which is what a folder was in
-older versions. A folder that is not a git repo works the same way, minus
-worktrees.
+remote ref (`origin/x`) that isn't there is refused as a typo. **Open checkout**
+also supports folders that are not Git repositories.
 
 The sidebar lists threads under the project they came from, and under each
 thread one row per pane, the way Orca lists agent sessions under a worktree:
 the provider's mark, the agent (`claude`, `codex`, `opencode`, `shell`) and
 whatever it titled itself. Projects fold on click and threads fold on their
 `▾`; both orders change by dragging a row up or down its list, and all of
-that is remembered. The box at the top filters threads by name, branch or
-agent title. `1 waiting` in the top bar counts panes waiting on you across
-every thread; click it (or `F3`) to go to the next one. Every
+that is remembered. The box at the top filters threads by project, name,
+branch, agent, or agent title. Project headings contain indented threads or
+checkouts, with their agents and terminals nested below. Filtering reveals
+matching threads even when their project is collapsed.
+
+`1 waiting` in the top bar counts panes waiting on you across
+every thread. Click it to choose an agent from the waiting list, or press `F3`
+to jump to the next one. Choosing an agent reveals its terminal and clears
+only its waiting indicator. Every
 row has a dot: pulsing while that agent is working, yellow when it has finished
 a turn and is waiting on you, red when it has exited. The thread's own dot is
 the worst of its panes. Clicking an agent row focuses that pane; if the thread
 is zoomed, the zoom moves to it, so a zoomed thread reads one agent at a time.
 
-Threads, their branches and their panes come back on the next launch, and each
-agent resumes the conversation it had when you closed Loom. Claude panes carry
-their own pinned session id. Codex and opencode cannot be handed an id up
-front, so they resume the last session in the thread's directory, which is
-exactly one per thread because a thread is a worktree. Two codex panes in one
-thread would resume the same conversation.
+Threads, branches, and panes come back on the next launch. Claude keeps its
+pinned session ID. Codex and OpenCode report their actual session IDs, so two
+panes in the same folder resume separate conversations. Loom never falls back
+silently to a fresh conversation after a resume error.
+
+Codex reports its thread through its `notify` setting, which Loom passes on the
+command line: after every completed turn a script records the thread for that
+pane. Nothing to trust or enable. OpenCode uses Loom's local plugin.
+
+Older panes have no verified session ID and show **Choose session** in the
+pane, which lists the folder's conversations for that agent.
+Choose the previous conversation once, and Loom remembers it. Closing an active pane or discarding changes uses
+a themed in-app confirmation, with Cancel focused by default.
 
 When an agent quits, the pane says `[exited N] — Enter relaunches`, and Enter
 brings it back into the same session. Agents no longer run inside a PowerShell:
@@ -84,8 +97,10 @@ integration below.
 
 | Action | How |
 | --- | --- |
-| New thread | `+ Thread` → repo, name, agent, base, panes |
+| New thread | `+ Thread`, then Open checkout or Create worktree |
 | Switch thread | click its row, or `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Choose a waiting agent | click the waiting count |
+| Preferences | `⚙` in the top bar |
 | Add / close a pane | `+` on the thread bar, or `✕` on the pane header |
 | Relaunch a dead pane | focus it and press Enter |
 | Resize panes | drag the gap between them |
@@ -106,7 +121,10 @@ integration below.
 | See what changed | `⎇` in the thread bar (the number is files touched) |
 | Close a thread / delete its worktree | `⋯` → Close, Delete worktree (keep branch), Delete worktree and branch |
 
-Up to **16 panes** per thread, tiled square-ish (4 → 2×2, 9 → 3×3, 16 → 4×4).
+Up to **16 panes** per thread. The top bar contains the dictation language, prefix,
+and pane layout controls. Layout options are columns, rows, and grid.
+The grid reduces its column count in narrower windows. At phone
+widths, panes stack vertically and the project sidebar becomes a drawer.
 
 ### Changes
 
@@ -152,7 +170,7 @@ transcribes on this machine; nothing leaves the box, and none of Handy's other
 half applies — no global hotkey, no system-wide text injection — because Loom
 already owns the pty.
 
-`/prompt ▾` beside it picks what gets typed into the pane the moment recording
+The prefix dropdown in the top bar picks what gets typed into the pane the moment recording
 starts, and the transcript lands after it. It's the same dropdown as the startup
 menu: click a prefix to use it, `⏎` on a row to make *that* prefix send itself
 as soon as the transcript arrives, `✕` to drop it, or type a new one into the
@@ -292,6 +310,14 @@ waits for a hardcoded ~60s idle delay (and effort re-pinning has nothing to go o
 Split so an installed release and a dev session can run side by side without
 overwriting each other.
 
+Loom restores the selected project, thread, and pane, pane zoom and split sizes,
+open diff tabs, per-thread commit drafts, and sidebar and Changes panel visibility.
+It also remembers collapsed groups, the sidebar filter, and its scroll position.
+Changes are saved during use, and closing waits for the final workspace save.
+Temporary menus and confirmation dialogs do not reopen.
+
+- `workspaces.window.json` stores the window position, size, maximized state,
+  and fullscreen state. An explicit profile has its own adjacent `.window.json` file.
 - `workspaces.json` — threads (repo, worktree, branch, panes with their
   sessions), known repos, the startup list. Hand-editable (no BOM — the loader
   strips one, but PowerShell's `Set-Content -Encoding utf8` adds it and other
@@ -313,8 +339,8 @@ takes itself for a child session and stops saving its transcript.
 - Windows only (ConPTY, `cmd.exe` / `powershell.exe`, hardcoded).
 - Create PR knows GitHub remotes only; other hosts get the error in the panel.
 - Startup commands are split on whitespace: no quoted arguments in the list.
-- Codex and opencode resume by directory, so one of each per thread.
+- Codex panes override a `notify` program set in `~/.codex/config.toml`.
 - Hidden threads keep their xterm buffers; agent panes cap scrollback at 1500
   lines to hold that down.
-- Pane layout weights reset when the pane count changes shape.
+- Pane layout weights reset when the grid changes shape, including after a resize that changes its column count.
 - A block's accent bar is only drawn while its first line is on screen.

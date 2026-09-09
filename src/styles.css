@@ -559,29 +559,25 @@ input:focus {
   color: var(--accent);
   white-space: nowrap;
 }
-#new,
-#rename,
-#keys {
-  min-width: 360px;
-  max-width: 92vw;
-  padding: 16px 18px;
+dialog {
+  width: 460px;
+  min-width: 0;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  padding: 20px;
   color: var(--text);
   background: var(--panel);
   border: 1px solid var(--line-strong);
   border-radius: 10px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
 }
-#new::backdrop,
-#rename::backdrop,
-#keys::backdrop {
+dialog::backdrop {
   background: rgba(0, 0, 0, 0.45);
 }
-#new h2,
-#rename h2,
-#keys h2 {
+dialog h2 {
   margin: 0 0 12px;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
 }
 #new label,
@@ -926,8 +922,7 @@ input:focus {
   text-overflow: ellipsis;
   font-family: var(--mono);
 }
-/* Same clamp: the list takes typed-in codes, so the label is user-supplied and
-   #wsbar is a flex row with nowhere to wrap. */
+/* Language labels can include user-supplied codes. */
 #lang {
   max-width: 110px;
   overflow: hidden;
@@ -1242,30 +1237,6 @@ input:focus {
   /* Only the entrance — the bars themselves are the reading, not decoration. */
   #wave {
     animation: none;
-  }
-}
-
-/* Narrow window: the toolbar buttons need the width more than the brand does,
-   and the panes need it more than the sidebar — it narrows to names only. */
-@media (max-width: 760px) {
-  .brand {
-    display: none;
-  }
-  #side {
-    width: 130px;
-  }
-  #side-filter {
-    display: none;
-  }
-  #changes {
-    width: 220px;
-  }
-  #wspath {
-    display: none;
-  }
-  .thread-sub,
-  .agents {
-    display: none;
   }
 }
 
@@ -1714,7 +1685,206 @@ input:focus {
   margin-bottom: 0;
 }
 #changes-refresh,
-#changes-more {
+#changes-more,
+#changes-close {
   padding: 0 6px;
   font-size: 13px;
+}
+
+/* Workspace controls keep the terminal palette and leave room for its content. */
+#bar { gap: 6px; height: 48px; }
+#bar > button { flex: none; min-height: 30px; }
+#quick-settings { display: flex; flex: none; align-items: center; gap: 2px; padding-right: 6px; margin-right: 2px; border-right: 1px solid var(--line); }
+#quick-settings > button { min-height: 24px; padding: 2px 6px; font-size: 11px; border-radius: 4px; }
+#quick-settings > button:hover, #quick-settings > button:focus-visible { background: var(--raise); border-color: var(--line); }
+kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
+#wsbar { height: 42px; gap: 6px; }
+.wsidentity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+#wsname, #wsbranch { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#wsname { min-width: 60px; }
+#wsbranch { max-width: 180px; }
+#wsbar > button { flex: none; min-height: 28px; }
+#stage { min-width: 0; }
+#empty { padding: 24px; text-align: center; }
+#empty p { max-width: 440px; overflow-wrap: break-word; }
+#side-empty { margin: 12px; font-size: 12px; }
+.repo { text-transform: none; letter-spacing: 0; font-size: 11px; }
+.thread.on { border-left-color: var(--accent); box-shadow: none; }
+.thread:focus-within .more, .menu-item:focus-within button,
+#tabs .tab:focus-within button { opacity: 1; }
+:is(button, input, select, summary, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+.panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.panel-heading h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.panel-heading > button { flex: none; }
+#preferences {
+  position: fixed; z-index: 40; top: 54px; right: 8px;
+  width: 340px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 66px);
+  overflow-y: auto; padding: 16px; background: var(--panel);
+  border: 1px solid var(--line-strong); border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+.preference-row { display: grid; grid-template-columns: 1fr minmax(0, 1fr); align-items: center; gap: 12px; padding: 7px 0; }
+.preference-row > span { color: var(--muted); font-size: 12px; }
+.preference-row > button { max-width: 100%; border-color: var(--line); overflow: hidden; text-overflow: ellipsis; }
+.preference-actions { display: grid; gap: 6px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.preference-actions button { text-align: left; }
+#pane-menu { min-width: 0; width: 300px; max-width: calc(100vw - 12px); max-height: calc(100dvh - 12px); overflow-y: auto; }
+.menu-note { overflow-wrap: anywhere; }
+
+#thread-picker { width: 540px; }
+#picker-query { width: 100%; padding: 10px 12px; }
+#picker-hint, #picker-empty { font-size: 12px; margin: 10px 0; }
+#picker-list { display: grid; gap: 4px; max-height: 50dvh; overflow-y: auto; padding: 3px; margin: 0 -3px; }
+.picker-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; width: 100%; padding: 10px 12px; text-align: left; border-color: var(--line); }
+.picker-label { color: var(--text); font-weight: 600; overflow-wrap: anywhere; white-space: normal; }
+.picker-detail { grid-column: 1 / -1; font: 11px var(--mono); color: var(--muted); white-space: normal; overflow-wrap: anywhere; }
+.picker-state { font-size: 11px; align-self: center; }
+.picker-row:focus { background: var(--raise); border-color: var(--accent); }
+
+#new label, #rename label { display: grid; grid-template-columns: 100px minmax(0, 1fr); font-family: inherit; }
+#new label > :is(input, select), #rename label > input { width: 100%; padding: 8px; font-family: inherit; }
+.thread-mode { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0; margin: 0; border: 0; }
+.thread-mode legend { margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+#new .thread-mode label { display: flex; gap: 8px; margin: 0; padding: 10px; border: 1px solid var(--line-strong); border-radius: 6px; cursor: pointer; }
+#new .thread-mode input { flex: none; width: auto; margin: 0; accent-color: var(--accent); }
+.thread-mode label:has(:checked) { background: var(--accent-dim); border-color: var(--accent) !important; color: var(--text) !important; }
+.form-help { margin: 12px 0 18px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+#new-advanced { margin: 16px 0 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+#new-advanced summary { cursor: pointer; color: var(--muted); margin-bottom: 12px; }
+#new-advanced .form-help { margin-bottom: 0; }
+.new-actions > button { min-height: 34px; }
+#new .err:empty { min-height: 0; }
+#keys { width: 620px; }
+#keys table { width: 100%; }
+#tabs { height: auto; max-height: 140px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); overflow-y: auto; }
+#tabs .tab { max-width: none; min-width: 0; min-height: 32px; }
+#tabs .tab > span { flex: 1; }
+#tabs .tab button { opacity: 1; }
+.diff-head > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+#diff-body .line { min-width: 0; white-space: pre-wrap; }
+#diff-body .line > span { min-width: 0; overflow-wrap: anywhere; }
+#diff-body .line.hunk { flex-wrap: wrap; }
+#diff-body .line.hunk > span { flex-basis: 100%; }
+#diff-body .line.hunk button { opacity: 1; margin: 4px 8px 4px 0; min-height: 26px; }
+#changes-base { overflow-wrap: anywhere; }
+#toast { max-width: calc(100vw - 24px); }
+
+@media (max-width: 1100px) {
+  #wspath { display: none; }
+  #wsbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; height: auto; padding: 8px 10px; }
+  .wsidentity { grid-column: 1 / -1; min-height: 22px; }
+  #wsbar > .spacer { display: none; }
+  #dictate { justify-self: start; }
+  #changes { position: absolute; inset: 0 0 0 auto; z-index: 15; width: min(360px, 100%); box-shadow: -8px 0 30px rgba(0,0,0,.3); }
+  #work { position: relative; }
+}
+
+@media (max-width: 760px) {
+  #bar { height: 80px; padding: 4px 6px; gap: 2px; flex-wrap: wrap; }
+  #quick-settings { order: 1; flex-basis: 100%; justify-content: flex-end; padding: 0; margin: 0; border: 0; }
+  #quick-settings > button { min-width: 0; min-height: 32px; }
+  #quick-settings #prefix { max-width: 130px; }
+  #preferences { top: 86px; max-height: calc(100dvh - 98px); }
+  #bar .mark, #bar .brand { display: none; }
+  #bar > button { padding: 4px 6px; min-height: 34px; }
+  #bar > .spacer { min-width: 0; }
+  #waiting { font-size: 11px; }
+  #side { display: none; }
+  #side.drawer-open { display: flex; position: fixed; z-index: 30; top: 80px; bottom: 0; left: 0; width: min(290px, calc(100vw - 24px)); box-shadow: 12px 0 40px rgba(0,0,0,.45); }
+  #side-filter { min-height: 36px; }
+  .thread { padding-top: 9px; padding-bottom: 9px; }
+  .thread-top .more, .menu-item button, .file .acts, .dir .acts { opacity: 1; }
+  .grid:not(.zooming) { display: flex; flex-direction: column; overflow-y: auto; }
+  .grid:not(.zooming) > .pane { flex: none; min-height: 300px; height: 65dvh; }
+  .grid:not(.zooming) > .pane:only-of-type { height: 100%; min-height: 0; }
+  .grid .split { display: none; }
+  .pane-head { min-height: 36px; }
+  .pane-head button { min-height: 28px; min-width: 28px; }
+  #keys tr { display: block; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  #keys td { display: block; padding: 2px 0; white-space: normal !important; }
+  #new label, #rename label { grid-template-columns: 1fr; gap: 5px; }
+  .thread-mode { grid-template-columns: 1fr; }
+  #new .thread-mode label { min-height: 40px; }
+  dialog { padding: 16px; }
+  .picker-row { padding: 10px; }
+  .menu-item { min-height: 36px; }
+  #diff-body .line i { width: 28px; padding-right: 4px; }
+  #diff-body .line i + i { margin-right: 6px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* Projects own threads; the inset rail connects each thread to its panes. */
+#side { width: 240px; }
+#side-filter { margin: 8px 8px 4px; padding: 6px 8px; font: 12px "Segoe UI", sans-serif; }
+#threads { padding: 8px; font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
+.side-head { padding: 0 2px 4px 6px; font-size: 12px; }
+.side-head button { width: 28px; height: 28px; padding: 0; font-size: 18px; border: 1px solid transparent; }
+.repo {
+  display: grid; grid-template-columns: 8px 15px minmax(0, 1fr); gap: 6px; align-items: center;
+  min-height: 32px; padding: 5px 4px; margin-top: 4px; color: var(--text); border: 0;
+  white-space: nowrap; border-radius: 4px;
+}
+.side-head + .repo { margin-top: 0; }
+.repo > .chev { align-self: center; }
+.repo > .project-icon { width: 15px; height: 15px; color: var(--muted); }
+.project-icon svg { display: block; width: 100%; height: 100%; }
+.repo > .project-name { font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; }
+.group { margin: 0 0 8px 10px; padding-left: 0; border: 0; }
+.thread, .thread.on, .thread:hover { margin: 2px 0 4px; padding: 2px 4px 5px; border: 1px solid transparent; border-radius: 7px; background: transparent; box-shadow: none; }
+.thread.on { background: var(--raise); border-color: var(--line-strong); }
+.thread-top { gap: 0; padding: 0; border: 0; }
+.thread-top::before { display: none; }
+.thread-top button, .thread-top .fold, .thread-top .more {
+  min-width: 24px; width: 24px; height: 26px; margin: 0; padding: 0;
+  font-size: 15px; line-height: 1; opacity: 1; border: 1px solid transparent;
+}
+.thread-top button:hover { background: var(--raise); border-color: var(--line-strong); color: var(--text); }
+.thread-top .thread-select {
+  flex: 1; min-width: 0; width: auto; height: 26px; min-height: 26px; padding: 0 2px;
+  color: var(--text); font: 600 13px/1.4 "Segoe UI", sans-serif; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.thread[data-state="waiting"] .thread-select { color: var(--warn); }
+.thread-meta { display: flex; gap: 6px; align-items: center; padding: 2px 4px 2px 26px; font-size: 10px; line-height: 16px; color: var(--muted); }
+.thread-n { font: inherit; color: var(--muted); }
+.thread-age { margin-left: auto; }
+.thread-line { padding: 0 4px 1px 26px; gap: 6px; }
+.thread-sub { font: 11px/1.5 var(--mono); color: var(--muted); }
+.thread-stat { font: 10px var(--mono); }
+.agents { margin: 1px 0 0 16px; padding: 0; border: 0; }
+.agent {
+  display: grid; grid-template-columns: 5px 14px minmax(0, 1fr); align-items: center;
+  gap: 4px; width: 100%; min-height: 26px; padding: 3px 4px; margin: 0;
+  border: 1px solid transparent; border-radius: 4px; text-align: left; white-space: nowrap;
+}
+.agent::before { margin-top: 0; }
+.agent .ico { width: 14px; height: 14px; margin-top: 0; }
+.agent-copy { display: flex; min-width: 0; gap: 4px; align-items: baseline; }
+.agent-name { flex: none; color: var(--text); font: 500 11px/1.4 "Segoe UI", sans-serif; }
+.agent-title { color: var(--muted); font: 11px/1.5 "Segoe UI", sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-title::before { content: "· "; }
+.agent-state { display: none; }
+.agent.on { background: var(--accent-dim); border-color: var(--line-strong); }
+.agent[data-state="waiting"] .agent-state { color: var(--warn); }
+.agent[data-state="dead"] .agent-state { color: var(--err); }
+#confirm { width: min(420px, calc(100vw - 32px)); font-family: "Segoe UI", sans-serif; }
+#confirm h2 { font-size: 17px; line-height: 1.4; overflow-wrap: anywhere; }
+#confirm-detail { margin: 12px 0 22px; color: var(--muted); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+#confirm-detail:empty { display: none; }
+#confirm .danger { color: var(--err); border-color: var(--err); background: transparent; }
+.resume-notice { flex: none; padding: 12px; font: 12px/1.5 "Segoe UI", sans-serif; border-bottom: 1px solid var(--line); }
+.resume-notice p { margin: 0 0 8px; }
+.resume-notice button { min-height: 32px; margin: 0 6px 4px 0; }
+#session-list { max-height: 50dvh; overflow-y: auto; overflow-wrap: anywhere; font: 13px/1.5 "Segoe UI", sans-serif; }
+@media (max-width: 760px) {
+  #side.drawer-open { width: min(280px, calc(100vw - 24px)); }
+  .thread-top button, .thread-top .fold, .thread-top .more { min-width: 32px; width: 32px; height: 32px; }
+  .thread-top .thread-select { width: auto; height: 32px; min-height: 32px; }
+  .agent { min-height: 32px; }
 }

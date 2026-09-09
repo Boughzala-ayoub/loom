@@ -20,6 +20,34 @@ export function agentOf(cmd: string): Agent {
 const CODEX_FLAGS =
   "-c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always";
 
+// Codex runs `notify` after every completed turn with the event as one JSON
+// argument, thread id included — and unlike its hooks, it needs no trust
+// prompt (a hook given on the command line never gets one, so it never ran).
+// `$LOOM_SESSION_HOOK` is replaced by the Rust side with the path of
+// loom-session.ps1, which drops the id where take_wakes picks it up.
+export const CODEX_NOTIFY =
+  `-c "notify=['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','$LOOM_SESSION_HOOK']"`;
+
+export const validSessionId = (id: string) => /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+
+/** The startup command already picks its own session, so Loom neither pins
+ * nor resumes one for it. */
+export function ownSession(cmd: string): boolean {
+  const c = cmd.trim();
+  const agent = agentOf(c);
+  const rest = c.slice(agent.length).trim();
+  switch (agent) {
+    case "claude":
+      return /(^|\s)(-r|--resume|-c|--continue|--session-id)(\s|$)/.test(c);
+    case "codex":
+      return /^(resume|fork)(\s|$)/.test(rest);
+    case "opencode":
+      return /(^|\s)(-s|--session|-c|--continue)([=\s]|$)/.test(rest);
+    default:
+      return false;
+  }
+}
+
 /** argv for pty_spawn. `resume` = this pane is being restored and its session
  * should be picked up where it was.
  *
@@ -30,19 +58,19 @@ const CODEX_FLAGS =
  * that was never written exits, so it checks the transcript exists first.
  *
  * codex and opencode are npm shims (.cmd), so they need cmd.exe — a 4 MB host.
- * Neither can be told a session id up front; both resume "the last session in
- * this directory", which is exactly one per thread since a thread is a worktree.
- * ponytail: two codex panes in one thread resume the same conversation.
- * `||` runs the fresh command when there is nothing to resume. */
-export function launch(cmd: string, sid: string, resume: boolean, effort?: string): string[] {
+ * Their actual session IDs arrive from the provider (codex's notify script,
+ * opencode's plugin), separately from Claude's preassigned sid. Never guess by
+ * directory or hide resume errors: a codex resume without an id is its picker,
+ * which a pane only reaches through its "Choose session" notice. */
+export function launch(cmd: string, sid: string, resume: boolean, effort?: string, sessionId?: string): string[] {
+  if (sessionId && !validSessionId(sessionId)) throw new Error("Invalid agent session ID");
   const c = cmd.trim();
   const agent = agentOf(c);
   const rest = c.slice(agent.length).trim();
   const args = rest ? rest.split(/\s+/) : []; // ponytail: no quoted args in startups
+  const own = ownSession(c);
   switch (agent) {
     case "claude": {
-      // Anything that already picks its own session is left alone.
-      const own = /(^|\s)(-r|--resume|-c|--continue|--session-id)(\s|$)/.test(c);
       const eff = effort && !/(^|\s)--effort(\s|$)/.test(c) ? ["--effort", effort] : [];
       const set = /(^|\s)--settings(\s|$)/.test(c) ? [] : ["--settings", "$LOOM_HOOKS"];
       return own
@@ -50,12 +78,12 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
         : ["claude", resume ? "--resume" : "--session-id", sid, ...set, ...eff, ...args];
     }
     case "codex": {
-      const fresh = `codex ${CODEX_FLAGS}${rest ? " " + rest : ""}`;
-      return cmdHost(resume ? `codex resume --last ${CODEX_FLAGS}${rest ? " " + rest : ""} || ${fresh}` : fresh);
+      const select = resume && !own ? ` resume${sessionId ? " " + sessionId : ""}` : "";
+      return cmdHost(`codex${select} ${CODEX_FLAGS} ${CODEX_NOTIFY}${rest ? " " + rest : ""}`);
     }
     case "opencode": {
-      const fresh = `opencode${rest ? " " + rest : ""}`;
-      return cmdHost(resume ? `opencode -c${rest ? " " + rest : ""} || ${fresh}` : fresh);
+      const select = resume && sessionId && !own ? ` --session ${sessionId}` : "";
+      return cmdHost(`opencode${select}${rest ? " " + rest : ""}`);
     }
     default:
       // -NoExit so the pane survives the startup command exiting (like aa: the

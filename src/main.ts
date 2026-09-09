@@ -3,7 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { confirm, open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -11,7 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
-import { agentOf, launch, type Agent } from "./agent";
+import { agentOf, launch, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
 import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { wheelInit } from "./scroll";
@@ -19,6 +19,23 @@ import { dropText } from "./drop";
 import "@xterm/xterm/css/xterm.css";
 
 const MAX_PANES = 16;
+
+/** Keep destructive confirmations in the app; Escape and initial focus cancel. */
+function confirm(message: string, options: { title: string; kind?: string; action?: string; detail?: string }): Promise<boolean> {
+  const dialog = document.querySelector<HTMLDialogElement>("#confirm")!;
+  // A second request must never overwrite the action the user is reviewing.
+  if (dialog.open) return Promise.resolve(false);
+  document.querySelector("#confirm-title")!.textContent = message.split("\n")[0];
+  document.querySelector("#confirm-detail")!.textContent = options.detail ?? message.split("\n").slice(1).join("\n").trim();
+  const action = document.querySelector<HTMLButtonElement>("#confirm-action")!;
+  action.textContent = options.action ?? "Continue";
+  action.classList.toggle("danger", options.kind === "warning");
+  dialog.returnValue = "cancel";
+  return new Promise(resolve => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), { once: true });
+    dialog.showModal();
+  });
+}
 
 /** Absolute or workspace-relative file path with an optional :line. The
  * dot-extension is what keeps prose (and "10:30") from lighting up. */
@@ -339,7 +356,7 @@ function applyTheme(t: Theme) {
 
 /** A pane as saved: the command it booted with, the claude session it owns,
  * and the session's last-known effort level (hook-reported; resume re-pins it). */
-type PaneState = { cmd: string; sid?: string; effort?: string };
+type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string };
 
 type Startup = { label: string; cmd: string };
 const DEFAULT_STARTUPS: Startup[] = [
@@ -376,6 +393,7 @@ function mini(label: string, title: string, fn: () => void) {
   const b = document.createElement("button");
   b.textContent = label;
   b.title = title;
+  b.setAttribute("aria-label", title);
   b.onmousedown = (e) => e.preventDefault(); // don't steal terminal focus
   b.onclick = (e) => {
     e.stopPropagation();
@@ -666,7 +684,12 @@ async function micStop() {
     micState("");
     if (text) {
       p.term.paste(text); // not pty_write: paste honors bracketed-paste mode
-      if (pre.enter) invoke("pty_write", { id: p.id, data: "\r" });
+      if (pre.enter) {
+        // Codex reads an Enter that lands right behind pasted text as part of
+        // the paste (a newline in the composer), so let the input settle first.
+        await p.settle(150, 1000);
+        invoke("pty_write", { id: p.id, data: "\r" });
+      }
     } else if (pre.text) {
       // A mis-tapped F4 with nothing said: take the prefix back out instead of
       // leaving a bare "/prompt " in the input. Backspaces have to go raw — a
@@ -704,6 +727,7 @@ class Pane {
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
   sid = ""; // and the claude session it owns, so the next launch resumes it
+  sessionId?: string; // Provider-reported ID, never a generated placeholder.
   effort = ""; // session's effort per the last hook, "" until one reports
   usage: Usage | null = null; // null until claude is up in this pane; zeroed until its first turn
   lastOut = 0; // when the pty last drew anything, for settle()
@@ -725,11 +749,14 @@ class Pane {
   private unlisten: UnlistenFn[] = [];
   private out = new Channel<string>();
   private idle = 0;
+  private resumeNotice?: HTMLElement;
   /** This pane's own row under its thread in the sidebar — Orca lists each
    * agent session under its worktree, and a thread with a claude and a codex
    * in it wants both visible at a glance. */
-  readonly row = document.createElement("div");
+  readonly row = document.createElement("button");
   private rowLabel = document.createElement("span");
+  private rowName = document.createElement("strong");
+  private rowState = document.createElement("small");
   /** Provider mark in the header and the sidebar row; swapped in start()
    * once the agent is known. */
   private ico: SVGSVGElement = icon("shell");
@@ -741,12 +768,15 @@ class Pane {
     this.row.className = "agent";
     this.row.onclick = (e) => {
       e.stopPropagation(); // the thread row behind it would only re-show
-      if (this.th !== current) show(this.th);
-      // Zoomed, the zoom follows the pick — one agent at a time, like Orca.
-      if (this.th.zoomed && this.th.zoomed !== this) this.th.toggleZoom(this);
-      else this.th.focusPane(this);
+      revealPane(this);
     };
-    this.row.append(this.rowIco, this.rowLabel);
+    const copy = document.createElement("span");
+    copy.className = "agent-copy";
+    this.rowName.className = "agent-name";
+    this.rowLabel.className = "agent-title";
+    this.rowState.className = "agent-state";
+    copy.append(this.rowName, this.rowLabel);
+    this.row.append(this.rowIco, copy, this.rowState);
     this.host.className = "pane-term";
     this.title.className = "pane-title";
     this.gauge.className = "ctx hidden";
@@ -880,6 +910,7 @@ class Pane {
       await listen<number>(`pty-exit:${this.id}`, (e) => {
         this.dead = true;
         this.busy = false;
+        this.waiting = false;
         this.term.write(`\r\n\x1b[90m[exited ${e.payload}] — Enter relaunches\x1b[0m\r\n`);
         this.paint();
       }),
@@ -898,8 +929,27 @@ class Pane {
   /** Start (or restart) the pane's process. `resume` = pick the session up
    * where it was. For claude that means `--resume`, which exits on an id that
    * was never written to — a pane opened and never used — so the transcript
-   * is checked first and a fresh `--session-id` boot takes over. */
+   * is checked first and a fresh `--session-id` boot takes over. A codex or
+   * opencode pane with no reported session yet (made before Loom captured one)
+   * asks once instead of guessing. */
   async spawn(resume: boolean) {
+    if (resume && !this.sessionId && (this.agent === "codex" || this.agent === "opencode") && !ownSession(this.startup)) {
+      this.dead = true;
+      if (!this.resumeNotice) {
+        const notice = document.createElement("div");
+        notice.className = "resume-notice";
+        const text = document.createElement("p");
+        text.textContent = `Choose the previous ${this.agent === "codex" ? "Codex" : "OpenCode"} session once. Loom will remember it for this pane.`;
+        notice.append(text, mini("Choose session", "Choose the session to resume", () => this.chooseSession()),
+          mini("Start new", "Start a new conversation", () => void this.spawn(false)));
+        this.host.before(notice);
+        this.resumeNotice = notice;
+      }
+      this.paint();
+      return;
+    }
+    this.resumeNotice?.remove();
+    this.resumeNotice = undefined;
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
     const can =
@@ -909,7 +959,7 @@ class Pane {
     await invoke("pty_spawn", {
       id: this.id,
       cwd: this.th.dir,
-      argv: launch(this.startup, this.sid, can, this.effort || undefined),
+      argv: launch(this.startup, this.sid, can, this.effort || undefined, this.sessionId),
       cols: this.term.cols,
       rows: this.term.rows,
       onOut: this.out,
@@ -918,6 +968,38 @@ class Pane {
       this.term.write(`\r\n\x1b[31m${e}\x1b[0m — Enter retries\r\n`);
     });
     this.paint();
+  }
+
+  async chooseSession() {
+    const dialog = $<HTMLDialogElement>("#session-picker");
+    if (dialog.open) return;
+    const list = $("#session-list");
+    const request = crypto.randomUUID();
+    dialog.dataset.request = request;
+    list.textContent = "Loading sessions…";
+    $("#session-title").textContent = `Resume ${this.agent === "codex" ? "Codex" : "OpenCode"}`;
+    dialog.showModal();
+    try {
+      const rows = await invoke<{ id: string; title: string }[]>(`${this.agent}_sessions`, { dir: this.th.dir });
+      if (!dialog.open || dialog.dataset.request !== request) return;
+      list.replaceChildren();
+      for (const row of rows.filter(r => validSessionId(r.id))) {
+        const b = document.createElement("button");
+        b.className = "picker-row";
+        b.textContent = row.title || row.id;
+        b.title = row.id;
+        b.onclick = () => {
+          this.sessionId = row.id;
+          save();
+          dialog.close();
+          void this.spawn(true);
+        };
+        list.append(b);
+      }
+      if (!list.childElementCount) list.textContent = "No saved sessions in this folder. You can start a new conversation in the pane.";
+    } catch (e) {
+      if (dialog.open && dialog.dataset.request === request) list.textContent = `Could not load sessions: ${String(e)}`;
+    }
   }
 
   /** Agent panes have no OSC 133 to say "working": output that keeps coming
@@ -1019,8 +1101,11 @@ class Pane {
     this.el.classList.toggle("active", this.th.active === this);
     // The sidebar row: the agent, then whatever it titled itself — a shell's
     // own path says nothing, so only a real title follows the name.
-    this.rowLabel.textContent = app && app !== this.agent ? `${this.agent} · ${app}` : this.agent;
-    this.row.title = this.appTitle;
+    this.rowName.textContent = this.agent;
+    this.rowLabel.textContent = app && app !== this.agent ? app : this.agent === "shell" ? "Terminal" : "Agent session";
+    this.rowState.textContent = this.dead ? "Exited" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
+    this.row.title = `${this.agent}: ${this.appTitle || this.rowLabel.textContent}`;
+    this.row.setAttribute("aria-label", `${this.agent}, ${this.rowLabel.textContent}, ${this.rowState.textContent}`);
     this.row.dataset.state = this.dead ? "dead" : this.waiting ? "waiting" : this.busy ? "busy" : "";
     this.row.classList.toggle("on", this.th === current && this.th.active === this);
     this.th.paint(); // the thread row sums its panes
@@ -1145,7 +1230,8 @@ class Thread {
    * the panes themselves. Orca keeps diffs as tabs beside the agent; so do we. */
   tabs: DiffTab[] = [];
   tab: DiffTab | null = null;
-  private label = document.createElement("span");
+  commitDraft = "";
+  private label = document.createElement("button");
   private sub = document.createElement("span");
   private list = document.createElement("div");
   private count = document.createElement("span");
@@ -1154,8 +1240,8 @@ class Thread {
   private fold = mini("▾", "Collapse agents", () => this.setFolded(!this.folded));
   /** Lines changed against HEAD and files touched, from pollStats(). */
   changed = { add: 0, del: 0, files: 0 };
-  private colW: number[] = [];
-  private rowH: number[] = [];
+  colW: number[] = [];
+  rowH: number[] = [];
 
   constructor(
     readonly repo: string,
@@ -1164,34 +1250,37 @@ class Thread {
     public name: string,
   ) {
     this.grid.className = "grid";
-    new ResizeObserver(() => this.placeSplitters()).observe(this.grid);
+    new ResizeObserver(() => { if (this.grid.clientWidth) this.relayout(); }).observe(this.grid);
     this.row.className = "thread";
     this.row.title = dir;
     this.row.dataset.id = this.id;
     const top = document.createElement("div");
     top.className = "thread-top";
-    this.label.className = "thread-name";
+    this.label.className = "thread-name thread-select";
     this.label.textContent = name;
     this.count.className = "thread-n";
     this.fold.classList.add("fold");
     const more = mini("⋯", "Thread actions", () => showMenu(more, threadMenu(this)));
     more.classList.add("more");
-    top.append(this.fold, this.label, this.count, more);
-    if (!this.isWorktree) {
-      const chip = document.createElement("i");
-      chip.className = "chip";
-      chip.textContent = "primary";
-      this.label.after(chip);
-    }
+    top.append(this.fold, this.label, more);
+    const meta = document.createElement("div");
+    meta.className = "thread-meta";
+    this.label.title = `${name} · ${this.isWorktree ? "Worktree" : "Checkout"}`;
+    meta.append(this.count, this.age);
     this.sub.className = "thread-sub";
     this.stat.className = "thread-stat";
     this.age.className = "thread-age";
     const sub = document.createElement("div");
     sub.className = "thread-line";
-    sub.append(this.sub, this.stat, this.age);
+    sub.append(this.sub, this.stat);
     this.label.ondblclick = () => renameThread(this);
     this.list.className = "agents";
-    this.row.append(top, sub, this.list);
+    this.list.id = `agents-${this.id}`;
+    this.list.setAttribute("role", "group");
+    this.list.setAttribute("aria-label", "Agents and terminals");
+    this.fold.setAttribute("aria-controls", this.list.id);
+    this.fold.setAttribute("aria-expanded", "true");
+    this.row.append(top, sub, meta, this.list);
     this.row.onclick = () => show(this);
     this.row.oncontextmenu = (e) => {
       e.preventDefault();
@@ -1209,6 +1298,8 @@ class Thread {
     this.list.classList.toggle("hidden", f);
     this.fold.textContent = f ? "▸" : "▾";
     this.fold.title = f ? "Show agents" : "Collapse agents";
+    this.fold.setAttribute("aria-label", this.fold.title);
+    this.fold.setAttribute("aria-expanded", String(!f));
     if (persist) save();
   }
 
@@ -1228,20 +1319,22 @@ class Thread {
 
   setStat(s: { add: number; del: number; files: number }) {
     this.changed = s;
-    this.sub.textContent = this.branch;
+    this.sub.textContent = this.branch ? `⑂ ${this.branch}` : "Local folder";
+    this.sub.title = this.branch ? `Branch: ${this.branch}` : "Folder without a Git branch";
     this.stat.innerHTML = statHtml(s);
     if (this === current) paintHead();
   }
 
   /** Does this row survive the sidebar filter? Name, branch, or an agent's title. */
   matches(q: string) {
-    const hay = [this.name, this.branch, ...this.panes.map((p) => p.appTitle)].join(" ").toLowerCase();
+    const hay = [basename(this.repo), this.name, this.branch, ...this.panes.map((p) => `${p.agent} ${p.appTitle}`)].join(" ").toLowerCase();
     return hay.includes(q);
   }
 
   async addPane(st: PaneState = { cmd: startups[0]?.cmd ?? "" }) {
     if (this.panes.length >= MAX_PANES) return;
     const p = new Pane(this);
+    if (st.sessionId && validSessionId(st.sessionId)) p.sessionId = st.sessionId;
     if (st.effort) p.effort = st.effort;
     this.panes.push(p);
     this.grid.append(p.el);
@@ -1254,7 +1347,10 @@ class Thread {
     const i = this.panes.indexOf(p);
     if (i === -1) return;
     // A misclick on ✕ would otherwise kill a running agent on the spot.
-    if (p.agentUp && !(await confirm(`Close this ${p.agent} pane?`, { title: "Loom" }))) return;
+    if (p.agentUp && !(await confirm(`Close ${p.agent} pane?`, {
+      title: "Loom", action: "Close pane",
+      detail: "This stops the running agent and removes this pane from the workspace. Your project files stay on disk.",
+    }))) return;
     if (this.zoomed === p) this.toggleZoom(p);
     this.panes.splice(i, 1);
     await p.dispose();
@@ -1291,17 +1387,19 @@ class Thread {
   }
 
   focusPane(p: Pane | null) {
+    const changed = this.active !== p;
     this.active = p;
     this.panes.forEach((q, i) => q.paint(i));
     p?.focus();
     micRefresh(); // dictation follows the focused pane
+    if (changed) save();
   }
 
   /** The sidebar row: what runs here, on which branch, and whether it wants
    * you. One state per row, worst first — a thread with a pane waiting is
    * waiting whatever the others are up to. */
   paint() {
-    this.count.textContent = this.panes.length > 1 ? String(this.panes.length) : "";
+    this.count.textContent = `${this.panes.length} ${this.panes.length === 1 ? "pane" : "panes"}`;
     const state = this.panes.some((p) => p.waiting)
       ? "waiting"
       : this.panes.some((p) => p.busy)
@@ -1318,9 +1416,12 @@ class Thread {
    * cols: one row, panes side by side. Track weights survive resizes but
    * reset (re-balance) whenever the pane count changes shape. */
   relayout() {
+    if (!this.grid.clientWidth) return; // Hidden threads keep their saved split sizes.
     const n = this.panes.length || 1;
-    const cols = this.layout === "rows" ? 1 : this.layout === "cols" ? n : Math.ceil(Math.sqrt(n));
+    const capacity = Math.max(1, Math.floor(this.grid.clientWidth / 280));
+    const cols = Math.min(capacity, this.layout === "rows" ? 1 : this.layout === "cols" ? n : Math.ceil(Math.sqrt(n)));
     const rows = Math.ceil(n / cols);
+    const reshaped = this.colW.length !== cols || this.rowH.length !== rows;
     if (this.colW.length !== cols) this.colW = Array(cols).fill(1);
     if (this.rowH.length !== rows) this.rowH = Array(rows).fill(1);
     this.grid.style.gridTemplateColumns = this.colW.map((w) => `${w}fr`).join(" ");
@@ -1329,6 +1430,7 @@ class Thread {
     this.panes.forEach((p, i) => p.paint(i));
     this.paint();
     this.placeSplitters();
+    if (reshaped) save();
   }
 
   /** Swap two panes' grid positions (drop target ⇄ dragged pane). */
@@ -1351,6 +1453,7 @@ class Thread {
     this.placeSplitters();
     this.panes.forEach((q) => q.resize()); // hidden panes no-op via the 0-size guard
     this.focusPane(this.zoomed ?? p);
+    save();
   }
 
   /** Drag handles over the grid gaps; dragging shifts weight between the two
@@ -1403,6 +1506,7 @@ class Thread {
     el.onpointerup = () => {
       el.onpointermove = el.onpointerup = null;
       this.placeSplitters();
+      save();
     };
   }
 
@@ -1423,18 +1527,30 @@ let repos: string[] = [];
 let reposFolded = new Set<string>();
 /** What the sidebar filter box holds, lower-cased. */
 let sideQuery = "";
+let sideOpen = !matchMedia("(max-width: 760px)").matches;
+// Restoring panes is asynchronous. Never replace the saved workspace with a
+// half-loaded one, and serialize writes so an older snapshot cannot win.
+let restoring = true;
+let saveQueue: Promise<unknown> = Promise.resolve();
 
-const save = () =>
-  invoke("save_state", {
-    json: JSON.stringify({
+const save = (): Promise<unknown> => {
+  if (restoring) return Promise.resolve();
+  const json = JSON.stringify({
       threads: threads.map((t) => ({
         repo: t.repo,
         dir: t.dir,
         branch: t.branch,
         name: t.name,
         folded: t.folded || undefined,
-        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, effort: p.effort || undefined })),
+        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined })),
         layout: t.layout,
+        active: t.panes.indexOf(t.active!),
+        zoomed: t.panes.indexOf(t.zoomed!),
+        colW: t.colW,
+        rowH: t.rowH,
+        tabs: t.tabs.map(({ load, ...tab }) => tab),
+        tab: t.tabs.indexOf(t.tab!),
+        commitDraft: t.commitDraft,
       })),
       repos,
       reposFolded: [...reposFolded],
@@ -1446,8 +1562,13 @@ const save = () =>
       theme: theme.label,
       fontSize,
       paneCount,
-    }),
-  }).catch(() => {});
+      ui: { thread: threads.indexOf(current!), sideOpen, changesOpen, sideQuery,
+        sideScroll: $("#threads").scrollTop,
+        foldedSections: [...foldedSections], foldedDirs: [...foldedDirs] },
+    });
+  saveQueue = saveQueue.catch(() => {}).then(() => invoke("save_state", { json }));
+  return saveQueue.catch(e => toast(`Could not save workspace: ${String(e)}`));
+};
 
 function setFont(n: number) {
   fontSize = Math.min(Math.max(n, 8), 24);
@@ -1465,8 +1586,16 @@ function jumpWaiting() {
   if (!waiting.length) return;
   const i = current?.active ? all.indexOf(current.active) : -1;
   const next = waiting.find((p) => all.indexOf(p) > i) ?? waiting[0];
-  if (next.th !== current) show(next.th);
-  next.th.focusPane(next); // focus → seen, clearing the flag
+  revealPane(next);
+}
+
+function revealPane(p: Pane) {
+  p.th.active = p; // Switching must not clear a different pane's notification.
+  p.th.tab = null;
+  show(p.th);
+  if (p.th.zoomed && p.th.zoomed !== p) p.th.toggleZoom(p);
+  if (matchMedia("(max-width: 1100px)").matches) toggleChanges(false);
+  p.el.scrollIntoView({ block: "nearest" });
 }
 
 /** The header chip: how many panes want you, across every thread. One glance
@@ -1476,7 +1605,81 @@ function paintWaiting() {
   const b = $("#waiting");
   b.classList.toggle("hidden", !n);
   b.textContent = `${n} waiting`;
+  if (picker.open) renderPicker();
 }
+
+// Agents waiting for input, in sidebar order.
+const picker = $<HTMLDialogElement>("#thread-picker");
+const pickerQuery = $<HTMLInputElement>("#picker-query");
+
+function openPicker() {
+  hideMenu();
+  togglePreferences(false);
+  pickerQuery.value = "";
+  renderPicker();
+  picker.showModal();
+  pickerQuery.focus();
+}
+
+function renderPicker() {
+  const list = $("#picker-list");
+  const focused = document.activeElement as HTMLElement | null;
+  const focusKey = list.contains(focused) ? focused?.dataset.key : undefined;
+  const q = pickerQuery.value.trim().toLowerCase();
+  list.replaceChildren();
+  for (const th of threads) {
+    const panes = th.panes.filter((p) => p.waiting && !p.dead);
+    for (const p of panes) {
+      if (q && !`${basename(th.repo)} ${th.name} ${th.branch} ${p.agent} ${p.appTitle}`.toLowerCase().includes(q)) continue;
+      const row = document.createElement("button");
+      row.className = "picker-row";
+      row.dataset.key = p.id;
+      const label = document.createElement("span");
+      label.className = "picker-label";
+      label.textContent = `${th.name} / ${p.agent}`;
+      const detail = document.createElement("span");
+      detail.className = "picker-detail";
+      detail.textContent = p.appTitle || `${basename(th.repo)} / ${th.branch || "checkout"}`;
+      const state = document.createElement("span");
+      state.className = "picker-state";
+      state.textContent = "Waiting";
+      state.classList.add("warn");
+      row.append(label, state, detail);
+      row.onclick = () => {
+        picker.close();
+        revealPane(p);
+      };
+      list.append(row);
+    }
+  }
+  $("#picker-empty").classList.toggle("hidden", list.childElementCount > 0);
+  $("#picker-empty").textContent = q ? "No matches. Try a project, thread, branch or agent name."
+    : "Nothing waiting. Agents that need you will appear here.";
+  if (focusKey) {
+    const next = [...list.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.dataset.key === focusKey);
+    (next ?? pickerQuery).focus();
+  }
+}
+
+pickerQuery.oninput = renderPicker;
+$("#picker-close").onclick = () => picker.close();
+picker.onkeydown = (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault(); // A search input otherwise consumes Escape to clear its text.
+    picker.close();
+    return;
+  }
+  const rows = [...$("#picker-list").querySelectorAll<HTMLButtonElement>("button")];
+  const i = rows.indexOf(document.activeElement as HTMLButtonElement);
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    const next = e.key === "ArrowDown" ? i + 1 : i < 0 ? rows.length - 1 : i - 1;
+    (rows[next] ?? pickerQuery).focus();
+  } else if (e.key === "Enter" && document.activeElement === pickerQuery) {
+    e.preventDefault();
+    rows[0]?.click();
+  }
+};
 
 /** "now", "3m", "2h", "5d": how long ago `t` was. */
 function ago(t: number) {
@@ -1499,7 +1702,7 @@ function cycleThread(back: boolean) {
  * land among; `done` gets the target and whether to land after it. */
 function dragRow(el: HTMLElement, peers: () => HTMLElement[], done: (over: HTMLElement, after: boolean) => void) {
   el.addEventListener("mousedown", (e) => {
-    if (e.button || (e.target as HTMLElement).closest("button, .agent, input")) return;
+    if (e.button || (e.target as HTMLElement).closest("button:not(.thread-select), .agent, input")) return;
     const from = { x: e.clientX, y: e.clientY };
     let dragging = false;
     let over: HTMLElement | null = null;
@@ -1556,20 +1759,32 @@ function renderSide() {
   for (const repo of repos.filter((r) => rowsOf(r).length)) {
     const h = document.createElement("div");
     h.className = "repo";
+    h.tabIndex = 0;
+    h.setAttribute("role", "button");
+    h.setAttribute("aria-label", `Project ${basename(repo)}, ${rowsOf(repo).length} threads`);
+    h.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); h.click(); }
+    };
     h.dataset.repo = repo;
     h.title = repo;
     const chev = document.createElement("i");
     chev.className = "chev";
     const name = document.createElement("span");
+    name.className = "project-name";
     name.textContent = basename(repo);
-    const n = document.createElement("b");
-    n.textContent = String(rowsOf(repo).length);
-    h.append(chev, name, n);
+    const folder = document.createElement("span");
+    folder.className = "project-icon";
+    folder.setAttribute("aria-hidden", "true");
+    folder.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7V5h7l2 2h9v13H3Z"/></svg>';
+    h.append(chev, folder, name);
     const group = document.createElement("div");
     group.className = "group";
+    group.id = `project-${uid()}`;
+    h.setAttribute("aria-controls", group.id);
     group.append(...rowsOf(repo).map((t) => t.row));
     const fold = (f: boolean) => {
       h.classList.toggle("folded", f);
+      h.setAttribute("aria-expanded", String(!f));
       group.classList.toggle("hidden", f);
     };
     fold(reposFolded.has(repo));
@@ -1601,18 +1816,28 @@ function filterSide() {
   for (const h of $("#threads").querySelectorAll<HTMLElement>(".repo")) {
     const any = threads.some((t) => t.repo === h.dataset.repo && (!q || t.matches(q)));
     h.classList.toggle("hidden", !any);
+    const folded = !q && reposFolded.has(h.dataset.repo!);
+    h.classList.toggle("folded", folded);
+    h.setAttribute("aria-expanded", String(!folded));
+    h.nextElementSibling?.classList.toggle("hidden", folded);
   }
+  $("#side-empty").classList.toggle("hidden", !q || threads.some((t) => t.matches(q)));
 }
 
 function show(th: Thread | null) {
   current = th;
+  if (matchMedia("(max-width: 760px)").matches) toggleSide(false);
   for (const t of threads) {
     t.grid.classList.toggle("hidden", t !== th);
     t.paint();
-    t.panes.forEach((p) => p.gpu(t === th));
+    t.panes.forEach((p) => {
+      p.gpu(t === th);
+      p.row.classList.toggle("on", t === th && p === t.active);
+    });
   }
   $("#empty").classList.toggle("hidden", threads.length > 0);
   paintHead();
+  $<HTMLTextAreaElement>("#commit-msg").value = th?.commitDraft ?? "";
   paintTabs();
   void showTab();
   if (changesOpen) void refreshChanges();
@@ -1620,21 +1845,30 @@ function show(th: Thread | null) {
   // The grid was display:none, so its terminals measured 0 — refit on reveal.
   th?.panes.forEach((p) => p.resize());
   th?.focusPane(th.active ?? th.panes[0] ?? null);
+  save();
 }
 
 /** The thread bar: name, branch chip, change stats, and the Changes toggle's badge. */
 function paintHead() {
   const th = current;
   $("#wsname").textContent = th?.name ?? "";
+  $("#wsname").title = th?.name ?? "";
   $("#wsbranch").textContent = th?.branch ?? "";
   $("#wsbranch").classList.toggle("hidden", !th?.branch);
   $("#wsstat").innerHTML = th ? statHtml(th.changed) : "";
   $("#wspath").textContent = th?.dir ?? "";
   $("#wspath").title = th?.dir ?? "";
-  changesBtn.textContent = th?.changed.files ? `⎇ ${th.changed.files}` : "⎇";
+  changesBtn.textContent = th?.changed.files ? `Changes ${th.changed.files}` : "Changes";
+  for (const id of ["#changes-btn", "#wsmore", "#add-pane", "#layout", "#vscode"]) {
+    $<HTMLButtonElement>(id).disabled = !th;
+  }
 }
 
-type ThreadState = { repo: string; dir: string; branch: string; name: string; folded?: boolean };
+type ThreadState = {
+  repo: string; dir: string; branch: string; name: string; folded?: boolean;
+  active?: number; zoomed?: number; colW?: number[]; rowH?: number[];
+  tabs?: Omit<DiffTab, "load">[]; tab?: number; commitDraft?: string;
+};
 
 async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMode = "cols") {
   const th = new Thread(st.repo, st.dir, st.branch, st.name);
@@ -1655,6 +1889,14 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
   // await, so mapping in order still lands them in order.
   await Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st)));
   if (!th.panes.length) await th.addPane();
+  th.colW = st.colW?.filter(w => Number.isFinite(w) && w > 0) ?? [];
+  th.rowH = st.rowH?.filter(w => Number.isFinite(w) && w > 0) ?? [];
+  th.active = th.panes[st.active ?? 0] ?? th.panes[0];
+  if (th.panes[st.zoomed ?? -1]) th.toggleZoom(th.panes[st.zoomed!]);
+  th.commitDraft = st.commitDraft ?? "";
+  th.tabs = (st.tabs ?? []).filter(t => t.source).map(t => ({ ...t, load: diffLoader(th, t.source) }));
+  th.tab = th.tabs[st.tab ?? -1] ?? null;
+  th.relayout();
   save();
   void pollStats();
   return th;
@@ -1678,7 +1920,7 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all") {
         ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n\nThe branch ${th.branch} is kept.`
         : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n\nCommits only on that branch are lost.`;
   if (th.panes.length || mode !== "close") {
-    if (!(await confirm(what, { title: "Loom", kind: mode === "all" ? "warning" : "info" }))) return;
+    if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return;
   }
   const i = threads.indexOf(th);
   threads.splice(i, 1);
@@ -1741,23 +1983,31 @@ const threadMenu = (th: Thread): Menu => ({
 // The strip sits over the stage and only shows while a thread has diff tabs.
 // The first tab is the panes; the rest each hold a loader that re-reads git
 // whenever the tab is shown, so a diff never goes stale behind a refresh.
-type DiffTab = { label: string; load: () => Promise<string>; sec?: Sec };
+type DiffSource = { sec: Sec; paths: string[] } | { commit: string };
+type DiffTab = { label: string; load: () => Promise<string>; source: DiffSource; sec?: Sec };
+const diffLoader = (th: Thread, source: DiffSource) => "commit" in source
+  ? () => git(th.dir, "show", "--stat", "--patch", source.commit)
+  : diffOf(th, source.sec, source.paths);
 const tabsEl = $("#tabs");
 const diffView = $("#diff");
 
-function openTab(th: Thread, label: string, load: () => Promise<string>, sec?: Sec) {
+function openTab(th: Thread, label: string, source: DiffSource) {
+  const load = diffLoader(th, source);
+  const sec = "sec" in source ? source.sec : undefined;
   let t = th.tabs.find((x) => x.label === label);
-  if (!t) th.tabs.push((t = { label, load, sec }));
-  else ((t.load = load), (t.sec = sec));
+  if (!t) th.tabs.push((t = { label, load, sec, source }));
+  else ((t.load = load), (t.sec = sec), (t.source = source));
   th.tab = t;
   if (th !== current) show(th);
   else (paintTabs(), void showTab());
+  save();
 }
 
 function closeTab(th: Thread, t: DiffTab) {
   th.tabs.splice(th.tabs.indexOf(t), 1);
   if (th.tab === t) th.tab = null;
   if (th === current) (paintTabs(), void showTab());
+  save();
 }
 
 function paintTabs() {
@@ -1771,7 +2021,7 @@ function paintTabs() {
     const s = document.createElement("span");
     s.textContent = label;
     b.append(s);
-    b.onclick = pick;
+    b.onclick = () => { pick(); save(); };
     b.onauxclick = (e) => e.button === 1 && close?.();
     if (close) b.append(mini("✕", "Close", close));
     tabsEl.append(b);
@@ -1866,6 +2116,7 @@ function toggleChanges(on = !changesOpen) {
   changesBtn.classList.toggle("on", on);
   current?.panes.forEach((p) => p.resize()); // the stage just changed width
   if (on) void refreshChanges();
+  save();
 }
 
 const LETTER: Record<string, string> = { M: "M", A: "A", D: "D", R: "R", C: "C", "?": "U", U: "U", T: "T" };
@@ -1921,7 +2172,7 @@ async function doAct(sec: Sec, act: Act, files: Change[]) {
       sec === "untracked"
         ? `Delete ${what}?\n\nUntracked — git has no copy to bring it back.`
         : `Discard changes in ${what}?\n\nThis cannot be undone.`;
-    if (!(await confirm(q, { title: "Loom", kind: "warning" }))) return;
+    if (!(await confirm(q, { title: "Loom", kind: "warning", action: sec === "untracked" ? "Delete files" : "Discard changes" }))) return;
   }
   try {
     for (const args of gitAct(sec, act, files)) await git(th.dir, ...args);
@@ -2076,6 +2327,7 @@ async function showStashes() {
 /** Amend with whatever is staged; the message box replaces the message when
  * it has something in it. */
 async function amend() {
+  const th = current;
   const box = $<HTMLTextAreaElement>("#commit-msg");
   const m = box.value.trim();
   await gitDo(
@@ -2084,7 +2336,9 @@ async function amend() {
     "--amend",
     ...(m ? ["-m", m] : ["--no-edit"]),
   );
-  box.value = "";
+  if (th) th.commitDraft = "";
+  if (current === th) box.value = "";
+  save();
 }
 
 /** Everything git that isn't about one file: the ⋯ beside Create PR. */
@@ -2224,7 +2478,7 @@ async function refreshChanges() {
     all.textContent = "View all";
     all.onclick = (e) => {
       e.stopPropagation();
-      openTab(th, `${title} (all)`, diffOf(th, sec, rows.map((c) => c.path)), sec);
+      openTab(th, `${title} (all)`, { sec, paths: rows.map((c) => c.path) });
     };
     const hActs = document.createElement("span");
     hActs.className = "acts";
@@ -2232,6 +2486,7 @@ async function refreshChanges() {
     h.append(chev, t, all, hActs);
     h.onclick = () => {
       foldedSections.has(title) ? foldedSections.delete(title) : foldedSections.add(title);
+      save();
       void refreshChanges();
     };
     body.append(h);
@@ -2256,6 +2511,7 @@ async function refreshChanges() {
         row.onclick = (e) => {
           if (e.ctrlKey || e.metaKey) return select(sec, under().map((c) => c.path), false);
           foldedDirs.has(key) ? foldedDirs.delete(key) : foldedDirs.add(key);
+          save();
           void refreshChanges();
         };
         row.oncontextmenu = (e) => (e.preventDefault(), showMenu(row, fileMenu(th, sec, under())));
@@ -2285,7 +2541,7 @@ async function refreshChanges() {
           if (e.shiftKey) return select(sec, runTo(order, c.path), true);
           if (e.ctrlKey || e.metaKey) return select(sec, [c.path], false, c.path);
           // The label says which side, so a file open in both lists is two tabs.
-          openTab(th, `${f.name} (${sec === "staged" ? "staged" : "diff"})`, diffOf(th, sec, [c.path]), sec);
+          openTab(th, `${f.name} (${sec === "staged" ? "staged" : "diff"})`, { sec, paths: [c.path] });
         };
         row.oncontextmenu = (e) => (
           e.preventDefault(), showMenu(row, fileMenu(th, sec, picked ? rows.filter((x) => sel.has(x.path)) : [c]))
@@ -2305,6 +2561,7 @@ async function refreshChanges() {
     h.innerHTML = `<i class="chev"></i><span>Commits</span>`;
     h.onclick = () => {
       foldedSections.has("Commits") ? foldedSections.delete("Commits") : foldedSections.add("Commits");
+      save();
       void refreshChanges();
     };
     body.append(h);
@@ -2315,7 +2572,7 @@ async function refreshChanges() {
         const [sha, ...msg] = line.split(" ");
         d.innerHTML = `<b>${esc(sha)}</b> ${esc(msg.join(" "))}`;
         d.title = "Show this commit — right-click to revert or reset";
-        d.onclick = () => openTab(th, `${sha} (commit)`, () => git(th.dir, "show", "--stat", "--patch", sha));
+        d.onclick = () => openTab(th, `${sha} (commit)`, { commit: sha });
         d.oncontextmenu = (e) => (e.preventDefault(), showMenu(d, commitMenuFor(sha)));
         body.append(d);
       }
@@ -2347,7 +2604,9 @@ async function commitAll(push = false, all = true) {
   try {
     if (all) await git(th.dir, "add", "-A");
     await git(th.dir, "commit", "-m", msg.value.trim());
-    msg.value = "";
+    th.commitDraft = "";
+    if (current === th) msg.value = "";
+    save();
     if (push) await git(th.dir, "push", "-u", "origin", "HEAD");
   } catch (e) {
     err = String(e);
@@ -2486,10 +2745,13 @@ const dlgRepo = $<HTMLSelectElement>("#new-repo");
 const dlgErr = $("#new-err");
 
 function newThread() {
+  if ($<HTMLButtonElement>("#new-go").disabled) return dlg.showModal();
   hideMenu();
+  togglePreferences(false);
   dlgRepo.textContent = "";
   for (const r of repos) dlgRepo.append(new Option(basename(r), r));
-  dlgRepo.append(new Option("browse…", ""));
+  dlgRepo.append(new Option("Choose a folder…", ""));
+  if (current) dlgRepo.value = current.repo;
   const agent = $<HTMLSelectElement>("#new-agent");
   agent.textContent = "";
   for (const s of startups) agent.append(new Option(s.label, s.cmd));
@@ -2497,22 +2759,46 @@ function newThread() {
   $<HTMLInputElement>("#new-base").value = "";
   $<HTMLInputElement>("#new-count").value = String(paneCount);
   dlgErr.textContent = "";
+  $<HTMLDetailsElement>("#new-advanced").open = false;
+  updateThreadMode();
   dlg.showModal();
-  (repos.length ? $("#new-name") : dlgRepo).focus();
+  (repos.length && threadMode() === "worktree" ? $("#new-name") : dlgRepo).focus();
 }
 
-dlgRepo.onchange = async () => {
-  if (dlgRepo.value) return;
-  const dir = await pickFolder({ directory: true, multiple: false });
-  if (typeof dir !== "string") return void (dlgRepo.selectedIndex = 0);
-  // The checkout root, whichever folder inside it was picked. Not a repo at
-  // all is still fine — it opens as a plain folder thread, no worktrees.
-  const root = (await git(dir, "rev-parse", "--show-toplevel").catch(() => dir)).trim().replace(/\//g, "\\");
-  if (!repos.includes(root)) repos.push(root);
-  dlgRepo.insertBefore(new Option(basename(root), root), dlgRepo.lastElementChild);
-  dlgRepo.value = root;
-  $("#new-name").focus();
-};
+const threadMode = () => $<HTMLInputElement>('input[name="thread-mode"]:checked').value;
+function updateThreadMode() {
+  const worktree = threadMode() === "worktree";
+  for (const field of ["name", "base"]) {
+    $(`#new-${field}-field`).classList.toggle("hidden", !worktree);
+    $<HTMLInputElement>(`#new-${field}`).disabled = !worktree;
+  }
+  $<HTMLInputElement>("#new-name").required = worktree;
+  $("#new-go").textContent = worktree ? "Create worktree" : "Open checkout";
+  $("#new-description").textContent = worktree
+    ? "Create an isolated folder and branch for this thread. Your checkout stays where it is."
+    : "Work in the existing folder. No new branch or copy.";
+  dlgErr.textContent = "";
+}
+for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="thread-mode"]')) radio.onchange = updateThreadMode;
+
+async function browseRepo() {
+  const previous = dlgRepo.value;
+  try {
+    const dir = await pickFolder({ directory: true, multiple: false });
+    if (typeof dir !== "string") return void (dlgRepo.value = previous);
+    // A folder outside Git can still be opened as a checkout thread.
+    const root = (await git(dir, "rev-parse", "--show-toplevel").catch(() => dir)).trim().replace(/\//g, "\\");
+    if (!repos.includes(root)) repos.push(root);
+    if (![...dlgRepo.options].some((o) => o.value === root))
+      dlgRepo.insertBefore(new Option(basename(root), root), dlgRepo.lastElementChild);
+    dlgRepo.value = root;
+    (threadMode() === "worktree" ? $("#new-name") : $("#new-agent")).focus();
+  } catch (err) {
+    dlgErr.textContent = String(err);
+  }
+}
+dlgRepo.onchange = () => { if (!dlgRepo.value) void browseRepo(); };
+$("#new-browse").onclick = () => void browseRepo();
 
 $("#new-cancel").onclick = () => dlg.close();
 
@@ -2520,24 +2806,32 @@ $<HTMLFormElement>("#new-form").onsubmit = async (e) => {
   e.preventDefault();
   const repo = dlgRepo.value;
   if (!repo) return void (dlgErr.textContent = "pick a repo");
+  const worktree = threadMode() === "worktree";
+  const name = $<HTMLInputElement>("#new-name").value.trim();
+  if (worktree && !name) return void (dlgErr.textContent = "Give this worktree a thread name.");
   const n = Math.max(1, Math.min(parseInt($<HTMLInputElement>("#new-count").value, 10) || 1, MAX_PANES));
   paneCount = n; // openThread save()s on the way out, so this rides along
   const go = $<HTMLButtonElement>("#new-go");
   go.disabled = true;
+  const controls = [...$("#new-form").querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input:not(:disabled), select:not(:disabled), #new-browse")];
+  controls.forEach((el) => (el.disabled = true));
+  go.textContent = worktree ? "Creating…" : "Opening…";
   dlgErr.textContent = "creating…"; // a fetch can take a moment
   try {
     await createThread(
       repo,
-      $<HTMLInputElement>("#new-name").value.trim(),
+      worktree ? name : "",
       $<HTMLSelectElement>("#new-agent").value,
-      $<HTMLInputElement>("#new-base").value.trim(),
+      worktree ? $<HTMLInputElement>("#new-base").value.trim() : "",
       n,
     );
     dlg.close();
   } catch (err) {
     dlgErr.textContent = String(err);
   } finally {
+    controls.forEach((el) => (el.disabled = false));
     go.disabled = false;
+    go.textContent = worktree ? "Create worktree" : "Open checkout";
   }
 };
 
@@ -2557,6 +2851,16 @@ function renderMenu() {
   list.textContent = "";
   cfgPaint = null; // only the config panel sets one, and only while it is up
   openMenu.rows(list);
+  for (const row of list.querySelectorAll<HTMLElement>(".menu-item")) {
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.onkeydown = (e) => {
+      if (e.target === row && (e.key === "Enter" || e.key === " ")) {
+        e.preventDefault();
+        row.click();
+      }
+    };
+  }
   addInput.classList.toggle("hidden", !openMenu.add);
   addInput.placeholder = openMenu.placeholder;
 }
@@ -2948,8 +3252,7 @@ const usageMenu: Menu = {
         `${tok(u.input + u.cacheWrite)} in · ${tok(u.cacheRead)} cached`;
       d.onclick = () => {
         hideMenu();
-        if (p.th !== current) show(p.th);
-        p.th.focusPane(p);
+        revealPane(p);
       };
       d.append(lbl, val);
       list.append(d);
@@ -3233,12 +3536,38 @@ function place() {
 }
 
 function showMenu(at: HTMLElement, m: Menu) {
+  if ($("#preferences").contains(at)) {
+    at = $("#preferences-btn");
+    togglePreferences(false);
+  }
   if (!menu.classList.contains("hidden") && at === anchor) return hideMenu();
   anchor = at;
   openMenu = m;
   renderMenu();
   menu.classList.remove("hidden");
   place();
+  menu.querySelector<HTMLElement>(".menu-item, select, input, button")?.focus();
+}
+
+function togglePreferences(on = $("#preferences").classList.contains("hidden")) {
+  $("#preferences").classList.toggle("hidden", !on);
+  $("#preferences-btn").setAttribute("aria-expanded", String(on));
+  if (on) {
+    hideMenu();
+    $("#theme").focus();
+  }
+}
+
+function toggleSide(on?: boolean) {
+  const narrow = matchMedia("(max-width: 760px)").matches;
+  const side = $("#side");
+  on ??= narrow ? !side.classList.contains("drawer-open") : side.classList.contains("hidden");
+  const changed = sideOpen !== on;
+  sideOpen = on;
+  side.classList.toggle("hidden", !narrow && !on);
+  side.classList.toggle("drawer-open", narrow && on);
+  $("#side-toggle").setAttribute("aria-expanded", String(on));
+  if (changed) save();
 }
 
 // --- Ctrl+F: one shared input parked over the active pane -----------------
@@ -3314,6 +3643,8 @@ async function main() {
     theme?: string;
     fontSize?: number;
     paneCount?: number;
+    ui?: { thread?: number; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
+      sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[] };
   } = {};
   try {
     // strip a BOM: the file is hand-editable and Notepad/PowerShell add one
@@ -3332,8 +3663,41 @@ async function main() {
   paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
   repos = saved.repos ?? [];
   reposFolded = new Set(saved.reposFolded ?? []);
+  sideQuery = saved.ui?.sideQuery ?? "";
+  $<HTMLInputElement>("#side-filter").value = sideQuery;
+  if (saved.ui?.foldedSections) {
+    foldedSections.clear();
+    saved.ui.foldedSections.forEach(s => foldedSections.add(s));
+  }
+  saved.ui?.foldedDirs?.forEach(s => foldedDirs.add(s));
+  let closing = false;
+  await getCurrentWindow().onCloseRequested(async e => {
+    e.preventDefault();
+    if (closing) return;
+    closing = true;
+    try {
+      await save();
+      await saveQueue;
+      await getCurrentWindow().destroy();
+    } catch (e) {
+      toast(`Could not close safely: ${String(e)}`);
+    } finally { closing = false; }
+  });
 
   for (const id of ["#new-thread", "#open-first"]) $(id).onclick = newThread;
+  $("#preferences-btn").onclick = () => togglePreferences();
+  $("#preferences-close").onclick = () => (togglePreferences(false), $("#preferences-btn").focus());
+  $("#shortcuts").onclick = () => {
+    togglePreferences(false);
+    $<HTMLDialogElement>("#keys").showModal();
+  };
+  $("#side-toggle").onclick = () => toggleSide();
+  const narrowWindow = matchMedia("(max-width: 760px)");
+  toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
+  narrowWindow.addEventListener("change", () => toggleSide(sideOpen));
+  window.addEventListener("resize", () => {
+    if (!menu.classList.contains("hidden")) place();
+  });
   addBtn.onclick = () =>
     current &&
     showMenu(
@@ -3343,6 +3707,8 @@ async function main() {
   window.addEventListener("mousedown", (e) => {
     const t = e.target as Node;
     if (!menu.contains(t) && !anchor.contains(t)) hideMenu();
+    if (!$("#preferences").contains(t) && !$("#preferences-btn").contains(t)) togglePreferences(false);
+    if (narrowWindow.matches && !$("#side").contains(t) && !$("#side-toggle").contains(t)) toggleSide(false);
   });
   // No webview context menu anywhere else either; real inputs keep theirs.
   window.addEventListener("contextmenu", (e) => {
@@ -3359,19 +3725,30 @@ async function main() {
   };
   changesBtn.onmousedown = (e) => e.preventDefault();
   changesBtn.onclick = () => toggleChanges();
+  $("#changes-close").onclick = () => toggleChanges(false);
   $("#diff-close").onclick = () => current?.tab && closeTab(current, current.tab);
   $("#commit-btn").onclick = () => void commitAll();
+  $("#commit-msg").oninput = () => {
+    if (current) current.commitDraft = $<HTMLTextAreaElement>("#commit-msg").value;
+    save();
+  };
   $("#commit-more").onclick = () => showMenu($("#commit-more"), commitMenu);
   $("#pr-btn").onclick = () => void createPR();
   $("#changes-refresh").onclick = () => void (pollStats(), refreshChanges());
   $("#changes-more").onclick = () => showMenu($("#changes-more"), repoMenu);
   $("#wsmore").onclick = () => current && showMenu($("#wsmore"), threadMenu(current));
-  $("#waiting").onclick = jumpWaiting;
+  $("#waiting").onclick = openPicker;
   $("#rename-cancel").onclick = () => renameDlg.close();
   $("#keys-close").onclick = () => $<HTMLDialogElement>("#keys").close();
   $<HTMLInputElement>("#side-filter").oninput = (e) => {
     sideQuery = (e.target as HTMLInputElement).value.trim().toLowerCase();
     filterSide();
+    save();
+  };
+  let scrollSave = 0;
+  $("#threads").onscroll = () => {
+    clearTimeout(scrollSave);
+    scrollSave = window.setTimeout(() => save(), 150);
   };
   $("#vscode").onclick = () =>
     current && invoke("open_vscode", { dir: current.dir }).catch((e) => toast(String(e)));
@@ -3445,10 +3822,22 @@ async function main() {
   window.addEventListener(
     "keydown",
     (e) => {
-      if (e.key === "Escape") return hideMenu(); // not consumed: dialogs use it too
+      if (document.querySelector("dialog[open]")) return;
+      if (e.key === "Escape") {
+        if (!menu.classList.contains("hidden")) {
+          hideMenu();
+          anchor.focus();
+        }
+        if (!$("#preferences").classList.contains("hidden")) {
+          togglePreferences(false);
+          $("#preferences-btn").focus();
+        }
+        if (narrowWindow.matches) toggleSide(false);
+        return; // native dialogs close themselves
+      }
       if (e.key === "F1") $<HTMLDialogElement>("#keys").showModal();
       else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "g") toggleChanges();
-      else if (e.ctrlKey && e.key === "b") $("#side").classList.toggle("hidden");
+      else if (e.ctrlKey && e.key === "b") toggleSide();
       else if (e.key === "F2" && current?.active) current.toggleZoom(current.active);
       else if (e.key === "F3") jumpWaiting();
       else if (e.ctrlKey && e.key === "Tab") cycleThread(e.shiftKey);
@@ -3481,10 +3870,17 @@ async function main() {
     const wakes = await invoke<[string, string][]>("take_wakes").catch(() => []);
     if (!wakes.length) return;
     const effortById = new Map(wakes);
+    let sessionsChanged = false;
     for (const p of threads.flatMap((t) => t.panes)) {
+      const sid = effortById.get(`${p.id}.session`);
+      if (sid && validSessionId(sid) && sid !== p.sessionId && (p.agent === "codex" || p.agent === "opencode")) {
+        p.sessionId = sid;
+        sessionsChanged = true;
+      }
       const e = effortById.get(p.id);
       if (e !== undefined) p.wake(e);
     }
+    if (sessionsChanged) save();
   }, 250);
 
   // Context and token totals, read from Claude Code's own transcripts.
@@ -3541,7 +3937,7 @@ async function main() {
   show(null);
   // Parallel too: openThread pushes its thread before awaiting, so sidebar
   // order stays saved order. Each one show()s itself as it starts, hence the
-  // explicit show() after — the first saved thread is the one you land on.
+  // explicit show() after restores the selection once every pane exists.
   const restore =
     saved.threads ?? (saved.spaces ?? []).map((w) => ({ ...w, repo: w.dir, branch: "", name: basename(w.dir) }));
   await Promise.all(
@@ -3554,7 +3950,12 @@ async function main() {
       return openThread(w, panes, w.layout);
     }),
   );
-  show(threads[0] ?? null);
+  show(threads[saved.ui?.thread ?? 0] ?? threads[0] ?? null);
+  toggleChanges(saved.ui?.changesOpen ?? false);
+  toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
+  $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
+  restoring = false;
+  await save();
   pollUsage(); // restored panes shouldn't sit blank for the first interval
   pollStats();
 }

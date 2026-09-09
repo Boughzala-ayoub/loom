@@ -1,5 +1,5 @@
 // Self-check for agentOf / launch. Run: node src/agent.test.ts
-import { agentOf, launch } from "./agent.ts";
+import { agentOf, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
 
 let fails = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -44,18 +44,28 @@ check(
   ["claude", "--resume", S, ...H, "--effort", "low"],
 );
 
-check("fresh codex", launch("codex", S, false), ["cmd.exe", "/d", "/s", "/c", `codex ${CX}`]);
+check("fresh codex", launch("codex", S, false), ["cmd.exe", "/d", "/s", "/c", `codex ${CX} ${CODEX_NOTIFY}`]);
 check(
-  "restored codex resumes this directory's last session, else fresh",
-  launch("codex -m o3", S, true),
-  ["cmd.exe", "/d", "/s", "/c", `codex resume --last ${CX} -m o3 || codex ${CX} -m o3`],
+  "restored codex resumes its own real session",
+  launch("codex -m o3", S, true, undefined, S),
+  ["cmd.exe", "/d", "/s", "/c", `codex resume ${S} ${CX} ${CODEX_NOTIFY} -m o3`],
 );
 check("fresh opencode", launch("opencode", S, false), ["cmd.exe", "/d", "/s", "/c", "opencode"]);
 check(
-  "restored opencode continues, else fresh",
-  launch("opencode", S, true),
-  ["cmd.exe", "/d", "/s", "/c", "opencode -c || opencode"],
+  "restored opencode resumes its own real session",
+  launch("opencode", S, true, undefined, "ses_first"),
+  ["cmd.exe", "/d", "/s", "/c", "opencode --session ses_first"],
 );
+check("codex picker (only via the pane notice), never guesses last", launch("codex", S, true)[4], `codex resume ${CX} ${CODEX_NOTIFY}`);
+check("two codex panes stay distinct", launch("codex", S, true, undefined, S)[4] === launch("codex", S, true, undefined, "second")[4], false);
+check("two opencode panes stay distinct", launch("opencode", S, true, undefined, "ses_first")[4] === launch("opencode", S, true, undefined, "ses_second")[4], false);
+check("explicit codex resume isn't doubled", launch(`codex resume ${S}`, S, true)[4], `codex ${CX} ${CODEX_NOTIFY} resume ${S}`);
+check("explicit opencode session isn't doubled", launch("opencode --session ses_own", S, true, undefined, "ses_other")[4], "opencode --session ses_own");
+check("session IDs reject shell injection", validSessionId("abc & whoami"), false);
+check("ownSession codex resume", ownSession("codex resume abc"), true);
+check("ownSession codex flags only", ownSession("codex -m o3"), false);
+check("ownSession opencode --session=", ownSession("opencode --session=ses_x"), true);
+check("ownSession shell", ownSession("cmd"), false);
 
 const PS = ["powershell.exe", "-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command"];
 check("shell command runs under PowerShell with shell-init", launch("cmd", S, true), [...PS, ". $env:LOOM_INIT; cmd"]);

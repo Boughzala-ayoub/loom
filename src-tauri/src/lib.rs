@@ -5,6 +5,7 @@ use std::sync::Mutex;
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 mod dictate;
 mod usage;
@@ -29,6 +30,8 @@ struct Session {
 
 #[derive(Default)]
 struct Ptys(Mutex<HashMap<String, Session>>);
+#[derive(Default)]
+struct WindowStateReady(std::sync::atomic::AtomicBool);
 
 pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
     let mut dir = app.path().app_data_dir().expect("no app data dir");
@@ -111,6 +114,8 @@ fn pty_spawn(
     let hooks_json =
         CLAUDE_HOOKS.replace("__LOOM_STATUS__", &status.display().to_string().replace('\\', "\\\\"));
     ensure_file(&hooks, &hooks_json)?;
+    let session_hook = data_dir(&app).join("loom-session.ps1");
+    ensure_file(&session_hook, include_str!("loom-session.ps1"))?;
     if argv.iter().any(|a| a.contains("opencode")) {
         if let Ok(home) = app.path().home_dir() {
             let _ = ensure_file(&home.join(".config/opencode/plugins/loom.js"), OPENCODE_PLUGIN);
@@ -119,11 +124,20 @@ fn pty_spawn(
 
     let hooks_arg = hooks.display().to_string();
     let mut cmd = CommandBuilder::new(&argv[0]);
-    cmd.args(argv[1..].iter().map(|a| if a == "$LOOM_HOOKS" { &hooks_arg } else { a }));
+    if argv.len() == 5 && argv[0].eq_ignore_ascii_case("cmd.exe") && argv[3] == "/c" {
+        // ConPTY quotes argv MSVC-style; cmd.exe does not understand \" inside
+        // its command string. Expand the whole command after that quoting step.
+        cmd.args(["/d", "/s", "/c", "%LOOM_COMMAND%"]);
+        // Codex's notify script goes in by path (agent.ts: CODEX_NOTIFY).
+        cmd.env("LOOM_COMMAND", argv[4].replace("$LOOM_SESSION_HOOK", &session_hook.display().to_string()));
+    } else {
+        cmd.args(argv[1..].iter().map(|a| if a == "$LOOM_HOOKS" { &hooks_arg } else { a }));
+    }
     // aa's WEZTERM_PANE equivalent: Claude's Stop/Notification hooks (and the
     // opencode plugin) drop a marker named after this, and `take_wakes` turns
     // it back into a pane.
     cmd.env("LOOM_PANE", &id);
+    cmd.env("LOOM_SESSION_FILE", data_dir(&app).join("session-marks").join(&id));
     // What every terminal tells its children. Nothing sets these on Windows
     // unless the terminal does, and Claude Code's Bun build draws in
     // monochrome without them; Orca and Windows Terminal both set them.
@@ -371,8 +385,106 @@ fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
 // ponytail: (async) so the scan is off the main thread; the markers live in
 // their own %TEMP%\loom-wait\ folder, so a poll only walks Loom's own files.
 #[tauri::command(async)]
-fn take_wakes() -> Vec<(String, String)> {
-    drain_wakes(&std::env::temp_dir().join("loom-wait"))
+fn take_wakes(app: AppHandle, ptys: State<Ptys>) -> Vec<(String, String)> {
+    let mut wakes = drain_wakes(&std::env::temp_dir().join("loom-wait"));
+    // Read only this instance's panes. Another Loom window cannot consume a
+    // session marker before its owner sees it.
+    let base = data_dir(&app).join("session-marks");
+    for id in ptys.0.lock().unwrap().keys() {
+        let path = base.join(id);
+        if let Ok(sid) = std::fs::read_to_string(&path) {
+            if !sid.trim().is_empty() {
+                wakes.push((format!("{id}.session"), sid.trim().to_string()));
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    wakes
+}
+
+#[tauri::command(async)]
+fn opencode_sessions(dir: String) -> Result<Vec<serde_json::Value>, String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("cmd.exe")
+        .args(["/d", "/s", "/c", "opencode session list --format json"])
+        .current_dir(&dir)
+        .stdin(std::process::Stdio::null())
+        .creation_flags(0x0800_0000)
+        .output().map_err(|e| e.to_string())?;
+    if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    if raw.trim().is_empty() { return Ok(Vec::new()); }
+    let rows: Vec<serde_json::Value> = serde_json::from_str(raw.trim()).map_err(|e| e.to_string())?;
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    Ok(rows.into_iter().filter(|row| row["directory"].as_str().is_some_and(|d| norm(d) == norm(&dir))).collect())
+}
+
+/// Codex conversations started in `dir`, newest first, as `{id, title}`. Codex
+/// has no machine-readable listing, so this reads what its own picker reads:
+/// the `session_meta` first line of every rollout under $CODEX_HOME/sessions,
+/// titled from session_index.jsonl (Codex's auto-name) or the first prompt.
+// ponytail: one full walk per open of the picker, 20 newest matches.
+#[tauri::command(async)]
+fn codex_sessions(app: AppHandle, dir: String) -> Result<Vec<serde_json::Value>, String> {
+    use std::io::BufRead;
+    let home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| app.path().home_dir().ok().map(|h| h.join(".codex")))
+        .ok_or("no home dir")?;
+    let mut names = std::collections::HashMap::new();
+    for line in std::fs::read_to_string(home.join("session_index.jsonl")).unwrap_or_default().lines() {
+        if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
+            if let (Some(id), Some(name)) = (row["id"].as_str(), row["thread_name"].as_str()) {
+                names.insert(id.to_string(), name.to_string());
+            }
+        }
+    }
+    fn walk(dir: &std::path::Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
+                out.push((e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&home.join("sessions"), &mut files);
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let want = norm(&dir);
+    let mut rows = Vec::new();
+    for (_, path) in files {
+        let Ok(file) = std::fs::File::open(&path) else { continue };
+        let mut lines = std::io::BufReader::new(file).lines().map_while(Result::ok);
+        let Some(meta) = lines.next().and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok()) else { continue };
+        let payload = &meta["payload"];
+        if meta["type"] != "session_meta" || !payload["cwd"].as_str().is_some_and(|c| norm(c) == want) {
+            continue;
+        }
+        let Some(id) = payload["id"].as_str() else { continue };
+        let title = names.get(id).cloned().or_else(|| {
+            // The first prompt you typed: a user message that is not one of the
+            // injected instruction blocks (`# AGENTS.md …`, `<environment_context>`).
+            lines.take(40).find_map(|l| {
+                let v = serde_json::from_str::<serde_json::Value>(&l).ok()?;
+                if v["type"] != "response_item" || v["payload"]["role"] != "user" {
+                    return None;
+                }
+                let text = v["payload"]["content"][0]["text"].as_str()?.trim();
+                if text.starts_with('<') || text.starts_with('#') {
+                    return None;
+                }
+                Some(text.lines().next()?.chars().take(80).collect::<String>())
+            })
+        });
+        rows.push(serde_json::json!({ "id": id, "title": title.unwrap_or_default() }));
+        if rows.len() == 20 {
+            break;
+        }
+    }
+    Ok(rows)
 }
 
 /// (pane id, effort level) pairs; effort is the marker's content — empty when
@@ -385,7 +497,8 @@ fn drain_wakes(dir: &std::path::Path) -> Vec<(String, String)> {
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(id) = name.to_str() else { continue };
-        let effort = std::fs::read_to_string(e.path()).unwrap_or_default();
+        let Ok(effort) = std::fs::read_to_string(e.path()) else { continue };
+        if id.ends_with(".session") && effort.trim().is_empty() { continue; }
         ids.push((id.to_string(), effort.trim().to_string()));
         let _ = std::fs::remove_file(e.path());
     }
@@ -470,7 +583,12 @@ fn load_state(app: AppHandle) -> String {
 
 #[tauri::command]
 fn save_state(app: AppHandle, json: String) -> Result<(), String> {
-    std::fs::write(state_file(&app), json).map_err(|e| e.to_string())
+    // Write beside the destination, then replace it, so an interrupted save
+    // leaves either the old snapshot or the new one, never half a JSON file.
+    let path = state_file(&app);
+    let pending = path.with_extension("json.pending");
+    std::fs::write(&pending, json).map_err(|e| e.to_string())?;
+    std::fs::rename(pending, path).map_err(|e| e.to_string())
 }
 
 // ASCII only: legacy consoles read stdout in the OEM codepage.
@@ -533,6 +651,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Ptys::default())
+        .manage(WindowStateReady::default())
         .manage(dictate::Dictation::default())
         .manage(usage::Scanned::default())
         // The window is config-defined but built here ("create": false) because
@@ -542,22 +661,37 @@ pub fn run() {
         // white until the document's first frame, so without it startup flashes
         // white for as long as the webview takes to come up.
         .setup(|app| {
+            // The plugin accepts an absolute filename. Keep geometry beside the
+            // workspace so dev, release, and explicit profiles stay independent.
+            let window_file = std::path::absolute(state_file(app.handle()))?.with_extension("window.json");
             // `loom.exe --reset` starts fresh: the state file is gone before the
             // webview ever calls load_state. Composes with profiles — `loom.exe
             // p.json --reset` wipes that profile instead of the default.
             if std::env::args().any(|a| a == "--reset") {
                 let _ = std::fs::remove_file(state_file(app.handle()));
+                let _ = std::fs::remove_file(&window_file);
             }
+            app.handle().plugin(tauri_plugin_window_state::Builder::default()
+                .with_filename(window_file.to_string_lossy())
+                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
+                .build())?;
             let cfg = app.config().app.windows.first().expect("window config").clone();
             tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(webview_profile_dir(app.handle()))
                 .enable_clipboard_access()
                 .build()?;
+            app.state::<WindowStateReady>().0.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })
         // ConPTY children are not reaped when the app exits — kill them explicitly.
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+            if window.state::<WindowStateReady>().0.load(std::sync::atomic::Ordering::Relaxed)
+                && matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) | tauri::WindowEvent::CloseRequested { .. }) {
+                // Persist while running too: stopping `tauri dev` need not send CloseRequested.
+                let _ = window.app_handle().save_window_state(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS);
+            }
+            // The frontend may cancel close if its final save fails.
+            if matches!(event, tauri::WindowEvent::Destroyed) {
                 for (_, mut s) in window.state::<Ptys>().0.lock().unwrap().drain() {
                     let _ = s.killer.kill();
                 }
@@ -565,7 +699,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             pty_spawn, pty_write, pty_resize, pty_kill, load_state, save_state, open_vscode,
-            git_run, git_stdin, take_wakes, usage::session_usage, usage::has_session, usage::plan_usage,
+            git_run, git_stdin, take_wakes, opencode_sessions, codex_sessions, usage::session_usage, usage::has_session, usage::plan_usage,
             usage::model_options, usage::context_profile,
             dictate::dictate_start,
             dictate::dictate_stop,

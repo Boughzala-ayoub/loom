@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "core:window:allow-request-user-attention",
+    "core:window:allow-destroy",
     "opener:default",
     "dialog:default"
   ]

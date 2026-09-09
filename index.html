@@ -11,34 +11,39 @@
 
   <body>
     <header id="bar">
+      <button id="side-toggle" aria-label="Toggle projects" aria-controls="side" aria-expanded="true" title="Toggle projects (Ctrl+B)">☰</button>
       <img src="/src/logo.svg" class="mark" alt="" />
       <span class="brand">loom<span class="cursor"></span></span>
       <span class="spacer"></span>
-      <button id="waiting" class="hidden warn" title="Jump to the next pane waiting on you (F3)"></button>
+      <div id="quick-settings" role="group" aria-label="Dictation and pane layout">
+        <button id="lang" aria-description="Dictation language" title="Language dictation transcribes as">English ▾</button>
+        <button id="prefix" aria-description="Dictation prefix" title="What dictation types before the transcript">/prompt ▾</button>
+        <button id="layout" aria-description="Pane layout" title="Cycle pane layout: grid / rows / columns">▥ cols</button>
+      </div>
+      <button id="waiting" class="hidden warn" title="Choose a waiting agent. F3 jumps to the next one."></button>
       <button id="plan" class="hidden" title="Claude plan usage"></button>
       <button id="new-thread" class="primary" title="Cut a new thread: a worktree with an agent in it">+ Thread</button>
+      <button id="preferences-btn" aria-label="Preferences" aria-expanded="false" aria-controls="preferences" title="Preferences">⚙</button>
     </header>
 
     <div id="body">
       <!-- Threads, grouped under the checkout they were cut from. Rows are built in main.ts. -->
       <aside id="side">
-        <input id="side-filter" spellcheck="false" placeholder="Search threads…" title="Filter by name, branch or agent title" />
+        <input id="side-filter" aria-label="Filter threads" spellcheck="false" placeholder="Filter threads…" title="Filter by project, name, branch or agent" />
         <div id="threads"></div>
+        <p id="side-empty" class="hidden muted">No matching threads.</p>
       </aside>
 
       <div id="main">
         <div id="wsbar">
+          <div class="wsidentity">
           <span id="wsname"></span>
           <span id="wsbranch" class="chip hidden"></span>
           <span id="wsstat"></span>
           <span id="wspath" class="muted"></span>
+          </div>
           <span class="spacer"></span>
-          <button id="prefix" title="What dictation types before the transcript">/prompt ▾</button>
           <button id="dictate" title="Dictate into the focused pane — click, or hold F4">◉ speak</button>
-          <button id="lang" title="Language dictation transcribes as">English ▾</button>
-          <button id="theme" title="Colour theme">◑ loom</button>
-          <button id="layout" title="Cycle pane layout: grid / rows / columns">▥ cols</button>
-          <button id="vscode" title="Open this thread in VS Code (F5)">VS Code</button>
           <button id="changes-btn" title="Changes in this thread's worktree">⎇</button>
           <button id="wsmore" title="Thread actions">⋯</button>
           <button id="add-pane" class="primary" title="Add a pane to this thread">+</button>
@@ -51,7 +56,8 @@
           <main id="stage">
             <div id="empty">
               <div class="empty-mark"><img src="/src/logo.svg" alt="" />loom</div>
-              <p>Cut a thread — a git worktree with <code>claude</code>, <code>codex</code> or <code>opencode</code> running in it.</p>
+              <p>Open a project, choose an agent, and start working.</p>
+              <p class="muted">Use a separate worktree when you want an isolated branch.</p>
               <button id="open-first" class="primary">New thread…</button>
             </div>
             <!-- One file's diff, over the panes. Esc or ✕ closes. -->
@@ -73,13 +79,14 @@
                 <span class="spacer"></span>
                 <button id="changes-more" title="Fetch, pull, push, branch, stash, amend">⋯</button>
                 <button id="changes-refresh" title="Re-read git now">↻</button>
+                <button id="changes-close" aria-label="Close changes" title="Close changes">✕</button>
               </div>
               <div class="changes-ref">
                 <span id="changes-branch"></span>
                 <span id="changes-stat"></span>
               </div>
               <div id="changes-base" class="muted"></div>
-              <textarea id="commit-msg" rows="2" placeholder="Message" spellcheck="false"></textarea>
+              <textarea id="commit-msg" aria-label="Commit message" rows="2" placeholder="Describe your changes" spellcheck="false"></textarea>
               <div class="commit-row">
                 <button id="commit-btn" class="primary" title="git add -A && git commit">✓ Commit</button>
                 <button id="commit-more" class="primary" title="Commit options">▾</button>
@@ -105,14 +112,28 @@
     />
 
     <span id="find-n" class="hidden-empty"></span>
-    <div id="toast" class="hidden"></div>
+    <div id="toast" class="hidden" role="status"></div>
+
+    <section id="preferences" class="hidden" aria-labelledby="preferences-title">
+      <div class="panel-heading"><h2 id="preferences-title">Preferences</h2><button id="preferences-close" aria-label="Close preferences">✕</button></div>
+      <div class="preference-row"><span>Theme</span><button id="theme" title="Colour theme">◑ loom</button></div>
+      <div class="preference-actions"><button id="vscode" title="Open this thread in VS Code (F5)">Open in VS Code</button><button id="shortcuts">Keyboard shortcuts <kbd>F1</kbd></button></div>
+    </section>
+
+    <dialog id="thread-picker" aria-labelledby="picker-title">
+      <div class="panel-heading"><h2 id="picker-title">Waiting for you</h2><button id="picker-close" aria-label="Close waiting list">✕</button></div>
+      <input id="picker-query" type="search" aria-label="Filter waiting agents" placeholder="Filter waiting agents…" autocomplete="off" spellcheck="false" />
+      <p id="picker-hint" class="muted">Choose an agent to review its turn. F3 jumps to the next one.</p>
+      <div id="picker-list"></div>
+      <p id="picker-empty" class="hidden muted" role="status"></p>
+    </dialog>
 
     <!-- Bars are built in main.ts; an empty box beats 28 lines of <i>. -->
     <div id="wave" class="hidden" aria-hidden="true"></div>
 
-    <dialog id="rename">
+    <dialog id="rename" aria-labelledby="rename-title">
       <form id="rename-form" method="dialog">
-        <h2>Rename thread</h2>
+        <h2 id="rename-title">Rename thread</h2>
         <label>name <input id="rename-name" spellcheck="false" autocomplete="off" /></label>
         <div class="new-actions">
           <button type="button" id="rename-cancel" formnovalidate>Cancel</button>
@@ -121,8 +142,26 @@
       </form>
     </dialog>
 
-    <dialog id="keys">
-      <h2>Keys</h2>
+    <dialog id="session-picker" aria-labelledby="session-title">
+      <h2 id="session-title">Resume session</h2>
+      <p class="form-help">Select the conversation that belongs to this pane.</p>
+      <div id="session-list" role="status"></div>
+      <form method="dialog" class="new-actions"><button autofocus>Cancel</button></form>
+    </dialog>
+
+    <dialog id="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-detail">
+      <form method="dialog">
+        <h2 id="confirm-title"></h2>
+        <p id="confirm-detail"></p>
+        <div class="new-actions">
+          <button value="cancel" autofocus>Cancel</button>
+          <button id="confirm-action" value="confirm" class="primary">Continue</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="keys" aria-labelledby="keys-title">
+      <h2 id="keys-title">Keyboard shortcuts</h2>
       <table>
         <tr><td>F1</td><td>this list</td></tr>
         <tr><td>F2</td><td>zoom the focused pane</td></tr>
@@ -145,21 +184,32 @@
     </dialog>
 
     <!-- New thread. Native dialog: Esc closes it, focus stays inside, the OS draws the selects. -->
-    <dialog id="new">
+    <dialog id="new" aria-labelledby="new-title">
       <form id="new-form" method="dialog">
-        <h2>New thread</h2>
-        <label>repo <select id="new-repo"></select></label>
-        <label>
-          name
-          <input id="new-name" spellcheck="false" autocomplete="off" placeholder="blank = open the checkout itself" />
+        <h2 id="new-title">New thread</h2>
+        <fieldset class="thread-mode">
+          <legend>Where do you want to work?</legend>
+          <label><input type="radio" name="thread-mode" value="checkout" checked />Open checkout</label>
+          <label><input type="radio" name="thread-mode" value="worktree" />Create worktree</label>
+        </fieldset>
+        <p id="new-description" class="form-help">Work in the existing folder. No new branch or copy.</p>
+        <label>Project <select id="new-repo" required></select></label>
+        <button type="button" id="new-browse">Browse for a folder…</button>
+        <label id="new-name-field" class="hidden">
+          Thread name
+          <input id="new-name" spellcheck="false" autocomplete="off" placeholder="e.g. improve-search" disabled />
         </label>
-        <label>agent <select id="new-agent"></select></label>
-        <label>base <input id="new-base" spellcheck="false" autocomplete="off" placeholder="HEAD · a branch, tag, or a new branch to create" /></label>
-        <label>panes <input id="new-count" type="number" min="1" max="16" value="1" /></label>
-        <p id="new-err" class="err"></p>
+        <label>Agent <select id="new-agent"></select></label>
+        <details id="new-advanced">
+          <summary>Advanced options</summary>
+          <label id="new-base-field" class="hidden">Base branch <input id="new-base" disabled spellcheck="false" autocomplete="off" placeholder="HEAD, branch, tag, or a new branch name" /></label>
+          <label>Pane count <input id="new-count" type="number" min="1" max="16" value="1" /></label>
+          <p class="form-help">Each agent pane keeps its own session. Older panes may ask you to select their previous conversation once.</p>
+        </details>
+        <p id="new-err" class="err" role="status"></p>
         <div class="new-actions">
           <button type="button" id="new-cancel" formnovalidate>Cancel</button>
-          <button type="submit" id="new-go" class="primary">Create</button>
+          <button type="submit" id="new-go" class="primary">Open checkout</button>
         </div>
       </form>
     </dialog>
