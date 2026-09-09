@@ -235,7 +235,7 @@ try {
         bg: row.querySelector('.theme-preview').style.getPropertyValue('--bg'),
         accent: row.querySelector('.theme-preview').style.getPropertyValue('--accent'),
       })));
-      assert.equal(palettes.length, 16);
+      assert.equal(palettes.length, 22);
       await escape();
       for (const [i, palette] of [...palettes, palettes[0]].entries()) {
         await openThemes();

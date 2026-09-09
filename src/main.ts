@@ -300,6 +300,132 @@ const THEMES: Theme[] = [
     },
   },
   {
+    label: "dusk",
+    vars: {
+      "--bg": "#1c1a20",
+      "--panel": "#232028",
+      "--raise": "#2d2933",
+      "--line": "#3a3542",
+      "--line-strong": "#544d5e",
+      "--text": "#e2dbe6",
+      "--muted": "#b3a9bb",
+      "--faint": "#9a90a2",
+      "--accent": "#c9a0b8",
+      "--accent-dim": "rgba(201, 160, 184, 0.14)",
+      "--ok": "#9fc4a0",
+      "--err": "#e09a9a",
+      "--warn": "#d8c08e",
+      "--blue": "#9fb5d4",
+      "--magenta": "#c4a8d6",
+      "--cyan": "#94c2c4",
+    },
+  },
+  {
+    label: "moss",
+    vars: {
+      "--bg": "#171c18",
+      "--panel": "#1d231f",
+      "--raise": "#262e29",
+      "--line": "#313b34",
+      "--line-strong": "#4a574e",
+      "--text": "#d9e0d6",
+      "--muted": "#a8b4a6",
+      "--faint": "#8c9a8b",
+      "--accent": "#a9c39a",
+      "--accent-dim": "rgba(169, 195, 154, 0.14)",
+      "--ok": "#a9c39a",
+      "--err": "#dd9c95",
+      "--warn": "#d2bd8a",
+      "--blue": "#96b4c4",
+      "--magenta": "#bca6c6",
+      "--cyan": "#8fbfb8",
+    },
+  },
+  {
+    label: "slate",
+    vars: {
+      "--bg": "#1b1e24",
+      "--panel": "#21252c",
+      "--raise": "#2a2f38",
+      "--line": "#353b46",
+      "--line-strong": "#4e5665",
+      "--text": "#dcdfe5",
+      "--muted": "#aab1bd",
+      "--faint": "#8f97a4",
+      "--accent": "#9db4cf",
+      "--accent-dim": "rgba(157, 180, 207, 0.14)",
+      "--ok": "#a3c4a6",
+      "--err": "#dc9d9d",
+      "--warn": "#d3bf90",
+      "--blue": "#9db4cf",
+      "--magenta": "#bdaad0",
+      "--cyan": "#92bfc3",
+    },
+  },
+  {
+    label: "void",
+    vars: {
+      "--bg": "#000000",
+      "--panel": "#070709",
+      "--raise": "#101014",
+      "--line": "#1c1c22",
+      "--line-strong": "#33333d",
+      "--text": "#e8e8f0",
+      "--muted": "#9a9aa8",
+      "--faint": "#8e8e9e",
+      "--accent": "#9a80ff",
+      "--accent-dim": "rgba(154, 128, 255, 0.18)",
+      "--ok": "#3ef2a3",
+      "--err": "#ff5470",
+      "--warn": "#ffc857",
+      "--blue": "#5ec8ff",
+      "--magenta": "#c07cff",
+      "--cyan": "#4ef0e0",
+    },
+  },
+  {
+    label: "kanagawa",
+    vars: {
+      "--bg": "#16161d",
+      "--panel": "#1f1f28",
+      "--raise": "#2a2a37",
+      "--line": "#363646",
+      "--line-strong": "#54546d",
+      "--text": "#dcd7ba",
+      "--muted": "#a6a69c",
+      "--faint": "#a09f93",
+      "--accent": "#ffa066",
+      "--accent-dim": "rgba(255, 160, 102, 0.14)",
+      "--ok": "#98bb6c",
+      "--err": "#ee8391",
+      "--warn": "#e6c384",
+      "--blue": "#7e9cd8",
+      "--magenta": "#ad98d0",
+      "--cyan": "#7aa89f",
+    },
+  },
+  {
+    label: "sepia",
+    vars: {
+      "--bg": "#1e1a16",
+      "--panel": "#26211c",
+      "--raise": "#302a24",
+      "--line": "#3e3630",
+      "--line-strong": "#5a5047",
+      "--text": "#e6ddd0",
+      "--muted": "#b8ac9c",
+      "--faint": "#9d9182",
+      "--accent": "#d2a679",
+      "--accent-dim": "rgba(210, 166, 121, 0.14)",
+      "--ok": "#a9bf8f",
+      "--err": "#dc9b8c",
+      "--warn": "#d5bb84",
+      "--blue": "#a4b6c8",
+      "--magenta": "#c4a8b8",
+      "--cyan": "#9bbfb4",
+    },
+  },
+  {
     label: "solarized light",
     scheme: "light",
     vars: {
@@ -1653,6 +1779,27 @@ let reposFolded = new Set<string>();
 /** What the sidebar filter box holds, lower-cased. */
 let sideQuery = "";
 let sideOpen = !matchMedia("(max-width: 760px)").matches;
+/** Sidebar widths, dragged from their inner edge. A CSS variable rather than
+ * an inline width so the narrow-window drawer rules still win. */
+const SIDE_W = { side: 240, changes: 300 };
+const sideW = { ...SIDE_W };
+function applySideW() {
+  document.documentElement.style.setProperty("--side-w", `${sideW.side}px`);
+  document.documentElement.style.setProperty("--changes-w", `${sideW.changes}px`);
+}
+function dragSideW(handle: HTMLElement, key: keyof typeof sideW, dir: 1 | -1) {
+  handle.onpointerdown = (e) => {
+    e.preventDefault();
+    const start = e.clientX, from = sideW[key];
+    handle.setPointerCapture(e.pointerId);
+    handle.onpointermove = (ev) => {
+      sideW[key] = Math.round(Math.min(Math.max(from + dir * (ev.clientX - start), 160), Math.max(160, innerWidth * 0.6)));
+      applySideW();
+    };
+    handle.onpointerup = () => { handle.onpointermove = handle.onpointerup = null; save(); };
+  };
+  handle.ondblclick = () => { sideW[key] = SIDE_W[key]; applySideW(); save(); };
+}
 // Restoring panes is asynchronous. Never replace the saved workspace with a
 // half-loaded one, and serialize writes so an older snapshot cannot win.
 let restoring = true;
@@ -1689,7 +1836,7 @@ const flushSave = (): Promise<unknown> => {
       theme: theme.label,
       fontSize,
       paneCount,
-      ui: { thread: threads.indexOf(current!), sideOpen, changesOpen, sideQuery,
+      ui: { thread: threads.indexOf(current!), sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
         sideScroll: $("#threads").scrollTop,
         foldedSections: [...foldedSections], foldedDirs: [...foldedDirs],
         panel, openDirs: [...openDirs], diffFull },
@@ -4028,7 +4175,7 @@ async function main() {
     fontSize?: number;
     paneCount?: number;
     ui?: { thread?: number; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
-      sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
+      sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
   } = {};
   try {
@@ -4050,6 +4197,11 @@ async function main() {
   reposFolded = new Set(saved.reposFolded ?? []);
   sideQuery = saved.ui?.sideQuery ?? "";
   $<HTMLInputElement>("#side-filter").value = sideQuery;
+  if (saved.ui?.sideW?.side) sideW.side = saved.ui.sideW.side;
+  if (saved.ui?.sideW?.changes) sideW.changes = saved.ui.sideW.changes;
+  applySideW();
+  dragSideW($("#side-resize"), "side", 1);
+  dragSideW($("#changes-resize"), "changes", -1);
   if (saved.ui?.foldedSections) {
     foldedSections.clear();
     saved.ui.foldedSections.forEach(s => foldedSections.add(s));

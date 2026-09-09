@@ -33,6 +33,7 @@
         <input id="side-filter" aria-label="Filter threads" spellcheck="false" placeholder="Filter threads…" title="Filter by project, name, branch or agent" />
         <div id="threads"></div>
         <p id="side-empty" class="hidden muted">No matching threads.</p>
+        <div id="side-resize" class="side-resize" title="Drag to resize, double-click to reset"></div>
       </aside>
 
       <div id="main">
@@ -80,6 +81,7 @@
 
           <!-- Orca's right-hand side: what the thread changed, and a commit box. -->
           <aside id="changes" class="hidden">
+            <div id="changes-resize" class="side-resize" title="Drag to resize, double-click to reset"></div>
             <div class="panel-tabs" role="tablist" aria-label="Right panel">
               <button id="panel-changes" role="tab" aria-selected="true">Changes</button>
               <button id="panel-files" role="tab" aria-selected="false" title="Every file in this thread's folder">Files</button>

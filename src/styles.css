@@ -234,8 +234,9 @@ input:focus {
 /* Orca's shape: rows grouped under the checkout they were cut from. A row is
    name, then agent and branch underneath, with one dot for the whole thread. */
 #side {
+  position: relative;
   flex: none;
-  width: 230px;
+  width: var(--side-w, 240px);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -836,6 +837,26 @@ dialog h2 {
   background: var(--accent-dim);
 }
 
+/* Sidebar edge handles: same feel as the pane splitters. */
+.side-resize {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  transition: background-color 0.12s;
+}
+#side-resize { right: -3px; }
+#changes-resize { left: -3px; }
+.side-resize:hover,
+.side-resize:active {
+  background: var(--accent-dim);
+}
+@media (max-width: 1100px) { #changes-resize { display: none; } }
+@media (max-width: 760px) { .side-resize { display: none; } }
+
 .pane.drop {
   border-color: var(--accent);
   border-style: dashed;
@@ -1352,8 +1373,9 @@ dialog h2 {
 
 /* --- changes panel ------------------------------------------------------- */
 #changes {
+  position: relative;
   flex: none;
-  width: 300px;
+  width: var(--changes-w, 300px);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1939,7 +1961,6 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
 }
 
 /* Projects own threads; the inset rail connects each thread to its panes. */
-#side { width: 240px; }
 #side-filter { margin: 8px 8px 4px; padding: 6px 8px; font: 12px "Segoe UI", sans-serif; }
 #threads { padding: 8px; font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; }
 .side-head { padding: 0 2px 4px 6px; font-size: 12px; }
