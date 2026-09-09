@@ -276,6 +276,13 @@ fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<Strin
         // A fetch that needs credentials must fail, not wait on a prompt
         // nobody can see.
         .env("GIT_TERMINAL_PROMPT", "0")
+        // The polls run `status` and `diff` every few seconds in every thread.
+        // Without this each one refreshes and REWRITES .git/index under
+        // index.lock — a disk write per poll, and the lock an agent's own
+        // `git commit` in a pane then trips over. Same switch VS Code's status
+        // poll uses; the read-only commands stay correct, they just don't
+        // persist the refreshed stat cache.
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(std::process::Stdio::null())
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output()
@@ -446,21 +453,34 @@ fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
 // ponytail: (async) so the scan is off the main thread; the markers live in
 // their own %TEMP%\loom-wait\ folder, so a poll only walks Loom's own files.
 #[tauri::command(async)]
-fn take_wakes(app: AppHandle, ptys: State<Ptys>) -> Vec<(String, String)> {
-    let mut wakes = drain_wakes(&std::env::temp_dir().join("loom-wait"));
-    // Read only this instance's panes. Another Loom window cannot consume a
-    // session marker before its owner sees it.
+fn take_wakes() -> Vec<(String, String)> {
+    drain_wakes(&std::env::temp_dir().join("loom-wait"))
+}
+
+/// `(pane id, session id)` for every pane in `ids` whose codex notify script
+/// or opencode plugin has reported one, consumed as they are read. The caller
+/// names its own panes, so another Loom window cannot consume a marker before
+/// its owner sees it. Polled every 4 s, not with the wakes: only the next
+/// launch needs these, and on the 250 ms tick this was a file open per pane
+/// under the pty lock every keystroke waits on.
+#[tauri::command(async)]
+fn take_sessions(app: AppHandle, ids: Vec<String>) -> Vec<(String, String)> {
     let base = data_dir(&app).join("session-marks");
-    for id in ptys.0.lock().unwrap().keys() {
-        let path = base.join(id);
+    let mut out = Vec::new();
+    for id in ids {
+        // Pane ids are Loom's own (uid() in main.ts); anything else names no marker.
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            continue;
+        }
+        let path = base.join(&id);
         if let Ok(sid) = std::fs::read_to_string(&path) {
             if !sid.trim().is_empty() {
-                wakes.push((format!("{id}.session"), sid.trim().to_string()));
+                out.push((id, sid.trim().to_string()));
                 let _ = std::fs::remove_file(path);
             }
         }
     }
-    wakes
+    out
 }
 
 #[tauri::command(async)]
@@ -760,7 +780,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             pty_spawn, pty_write, pty_resize, pty_kill, load_state, save_state, open_vscode,
-            git_run, git_stdin, list_files, read_file, read_image, take_wakes, opencode_sessions, codex_sessions, usage::session_usage, usage::has_session, usage::plan_usage, usage::codex_plan_usage,
+            git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, usage::session_usage, usage::has_session, usage::plan_usage, usage::codex_plan_usage,
             usage::model_options, usage::context_profile,
             dictate::dictate_start,
             dictate::dictate_stop,

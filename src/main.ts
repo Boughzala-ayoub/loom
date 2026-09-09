@@ -20,6 +20,8 @@ import { fileLinks, imageMime } from "./links";
 import "@xterm/xterm/css/xterm.css";
 
 const MAX_PANES = 16;
+/** Provider title spinners ("✻ Thinking…"): stripped before a title is shown or compared. */
+const SPIN = /^[✳✻✽✶✢·◐◓◑◒⠁-⣿]+\s*/u;
 
 /** Keep destructive confirmations in the app; Escape and initial focus cancel. */
 function confirm(message: string, options: { title: string; kind?: string; action?: string; detail?: string }): Promise<boolean> {
@@ -389,7 +391,7 @@ const THEMES: Theme[] = [
 let theme: Theme = THEMES[0];
 
 /** ANSI and app chrome share a palette. Light themes use ink for bright white. */
-const termTheme = () => ({
+const buildTermTheme = () => ({
   background: cssVar("--bg"),
   foreground: cssVar("--text"),
   cursor: cssVar("--accent"),
@@ -407,6 +409,10 @@ const termTheme = () => ({
   magenta: cssVar("--magenta"), brightMagenta: cssVar("--magenta"),
   cyan: cssVar("--cyan"), brightCyan: cssVar("--cyan"),
 });
+/** Memoised per theme: every cssVar is a getComputedStyle, and this ran 18 of
+ * them for each pane built or re-themed. */
+let termColors: ReturnType<typeof buildTermTheme> | undefined;
+const termTheme = () => (termColors ??= buildTermTheme());
 
 function applyTheme(t: Theme) {
   theme = t;
@@ -416,6 +422,7 @@ function applyTheme(t: Theme) {
   for (const k of THEMES.flatMap((x) => Object.keys(x.vars))) root.style.removeProperty(k);
   for (const [k, v] of Object.entries(t.vars)) root.style.setProperty(k, v);
   root.style.colorScheme = t.scheme ?? "dark";
+  termColors = undefined; // the palette moved
   for (const p of threads.flatMap((t) => t.panes)) p.term.options.theme = termTheme();
 }
 
@@ -779,6 +786,10 @@ type LayoutMode = "grid" | "rows" | "cols";
 const LAYOUTS: LayoutMode[] = ["grid", "rows", "cols"];
 const LAYOUT_LABEL: Record<LayoutMode, string> = { grid: "▦ grid", rows: "▤ rows", cols: "▥ cols" };
 
+/** Panes holding a WebGL context, least recently shown first. See Pane.gpu(). */
+const GL_BUDGET = 12;
+const glLive: Pane[] = [];
+
 class Pane {
   readonly id = uid();
   readonly el = document.createElement("div");
@@ -960,7 +971,13 @@ class Pane {
     this.term.options.scrollback = this.agent === "shell" ? 5000 : 1500;
     this.term.open(this.host);
     this.gpu(this.th === current);
-    this.term.onTitleChange((t) => ((this.appTitle = t), this.paint()));
+    this.term.onTitleChange((t) => {
+      // Agents redraw the title with a spinner glyph while working, ~10 times a
+      // second; paint() strips it, so those are the same title — skip them.
+      const same = t.replace(SPIN, "") === this.appTitle.replace(SPIN, "");
+      this.appTitle = t;
+      if (!same) this.paint();
+    });
     this.term.onData((d) => {
       // A dead pane has nowhere to send keys; Enter brings the process back.
       if (this.dead) return void (d === "\r" && this.spawn(true));
@@ -1086,22 +1103,32 @@ class Pane {
     this.paint();
   }
 
-  /** GPU rendering, on only while this pane's thread is visible: a page gets
-   * ~16 WebGL contexts and hidden threads would eat them. Idempotent both
-   * ways; on context loss (or off) xterm falls back to the DOM renderer. */
+  /** GPU rendering. A page gets ~16 WebGL contexts, so they are budgeted:
+   * showing a thread turns its panes on, and once GL_BUDGET is exceeded the
+   * least recently shown panes of other threads give theirs up — so bouncing
+   * between two threads rebuilds nothing. Idempotent both ways; on context
+   * loss (or off) xterm falls back to the DOM renderer. */
   gpu(on: boolean) {
-    if (on === !!this.gl) return;
+    const i = glLive.indexOf(this);
+    if (i >= 0) glLive.splice(i, 1);
     if (!on) {
-      this.gl!.dispose();
+      this.gl?.dispose();
       this.gl = undefined;
       return;
     }
-    try {
-      const gl = new WebglAddon();
-      gl.onContextLoss(() => this.gpu(false));
-      this.term.loadAddon(gl);
-      this.gl = gl;
-    } catch {} // no WebGL → DOM renderer, still works
+    glLive.push(this); // most recently shown last
+    if (!this.gl)
+      try {
+        const gl = new WebglAddon();
+        gl.onContextLoss(() => this.gpu(false));
+        this.term.loadAddon(gl);
+        this.gl = gl;
+      } catch {} // no WebGL → DOM renderer, still works
+    while (glLive.length > GL_BUDGET) {
+      const old = glLive.find((p) => p.th !== current);
+      if (!old) break; // the current thread alone is over budget: keep it whole
+      old.gpu(false);
+    }
   }
 
   private raf = 0;
@@ -1175,7 +1202,7 @@ class Pane {
     // own path says nothing, so only a real title follows the name.
     this.rowName.textContent = this.agent;
     // Replace provider title spinners with the shared animation after the name.
-    const rowTitle = this.agent === "shell" ? app : app.replace(/^[✳✻✽✶✢·◐◓◑◒⠁-⣿]+\s*/u, "");
+    const rowTitle = this.agent === "shell" ? app : app.replace(SPIN, "");
     this.rowLabel.textContent = rowTitle && rowTitle !== this.agent ? rowTitle : this.agent === "shell" ? "Terminal" : "Agent session";
     this.rowState.textContent = this.dead ? "Exited" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
     this.row.title = `${this.agent}: ${this.appTitle || this.rowLabel.textContent}`;
@@ -1271,6 +1298,7 @@ class Pane {
     clearTimeout(this.idle);
     this.unlisten.forEach((u) => u());
     await invoke("pty_kill", { id: this.id }).catch(() => {});
+    this.gpu(false);
     this.term.dispose();
     this.el.remove();
     this.row.remove();
@@ -1362,6 +1390,13 @@ class Thread {
       e.preventDefault();
       showMenu(this.row, threadMenu(this));
     };
+    // Wired once, here: the row outlives every sidebar rebuild, and wiring it
+    // in renderSide added a listener per rebuild — each drop then fired N times.
+    dragRow(this.row, () => threads.filter((t) => t.repo === repo).map((t) => t.row), (over, after) => {
+      moveNextTo(threads, this, threads.find((t) => t.id === over.dataset.id)!, after);
+      renderSide();
+      save();
+    });
   }
 
   /** Cut from a repo, or the repo's own checkout opened as a thread. */
@@ -1414,6 +1449,7 @@ class Thread {
     if (st.effort) p.effort = st.effort;
     this.panes.push(p);
     this.grid.append(p.el);
+    this.list.append(p.row); // sidebar order = grid order
     this.relayout();
     await p.start(st.cmd, st.sid);
     this.focusPane(p);
@@ -1516,7 +1552,6 @@ class Thread {
     if (this.rowH.length !== rows) this.rowH = Array(rows).fill(1);
     this.grid.style.gridTemplateColumns = this.colW.map((w) => `${w}fr`).join(" ");
     this.grid.style.gridTemplateRows = this.rowH.map((w) => `${w}fr`).join(" ");
-    for (const p of this.panes) this.list.append(p.row); // sidebar order = grid order
     this.panes.forEach((p, i) => p.paint(i));
     this.paint();
     this.placeSplitters();
@@ -1529,7 +1564,7 @@ class Thread {
     const j = this.panes.indexOf(b);
     if (i === -1 || j === -1 || i === j) return;
     [this.panes[i], this.panes[j]] = [b, a];
-    for (const p of this.panes) this.grid.append(p.el); // DOM order = grid order
+    for (const p of this.panes) (this.grid.append(p.el), this.list.append(p.row)); // DOM order = grid order, sidebar too
     this.relayout();
     this.focusPane(a);
     save(); // the reorder is the saved pane order
@@ -1623,7 +1658,9 @@ let sideOpen = !matchMedia("(max-width: 760px)").matches;
 let restoring = true;
 let saveQueue: Promise<unknown> = Promise.resolve();
 
-const save = (): Promise<unknown> => {
+/** Write the workspace now. `save()` below is what everything calls; this is
+ * for the two moments that can't wait: the end of boot and the window closing. */
+const flushSave = (): Promise<unknown> => {
   if (restoring) return Promise.resolve();
   const json = JSON.stringify({
       threads: threads.map((t) => ({
@@ -1659,6 +1696,17 @@ const save = (): Promise<unknown> => {
     });
   saveQueue = saveQueue.catch(() => {}).then(() => invoke("save_state", { json }));
   return saveQueue.catch(e => toast(`Could not save workspace: ${String(e)}`));
+};
+/** Throttled. Focus changes, folds and scrolls all save, and each one used to
+ * serialise the whole workspace and hit the disk — a click between panes was
+ * a write. Now at most one write per 300 ms, of whatever the state is by then. */
+let savePending: Promise<unknown> | null = null;
+const save = (): Promise<unknown> => {
+  if (restoring) return Promise.resolve();
+  return (savePending ??= new Promise((r) => setTimeout(r, 300)).then(() => {
+    savePending = null;
+    return flushSave();
+  }));
 };
 
 function setFont(n: number) {
@@ -1890,12 +1938,6 @@ function renderSide() {
       renderSide();
       save();
     });
-    for (const t of rowsOf(repo))
-      dragRow(t.row, () => rowsOf(repo).map((x) => x.row), (over, after) => {
-        moveNextTo(threads, t, threads.find((x) => x.id === over.dataset.id)!, after);
-        renderSide();
-        save();
-      });
     side.append(h, group);
   }
   filterSide();
@@ -1922,7 +1964,7 @@ function show(th: Thread | null) {
     t.grid.classList.toggle("hidden", t !== th);
     t.paint();
     t.panes.forEach((p) => {
-      p.gpu(t === th);
+      if (t === th) p.gpu(true); // the budget in gpu() retires other threads' contexts
       p.row.classList.toggle("on", t === th && p === t.active);
     });
   }
@@ -1973,9 +2015,12 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
       .then((b) => ((th.branch = b.trim()), th.setStat(th.changed)))
       .catch(() => {});
   if (!repos.includes(st.repo)) repos.push(st.repo);
-  renderSide();
   $("#stage").append(th.grid);
-  show(th);
+  // Restoring N threads used to show() each in turn: N sidebar rebuilds, and
+  // every pane got a WebGL context only to lose it when the next thread showed.
+  // main() renders the sidebar and shows the saved thread once all are up.
+  if (restoring) th.grid.classList.add("hidden");
+  else (renderSide(), show(th));
   // Parallel: a spawn is up to ~1s. addPane pushes its pane before the first
   // await, so mapping in order still lands them in order.
   await Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st)));
@@ -2071,9 +2116,9 @@ const threadMenu = (th: Thread): Menu => ({
 });
 
 // --- diff tabs: Orca opens a diff as a tab beside the agent; so do we -------
-// The strip sits over the stage and only shows while a thread has diff tabs.
-// The first tab is the panes; the rest each hold a loader that re-reads git
-// whenever the tab is shown, so a diff never goes stale behind a refresh.
+// The tabs are the diff view's header; closing the last one shows the panes
+// again. Each holds a loader that re-reads git whenever the tab is shown, so
+// a diff never goes stale behind a refresh.
 type DiffSource = { sec: Sec; paths: string[] } | { commit: string } | { file: string };
 type DiffTab = { label: string; load: () => Promise<string>; source: DiffSource; sec?: Sec; rendered?: string };
 /** Hunks with git's three lines around them, or the whole file: `-U` big
@@ -2089,6 +2134,7 @@ const diffLoader = (th: Thread, source: DiffSource) => "commit" in source
 const tabsEl = $("#tabs");
 const diffView = $("#diff");
 let showGen = 0; // bumped per showTab, so a chunked render stops when its tab is gone
+let shownTab: DiffTab | null = null; // whose rows #diff-body holds right now
 
 function openTab(th: Thread, label: string, source: DiffSource) {
   const load = diffLoader(th, source);
@@ -2103,8 +2149,9 @@ function openTab(th: Thread, label: string, source: DiffSource) {
 }
 
 function closeTab(th: Thread, t: DiffTab) {
-  th.tabs.splice(th.tabs.indexOf(t), 1);
-  if (th.tab === t) th.tab = null;
+  const i = th.tabs.indexOf(t);
+  th.tabs.splice(i, 1);
+  if (th.tab === t) th.tab = th.tabs[i] ?? th.tabs[i - 1] ?? null; // a neighbour takes over; none left = the panes
   if (th === current) (paintTabs(), void showTab());
   save();
 }
@@ -2112,23 +2159,69 @@ function closeTab(th: Thread, t: DiffTab) {
 function paintTabs() {
   const th = current;
   tabsEl.textContent = "";
-  tabsEl.classList.toggle("hidden", !th?.tabs.length);
-  if (!th?.tabs.length) return;
-  const mk = (label: string, on: boolean, pick: () => void, close?: () => void) => {
+  tabsEl.classList.toggle("hidden", !th); // only the empty state has no bar
+  if (!th) return;
+  // The panes are the first tab: a way back that keeps the diffs open. It wears
+  // the focused pane's agent mark, so it reads as the agent, not another diff.
+  mk(th.active ? icon(th.active.agent) : "▦", th.name, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()))
+    .classList.add("panes");
+  function mk(glyph: string | Node, label: string, on: boolean, pick: () => void, close?: () => void) {
     const b = document.createElement("div");
     b.className = `tab${on ? " on" : ""}`;
+    b.title = label;
+    const g = document.createElement("i");
+    g.append(glyph);
     const s = document.createElement("span");
     s.textContent = label;
-    b.append(s);
+    b.append(g, s);
     b.onclick = () => { pick(); save(); };
     b.onauxclick = (e) => e.button === 1 && close?.();
     if (close) b.append(mini("✕", "Close", close));
     tabsEl.append(b);
-  };
-  mk(`▦ ${th.name}`, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()));
+    return b;
+  }
   for (const t of th.tabs)
-    mk(t.label, th.tab === t, () => ((th.tab = t), paintTabs(), void showTab()), () => closeTab(th, t));
+    mk("commit" in t.source ? "◆" : "file" in t.source ? "≡" : "±", t.label, th.tab === t,
+      () => ((th.tab = t), paintTabs(), void showTab()), () => closeTab(th, t));
+  tabsEl.querySelector(".on")?.scrollIntoView({ inline: "nearest", block: "nearest" });
 }
+// The strip scrolls sideways, so the wheel does too — Orca's tab bar does the same.
+tabsEl.addEventListener("wheel", (e) => {
+  if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+  e.preventDefault();
+  tabsEl.scrollLeft += e.deltaY;
+}, { passive: false });
+
+/** Mark each run of added or removed rows on the overview ruler, at the run's
+ * share of the row count.
+ * ponytail: rows are taken as equal height — a wrapped line or a hunk header
+ * is a little taller, so marks drift by a few px on long diffs; measure the
+ * rows once drawn if that ever matters. */
+function ruler(rows: DiffRow[]) {
+  const marks: HTMLElement[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const kind = rows[i].kind;
+    if (kind !== "add" && kind !== "del") continue;
+    let j = i + 1;
+    while (j < rows.length && rows[j].kind === kind) j++;
+    const m = document.createElement("i");
+    m.className = kind;
+    m.style.top = `${(i / rows.length) * 100}%`;
+    m.style.height = `${((j - i) / rows.length) * 100}%`;
+    marks.push(m);
+    i = j - 1;
+  }
+  $("#diff-ruler").replaceChildren(...marks);
+}
+/** The ruler stands for the scroll range: the viewport once the rows overflow
+ * it, else the rows themselves, so a short diff's marks sit beside their lines. */
+function rulerFit() {
+  const body = $("#diff-body");
+  const last = body.lastElementChild as HTMLElement | null; // offsets are from .diff-scroll, where the pre starts at 0
+  const rows = last ? last.offsetTop + last.offsetHeight : 0;
+  $("#diff-ruler").style.height = `${Math.min(rows, body.clientHeight)}px`;
+}
+new ResizeObserver(rulerFit).observe($("#diff-body"));
 
 /** Show the current thread's active tab: its panes, or a diff read fresh. */
 async function showTab() {
@@ -2141,10 +2234,13 @@ async function showTab() {
   $("#diff-full").classList.toggle("hidden", isFile); // a file is already all of it
   diffView.classList.remove("hidden");
   const gen = ++showGen; // a later showTab, or a closed tab, stops this one's chunks
-  if (t.rendered === undefined) body.textContent = "Loading…"; // else keep the old rows up while git answers
+  // A commit can't change: once its rows are up there is nothing to re-read.
+  if ("commit" in t.source && shownTab === t && t.rendered !== undefined) return;
+  if (t.rendered === undefined) (body.textContent = "Loading…"), ruler([]); // else keep the old rows up while git answers
   const imagePath = "file" in t.source && imageMime(t.source.file) ? t.source.file : null;
   body.classList.toggle("image-preview", !!imagePath);
   if (imagePath) {
+    ruler([]);
     const img = document.createElement("img");
     img.alt = imagePath;
     try {
@@ -2155,6 +2251,7 @@ async function showTab() {
       img.onerror = () => { URL.revokeObjectURL(url); if (body.contains(img)) body.textContent = "Could not display this image."; };
       img.src = url;
       body.replaceChildren(img);
+      shownTab = t;
     } catch (e) {
       if (current === th && th.tab === t) body.textContent = `Could not open image: ${String(e)}`;
     }
@@ -2165,8 +2262,9 @@ async function showTab() {
   // The panel re-reads every poll to stay in step; the DOM only moves when the
   // diff did. A full-file view is tens of thousands of rows — not for redrawing
   // every ten seconds, and a redraw would drop the scroll position.
-  if (text === t.rendered) return;
+  if (text === t.rendered && shownTab === t) return; // else another tab's rows are up
   t.rendered = text;
+  shownTab = t;
   body.textContent = "";
   const rows = isFile
     ? text.replace(/\n$/, "").split("\n").map((line, i) => ({ kind: "" as const, old: 0, neu: i + 1, text: line }))
@@ -2185,6 +2283,7 @@ async function showTab() {
   // ponytail: 50k rows keeps the DOM sane; a full-file diff of anything bigger is not for reading.
   const CAP = 50_000;
   const end = Math.min(rows.length, CAP);
+  ruler(rows.slice(0, end));
   const line = (r: DiffRow, i: number) => {
     const d = document.createElement("div");
     d.className = `line ${r.kind}`;
@@ -2209,6 +2308,7 @@ async function showTab() {
     for (const stop = Math.min(end, i + 2000); i < stop; i++) frag.append(line(rows[i], i));
     body.append(frag);
     if (i < end) return void requestAnimationFrame(step);
+    rulerFit();
     if (rows.length > CAP) note(body, `… ${rows.length - CAP} more lines`);
     if (!rows.length) note(body, "no differences");
   };
@@ -2633,8 +2733,9 @@ async function refreshChanges() {
   let log = "";
   let span = "";
   let midway = "";
+  let head: Map<string, Stat>; // against HEAD: the thread bar and sidebar numbers
   try {
-    [status, unstaged, staged, upstream, log, span, midway] = await Promise.all([
+    [status, unstaged, staged, upstream, log, span, midway, head] = await Promise.all([
       git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(parseStatus),
       git(th.dir, "diff", "--numstat").then(parseNumstat),
       git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
@@ -2649,6 +2750,7 @@ async function refreshChanges() {
         git(th.dir, "rev-parse", "-q", "--verify", "REVERT_HEAD").then(() => "revert", () => ""),
         git(th.dir, "rebase", "--show-current-patch").then(() => "rebase", () => ""),
       ]).then((r) => r.find(Boolean) ?? ""),
+      git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => new Map<string, Stat>()),
     ]);
   } catch (e) {
     panelSig = "";
@@ -2657,6 +2759,7 @@ async function refreshChanges() {
     return;
   }
   if (th !== current) return; // switched threads while git was answering
+  th.setStat({ ...sumStat(head.values()), files: status.length }); // pollStats skips this thread while the panel is up
   const total = sumStat([...unstaged.values(), ...staged.values()]);
   $("#changes-branch").textContent = th.branch || "(no branch)";
   $("#changes-stat").innerHTML = statHtml(total);
@@ -2671,6 +2774,12 @@ async function refreshChanges() {
     untracked: status.filter((c) => c.x === "?"),
   };
   hasStaged = secRows.staged.length > 0;
+  // A diff tab outlives its changes only as "no differences": once the section
+  // it came from lists none of its paths — committed, discarded, staged across —
+  // it goes. File and commit tabs are views of things that stay.
+  for (const t of th.tabs.filter((t) => "sec" in t.source))
+    if (!(t.source as { sec: Sec; paths: string[] }).paths.some((p) => secRows[(t.source as { sec: Sec }).sec].some((c) => c.path === p)))
+      closeTab(th, t);
   // Whatever was selected and has since been staged, discarded or committed
   // is no longer in the section it was picked from.
   if (selSec) {
@@ -2886,11 +2995,15 @@ async function createPR() {
 }
 
 /** Sidebar and header stats: lines changed against HEAD plus the untracked
- * count, per thread. Two quick git calls each, every 10 s; a folder that is
- * not a repo answers nothing and stays blank. */
-async function pollStats() {
+ * count. Two git calls per thread; a folder that is not a repo answers nothing
+ * and stays blank. The current thread every 10 s, every thread once a minute
+ * (`all`): a hidden thread's `+N −M` needs no more, and each call is a git.exe
+ * launch that stats the whole worktree. The open Changes panel reads the
+ * current thread's numbers itself, so that one is skipped while it is up. */
+async function pollStats(all = false) {
+  const targets = all ? threads : current ? [current] : [];
   await Promise.all(
-    threads.map(async (th) => {
+    targets.filter((th) => !(changesOpen && panel === "changes" && th === current)).map(async (th) => {
       const [numstat, status] = await Promise.all([
         git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => null),
         git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(parseStatus, () => null),
@@ -3952,8 +4065,8 @@ async function main() {
     if (closing) return;
     closing = true;
     try {
-      await save();
-      await saveQueue;
+      await flushSave();
+      await saveQueue; // flushSave swallows the error into a toast; this rethrows it, so a failed save cancels the close
       await getCurrentWindow().destroy();
     } catch (e) {
       toast(`Could not close safely: ${String(e)}`);
@@ -4149,18 +4262,26 @@ async function main() {
     const wakes = await invoke<[string, string][]>("take_wakes").catch(() => []);
     if (!wakes.length) return;
     const effortById = new Map(wakes);
-    let sessionsChanged = false;
     for (const p of threads.flatMap((t) => t.panes)) {
-      const sid = effortById.get(`${p.id}.session`);
-      if (sid && validSessionId(sid) && sid !== p.sessionId && (p.agent === "codex" || p.agent === "opencode")) {
-        p.sessionId = sid;
-        sessionsChanged = true;
-      }
       const e = effortById.get(p.id);
       if (e !== undefined) p.wake(e);
     }
-    if (sessionsChanged) save();
   }, 250);
+
+  // Codex's notify script and the opencode plugin drop the session id a pane is
+  // really on (agent.ts). Only the next launch needs it, so it rides the 4 s
+  // tick — on the 250 ms one it cost a file open per pane, under the pty lock.
+  const pollSessions = async () => {
+    const panes = threads.flatMap((t) => t.panes).filter((p) => p.agent === "codex" || p.agent === "opencode");
+    if (!panes.length) return;
+    const got = await invoke<[string, string][]>("take_sessions", { ids: panes.map((p) => p.id) }).catch(() => []);
+    let changed = false;
+    for (const [id, sid] of got) {
+      const p = panes.find((x) => x.id === id);
+      if (p && validSessionId(sid) && sid !== p.sessionId) (p.sessionId = sid), (changed = true);
+    }
+    if (changed) save();
+  };
 
   // Context and token totals, read from Claude Code's own transcripts.
   // ponytail: a 4s poll beside the wake one — the Rust side reads only what was
@@ -4188,9 +4309,21 @@ async function main() {
     // say, and it may well be open in front of you.
     if (!menu.classList.contains("hidden")) cfgPaint?.();
   };
-  setInterval(pollUsage, 4000);
-  setInterval(pollStats, 10_000);
-  setInterval(() => threads.forEach((t) => t.paintAge()), 30_000);
+  // Nothing reads git or transcripts while Loom is minimised or covered —
+  // WebView2 reports that as document.hidden — and it all catches up the
+  // moment the window is back. Session marks are the exception: a pane whose
+  // agent finished while Loom was hidden must not lose its id to a close.
+  const tick = (fn: () => unknown) => () => void (document.hidden || fn());
+  let statTick = 0;
+  setInterval(tick(pollUsage), 4000);
+  setInterval(pollSessions, 4000);
+  setInterval(tick(() => pollStats(++statTick % 6 === 0)), 10_000);
+  setInterval(tick(() => threads.forEach((t) => t.paintAge())), 30_000);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    void pollUsage();
+    void pollStats(true);
+  });
 
   for (const provider of ["claude", "codex"] as const) {
     const planBtn = $(`#${PLAN_PROVIDERS[provider].button}`);
@@ -4228,14 +4361,15 @@ async function main() {
       return openThread(w, panes, w.layout);
     }),
   );
+  renderSide();
   show(threads[saved.ui?.thread ?? 0] ?? threads[0] ?? null);
   toggleChanges(saved.ui?.changesOpen ?? false);
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
   restoring = false;
-  await save();
+  await flushSave();
   pollUsage(); // restored panes shouldn't sit blank for the first interval
-  pollStats();
+  pollStats(true);
 }
 
 main();

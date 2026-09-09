@@ -25,7 +25,7 @@ try {
       if (location.search.includes('resume')) state.threads[0].panes = [{ cmd: 'codex' }, { cmd: 'codex' }];
       if (location.search.includes('legacy')) state.threads[0].panes = [{ cmd: 'opencode', sid: 'old-placeholder-a' }, { cmd: 'opencode', sid: 'old-placeholder-b' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
-      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], failSessions: false };
+      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false };
       mockWindows('main');
       mockIPC((cmd, args = {}) => {
         qa.calls.push({ cmd, args });
@@ -41,6 +41,11 @@ try {
           return location.search.includes('restore') ? new Promise(resolve => setTimeout(resolve, qa.panes.length * 30)) : undefined;
         }
         if (cmd === 'take_wakes') return qa.wakes.splice(0);
+        if (cmd === 'take_sessions') {
+          const mine = qa.sessions.filter(([id]) => args.ids.includes(id));
+          qa.sessions = qa.sessions.filter(s => !mine.includes(s));
+          return mine;
+        }
         if (cmd === 'read_file') return 'export const answer = 42;\n// ' + args.path + '\n';
         if (cmd === 'read_image') {
           if (qa.failImage) throw new Error('Image file not found');
@@ -79,7 +84,7 @@ try {
           const a = args.args;
           if (a.includes('MERGE_HEAD') || a.includes('REVERT_HEAD') || a[0] === 'rebase') throw new Error('No operation in progress');
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
-          if (a[0] === 'status') return ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0';
+          if (a[0] === 'status') return qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0';
           if (a.includes('--numstat')) return '18\t4\tsrc/main.ts\n7\t2\tsrc/styles.css\n';
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
           if (a[0] === 'diff' || a[0] === 'show') return (a.includes('-U999999') ? ' context line one\n context line two\n' : '') + 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old navigation\n+const description = "A long line of source code that should remain readable when reviewing changes inside a narrow workspace window.";\n';
@@ -376,7 +381,8 @@ try {
       await audit(id + '-menu');
       if (id !== 'theme') {
         await page.locator('.menu-item').nth(1).locator('span').first().click();
-        assert.equal(await page.evaluate(key => window.qa.saved[key], id), 1, id + ' selection must be saved');
+        // save() is throttled to one write per 300 ms, so the pick lands a moment later.
+        await page.waitForFunction(key => window.qa.saved[key] === 1, id, { timeout: 5000 }).catch(() => assert.fail(id + ' selection must be saved'));
         await audit(id + '-selected');
       }
       await escape();
@@ -438,11 +444,25 @@ try {
     await page.locator('.file').first().click();
     await page.waitForSelector('#diff:not(.hidden) .line');
     await page.click('#changes-close'); // under 760px the panel covers the diff
+    // The overview ruler: one mark per run of changed rows, the removal above the addition.
+    assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('#diff-ruler i')].map(m => [m.className, parseFloat(m.style.top) < 100])), [['del', true], ['add', true]]);
+    assert.ok(await page.evaluate(() => { const [d, a] = document.querySelectorAll('#diff-ruler i'); return d.getBoundingClientRect().top < a.getBoundingClientRect().top; }), 'Ruler marks keep row order');
     await page.click('#diff-full');
     await page.waitForFunction(() => document.querySelector('#diff-body').textContent.includes('context line one') && window.qa.saved.ui.diffFull);
     await audit('diff-full');
     await page.click('#diff-full');
     await page.waitForFunction(() => !document.querySelector('#diff-body').textContent.includes('context line one'));
+    // Once the file has no changes left, its diff tab closes on the next re-read.
+    await page.evaluate(() => { window.qa.clean = true; });
+    await page.click('#changes-btn');
+    await page.click('#panel-files');
+    await page.click('#panel-changes');
+    await page.waitForFunction(() => !document.querySelector('#tabs .tab[title="main.ts (diff)"]') && document.querySelector('#diff').classList.contains('hidden'));
+    await page.evaluate(() => { window.qa.clean = false; });
+    await page.click('#panel-files');
+    await page.click('#panel-changes');
+    await page.waitForSelector('#changes-body .file');
+    await page.click('#changes-close');
     await page.click('#changes-btn');
     await page.click('#panel-files');
     await page.waitForFunction(() => document.querySelectorAll('#changes-body .dir').length === 1 && window.qa.saved.ui.panel === 'files');
@@ -463,7 +483,7 @@ try {
     await page.locator('#changes-body .file').filter({ hasText: 'main.ts' }).click();
     await page.waitForFunction(() => document.querySelector('#diff-body').textContent.includes('answer = 42') && document.querySelector('#diff-body').textContent.includes('src/main.ts'));
     assert.equal(await page.locator('#diff-full').isVisible(), false, 'A file tab has no hunk mode');
-    assert.equal(await page.locator('#diff-name').textContent(), 'main.ts');
+    assert.equal(await page.locator('#tabs .tab.on > span').textContent(), 'main.ts');
     await audit('file-tab');
     await page.locator('#changes-body .file').filter({ hasText: 'preview.png' }).click();
     await page.waitForFunction(() => document.querySelector('#diff-body img')?.naturalWidth === 1600);
@@ -524,7 +544,8 @@ try {
     await page.mouse.down();
     await page.mouse.move(source.x + source.width / 2, targetBounds.y + targetBounds.height - 8, { steps: 10 });
     await page.mouse.up();
-    assert.equal(await page.evaluate(() => window.qa.saved.threads[0].name), 'review-keyboard-navigation', 'Thread-name buttons must still support drag-to-reorder');
+    await page.waitForFunction(() => window.qa.saved.threads[0].name === 'review-keyboard-navigation', null, { timeout: 5000 })
+      .catch(() => assert.fail('Thread-name buttons must still support drag-to-reorder'));
     await page.goto(base + '?empty');
     await page.waitForSelector('#empty:not(.hidden)');
     await audit('empty-workspace');
@@ -538,7 +559,7 @@ try {
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await page.evaluate(() => {
       const codex = window.qa.panes.filter(p => p.argv.at(-1).startsWith('codex'));
-      window.qa.wakes.push([codex[0].id + '.session', '11111111-2222-4333-8444-555555555555'], [codex[1].id + '.session', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee']);
+      window.qa.sessions.push([codex[0].id, '11111111-2222-4333-8444-555555555555'], [codex[1].id, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee']);
     });
     await page.waitForFunction(() => window.qa.saved.threads[0].panes.every(p => p.sessionId));
     await page.goto(base + '?restore');
@@ -590,7 +611,7 @@ try {
     await page.locator('.file').first().click();
     await page.click('#changes-close');
     if (width > 760) await page.click('#side-toggle');
-    await page.waitForFunction(() => window.qa.saved?.ui.thread === 2 && window.qa.saved.ui.sideOpen === false && window.qa.saved.threads[2].tab === 0);
+    await page.waitForFunction(() => window.qa.saved?.ui.thread === 2 && window.qa.saved.ui.sideOpen === false && window.qa.saved.ui.changesOpen === false && window.qa.saved.threads[2].tab === 0);
     await page.waitForTimeout(250); // ResizeObserver settles after hiding the sidebar.
     const remembered = await page.evaluate(() => window.qa.saved);
     await page.goto(base + '?restore');

@@ -1254,30 +1254,44 @@ dialog h2 {
 }
 
 /* --- diff tabs ----------------------------------------------------------- */
+/* The open diffs, as tabs in the diff view's header. Each keeps its own width
+   and the row wraps, so a lone tab's underline stays under its label. Living
+   in the overlay, they never take height from the panes — a pty resize on
+   every open and close, which ConPTY answers by repainting Claude's
+   transcript from the top. */
 #tabs {
   display: flex;
   align-items: stretch;
-  gap: 2px;
-  height: 30px;
-  padding: 0 8px;
+  flex: none;
+  height: 32px;
+  padding: 0 6px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   font-family: var(--mono);
   font-size: 11px;
-  overflow-x: auto;
+  overflow-x: auto; /* sideways like Orca's; the wheel scrolls it, see paintTabs */
   scrollbar-width: none;
   user-select: none;
 }
+#tabs::-webkit-scrollbar { display: none; }
 #tabs .tab {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex: none;
+  gap: 6px;
+  flex: 0 1 auto; /* tabs share a narrow row before the strip scrolls */
+  min-width: 44px;
   max-width: 220px;
-  padding: 0 4px 0 10px;
-  border-bottom: 2px solid transparent;
+  padding: 0 6px 0 10px;
+  border-right: 1px solid var(--line);
   color: var(--muted);
   cursor: pointer;
+}
+#tabs .tab > i {
+  flex: none;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--faint);
 }
 #tabs .tab > span {
   overflow: hidden;
@@ -1286,23 +1300,54 @@ dialog h2 {
 }
 #tabs .tab:hover {
   color: var(--text);
+  background: color-mix(in srgb, var(--raise) 60%, transparent);
 }
 #tabs .tab.on {
   color: var(--text);
-  border-bottom-color: var(--accent);
+  background: var(--raise);
+}
+#tabs .tab.on > i { color: var(--muted); }
+/* The agent tab: brand mark, bold name, a gap from the diffs, and the accent
+   when it's the one showing — the diffs only ever get the quiet bar. */
+#tabs .tab.panes {
+  margin-right: 6px;
+  padding-left: 8px;
+  border-right-color: var(--line-strong);
+  font-weight: 600;
+  color: var(--text);
+}
+#tabs .tab.panes > i { display: flex; }
+#tabs .tab.panes .ico { width: 13px; height: 13px; }
+#tabs .tab.panes.on {
+  background: var(--accent-dim);
+}
+#tabs .tab.panes.on::after { background: var(--accent); }
+/* Orca's active marker: a quiet bar in the text colour, not the accent. */
+#tabs .tab.on::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--text) 60%, var(--panel));
 }
 #tabs .tab button {
-  padding: 0 4px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
   border: none;
+  border-radius: 3px;
   background: none;
-  color: var(--faint);
-  opacity: 0;
+  color: transparent;
+  font-size: 10px;
+  line-height: 16px;
 }
-#tabs .tab:hover button {
-  opacity: 1;
+#tabs .tab:hover button,
+#tabs .tab.on button {
+  color: var(--muted);
 }
 #tabs .tab button:hover {
-  color: var(--err);
+  color: var(--text);
+  background: var(--line-strong);
 }
 
 /* --- changes panel ------------------------------------------------------- */
@@ -1599,15 +1644,42 @@ dialog h2 {
 .diff-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 6px 4px 12px;
+  gap: 6px;
+  height: 32px;
+  padding: 0 6px 0 12px;
   border-bottom: 1px solid var(--line);
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text);
 }
+.diff-scroll {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+}
+/* Marks along the scrollbar, one per run of changed rows; a row's share of the
+   height is its share of the rows. */
+#diff-ruler {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%; /* rulerFit() shrinks it to the rows when they don't fill the viewport */
+  width: 8px;
+  pointer-events: none;
+}
+#diff-ruler i {
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  min-height: 2px;
+  border-radius: 1px;
+  background: var(--ok);
+}
+#diff-ruler i.del { background: var(--err); }
 #diff-body {
   flex: 1;
+  min-width: 0;
   margin: 0;
   padding: 8px 12px;
   overflow: auto;
@@ -1805,12 +1877,12 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
 #new .err:empty { min-height: 0; }
 #keys { width: 620px; }
 #keys table { width: 100%; }
-#tabs { height: auto; max-height: 140px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); overflow-y: auto; }
-#tabs .tab { max-width: none; min-width: 0; min-height: 32px; }
-#tabs .tab > span { flex: 1; }
-#tabs .tab button { opacity: 1; }
-.diff-head > span:first-child { min-width: 0; overflow-wrap: anywhere; }
-#diff-body .line { min-width: 0; white-space: pre-wrap; }
+/* content-visibility: rows off screen are neither laid out nor painted, so a
+   50k-row diff or a 20k-file tree costs what the viewport shows — the
+   virtualised list, from CSS. `auto` sizes remember each row once drawn; the
+   intrinsic size only seeds the scrollbar before that. */
+#diff-body .line { min-width: 0; white-space: pre-wrap; content-visibility: auto; contain-intrinsic-size: auto 1.45em; }
+#changes-body .file, #changes-body .dir { content-visibility: auto; contain-intrinsic-size: auto 22px; }
 #diff-body .line > span { min-width: 0; overflow-wrap: anywhere; }
 #diff-body .line.hunk { flex-wrap: wrap; }
 #diff-body .line.hunk > span { flex-basis: 100%; }

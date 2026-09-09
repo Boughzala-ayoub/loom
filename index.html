@@ -50,7 +50,8 @@
           <button id="wsmore" title="Thread actions">⋯</button>
         </div>
 
-        <!-- Diff tabs beside the panes, shown only while a thread has some. -->
+        <!-- The panes and the open diffs as tabs, Orca's bar. Always up while a
+             thread shows: coming and going would resize every pane. -->
         <div id="tabs" class="hidden"></div>
 
         <div id="work">
@@ -69,7 +70,11 @@
                 <button id="diff-full" title="Show the whole file around each change, or only the hunks">⊞ full file</button>
                 <button id="diff-close" title="Close (Esc)">✕</button>
               </div>
-              <pre id="diff-body"></pre>
+              <div class="diff-scroll">
+                <pre id="diff-body"></pre>
+                <!-- Overview ruler: where the changes are, along the scrollbar. -->
+                <div id="diff-ruler"></div>
+              </div>
             </div>
           </main>
 
