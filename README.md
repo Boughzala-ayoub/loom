@@ -141,7 +141,15 @@ the bottom; a commit opens as its own diff.
 A diff opens as a **tab** beside the panes, the way Orca does it: the strip
 above the stage shows `▦ <thread>` for the panes and one tab per diff, with
 old and new line numbers in the gutter. Tabs re-read git every time they are
-shown, so they never go stale behind a refresh.
+shown, so they never go stale behind a refresh. **full file** in the diff
+header switches between git's hunks and the whole file with the changes
+marked in it; the choice sticks across diffs and restarts.
+
+The panel's **Files** tab lists every file in the thread's folder, the way
+Orca's does: what git tracks or would track (so nothing ignored), or the folder
+itself when it is not a repository. Folders fold, and a file opens as a tab
+beside the panes with line numbers; right-click copies its path or opens it in
+VS Code.
 
 Every thread row in the sidebar carries the same `+N −M`, refreshed every ten
 seconds, so a thread with work in it reads as such before you open it.

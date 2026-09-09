@@ -664,6 +664,14 @@ fn creds() -> Result<Oauth, String> {
 // a TLS stack — into the build for one request. The token goes in through a
 // config on stdin, never argv, so it can't be read out of a process list.
 fn get(url: &str, token: &str) -> Result<String, String> {
+    let auth = format!("Bearer {token}");
+    get_headers(url, &[("Authorization", &auth), ("anthropic-beta", "oauth-2025-04-20"), ("anthropic-version", "2023-06-01")])
+}
+
+fn get_headers(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
+    if headers.iter().any(|(_, value)| value.chars().any(char::is_control)) {
+        return Err("Invalid usage request credentials".into());
+    }
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     let curl = std::env::var("SystemRoot")
@@ -677,12 +685,7 @@ fn get(url: &str, token: &str) -> Result<String, String> {
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no console flash
         .spawn()
         .map_err(|e| format!("curl: {e}"))?;
-    // anthropic-version is what /v1/models wants and /api/oauth/usage ignores.
-    let cfg = format!(
-        "header = \"Authorization: Bearer {token}\"\n\
-         header = \"anthropic-beta: oauth-2025-04-20\"\n\
-         header = \"anthropic-version: 2023-06-01\"\n"
-    );
+    let cfg = headers.iter().map(|(name, value)| format!("header = {}\n", serde_json::to_string(&format!("{name}: {value}")).unwrap())).collect::<String>();
     child
         .stdin
         .take()
@@ -714,6 +717,132 @@ fn get(url: &str, token: &str) -> Result<String, String> {
             Err(_) => body.trim().to_string(),
         }
     ))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexPlan {
+    #[serde(flatten)]
+    plan: Plan,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    banked_resets: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    banked_reset_expiries: Option<Vec<Option<String>>>,
+    note: String,
+}
+
+fn shape_codex(value: &serde_json::Value, live: bool) -> Option<CodexPlan> {
+    let rate = if live { &value["rate_limit"] } else { value };
+    let mut limits = Vec::new();
+    for key in if live { ["primary_window", "secondary_window"] } else { ["primary", "secondary"] } {
+        let w = &rate[key];
+        let Some(percent) = w["used_percent"].as_f64().filter(|n| n.is_finite()) else { continue };
+        let mins = if live { w["limit_window_seconds"].as_u64().unwrap_or(0).div_ceil(60) } else { w["window_minutes"].as_u64().unwrap_or(0) };
+        let label = match mins {
+            0 => "Usage".into(),
+            10080 => "Weekly".into(),
+            n if n >= 10080 => format!("{} wk", (n as f64 / 10080.0).round()),
+            n if n >= 1440 => format!("{}-day", (n as f64 / 1440.0).round()),
+            n if n >= 60 => format!("{}h limit", (n as f64 / 60.0).round()),
+            n => format!("{n} min"),
+        };
+        limits.push(Limit {
+            label, group: if mins >= 1440 { "weekly" } else { "session" }.into(),
+            percent: percent.clamp(0.0, 100.0),
+            severity: match percent { p if p >= 100.0 => "exceeded", p if p >= 90.0 => "critical", p if p >= 80.0 => "warning", _ => "ok" }.into(),
+            resets_at: w[if live { "reset_at" } else { "resets_at" }].as_i64().filter(|n| *n > 0).map(|n| n.to_string()),
+        });
+    }
+    if limits.is_empty() { return None; }
+    Some(CodexPlan {
+        plan: Plan { tier: value["plan_type"].as_str().unwrap_or("").into(), limits, stale: !live },
+        banked_resets: if live { value["rate_limit_reset_credits"]["available_count"].as_u64().filter(|n| *n <= 9_007_199_254_740_991) } else { None },
+        banked_reset_expiries: None,
+        note: String::new(),
+    })
+}
+
+fn codex_homes() -> Vec<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME") { return vec![home.into()]; }
+    let mut homes = Vec::new();
+    if let Some(home) = std::env::var_os("ORCA_CODEX_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("orca/codex-runtime-home/home"))) {
+        homes.push(home);
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") { homes.push(PathBuf::from(home).join(".codex")); }
+    homes
+}
+
+fn codex_local(homes: &[PathBuf]) -> Option<CodexPlan> {
+    // ponytail: two date folders and 20 files; widen for sessions spanning older dates.
+    let mut files = Vec::new();
+    let dirs = |path: &Path| std::fs::read_dir(path).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect::<Vec<_>>();
+    for home in homes {
+        let mut days = Vec::new();
+        for year in dirs(&home.join("sessions")) { for month in dirs(&year) { days.extend(dirs(&month)); } }
+        days.sort();
+        for day in days.iter().rev().take(2) {
+            for entry in std::fs::read_dir(day).into_iter().flatten().flatten() {
+                if entry.path().extension().is_some_and(|e| e == "jsonl") {
+                    if let Ok(time) = entry.metadata().and_then(|m| m.modified()) { files.push((time, entry.path())); }
+                }
+            }
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    // Same bounded rollout tail as usageoverlayv2; never load whole transcripts.
+    for (_, path) in files.into_iter().take(20) {
+        let Ok(mut file) = std::fs::File::open(path) else { continue };
+        let Ok(size) = file.metadata().map(|m| m.len()) else { continue };
+        if file.seek(SeekFrom::Start(size.saturating_sub(256 * 1024))).is_err() { continue; }
+        let mut bytes = Vec::new();
+        if file.read_to_end(&mut bytes).is_err() { continue; }
+        let tail = String::from_utf8_lossy(&bytes);
+        for line in tail.lines().rev().filter(|s| s.contains("\"rate_limits\"")) {
+            if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(mut plan) = shape_codex(&row["payload"]["rate_limits"], false) {
+                    plan.note = "Live refresh unavailable; showing local session usage.".into();
+                    return Some(plan);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command(async)]
+pub fn codex_plan_usage() -> Result<CodexPlan, String> {
+    let homes = codex_homes();
+    let auth = homes.iter().find_map(|home| {
+        let raw = std::fs::read_to_string(home.join("auth.json")).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        let token = value["tokens"]["access_token"].as_str()?.to_string();
+        if token.is_empty() { return None; }
+        Some((home, token, value["tokens"]["account_id"].as_str().unwrap_or("").to_string()))
+    });
+    let mut error = "No Codex usage available. Run codex to sign in.".to_string();
+    if let Some((home, token, account)) = auth {
+        let auth = format!("Bearer {token}");
+        let mut headers = vec![("Authorization", auth.as_str()), ("User-Agent", "codex-cli"), ("OpenAI-Beta", "codex-1"), ("originator", "Codex Desktop")];
+        if !account.is_empty() { headers.push(("ChatGPT-Account-Id", account.as_str())); }
+        match get_headers("https://chatgpt.com/backend-api/wham/usage", &headers)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())) {
+            Ok(value) => if let Some(mut plan) = shape_codex(&value, true) {
+                if plan.banked_resets.is_some_and(|n| n > 0) {
+                    if let Ok(raw) = get_headers("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", &headers) {
+                        if let Ok(details) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            plan.banked_reset_expiries = details["credits"].as_array().map(|credits| credits.iter().filter(|c| c["status"] == "available").map(|c| c["expires_at"].as_str().map(String::from)).collect());
+                        }
+                    }
+                }
+                return Ok(plan);
+            },
+            Err(e) => error = e,
+        }
+        // Keep offline readings tied to the home that supplied this account's token.
+        return codex_local(std::slice::from_ref(home)).ok_or(error);
+    }
+    codex_local(&homes).ok_or(error)
 }
 
 /// Plan usage for the signed-in account. The caller polls this — the endpoint
@@ -839,6 +968,50 @@ fn plan_from_status(dir: &Path, tier: String) -> Option<Plan> {
 mod tests {
     use super::{live_status, plan_from_status, profile_of, scan, slug, transcript, Usage};
     use std::io::Write;
+
+    #[test]
+    fn codex_usage_windows_and_fallback() {
+        let live = serde_json::json!({"plan_type":"prolite", "rate_limit": {
+            "primary_window":{"used_percent":4,"limit_window_seconds":604800,"reset_at":1900000000},
+            "secondary_window":{"used_percent":125,"limit_window_seconds":18000,"reset_at":1900000100}
+        }, "rate_limit_reset_credits":{"available_count":3}});
+        let plan = super::shape_codex(&live, true).unwrap();
+        assert_eq!(plan.plan.tier, "prolite");
+        assert_eq!((plan.plan.limits[0].label.as_str(), plan.plan.limits[0].group.as_str()), ("Weekly", "weekly"));
+        assert_eq!((plan.plan.limits[1].label.as_str(), plan.plan.limits[1].group.as_str(), plan.plan.limits[1].percent), ("5h limit", "session", 100.0));
+        assert_eq!(plan.plan.limits[1].resets_at.as_deref(), Some("1900000100"));
+        assert_eq!(plan.banked_resets, Some(3));
+        assert!(!plan.plan.stale);
+        assert!(super::shape_codex(&serde_json::json!({"rate_limit":{}}), true).is_none());
+        for invalid in [serde_json::Value::Null, serde_json::json!(-1), serde_json::json!(1.5), serde_json::json!("3")] {
+            let mut value = live.clone();
+            value["rate_limit_reset_credits"]["available_count"] = invalid;
+            assert!(super::shape_codex(&value, true).unwrap().banked_resets.is_none());
+        }
+        let root = std::env::temp_dir().join(format!("loom-codex-usage-test-{}", std::process::id()));
+        let day = root.join("sessions/2026/09/09");
+        std::fs::create_dir_all(&day).unwrap();
+        let local = serde_json::json!({"payload":{"rate_limits":{"plan_type":"plus", "primary":{"used_percent":42.6,"window_minutes":300,"resets_at":1900000000}}}});
+        // The tail can begin in a UTF-8 character or half-written JSON line.
+        let mut file = std::fs::File::create(day.join("rollout-test.jsonl")).unwrap();
+        file.write_all("é".repeat(140_000).as_bytes()).unwrap();
+        writeln!(file, "\n{local}\n{{broken").unwrap();
+        let fallback = super::codex_local(std::slice::from_ref(&root)).unwrap();
+        assert!(fallback.plan.stale);
+        assert_eq!(fallback.plan.limits[0].percent, 42.6);
+        assert_eq!(fallback.plan.limits[0].group, "session");
+        assert!(fallback.banked_resets.is_none());
+        assert!(super::get_headers("https://example.invalid", &[("Authorization", "bad\nheader")]).is_err());
+        drop(file);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Reads the signed-in account's live usage"]
+    fn codex_live_usage() {
+        let plan = super::codex_plan_usage().unwrap();
+        println!("Codex usage: {} windows, local fallback: {}, banked resets reported: {}", plan.plan.limits.len(), plan.plan.stale, plan.banked_resets.is_some());
+    }
 
     /// Tokens are charged to the tool that produced them, a subagent's are not
     /// this conversation's, and the two exact readings — context per turn, and

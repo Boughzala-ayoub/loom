@@ -290,6 +290,67 @@ fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<Strin
     }
 }
 
+/// Every file under `dir`, relative with `/`, for the Files tree. Folders git
+/// would not track are skipped, so a `node_modules` never lands in the panel.
+/// ponytail: no .gitignore parsing — `git ls-files` covers git checkouts and
+/// this is the fallback for plain folders; caps at 20k entries.
+#[tauri::command(async)]
+fn list_files(dir: String) -> Vec<String> {
+    let root = std::path::PathBuf::from(&dir);
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if p.is_dir() {
+                if !matches!(name.as_str(), ".git" | "node_modules" | "target" | ".build") {
+                    stack.push(p);
+                }
+            } else if let Ok(rel) = p.strip_prefix(&root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+                if out.len() >= 20_000 {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One file's text for the viewer tab. Binary bytes come back lossy; anything
+/// past 4 MB is cut, which is past what a diff view is for anyway.
+#[tauri::command(async)]
+fn read_file(dir: String, path: String) -> Result<String, String> {
+    let mut bytes = std::fs::read(std::path::Path::new(&dir).join(&path)).map_err(|e| e.to_string())?;
+    let cut = bytes.len() > 4 << 20;
+    bytes.truncate(4 << 20);
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if cut {
+        text.push_str("\n… truncated at 4 MB");
+    }
+    Ok(text)
+}
+
+#[tauri::command(async)]
+fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, String> {
+    let path = std::path::Path::new(&dir).join(path);
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif") {
+        return Err("Unsupported image format".into());
+    }
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+        return Err("Not an image file".into());
+    }
+    // ponytail: cap previews at 32 MB; stream larger images if needed.
+    let mut bytes = Vec::new();
+    file.take((32 << 20) + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() > 32 << 20 { return Err("Image exceeds the 32 MB preview limit".into()); }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// `git_run` with the patch on stdin, which is the only way to hand `git apply`
 /// one hunk: staging part of a file writes a patch nobody should have to keep
 /// in a temp file.
@@ -699,7 +760,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             pty_spawn, pty_write, pty_resize, pty_kill, load_state, save_state, open_vscode,
-            git_run, git_stdin, take_wakes, opencode_sessions, codex_sessions, usage::session_usage, usage::has_session, usage::plan_usage,
+            git_run, git_stdin, list_files, read_file, read_image, take_wakes, opencode_sessions, codex_sessions, usage::session_usage, usage::has_session, usage::plan_usage, usage::codex_plan_usage,
             usage::model_options, usage::context_profile,
             dictate::dictate_start,
             dictate::dictate_stop,
@@ -712,6 +773,26 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{drain_wakes, sweep_stale_profiles, take_utf8};
+
+    #[test]
+    fn image_preview_reads_bytes_and_rejects_invalid_files() {
+        use tauri::ipc::{IpcResponse, InvokeResponseBody};
+        let dir = std::env::temp_dir().join(format!("loom-image-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let image = include_bytes!("../icons/128x128.png");
+        std::fs::write(dir.join("screen shot.PNG"), image).unwrap();
+        let response = super::read_image(root.clone(), "screen shot.PNG".into()).unwrap().body().unwrap();
+        assert!(matches!(response, InvokeResponseBody::Raw(bytes) if bytes == image));
+        assert!(super::read_image(root.clone(), dir.join("screen shot.PNG").to_string_lossy().into()).is_ok());
+        assert!(super::read_image(root.clone(), "missing.png".into()).is_err());
+        assert!(super::read_image(root.clone(), "script.exe".into()).is_err());
+        let large = std::fs::File::create(dir.join("large.png")).unwrap();
+        large.set_len((32 << 20) + 1).unwrap();
+        drop(large);
+        assert!(super::read_image(root, "large.png".into()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn sweep_keeps_current_and_live_profiles() {

@@ -1,6 +1,4 @@
-/* Palette shared with aa.wezterm.lua so the two read as one family.
-   Chrome speaks the terminal's own language: mono labels, prompt glyphs,
-   a block cursor in the wordmark. Everything else stays quiet. */
+/* Original Loom palette: deep navy chrome with a warm copper accent. */
 :root {
   --bg: #0a0f1b;
   --panel: #0e1626;
@@ -15,6 +13,10 @@
   --ok: #6fbf73;
   --err: #f85149;
   --warn: #e3b341;
+  --blue: #91b9df;
+  --magenta: #bba6d8;
+  --cyan: #83c6d0;
+  --shadow: color-mix(in srgb, var(--bg) 35%, transparent);
   --mono: "Cascadia Mono", Consolas, "Courier New", monospace;
   color-scheme: dark;
 }
@@ -337,7 +339,7 @@ input:focus {
   color: var(--text);
   background: var(--raise);
   border-color: var(--line-strong);
-  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 1px 6px var(--shadow);
 }
 .thread .chip {
   padding: 0 4px;
@@ -530,7 +532,6 @@ input:focus {
 }
 .agent[data-state="busy"]::before {
   background: var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
 }
 .agent[data-state="dead"]::before {
   background: var(--err);
@@ -569,10 +570,10 @@ dialog {
   background: var(--panel);
   border: 1px solid var(--line-strong);
   border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 12px 40px var(--shadow);
 }
 dialog::backdrop {
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--shadow);
 }
 dialog h2 {
   margin: 0 0 12px;
@@ -690,7 +691,7 @@ dialog h2 {
   background: var(--panel);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 24px var(--shadow);
   font-family: var(--mono);
   font-size: 12px;
 }
@@ -758,16 +759,21 @@ dialog h2 {
   content: "●";
   font-size: 8px;
 }
-/* Theme rows carry a swatch: accent disc, ringed in that theme's own
-   background so a dark and a light palette are told apart at a glance. */
-.menu-item .swatch {
-  flex: none;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  border: 1px solid;
-  box-shadow: inset 0 0 0 2px currentColor;
-}
+/* Each palette previews the sidebar, terminal, and its actual text colors. */
+#pane-menu:has(.theme-card) { width: 380px; max-width: calc(100vw - 12px); padding: 10px; }
+#menu-list:has(.theme-card) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 3px; max-height: 70dvh; }
+.menu-item.theme-card { display: grid; gap: 8px; min-width: 0; padding: 8px; border: 1px solid var(--line); font-family: "Segoe UI", sans-serif; }
+.theme-card::before { display: none; }
+.theme-card.on { border-color: var(--accent); background: var(--accent-dim); }
+.theme-card:hover { border-color: var(--accent); }
+.theme-preview { position: relative; display: block; height: 58px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--bg); overflow: hidden; }
+.theme-preview::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 24%; background: var(--panel); border-right: 1px solid var(--line); }
+.theme-preview::after { content: ""; position: absolute; left: 5%; top: 12px; width: 13%; height: 4px; border-radius: 1px; background: var(--accent); box-shadow: 0 10px var(--line-strong), 0 20px var(--line-strong); }
+.theme-preview i { position: absolute; left: 32%; top: 12px; width: 38%; height: 4px; border-radius: 1px; background: var(--text); box-shadow: 0 10px var(--muted); }
+.theme-preview i + i { top: 34px; width: 23%; background: var(--accent); box-shadow: none; }
+.theme-card > .theme-caption { display: flex; align-items: center; gap: 4px; min-width: 0; font-size: 12px; }
+.theme-caption small { margin-left: auto; color: var(--muted); font-size: 10px; }
+.theme-card.on .theme-caption::after { content: "✓"; color: var(--accent); }
 #menu-add {
   width: 100%;
   margin-top: 5px;
@@ -789,7 +795,7 @@ dialog h2 {
   font-size: 11px;
   background: var(--panel);
   border-color: var(--line-strong);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 24px var(--shadow);
 }
 #find::placeholder {
   color: var(--faint);
@@ -848,7 +854,7 @@ dialog h2 {
 }
 .pane.active {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent-dim), 0 2px 14px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px var(--accent-dim), 0 2px 14px var(--shadow);
 }
 
 /* Claude finished a turn here. Outranks .active — the whole point is that it
@@ -856,7 +862,7 @@ dialog h2 {
 .pane.waiting,
 .pane.waiting.active {
   border-color: var(--warn);
-  box-shadow: 0 0 0 1px rgba(227, 179, 65, 0.22), 0 2px 14px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 22%, transparent), 0 2px 14px var(--shadow);
 }
 .pane.waiting .pane-title {
   color: var(--warn);
@@ -875,7 +881,7 @@ dialog h2 {
   gap: 6px;
   padding: 3px 4px 3px 10px;
   border-bottom: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.015);
+  background: var(--panel);
   color: var(--faint);
   font-family: var(--mono);
   font-size: 11px;
@@ -895,7 +901,10 @@ dialog h2 {
   opacity: 0.75;
   transition: opacity 0.12s, color 0.12s;
 }
-.pane-head button:first-of-type {
+.pane-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
   margin-left: auto;
 }
 .pane:hover .pane-head button {
@@ -960,7 +969,7 @@ dialog h2 {
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   border: 1px solid var(--line-strong);
   border-radius: 24px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 24px var(--shadow);
   animation: rise 0.16s ease-out;
 }
 #wave i {
@@ -1047,11 +1056,15 @@ dialog h2 {
 }
 /* Plan chip: the 5-hour session window, so one glance says how much room is left
    before anything stops. */
-#plan {
+.plan-chip {
   flex: none;
   font-family: var(--mono);
   font-size: 12px;
+  display: inline-flex; align-items: center; gap: 5px;
 }
+.plan-heading { display: flex; align-items: center; gap: 7px; padding: 8px 9px 4px; color: var(--text); }
+.plan-heading .ico { width: 16px; height: 16px; }
+.plan-site { display: block; padding: 6px 9px; color: var(--accent); font-size: 11px; }
 /* Severities as the API reports them; `normal` keeps the button's own colours. */
 .sev-warning {
   color: var(--warn);
@@ -1373,8 +1386,11 @@ dialog h2 {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 10px 4px 4px;
-  color: var(--muted);
+  margin: 8px 0 3px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  background: var(--raise);
+  color: var(--text);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.6px;
@@ -1400,6 +1416,31 @@ dialog h2 {
 }
 .changes-h a:hover {
   color: var(--accent);
+}
+.changes-h > .chev {
+  color: var(--accent);
+}
+#changes-body > .changes-h:first-child,
+.sel-bar + .changes-h {
+  margin-top: 2px;
+}
+/* Nesting: each level steps in 14px and draws a guide line, so a file under
+   src-tauri/src sits visibly two folders deep instead of floating. */
+#changes-body .dir,
+#changes-body .file {
+  padding-left: calc(8px + var(--depth, 0) * 14px);
+  background-image: repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px 14px);
+  background-size: calc(var(--depth, 0) * 14px) 100%;
+  background-position: 11px 0;
+  background-repeat: no-repeat;
+}
+.dir > .chev {
+  border-width: 3px;
+  border-top-width: 4px;
+  color: var(--faint);
+}
+.dir > span {
+  font-weight: 600;
 }
 .dir {
   display: flex;
@@ -1431,7 +1472,7 @@ dialog h2 {
   user-select: none; /* shift-click picks rows, not text */
 }
 .file:hover {
-  background: var(--raise);
+  background-color: var(--raise);
 }
 .file-name {
   flex: 1;
@@ -1496,7 +1537,7 @@ dialog h2 {
   background: var(--raise);
 }
 .file.sel {
-  background: var(--accent-dim);
+  background-color: var(--accent-dim);
 }
 .sel-bar {
   display: flex;
@@ -1552,7 +1593,7 @@ dialog h2 {
   background: var(--panel);
   border: 1px solid var(--line-strong);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 24px var(--shadow);
   overflow: hidden;
 }
 .diff-head {
@@ -1580,6 +1621,11 @@ dialog h2 {
 #diff-body {
   padding: 0 0 8px;
 }
+#diff-body.image-preview {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 0; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+#diff-body.image-preview img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
 #diff-body .line {
   display: flex;
   white-space: pre;
@@ -1664,7 +1710,7 @@ dialog h2 {
   background: var(--panel);
   border: 1px solid var(--err);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 8px 24px var(--shadow);
   font-family: var(--mono);
   font-size: 11px;
   overflow-wrap: anywhere;
@@ -1724,7 +1770,7 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
   width: 340px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 66px);
   overflow-y: auto; padding: 16px; background: var(--panel);
   border: 1px solid var(--line-strong); border-radius: 10px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 12px 40px var(--shadow);
 }
 .preference-row { display: grid; grid-template-columns: 1fr minmax(0, 1fr); align-items: center; gap: 12px; padding: 7px 0; }
 .preference-row > span { color: var(--muted); font-size: 12px; }
@@ -1774,11 +1820,12 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
 
 @media (max-width: 1100px) {
   #wspath { display: none; }
-  #wsbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; height: auto; padding: 8px 10px; }
+  #wsbar { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; height: auto; padding: 8px 10px; }
   .wsidentity { grid-column: 1 / -1; min-height: 22px; }
   #wsbar > .spacer { display: none; }
   #dictate { justify-self: start; }
-  #changes { position: absolute; inset: 0 0 0 auto; z-index: 15; width: min(360px, 100%); box-shadow: -8px 0 30px rgba(0,0,0,.3); }
+  #changes-btn { justify-self: end; }
+  #changes { position: absolute; inset: 0 0 0 auto; z-index: 15; width: min(360px, 100%); box-shadow: -8px 0 30px var(--shadow); }
   #work { position: relative; }
 }
 
@@ -1793,7 +1840,7 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
   #bar > .spacer { min-width: 0; }
   #waiting { font-size: 11px; }
   #side { display: none; }
-  #side.drawer-open { display: flex; position: fixed; z-index: 30; top: 80px; bottom: 0; left: 0; width: min(290px, calc(100vw - 24px)); box-shadow: 12px 0 40px rgba(0,0,0,.45); }
+  #side.drawer-open { display: flex; position: fixed; z-index: 30; top: 80px; bottom: 0; left: 0; width: min(290px, calc(100vw - 24px)); box-shadow: 12px 0 40px var(--shadow); }
   #side-filter { min-height: 36px; }
   .thread { padding-top: 9px; padding-bottom: 9px; }
   .thread-top .more, .menu-item button, .file .acts, .dir .acts { opacity: 1; }
@@ -1869,6 +1916,22 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
 .agent-name { flex: none; color: var(--text); font: 500 11px/1.4 "Segoe UI", sans-serif; }
 .agent-title { color: var(--muted); font: 11px/1.5 "Segoe UI", sans-serif; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-title::before { content: "· "; }
+.agent[data-state="busy"] .agent-title::before {
+  content: "· ⠋ ";
+  animation: agent-spin 0.8s step-end infinite;
+}
+@keyframes agent-spin {
+  0%, 100% { content: "· ⠋ "; }
+  10% { content: "· ⠙ "; }
+  20% { content: "· ⠹ "; }
+  30% { content: "· ⠸ "; }
+  40% { content: "· ⠼ "; }
+  50% { content: "· ⠴ "; }
+  60% { content: "· ⠦ "; }
+  70% { content: "· ⠧ "; }
+  80% { content: "· ⠇ "; }
+  90% { content: "· ⠏ "; }
+}
 .agent-state { display: none; }
 .agent.on { background: var(--accent-dim); border-color: var(--line-strong); }
 .agent[data-state="waiting"] .agent-state { color: var(--warn); }
@@ -1887,4 +1950,37 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
   .thread-top button, .thread-top .fold, .thread-top .more { min-width: 32px; width: 32px; height: 32px; }
   .thread-top .thread-select { width: auto; height: 32px; min-height: 32px; }
   .agent { min-height: 32px; }
+}
+
+/* --- right panel tabs: Changes / Files ----------------------------------- */
+.panel-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 6px 0 10px;
+}
+.panel-tabs [role="tab"] {
+  padding: 3px 8px;
+  border-radius: 4px 4px 0 0;
+  border-bottom: 2px solid transparent;
+  font-size: 11px;
+}
+.panel-tabs [role="tab"][aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+#changes.files .changes-top {
+  display: none;
+}
+#changes.files #changes-body {
+  border-top: 1px solid var(--line);
+}
+#diff-full {
+  padding: 1px 6px;
+  font-size: 11px;
+}
+#diff-full.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
 }

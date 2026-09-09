@@ -22,6 +22,7 @@
       </div>
       <button id="waiting" class="hidden warn" title="Choose a waiting agent. F3 jumps to the next one."></button>
       <button id="plan" class="hidden" title="Claude plan usage"></button>
+      <button id="codex-plan" class="hidden" title="Codex plan usage"></button>
       <button id="new-thread" class="primary" title="Cut a new thread: a worktree with an agent in it">+ Thread</button>
       <button id="preferences-btn" aria-label="Preferences" aria-expanded="false" aria-controls="preferences" title="Preferences">⚙</button>
     </header>
@@ -43,10 +44,10 @@
           <span id="wspath" class="muted"></span>
           </div>
           <span class="spacer"></span>
+          <button id="add-pane" class="primary" title="Add a pane to this thread">+</button>
           <button id="dictate" title="Dictate into the focused pane — click, or hold F4">◉ speak</button>
           <button id="changes-btn" title="Changes in this thread's worktree">⎇</button>
           <button id="wsmore" title="Thread actions">⋯</button>
-          <button id="add-pane" class="primary" title="Add a pane to this thread">+</button>
         </div>
 
         <!-- Diff tabs beside the panes, shown only while a thread has some. -->
@@ -65,6 +66,7 @@
               <div class="diff-head">
                 <span id="diff-name"></span>
                 <span class="spacer"></span>
+                <button id="diff-full" title="Show the whole file around each change, or only the hunks">⊞ full file</button>
                 <button id="diff-close" title="Close (Esc)">✕</button>
               </div>
               <pre id="diff-body"></pre>
@@ -73,13 +75,18 @@
 
           <!-- Orca's right-hand side: what the thread changed, and a commit box. -->
           <aside id="changes" class="hidden">
+            <div class="panel-tabs" role="tablist" aria-label="Right panel">
+              <button id="panel-changes" role="tab" aria-selected="true">Changes</button>
+              <button id="panel-files" role="tab" aria-selected="false" title="Every file in this thread's folder">Files</button>
+              <span class="spacer"></span>
+              <button id="changes-refresh" title="Re-read git now">↻</button>
+              <button id="changes-close" aria-label="Close changes" title="Close changes">✕</button>
+            </div>
             <div class="changes-top">
               <div class="changes-tools">
                 <button id="pr-btn" title="Push the branch and open GitHub's compare page">⎇ Create PR</button>
                 <span class="spacer"></span>
                 <button id="changes-more" title="Fetch, pull, push, branch, stash, amend">⋯</button>
-                <button id="changes-refresh" title="Re-read git now">↻</button>
-                <button id="changes-close" aria-label="Close changes" title="Close changes">✕</button>
               </div>
               <div class="changes-ref">
                 <span id="changes-branch"></span>

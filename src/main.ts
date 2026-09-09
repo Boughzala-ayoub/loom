@@ -13,9 +13,10 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, launch, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
-import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type Sec, type Stat, type Node as Tree } from "./gitparse";
+import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { wheelInit } from "./scroll";
 import { dropText } from "./drop";
+import { fileLinks, imageMime } from "./links";
 import "@xterm/xterm/css/xterm.css";
 
 const MAX_PANES = 16;
@@ -37,9 +38,6 @@ function confirm(message: string, options: { title: string; kind?: string; actio
   });
 }
 
-/** Absolute or workspace-relative file path with an optional :line. The
- * dot-extension is what keeps prose (and "10:30") from lighting up. */
-const PATH_RE = /(?:[A-Za-z]:)?[\\/]?(?:[\w.-]+[\\/])+[\w.-]+\.[A-Za-z]\w{0,7}(?::\d+)?/g;
 const ABS_RE = /^(?:[A-Za-z]:|[\\/])/;
 
 /** The live value of a palette custom property — one source of truth for the
@@ -62,13 +60,10 @@ const findOpts = () => ({
  * "whatever :root says" — that's the default theme, and it keeps the stylesheet
  * the single source of truth for it (no flash of the wrong palette on boot). */
 type Theme = { label: string; scheme?: "light"; vars: Record<string, string> };
-/** The default theme's swatch colours, read from :root before any override can
- * land — an empty `vars` has nothing of its own to show. */
-const BASE: Record<string, string> = {
-  "--accent": cssVar("--accent"),
-  "--line-strong": cssVar("--line-strong"),
-  "--bg": cssVar("--bg"),
-};
+/** Capture the default before overrides, including colors used by previews. */
+const BASE = Object.fromEntries(
+  ["bg", "panel", "raise", "line", "line-strong", "text", "muted", "accent"].map(k => [`--${k}`, cssVar(`--${k}`)]),
+);
 const THEMES: Theme[] = [
   { label: "loom", vars: {} },
   {
@@ -87,6 +82,30 @@ const THEMES: Theme[] = [
       "--ok": "#4ade80",
       "--err": "#f87171",
       "--warn": "#fbbf24",
+      "--blue": "#a5b9db",
+      "--magenta": "#cfadd2",
+      "--cyan": "#96c4cb",
+    },
+  },
+  {
+    label: "tidal",
+    vars: {
+      "--bg": "#101b2a",
+      "--panel": "#172538",
+      "--raise": "#22334a",
+      "--line": "#2b4059",
+      "--line-strong": "#47617e",
+      "--text": "#e0eaf5",
+      "--muted": "#a5bad1",
+      "--faint": "#8ea7c2",
+      "--accent": "#8bbafa",
+      "--accent-dim": "rgba(139, 186, 250, 0.12)",
+      "--ok": "#90c7af",
+      "--err": "#f19ba9",
+      "--warn": "#e4c18d",
+      "--blue": "#8bbafa",
+      "--magenta": "#c3aaea",
+      "--cyan": "#8dcdd4",
     },
   },
   {
@@ -98,13 +117,16 @@ const THEMES: Theme[] = [
       "--line": "#0d4552",
       "--line-strong": "#586e75",
       "--text": "#93a1a1",
-      "--muted": "#839496",
-      "--faint": "#657b83",
-      "--accent": "#cb4b16",
+      "--muted": "#8c9b9d",
+      "--faint": "#8a9ba1",
+      "--accent": "#db815c",
+      "--blue": "#54a0cc",
+      "--magenta": "#d87aab",
+      "--cyan": "#56b4ad",
       "--accent-dim": "rgba(203, 75, 22, 0.16)",
-      "--ok": "#859900",
-      "--err": "#dc322f",
-      "--warn": "#b58900",
+      "--ok": "#8fa114",
+      "--err": "#e87674",
+      "--warn": "#bc9417",
     },
   },
   {
@@ -117,11 +139,14 @@ const THEMES: Theme[] = [
       "--line-strong": "#504945",
       "--text": "#ebdbb2",
       "--muted": "#bdae93",
-      "--faint": "#928374",
+      "--faint": "#a29689",
       "--accent": "#fe8019",
+      "--blue": "#83a598",
+      "--magenta": "#d3869b",
+      "--cyan": "#8ec07c",
       "--accent-dim": "rgba(254, 128, 25, 0.14)",
       "--ok": "#b8bb26",
-      "--err": "#fb4934",
+      "--err": "#fc6857",
       "--warn": "#fabd2f",
     },
   },
@@ -135,11 +160,14 @@ const THEMES: Theme[] = [
       "--line-strong": "#6272a4",
       "--text": "#f8f8f2",
       "--muted": "#b4b6c4",
-      "--faint": "#7c81a0",
+      "--faint": "#9b9fb7",
       "--accent": "#bd93f9",
+      "--blue": "#9aaeff",
+      "--magenta": "#ff79c6",
+      "--cyan": "#8be9fd",
       "--accent-dim": "rgba(189, 147, 249, 0.16)",
       "--ok": "#50fa7b",
-      "--err": "#ff5555",
+      "--err": "#ff7575",
       "--warn": "#f1fa8c",
     },
   },
@@ -153,11 +181,14 @@ const THEMES: Theme[] = [
       "--line-strong": "#4c566a",
       "--text": "#eceff4",
       "--muted": "#d8dee9",
-      "--faint": "#7b88a1",
+      "--faint": "#a5aebf",
       "--accent": "#88c0d0",
+      "--blue": "#96b1cc",
+      "--magenta": "#c3a5bd",
+      "--cyan": "#8fbcbb",
       "--accent-dim": "rgba(136, 192, 208, 0.16)",
       "--ok": "#a3be8c",
-      "--err": "#bf616a",
+      "--err": "#d89fa4",
       "--warn": "#ebcb8b",
     },
   },
@@ -171,8 +202,11 @@ const THEMES: Theme[] = [
       "--line-strong": "#3b4261",
       "--text": "#c0caf5",
       "--muted": "#9aa5ce",
-      "--faint": "#565f89",
+      "--faint": "#8f95b1",
       "--accent": "#7aa2f7",
+      "--blue": "#7aa2f7",
+      "--magenta": "#bb9af7",
+      "--cyan": "#7dcfff",
       "--accent-dim": "rgba(122, 162, 247, 0.16)",
       "--ok": "#9ece6a",
       "--err": "#f7768e",
@@ -189,8 +223,11 @@ const THEMES: Theme[] = [
       "--line-strong": "#585b70",
       "--text": "#cdd6f4",
       "--muted": "#a6adc8",
-      "--faint": "#7f849c",
+      "--faint": "#969aae",
       "--accent": "#cba6f7",
+      "--blue": "#89b4fa",
+      "--magenta": "#f5c2e7",
+      "--cyan": "#94e2d5",
       "--accent-dim": "rgba(203, 166, 247, 0.16)",
       "--ok": "#a6e3a1",
       "--err": "#f38ba8",
@@ -206,12 +243,15 @@ const THEMES: Theme[] = [
       "--line": "#3e4451",
       "--line-strong": "#4f5666",
       "--text": "#abb2bf",
-      "--muted": "#8c93a1",
-      "--faint": "#5c6370",
+      "--muted": "#959ca9",
+      "--faint": "#989da5",
       "--accent": "#61afef",
+      "--blue": "#61afef",
+      "--magenta": "#c97fdf",
+      "--cyan": "#56b6c2",
       "--accent-dim": "rgba(97, 175, 239, 0.16)",
       "--ok": "#98c379",
-      "--err": "#e06c75",
+      "--err": "#e47e86",
       "--warn": "#e5c07b",
     },
   },
@@ -224,12 +264,15 @@ const THEMES: Theme[] = [
       "--line": "#475258",
       "--line-strong": "#56635f",
       "--text": "#d3c6aa",
-      "--muted": "#a6b0a0",
-      "--faint": "#859289",
-      "--accent": "#e69875",
+      "--muted": "#aeb7a9",
+      "--faint": "#adb6b0",
+      "--accent": "#e9a486",
+      "--blue": "#85beb7",
+      "--magenta": "#dba4be",
+      "--cyan": "#85c194",
       "--accent-dim": "rgba(230, 152, 117, 0.16)",
       "--ok": "#a7c080",
-      "--err": "#e67e80",
+      "--err": "#eca0a1",
       "--warn": "#dbbc7f",
     },
   },
@@ -243,8 +286,11 @@ const THEMES: Theme[] = [
       "--line-strong": "#403d52",
       "--text": "#e0def4",
       "--muted": "#908caa",
-      "--faint": "#6e6a86",
+      "--faint": "#8e8ba1",
       "--accent": "#c4a7e7",
+      "--blue": "#9ccfd8",
+      "--magenta": "#c4a7e7",
+      "--cyan": "#9ccfd8",
       "--accent-dim": "rgba(196, 167, 231, 0.16)",
       "--ok": "#9ccfd8",
       "--err": "#eb6f92",
@@ -261,13 +307,16 @@ const THEMES: Theme[] = [
       "--line": "#e0d9c1",
       "--line-strong": "#a9b3ad",
       "--text": "#073642",
-      "--muted": "#586e75",
-      "--faint": "#839496",
-      "--accent": "#cb4b16",
+      "--muted": "#566c73",
+      "--faint": "#5e6b6c",
+      "--accent": "#b54314",
+      "--blue": "#216e9f",
+      "--magenta": "#a8316b",
+      "--cyan": "#227470",
       "--accent-dim": "rgba(203, 75, 22, 0.12)",
-      "--ok": "#6b7a00",
-      "--err": "#dc322f",
-      "--warn": "#976f00",
+      "--ok": "#616f00",
+      "--err": "#c42c2a",
+      "--warn": "#866300",
     },
   },
   {
@@ -280,67 +329,83 @@ const THEMES: Theme[] = [
       "--line": "#dce0e8",
       "--line-strong": "#bcc0cc",
       "--text": "#4c4f69",
-      "--muted": "#6c6f85",
-      "--faint": "#8c8fa1",
-      "--accent": "#8839ef",
+      "--muted": "#64677c",
+      "--faint": "#666876",
+      "--accent": "#8738ed",
+      "--blue": "#1c5fe4",
+      "--magenta": "#8738ed",
+      "--cyan": "#157381",
       "--accent-dim": "rgba(136, 57, 239, 0.12)",
-      "--ok": "#40a02b",
-      "--err": "#d20f39",
-      "--warn": "#b0740e",
+      "--ok": "#307820",
+      "--err": "#d00f38",
+      "--warn": "#905f0b",
     },
   },
   {
     label: "paper",
     scheme: "light",
     vars: {
-      "--bg": "#fbfaf7",
+      "--bg": "#f7f6f2",
       "--panel": "#ffffff",
-      "--raise": "#f2f1ec",
-      "--line": "#e0ded7",
-      "--line-strong": "#c3c0b6",
-      "--text": "#23262b",
-      "--muted": "#5c626c",
-      "--faint": "#8a8f99",
-      "--accent": "#c0562f",
-      "--accent-dim": "rgba(192, 86, 47, 0.12)",
-      "--ok": "#2f7d32",
+      "--raise": "#eaeae3",
+      "--line": "#dcded4",
+      "--line-strong": "#b4b9a9",
+      "--text": "#30362c",
+      "--muted": "#5c6555",
+      "--faint": "#646a5e",
+      "--accent": "#586c3c",
+      "--accent-dim": "rgba(88, 108, 60, 0.10)",
+      "--ok": "#2d7830",
       "--err": "#c22a24",
       "--warn": "#8a6100",
+      "--blue": "#426797",
+      "--magenta": "#845b8a",
+      "--cyan": "#306f73",
+    },
+  },
+  {
+    label: "porcelain",
+    scheme: "light",
+    vars: {
+      "--bg": "#f3f6fa",
+      "--panel": "#ffffff",
+      "--raise": "#e7edf5",
+      "--line": "#d8e0eb",
+      "--line-strong": "#aabbd1",
+      "--text": "#27364b",
+      "--muted": "#53657d",
+      "--faint": "#5c6c7f",
+      "--accent": "#365fa0",
+      "--accent-dim": "rgba(54, 95, 160, 0.10)",
+      "--ok": "#287452",
+      "--err": "#b43f56",
+      "--warn": "#886116",
+      "--blue": "#365fa0",
+      "--magenta": "#8154a1",
+      "--cyan": "#247078",
     },
   },
 ];
 let theme: Theme = THEMES[0];
 
-/** The 16 ANSI colours for a light background. xterm's defaults are a dark
- * scheme's: bright yellow, bright white and cyan vanish on paper. Solarized's
- * accents at their light-side values, with the greys turned around so "bright
- * white" text — what every TUI uses for emphasis — is the darkest ink. */
-const LIGHT_ANSI = {
-  black: "#002b36",
-  red: "#dc322f",
-  green: "#6b7a00",
-  yellow: "#976f00",
-  blue: "#268bd2",
-  magenta: "#d33682",
-  cyan: "#1f8f8a",
-  white: "#657b83",
-  brightBlack: "#93a1a1",
-  brightRed: "#cb4b16",
-  brightGreen: "#586e75",
-  brightYellow: "#8a6100",
-  brightBlue: "#1c6fb0",
-  brightMagenta: "#6c71c4",
-  brightCyan: "#2aa198",
-  brightWhite: "#073642",
-};
-
-/** xterm draws itself, so it can't inherit the CSS palette — hand it over. */
+/** ANSI and app chrome share a palette. Light themes use ink for bright white. */
 const termTheme = () => ({
   background: cssVar("--bg"),
   foreground: cssVar("--text"),
   cursor: cssVar("--accent"),
+  cursorAccent: cssVar("--bg"),
   selectionBackground: cssVar("--line-strong"),
-  ...(theme.scheme === "light" ? LIGHT_ANSI : {}),
+  selectionForeground: cssVar("--text"),
+  black: theme.scheme === "light" ? cssVar("--text") : cssVar("--bg"),
+  brightBlack: cssVar("--faint"),
+  white: cssVar("--muted"),
+  brightWhite: cssVar("--text"),
+  red: cssVar("--err"), brightRed: cssVar("--err"),
+  green: cssVar("--ok"), brightGreen: cssVar("--ok"),
+  yellow: cssVar("--warn"), brightYellow: cssVar("--warn"),
+  blue: cssVar("--blue"), brightBlue: cssVar("--blue"),
+  magenta: cssVar("--magenta"), brightMagenta: cssVar("--magenta"),
+  cyan: cssVar("--cyan"), brightCyan: cssVar("--cyan"),
 });
 
 function applyTheme(t: Theme) {
@@ -517,15 +582,21 @@ const tok = (n: number) =>
 type Limit = { label: string; group: string; percent: number; severity: string; resetsAt: string | null };
 /** `stale` = read off a statusline payload because the endpoint wouldn't answer,
  * so it carries the two account-wide windows and nothing else. */
-type Plan = { tier: string; limits: Limit[]; stale: boolean };
-let plan: Plan | null = null;
-let planErr = "";
+type Plan = { tier: string; limits: Limit[]; stale: boolean; bankedResets?: number; bankedResetExpiries?: (string | null)[]; note?: string };
+type PlanProvider = "claude" | "codex";
+const PLAN_PROVIDERS = {
+  claude: { name: "Claude", button: "plan", command: "plan_usage", url: "https://claude.ai/settings/usage" },
+  codex: { name: "Codex", button: "codex-plan", command: "codex_plan_usage", url: "https://chatgpt.com/codex/settings/usage" },
+};
+const plans: Partial<Record<PlanProvider, Plan>> = {};
+const planErrors: Partial<Record<PlanProvider, string>> = {};
 
 const TIERS: Record<string, string> = {
   default_claude_max_5x: "Max (5x)",
   default_claude_max_20x: "Max (20x)",
   default_claude_pro: "Pro",
   default_claude_free: "Free",
+  free: "Free", plus: "Plus", pro: "Pro", prolite: "Pro Lite", team: "Team", business: "Business", enterprise: "Enterprise",
 };
 const KIND_LABELS: Record<string, string> = { session: "Current session", weekly_all: "All models" };
 
@@ -796,14 +867,14 @@ class Pane {
     this.cfg.classList.add("cfg", "hidden"); // until start() knows this pane runs claude
     const head = document.createElement("div");
     head.className = "pane-head";
-    head.append(
-      this.ico,
-      this.title,
-      this.gauge,
+    const actions = document.createElement("div");
+    actions.className = "pane-actions";
+    actions.append(
       this.cfg,
       mini("⛶", "Zoom (F2)", () => this.th.toggleZoom(this)),
       mini("✕", "Close pane", () => this.th.closePane(this)),
     );
+    head.append(this.ico, this.title, this.gauge, actions);
     this.el.append(head, this.host);
     this.el.addEventListener("mousedown", () => this.th.focusPane(this));
     // Right-click = paste, like a real terminal — no context menu. With a
@@ -829,16 +900,17 @@ class Pane {
     // Registered after web-links, so a URL still wins over the path shape inside it.
     this.term.registerLinkProvider({
       provideLinks: (y, cb) => {
-        const line = this.term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
         cb(
-          [...line.matchAll(PATH_RE)].map((m) => ({
-            range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } },
-            text: m[0],
-            activate: () =>
+          fileLinks(this.term.buffer.active, y).map((link) => ({
+            ...link,
+            activate: () => {
+              const path = link.text.replace(/:\d+(?::\d+)?$/, "");
+              if (imageMime(path)) return openTab(this.th, basename(path), { file: path });
               void invoke("open_vscode", {
                 dir: this.th.dir,
-                goto: ABS_RE.test(m[0]) ? m[0] : `${this.th.dir}\\${m[0]}`,
-              }).catch((e) => console.error(e)),
+                goto: ABS_RE.test(link.text) ? link.text : `${this.th.dir}\\${link.text}`,
+              }).catch((e) => toast(String(e)));
+            },
           })),
         );
       },
@@ -1102,7 +1174,9 @@ class Pane {
     // The sidebar row: the agent, then whatever it titled itself — a shell's
     // own path says nothing, so only a real title follows the name.
     this.rowName.textContent = this.agent;
-    this.rowLabel.textContent = app && app !== this.agent ? app : this.agent === "shell" ? "Terminal" : "Agent session";
+    // Replace provider title spinners with the shared animation after the name.
+    const rowTitle = this.agent === "shell" ? app : app.replace(/^[✳✻✽✶✢·◐◓◑◒⠁-⣿]+\s*/u, "");
+    this.rowLabel.textContent = rowTitle && rowTitle !== this.agent ? rowTitle : this.agent === "shell" ? "Terminal" : "Agent session";
     this.rowState.textContent = this.dead ? "Exited" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
     this.row.title = `${this.agent}: ${this.appTitle || this.rowLabel.textContent}`;
     this.row.setAttribute("aria-label", `${this.agent}, ${this.rowLabel.textContent}, ${this.rowState.textContent}`);
@@ -1238,6 +1312,7 @@ class Thread {
   private stat = document.createElement("span");
   private age = document.createElement("span");
   private fold = mini("▾", "Collapse agents", () => this.setFolded(!this.folded));
+  private add = mini("+", "Add agent or CLI to this thread", () => this.addMenu(this.add));
   /** Lines changed against HEAD and files touched, from pollStats(). */
   changed = { add: 0, del: 0, files: 0 };
   colW: number[] = [];
@@ -1262,7 +1337,8 @@ class Thread {
     this.fold.classList.add("fold");
     const more = mini("⋯", "Thread actions", () => showMenu(more, threadMenu(this)));
     more.classList.add("more");
-    top.append(this.fold, this.label, more);
+    this.add.className = "thread-add";
+    top.append(this.fold, this.label, this.add, more);
     const meta = document.createElement("div");
     meta.className = "thread-meta";
     this.label.title = `${name} · ${this.isWorktree ? "Worktree" : "Checkout"}`;
@@ -1341,6 +1417,19 @@ class Thread {
     this.relayout();
     await p.start(st.cmd, st.sid);
     this.focusPane(p);
+    return p;
+  }
+
+  addMenu(at: HTMLElement) {
+    showMenu(at, startupMenu((cmd) => {
+      this.setFolded(false);
+      this.tab = null;
+      show(this);
+      void this.addPane({ cmd }).then(p => {
+        if (p) revealPane(p);
+        return save();
+      });
+    }));
   }
 
   async closePane(p: Pane) {
@@ -1400,6 +1489,7 @@ class Thread {
    * waiting whatever the others are up to. */
   paint() {
     this.count.textContent = `${this.panes.length} ${this.panes.length === 1 ? "pane" : "panes"}`;
+    this.add.disabled = this.panes.length >= MAX_PANES;
     const state = this.panes.some((p) => p.waiting)
       ? "waiting"
       : this.panes.some((p) => p.busy)
@@ -1548,7 +1638,7 @@ const save = (): Promise<unknown> => {
         zoomed: t.panes.indexOf(t.zoomed!),
         colW: t.colW,
         rowH: t.rowH,
-        tabs: t.tabs.map(({ load, ...tab }) => tab),
+        tabs: t.tabs.map(({ load, rendered, ...tab }) => tab),
         tab: t.tabs.indexOf(t.tab!),
         commitDraft: t.commitDraft,
       })),
@@ -1564,7 +1654,8 @@ const save = (): Promise<unknown> => {
       paneCount,
       ui: { thread: threads.indexOf(current!), sideOpen, changesOpen, sideQuery,
         sideScroll: $("#threads").scrollTop,
-        foldedSections: [...foldedSections], foldedDirs: [...foldedDirs] },
+        foldedSections: [...foldedSections], foldedDirs: [...foldedDirs],
+        panel, openDirs: [...openDirs], diffFull },
     });
   saveQueue = saveQueue.catch(() => {}).then(() => invoke("save_state", { json }));
   return saveQueue.catch(e => toast(`Could not save workspace: ${String(e)}`));
@@ -1983,13 +2074,21 @@ const threadMenu = (th: Thread): Menu => ({
 // The strip sits over the stage and only shows while a thread has diff tabs.
 // The first tab is the panes; the rest each hold a loader that re-reads git
 // whenever the tab is shown, so a diff never goes stale behind a refresh.
-type DiffSource = { sec: Sec; paths: string[] } | { commit: string };
-type DiffTab = { label: string; load: () => Promise<string>; source: DiffSource; sec?: Sec };
+type DiffSource = { sec: Sec; paths: string[] } | { commit: string } | { file: string };
+type DiffTab = { label: string; load: () => Promise<string>; source: DiffSource; sec?: Sec; rendered?: string };
+/** Hunks with git's three lines around them, or the whole file: `-U` big
+ * enough that every hunk swallows the file. Read at load time so flipping it
+ * re-reads the open tab. */
+let diffFull = false;
+const ctx = () => (diffFull ? ["-U999999"] : []);
 const diffLoader = (th: Thread, source: DiffSource) => "commit" in source
-  ? () => git(th.dir, "show", "--stat", "--patch", source.commit)
-  : diffOf(th, source.sec, source.paths);
+  ? () => git(th.dir, "show", "--stat", "--patch", ...ctx(), source.commit)
+  : "file" in source
+    ? () => invoke<string>("read_file", { dir: th.dir, path: source.file })
+    : diffOf(th, source.sec, source.paths);
 const tabsEl = $("#tabs");
 const diffView = $("#diff");
+let showGen = 0; // bumped per showTab, so a chunked render stops when its tab is gone
 
 function openTab(th: Thread, label: string, source: DiffSource) {
   const load = diffLoader(th, source);
@@ -2035,14 +2134,43 @@ function paintTabs() {
 async function showTab() {
   const th = current;
   const t = th?.tab;
-  if (!th || !t) return void diffView.classList.add("hidden");
+  if (!th || !t) return void (showGen++, diffView.classList.add("hidden"));
   $("#diff-name").textContent = t.label;
   const body = $("#diff-body");
+  const isFile = "file" in t.source;
+  $("#diff-full").classList.toggle("hidden", isFile); // a file is already all of it
   diffView.classList.remove("hidden");
+  const gen = ++showGen; // a later showTab, or a closed tab, stops this one's chunks
+  if (t.rendered === undefined) body.textContent = "Loading…"; // else keep the old rows up while git answers
+  const imagePath = "file" in t.source && imageMime(t.source.file) ? t.source.file : null;
+  body.classList.toggle("image-preview", !!imagePath);
+  if (imagePath) {
+    const img = document.createElement("img");
+    img.alt = imagePath;
+    try {
+      const bytes = await invoke<ArrayBuffer>("read_image", { dir: th.dir, path: imagePath });
+      if (current !== th || th.tab !== t) return;
+      const url = URL.createObjectURL(new Blob([bytes], { type: imageMime(imagePath) }));
+      img.onload = () => URL.revokeObjectURL(url);
+      img.onerror = () => { URL.revokeObjectURL(url); if (body.contains(img)) body.textContent = "Could not display this image."; };
+      img.src = url;
+      body.replaceChildren(img);
+    } catch (e) {
+      if (current === th && th.tab === t) body.textContent = `Could not open image: ${String(e)}`;
+    }
+    return;
+  }
   const text = await t.load().catch((e) => String(e));
-  if (current !== th || th.tab !== t) return; // moved on while git was answering
+  if (current !== th || th.tab !== t || gen !== showGen) return; // moved on while git was answering
+  // The panel re-reads every poll to stay in step; the DOM only moves when the
+  // diff did. A full-file view is tens of thousands of rows — not for redrawing
+  // every ten seconds, and a redraw would drop the scroll position.
+  if (text === t.rendered) return;
+  t.rendered = text;
   body.textContent = "";
-  const rows = diffRows(text);
+  const rows = isFile
+    ? text.replace(/\n$/, "").split("\n").map((line, i) => ({ kind: "" as const, old: 0, neu: i + 1, text: line }))
+    : diffRows(text);
   // Which way a hunk moves depends on the side the tab is showing: an unstaged
   // hunk goes into the index or out of the file, a staged one comes back out.
   const moves: [string, string, string[]][] =
@@ -2054,8 +2182,10 @@ async function showTab() {
       : t.sec === "staged"
         ? [["Unstage", "Take this hunk out of the index", ["apply", "--cached", "--reverse"]]]
         : [];
-  // ponytail: 5000 rows is plenty to read; past that the file is the diff.
-  for (const r of rows.slice(0, 5000)) {
+  // ponytail: 50k rows keeps the DOM sane; a full-file diff of anything bigger is not for reading.
+  const CAP = 50_000;
+  const end = Math.min(rows.length, CAP);
+  const line = (r: DiffRow, i: number) => {
     const d = document.createElement("div");
     d.className = `line ${r.kind}`;
     const o = document.createElement("i");
@@ -2066,14 +2196,23 @@ async function showTab() {
     s.textContent = r.text || " ";
     d.append(o, n, s);
     if (r.kind === "hunk")
-      for (const [label, title, args] of moves) {
-        const i = rows.indexOf(r);
+      for (const [label, title, args] of moves)
         d.append(mini(label, title, () => void applyHunk(th, hunkPatch(rows, i), args)));
-      }
-    body.append(d);
-  }
-  if (rows.length > 5000) note(body, `… ${rows.length - 5000} more lines`);
-  if (!rows.length) note(body, "no differences");
+    return d;
+  };
+  // A screenful now, the rest a frame at a time: the panes keep drawing while
+  // a long full-file diff lands, instead of freezing for the whole build.
+  let i = 0;
+  const step = () => {
+    if (gen !== showGen) return;
+    const frag = document.createDocumentFragment();
+    for (const stop = Math.min(end, i + 2000); i < stop; i++) frag.append(line(rows[i], i));
+    body.append(frag);
+    if (i < end) return void requestAnimationFrame(step);
+    if (rows.length > CAP) note(body, `… ${rows.length - CAP} more lines`);
+    if (!rows.length) note(body, "no differences");
+  };
+  step();
 }
 
 /** Every file of a section as one diff, against the base that section is
@@ -2082,7 +2221,7 @@ async function showTab() {
  * That base is also what makes a hunk button meaningful — a diff of `HEAD`
  * mixes both sides and cannot be applied to either. */
 const diffOf = (th: Thread, sec: Sec, paths: string[]) => async () => {
-  if (sec !== "untracked") return git(th.dir, "diff", ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
+  if (sec !== "untracked") return git(th.dir, "diff", ...ctx(), ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
   const parts: string[] = [];
   for (const u of paths)
     parts.push(await gitOk(th.dir, [1], "diff", "--no-index", "--", "/dev/null", u).catch((e) => String(e)));
@@ -2109,6 +2248,10 @@ const changesBtn = $("#changes-btn");
 let changesOpen = false;
 const foldedSections = new Set<string>(["Commits"]);
 const foldedDirs = new Set<string>();
+/** The right panel is Orca's: git's view of the thread, or every file in it. */
+let panel: "changes" | "files" = "changes";
+const openDirs = new Set<string>(); // Files tree folders unfolded; shut by default, the repo is big
+let panelSig = ""; // what the panel body last drew, so an unchanged poll leaves the DOM alone
 
 function toggleChanges(on = !changesOpen) {
   changesOpen = on;
@@ -2117,6 +2260,89 @@ function toggleChanges(on = !changesOpen) {
   current?.panes.forEach((p) => p.resize()); // the stage just changed width
   if (on) void refreshChanges();
   save();
+}
+
+function setPanel(p: typeof panel) {
+  panel = p;
+  changes.classList.toggle("files", p === "files");
+  for (const q of ["changes", "files"] as const)
+    $(`#panel-${q}`).setAttribute("aria-selected", String(q === p));
+  save();
+  void refreshChanges();
+}
+
+/** The Files tab: what git tracks or would track, else whatever is on disk.
+ * Folders fold; a file opens as a tab beside the panes, like a diff does. */
+async function refreshFiles(th: Thread, body: HTMLElement) {
+  const paths = await git(th.dir, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    .then((z) => z.split("\0").filter(Boolean), () => invoke<string[]>("list_files", { dir: th.dir }))
+    .catch((e) => (toast(String(e)), [] as string[]));
+  if (th !== current || panel !== "files") return;
+  paths.sort();
+  // Same list, same folds: leave the tree alone — the poll runs every ten seconds.
+  const sig = JSON.stringify([th.dir, paths, [...openDirs]]);
+  if (sig === panelSig && body.childElementCount) return;
+  panelSig = sig;
+  body.textContent = "";
+  const walk = (node: Tree, depth: number) => {
+    for (const d of node.dirs) {
+      const row = document.createElement("div");
+      row.className = `dir${openDirs.has(d.path) ? "" : " folded"}`;
+      row.style.setProperty("--depth", String(depth));
+      row.innerHTML = `<i class="chev"></i><span>${esc(d.name)}</span><b>${d.count}</b>`;
+      row.onclick = () => {
+        openDirs.has(d.path) ? openDirs.delete(d.path) : openDirs.add(d.path);
+        save();
+        void refreshChanges();
+      };
+      body.append(row);
+      if (openDirs.has(d.path)) walk(d, depth + 1);
+    }
+    for (const f of node.files) {
+      const path = paths[f.i];
+      const row = document.createElement("div");
+      row.className = "file";
+      row.title = path;
+      row.style.setProperty("--depth", String(depth));
+      const name = document.createElement("span");
+      name.className = "file-name";
+      name.textContent = f.name;
+      row.append(name);
+      row.onclick = () => openTab(th, f.name, { file: path });
+      row.oncontextmenu = (e) => (
+        e.preventDefault(),
+        showMenu(row, {
+          placeholder: "",
+          rows: (list) => {
+            menuItem(list, "Copy path", () => void navigator.clipboard.writeText(path));
+            menuItem(list, "Open in VS Code", () =>
+              void invoke("open_vscode", { dir: th.dir, goto: path }).catch((e) => toast(String(e))),
+            );
+          },
+        })
+      );
+      body.append(row);
+    }
+  };
+  // The same band the Changes sections wear: the folder's name, how many
+  // files, and a way back to a folded tree once you have opened half of it.
+  const collapse = () => (openDirs.clear(), save(), void refreshChanges());
+  const h = document.createElement("div");
+  h.className = `changes-h${openDirs.size ? "" : " folded"}`;
+  h.onclick = collapse;
+  const chev = document.createElement("i");
+  chev.className = "chev";
+  const t = document.createElement("span");
+  t.textContent = `${basename(th.dir)} ${paths.length}`;
+  const fold = document.createElement("a");
+  fold.textContent = "Collapse all";
+  fold.hidden = !openDirs.size;
+  fold.onclick = (e) => (e.stopPropagation(), collapse());
+  h.append(chev, t, fold);
+  body.append(h);
+  walk(tree(paths), 0);
+  if (!paths.length) note(body, "no files");
+  if (th.tab) void showTab();
 }
 
 const LETTER: Record<string, string> = { M: "M", A: "A", D: "D", R: "R", C: "C", "?": "U", U: "U", T: "T" };
@@ -2399,6 +2625,7 @@ async function refreshChanges() {
   const th = current;
   if (!th || !changesOpen) return;
   const body = $("#changes-body");
+  if (panel === "files") return refreshFiles(th, body);
   let status: Change[];
   let unstaged: Map<string, Stat>;
   let staged: Map<string, Stat>;
@@ -2424,6 +2651,7 @@ async function refreshChanges() {
       ]).then((r) => r.find(Boolean) ?? ""),
     ]);
   } catch (e) {
+    panelSig = "";
     body.textContent = "";
     note(body, String(e));
     return;
@@ -2436,7 +2664,6 @@ async function refreshChanges() {
   const gap = +behind || +ahead ? `  ${+behind ? `↓${behind}` : ""}${+ahead ? ` ↑${ahead}` : ""}`.trimEnd() : "";
   $("#changes-base").textContent = upstream ? `→ ${upstream}${gap}` : "→ not pushed yet";
 
-  body.textContent = "";
   const tracked = status.filter((c) => c.x !== "?");
   const secRows: Record<Sec, Change[]> = {
     unstaged: tracked.filter((c) => c.y !== " "),
@@ -2451,6 +2678,13 @@ async function refreshChanges() {
     for (const p of sel) if (!live.has(p)) sel.delete(p);
     if (!sel.size) selSec = null;
   }
+  // Nothing git said or you did has changed since the last draw: keep the DOM,
+  // and with it hover, focus and scroll. The poll lands here every ten seconds.
+  const sig = JSON.stringify([th.dir, status, [...unstaged], [...staged], upstream, log, span, midway,
+    [...foldedSections], [...foldedDirs], selSec, [...sel]]);
+  if (sig === panelSig && body.childElementCount) return void (th.tab && showTab());
+  panelSig = sig;
+  body.textContent = "";
   if (midway) body.append(midwayBar(midway));
   if (selSec) {
     const sec = selSec;
@@ -2502,7 +2736,7 @@ async function refreshChanges() {
         const under = () => rows.filter((c) => c.path === d.path || c.path.startsWith(`${d.path}/`));
         const row = document.createElement("div");
         row.className = `dir${foldedDirs.has(key) ? " folded" : ""}`;
-        row.style.paddingLeft = `${6 + depth * 12}px`;
+        row.style.setProperty("--depth", String(depth));
         row.innerHTML = `<i class="chev"></i><span>${esc(d.name)}</span><b>${d.count}</b>`;
         const acts = document.createElement("span");
         acts.className = "acts";
@@ -2525,7 +2759,7 @@ async function refreshChanges() {
         const row = document.createElement("div");
         row.className = `file${picked ? " sel" : ""}`;
         row.title = c.path;
-        row.style.paddingLeft = `${6 + depth * 12}px`;
+        row.style.setProperty("--depth", String(depth));
         const name = document.createElement("span");
         name.className = "file-name";
         name.textContent = f.name;
@@ -3375,16 +3609,29 @@ function profileRows(list: HTMLElement, note: (text: string) => void) {
 
 /** The plan panel: the 5-hour session window and the weekly limits, drawn the
  * way Claude Code's /usage shows them. Read-only, so no add input. */
-const planMenu: Menu = {
+const makePlanMenu = (provider: PlanProvider): Menu => ({
   placeholder: "",
   rows: (list) => {
+    const plan = plans[provider];
+    const planErr = planErrors[provider];
+    const info = PLAN_PROVIDERS[provider];
     const note = (text: string) => {
       const d = document.createElement("div");
       d.className = "menu-note";
       d.textContent = text;
       list.append(d);
     };
-    if (!plan?.limits.length) return note(planErr || "fetching plan usage…");
+    const heading = document.createElement("div");
+    heading.className = "plan-heading";
+    heading.append(icon(provider), `${info.name}${plan?.tier ? ` · ${TIERS[plan.tier] ?? plan.tier}` : ""}`);
+    list.append(heading);
+    const site = document.createElement("a");
+    site.className = "plan-site";
+    site.textContent = `Open ${info.name} usage page ↗`;
+    site.href = info.url;
+    site.onclick = (e) => { e.preventDefault(); void openUrl(info.url).catch(e => toast(String(e))); };
+    list.append(site);
+    if (!plan?.limits.length) return note(planErr || "Fetching plan usage…");
 
     let group = "";
     for (const l of plan.limits) {
@@ -3411,8 +3658,20 @@ const planMenu: Menu = {
     // A failed refresh keeps the last good numbers on screen and says so, rather
     // than blanking the panel — this endpoint rate-limits.
     if (planErr) note(planErr);
+    else if (plan.note) note(plan.note);
+    else if (plan.stale) note("Live refresh unavailable; showing local usage.");
+    if (plan.bankedResets !== undefined) {
+      note(`Banked resets: ${plan.bankedResets}`);
+      if (plan.bankedResets > 0) {
+        for (const expiry of plan.bankedResetExpiries?.length ? plan.bankedResetExpiries : [null]) {
+          const at = resetMs(expiry);
+          note(at ? `Expires ${new Date(at).toLocaleString()}` : "Expiry unavailable");
+        }
+      }
+    }
   },
-};
+});
+const planMenus = { claude: makePlanMenu("claude"), codex: makePlanMenu("codex") };
 
 /** The palette. Built in, so no add input — every row is one of THEMES. */
 const themeMenu: Menu = {
@@ -3420,22 +3679,28 @@ const themeMenu: Menu = {
   rows: (list) => {
     for (const t of THEMES) {
       const row = document.createElement("div");
-      row.className = `menu-item${t === theme ? " on" : ""}`;
+      row.className = `menu-item theme-card${t === theme ? " on" : ""}`;
+      row.setAttribute("aria-label", `${t.label}, ${t.scheme ?? "dark"} theme`);
+      row.setAttribute("aria-pressed", String(t === theme));
       const lbl = document.createElement("span");
+      lbl.className = "theme-caption";
       lbl.textContent = t.label;
-      // A swatch of what you're picking, so the names don't have to carry it.
-      const dot = document.createElement("b");
-      dot.className = "swatch";
-      dot.style.background = t.vars["--accent"] ?? BASE["--accent"];
-      dot.style.borderColor = t.vars["--line-strong"] ?? BASE["--line-strong"];
-      dot.style.color = t.vars["--bg"] ?? BASE["--bg"]; // the ring, via currentColor
+      const scheme = document.createElement("small");
+      scheme.textContent = t.scheme ?? "dark";
+      lbl.append(scheme);
+      const preview = document.createElement("b");
+      preview.className = "theme-preview";
+      preview.setAttribute("aria-hidden", "true");
+      for (const [k, v] of Object.entries({ ...BASE, ...t.vars })) preview.style.setProperty(k, v);
+      preview.append(document.createElement("i"), document.createElement("i"));
       row.onclick = () => {
         applyTheme(t);
         hideMenu();
         save();
         paintTheme();
+        anchor.focus();
       };
-      row.append(lbl, dot);
+      row.append(preview, lbl);
       list.append(row);
     }
   },
@@ -3443,14 +3708,19 @@ const themeMenu: Menu = {
 
 /** The top-bar chip: the 5-hour session window, which is the one that moves while
  * you work. The weeklies are a click away. Hidden until the first fetch answers. */
-function paintPlan() {
-  const b = $("#plan");
-  const s = plan?.limits.find((l) => l.group === "session") ?? plan?.limits[0];
-  if (!s) return void (b.className = "hidden");
-  b.className = `sev-${s.severity}`;
-  b.textContent = `◔ ${Math.round(s.percent)}%`;
+function paintPlan(provider: PlanProvider) {
+  const info = PLAN_PROVIDERS[provider];
+  const plan = plans[provider];
+  const b = $(`#${info.button}`);
+  const s = provider === "codex"
+    ? plan?.limits.slice().sort((a, b) => b.percent - a.percent)[0]
+    : plan?.limits.find((l) => l.group === "session") ?? plan?.limits[0];
+  b.className = `plan-chip sev-${s?.severity ?? "ok"}`;
+  b.replaceChildren(icon(provider), document.createTextNode(s ? `${Math.round(s.percent)}%` : "—"));
+  b.setAttribute("aria-label", `${info.name} usage${s ? `, ${Math.round(s.percent)}% used` : " unavailable"}`);
+  if (!s) { b.title = `${info.name}: ${planErrors[provider] || "Fetching usage…"}`; return; }
   b.title =
-    `${TIERS[plan!.tier] ?? plan!.tier}${plan!.tier ? " — " : ""}` +
+    `${info.name} · ${TIERS[plan!.tier] ?? plan!.tier}${plan!.tier ? " — " : ""}` +
     `${KIND_LABELS[s.label] ?? s.label} ${Math.round(s.percent)}% used\n` +
     `${fmtReset(s.resetsAt)}\nClick for the weekly limits too`;
 }
@@ -3458,9 +3728,10 @@ function paintPlan() {
 /** Poll: the endpoint rate-limits hard and these numbers move slowly, so five
  * minutes is as often as it's worth asking. A failure keeps the last good
  * numbers and shows why underneath them. */
-async function pollPlan() {
+async function pollPlan(provider: PlanProvider) {
+  const plan = plans[provider];
   try {
-    const got = await invoke<Plan>("plan_usage");
+    const got = await invoke<Plan>(PLAN_PROVIDERS[provider].command);
     // A row whose reset time has passed describes a window that rolled over —
     // its usage is back at zero, whatever the stale payload last said. This is
     // how a pane idle since 1 AM used to read "47% used, Resetting now" all
@@ -3478,22 +3749,22 @@ async function pollPlan() {
     // last good answer stands, rather than dropping "Fable" off the panel every
     // time the endpoint says 429. Session first, so the chip and the panel's
     // WEEKLY LIMITS heading keep their order whichever source a row came from.
-    const kept = (got.stale && plan ? plan.limits : []).filter(
+    const kept = (provider === "claude" && got.stale && plan ? plan.limits : []).filter(
       (l) => !got.limits.some((g) => g.label === l.label),
     );
-    plan = {
+    plans[provider] = {
       ...got,
       tier: got.tier || plan?.tier || "",
       limits: [...got.limits, ...kept].map(rolled).sort(
         (a, b) => Number(b.group === "session") - Number(a.group === "session"),
       ),
     };
-    planErr = "";
+    planErrors[provider] = "";
   } catch (e) {
-    planErr = String(e);
+    planErrors[provider] = String(e);
   }
-  paintPlan();
-  if (!menu.classList.contains("hidden") && openMenu === planMenu) renderMenu();
+  paintPlan(provider);
+  if (!menu.classList.contains("hidden") && openMenu === planMenus[provider]) renderMenu();
 }
 
 function paintTheme() {
@@ -3546,7 +3817,7 @@ function showMenu(at: HTMLElement, m: Menu) {
   renderMenu();
   menu.classList.remove("hidden");
   place();
-  menu.querySelector<HTMLElement>(".menu-item, select, input, button")?.focus();
+  menu.querySelector<HTMLElement>(".menu-item, select, input, button, a[href]")?.focus();
 }
 
 function togglePreferences(on = $("#preferences").classList.contains("hidden")) {
@@ -3644,7 +3915,8 @@ async function main() {
     fontSize?: number;
     paneCount?: number;
     ui?: { thread?: number; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
-      sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[] };
+      sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
+      panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
   } = {};
   try {
     // strip a BOM: the file is hand-editable and Notepad/PowerShell add one
@@ -3670,6 +3942,10 @@ async function main() {
     saved.ui.foldedSections.forEach(s => foldedSections.add(s));
   }
   saved.ui?.foldedDirs?.forEach(s => foldedDirs.add(s));
+  saved.ui?.openDirs?.forEach(s => openDirs.add(s));
+  diffFull = saved.ui?.diffFull ?? false;
+  $("#diff-full").classList.toggle("on", diffFull);
+  if (saved.ui?.panel === "files") setPanel("files");
   let closing = false;
   await getCurrentWindow().onCloseRequested(async e => {
     e.preventDefault();
@@ -3698,12 +3974,7 @@ async function main() {
   window.addEventListener("resize", () => {
     if (!menu.classList.contains("hidden")) place();
   });
-  addBtn.onclick = () =>
-    current &&
-    showMenu(
-      addBtn,
-      startupMenu((cmd) => void current!.addPane({ cmd }).then(save)),
-    );
+  addBtn.onclick = () => current?.addMenu(addBtn);
   window.addEventListener("mousedown", (e) => {
     const t = e.target as Node;
     if (!menu.contains(t) && !anchor.contains(t)) hideMenu();
@@ -3727,6 +3998,14 @@ async function main() {
   changesBtn.onclick = () => toggleChanges();
   $("#changes-close").onclick = () => toggleChanges(false);
   $("#diff-close").onclick = () => current?.tab && closeTab(current, current.tab);
+  $("#diff-full").onclick = () => {
+    diffFull = !diffFull;
+    $("#diff-full").classList.toggle("on", diffFull);
+    save();
+    void showTab();
+  };
+  $("#panel-changes").onclick = () => setPanel("changes");
+  $("#panel-files").onclick = () => setPanel("files");
   $("#commit-btn").onclick = () => void commitAll();
   $("#commit-msg").oninput = () => {
     if (current) current.commitDraft = $<HTMLTextAreaElement>("#commit-msg").value;
@@ -3913,21 +4192,20 @@ async function main() {
   setInterval(pollStats, 10_000);
   setInterval(() => threads.forEach((t) => t.paintAge()), 30_000);
 
-  const planBtn = $("#plan");
-  planBtn.onmousedown = (e) => e.preventDefault();
-  // The tooltip carries a countdown, so it goes stale between polls and stops
-  // agreeing with the panel, which recomputes on every open. Rebuilding it as
-  // the pointer arrives costs nothing and lands well before the tooltip shows.
-  planBtn.onmouseenter = paintPlan;
-  planBtn.onclick = () => {
-    showMenu(planBtn, planMenu);
-    // While the panel is up it says all of this and more; leaving the tooltip on
-    // would only float it over the top. The mouseenter above puts it back.
-    if (menu.classList.contains("hidden")) paintPlan();
-    else planBtn.title = "";
-  };
-  pollPlan();
-  setInterval(pollPlan, 5 * 60_000);
+  for (const provider of ["claude", "codex"] as const) {
+    const planBtn = $(`#${PLAN_PROVIDERS[provider].button}`);
+    planBtn.onmousedown = (e) => e.preventDefault();
+    // Refresh the tooltip's countdown when hovered; the open menu supplies its own.
+    planBtn.onmouseenter = () => paintPlan(provider);
+    planBtn.onclick = () => {
+      showMenu(planBtn, planMenus[provider]);
+      if (menu.classList.contains("hidden")) paintPlan(provider);
+      else planBtn.title = "";
+    };
+    paintPlan(provider);
+    void pollPlan(provider);
+    setInterval(() => void pollPlan(provider), 5 * 60_000);
+  }
   // Once a launch is plenty: the roster changes on Anthropic's schedule, not
   // yours, and the panel falls back to the CLI's aliases if this never answers.
   invoke<ModelOpt[]>("model_options")
