@@ -26,6 +26,24 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    pid: Option<u32>,
+}
+
+impl Session {
+    /// Kill the shell AND everything it spawned. `killer` alone is a
+    /// TerminateProcess on the shell; claude/node under it live on, and a
+    /// process whose cwd is the worktree makes `git worktree remove` fail
+    /// with "Permission denied" on Windows.
+    fn kill(&mut self) {
+        use std::os::windows::process::CommandExt;
+        if let Some(pid) = self.pid {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .output();
+        }
+        let _ = self.killer.kill();
+    }
 }
 
 #[derive(Default)]
@@ -179,6 +197,7 @@ fn pty_spawn(
     drop(pair.slave); // else the reader never sees EOF on Windows
 
     let killer = child.clone_killer();
+    let pid = child.process_id();
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
@@ -226,6 +245,7 @@ fn pty_spawn(
             master: pair.master,
             writer,
             killer,
+            pid,
         },
     );
     Ok(())
@@ -256,7 +276,7 @@ fn pty_resize(ptys: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(),
 #[tauri::command]
 fn pty_kill(ptys: State<Ptys>, id: String) -> Result<(), String> {
     if let Some(mut s) = ptys.0.lock().unwrap().remove(&id) {
-        let _ = s.killer.kill();
+        s.kill();
     }
     Ok(())
 }
@@ -774,7 +794,7 @@ pub fn run() {
             // The frontend may cancel close if its final save fails.
             if matches!(event, tauri::WindowEvent::Destroyed) {
                 for (_, mut s) in window.state::<Ptys>().0.lock().unwrap().drain() {
-                    let _ = s.killer.kill();
+                    s.kill();
                 }
             }
         })

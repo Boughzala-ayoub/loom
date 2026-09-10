@@ -2213,7 +2213,17 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all") {
   save();
   if (mode === "close" || !th.isWorktree) return;
   try {
-    await git(th.repo, "worktree", "remove", "--force", th.dir);
+    // The killed panes' processes take a beat to die, and Windows refuses to
+    // delete a folder that is still some process's cwd — retry a few times.
+    for (let n = 0; ; n++) {
+      try {
+        await git(th.repo, "worktree", "remove", "--force", th.dir);
+        break;
+      } catch (e) {
+        if (n === 10) throw e;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
     if (mode === "all" && th.branch) await git(th.repo, "branch", "-D", th.branch);
   } catch (e) {
     toast(String(e));
