@@ -1354,23 +1354,37 @@ class Pane {
     head.append(this.ico, this.title, this.gauge, actions);
     this.el.append(head, this.host);
     this.el.addEventListener("mousedown", () => this.th.focusPane(this));
+    this.term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.key.toLowerCase() !== "c" || !this.term.hasSelection()) return true;
+      e.preventDefault();
+      void this.copySelection();
+      return false;
+    });
+    // The right button is Loom's in every pane, even mouse-reporting TUIs:
+    // capture phase, so xterm never reports the click to the pty. Claude Code
+    // would otherwise paste on it too and double the text; opencode reports
+    // it and does nothing, which left it with no paste at all.
+    this.host.addEventListener("mousedown", (e) => {
+      if (e.button !== 2) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.th.focusPane(this);
+    }, true);
+    // Any-motion mouse tracking (opencode) reports every mouse move to the
+    // pty as input, and xterm drops the selection on any input — so a
+    // Shift-drag selection was gone before the mouse reached the copy click.
+    // Hold plain motion back while a selection stands; a click or key still ends it.
+    this.host.addEventListener("mousemove", (e) => {
+      if (!e.buttons && this.term.modes.mouseTrackingMode === "any" && this.term.hasSelection()) e.stopPropagation();
+    }, true);
     // Right-click = paste, like a real terminal — no context menu. With a
     // selection it copies instead (and clears it), so copy stays one click too.
     this.host.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      // Claude Code takes the right-click from the pty and pastes itself —
-      // pasting here too would double it. Every other pane is ours, mouse
-      // tracking or not: a TUI that reports the click but ignores button 2
-      // (opencode) would otherwise have no paste at all.
-      if (this.claudeUp) return;
-      const sel = this.term.getSelection();
-      if (sel) {
-        navigator.clipboard.writeText(sel);
-        this.term.clearSelection();
-      } else {
-        navigator.clipboard.readText().then((t) => t && this.term.paste(t));
-      }
-    });
+      e.stopPropagation();
+      if (this.term.hasSelection()) return void this.copySelection();
+      navigator.clipboard.readText().then((t) => t && this.term.paste(t)).catch((e) => toast(`Could not paste: ${e}`));
+    }, true);
     this.term.loadAddon(this.fit);
     this.term.loadAddon(this.search);
     this.term.loadAddon(new WebLinksAddon((_e, uri) => void openUrl(uri).catch(() => {})));
@@ -1419,6 +1433,16 @@ class Pane {
       addEventListener("mouseup", up);
     });
     head.addEventListener("dblclick", () => this.th.toggleZoom(this));
+  }
+
+  private async copySelection() {
+    const text = this.term.getSelection();
+    try {
+      await navigator.clipboard.writeText(text);
+      if (this.term.getSelection() === text) this.term.clearSelection();
+    } catch (e) {
+      toast(`Could not copy: ${e}`);
+    }
   }
 
   /** `sid` given = this pane is being restored, so resume that session. */

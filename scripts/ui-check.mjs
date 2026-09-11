@@ -552,6 +552,19 @@ try {
     await audit('four-panes');
     const paneWidths = await page.locator('.grid:not(.hidden) .pane').evaluateAll(panes => panes.map(p => p.clientWidth));
     assert.ok(paneWidths.every(w => w >= 260), 'Pane controls must stay readable with four columns requested');
+    // Right-click pastes into a Claude pane whether or not Claude Code has mouse tracking on, and the click never reaches the pty.
+    await page.evaluate(() => { navigator.clipboard.readText = async () => 'pasted text'; });
+    const claudePane = page.locator('.grid:not(.hidden) .pane').first();
+    const pasted = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'pty_write' && c.args.data.includes('pasted text')).length);
+    await claudePane.locator('.pane-term').click({ button: 'right' });
+    await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.data.includes('pasted text')), null, { timeout: 5000 })
+      .catch(() => assert.fail('Right-click must paste into a Claude pane without mouse tracking'));
+    const before = await pasted();
+    await page.evaluate(id => window.qa.panes.find(p => p.id === id).onOut.onmessage('\x1b[?1000h'), await claudePane.getAttribute('data-id'));
+    await claudePane.locator('.pane-term').click({ button: 'right' });
+    await page.waitForFunction(n => window.qa.calls.filter(c => c.cmd === 'pty_write' && c.args.data.includes('pasted text')).length === n + 1, before, { timeout: 5000 })
+      .catch(() => assert.fail('Right-click must paste once into a Claude pane with mouse tracking on'));
+    assert.ok(await page.evaluate(() => !window.qa.calls.some(c => c.cmd === 'pty_write' && /\x1b\[(M|<)/.test(c.args.data))), 'The right click must not reach the agent as a mouse report');
     if (width <= 760) await page.click('#side-toggle');
     const source = await page.locator('.thread-select').filter({ hasText: 'search-polish' }).boundingBox();
     const targetBounds = await page.locator('.thread').filter({ has: page.locator('.thread-select', { hasText: 'review-keyboard-navigation' }) }).boundingBox();
