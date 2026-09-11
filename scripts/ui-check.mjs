@@ -235,7 +235,7 @@ try {
         bg: row.querySelector('.theme-preview').style.getPropertyValue('--bg'),
         accent: row.querySelector('.theme-preview').style.getPropertyValue('--accent'),
       })));
-      assert.equal(palettes.length, 22);
+      assert.equal(palettes.length, 38);
       await escape();
       for (const [i, palette] of [...palettes, palettes[0]].entries()) {
         await openThemes();
@@ -249,7 +249,7 @@ try {
         });
         assert.equal(colors['--bg'], palette.bg);
         assert.equal(colors['--accent'], palette.accent);
-        assert.equal(colors['color-scheme'], ['paper', 'porcelain', 'latte', 'solarized light'].includes(palette.label) ? 'light' : 'dark');
+        assert.equal(colors['color-scheme'], ['paper', 'porcelain', 'latte', 'solarized light', 'polar', 'sakura'].includes(palette.label) ? 'light' : 'dark');
         const lowContrast = await page.evaluate(classic => {
           const css = getComputedStyle(document.documentElement);
           const luminance = key => {
