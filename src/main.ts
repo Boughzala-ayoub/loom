@@ -1109,6 +1109,7 @@ class Pane {
       if (this.dead) return void (d === "\r" && this.spawn(true));
       this.lastIn = Date.now();
       this.seen(); // typing into the pane = you've seen it
+      if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint()); // Esc interrupts the turn
       invoke("pty_write", { id: this.id, data: d });
     });
     this.term.parser.registerOscHandler(133, (d) => (this.mark(d), true));
@@ -1135,7 +1136,7 @@ class Pane {
     this.out.onmessage = (d) => {
       this.lastOut = Date.now(); // settle() waits on this
       this.term.write(d);
-      this.activity();
+      this.activity(d);
     };
     await this.spawn(!!sid);
     new ResizeObserver(() => this.resize()).observe(this.host);
@@ -1220,8 +1221,16 @@ class Pane {
   /** Agent panes have no OSC 133 to say "working": output that keeps coming
    * is the signal, and 1.5 s of quiet ends it. Output right after a keystroke
    * is the echo, not the agent — a real answer keeps drawing well past that. */
-  private activity() {
+  private activity(d: string) {
     if (this.agent === "shell" || Date.now() - this.lastIn < 300) return;
+    if (this.agent === "codex") {
+      // ponytail: codex keeps drawing while idle (the astra prompt's star field),
+      // so output alone says nothing. Its "Working (3s • esc to interrupt)"
+      // line is the tell; OSC 9 (wake) or Esc ends the turn. Ratatui repaints
+      // only changed cells, so the text shows up once — no quiet timer here.
+      if (!this.busy && !this.waiting && /esc to interrupt/i.test(d)) ((this.busy = true), this.paint());
+      return;
+    }
     clearTimeout(this.idle);
     this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
     if (this.busy || this.waiting) return;

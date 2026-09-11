@@ -311,7 +311,7 @@ try {
     assert.deepEqual(await page.evaluate(() => window.qa.saved.threads.map(t => t.panes.map(p => p.cmd))), [['claude', 'codex'], ['claude', 'opencode', ''], ['claude']]);
     assert.ok(await page.evaluate(() => window.qa.panes.slice(-2).every(p => p.cwd.endsWith('review-keyboard-navigation'))), 'Spawn in the selected thread folder');
     if (width <= 760) await page.click('#side-toggle');
-    await page.evaluate(() => window.qa.panes.forEach((p, i) => p.onOut.onmessage('\x1b]0;' + (i === 5 ? 'Terminal\x07\x1b]133;C' : ['◐', '⠙', '✳'][i % 3] + ' Agent session') + '\x07Working\r\n')));
+    await page.evaluate(() => window.qa.panes.forEach((p, i) => p.onOut.onmessage('\x1b]0;' + (i === 5 ? 'Terminal\x07\x1b]133;C' : ['◐', '⠙', '✳'][i % 3] + ' Agent session') + '\x07Working (3s • esc to interrupt)\r\n')));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=busy]').length === 6);
     assert.equal(await page.locator('.agent-title').filter({ hasText: /[◐⠙✳]/ }).count(), 0, 'Provider titles do not duplicate the spinner');
     const frames = await page.locator('.agent-title').evaluateAll(labels => [0, 100].map(time => labels.map(label => {
@@ -328,6 +328,10 @@ try {
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x1b]133;D\x07')));
     await page.waitForFunction(() => !document.querySelector('.agent[data-state=busy]'));
+    // Codex's idle prompt animates: output without its working line must not read as busy.
+    await page.evaluate(() => window.qa.panes.filter(p => p.argv.join(' ').includes('codex')).forEach(p => { p.onOut.onmessage('\x1b[2;3H·\x1b[4;9H✦'); p.onOut.onmessage('\x1b[2;3H \x1b[5;1H·'); }));
+    await page.waitForTimeout(100);
+    assert.equal(await page.locator('.agent[data-state=busy]').count(), 0, 'Idle codex redraws must not show as working');
     assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').animationName === 'none')), 'Ready agents stop animating');
     await audit('all-agents-ready');
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x07')));
