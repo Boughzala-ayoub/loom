@@ -1576,6 +1576,10 @@ class Thread {
     this.panes.push(p);
     this.grid.append(p.el);
     this.list.append(p.row); // sidebar order = grid order
+    dragRow(p.row, () => this.panes.map((q) => q.row), (over, after) => {
+      moveNextTo(this.panes, p, this.panes.find((q) => q.row === over)!, after);
+      this.reordered(p);
+    });
     this.relayout();
     await p.start(st.cmd, st.sid);
     this.focusPane(p);
@@ -1690,9 +1694,14 @@ class Thread {
     const j = this.panes.indexOf(b);
     if (i === -1 || j === -1 || i === j) return;
     [this.panes[i], this.panes[j]] = [b, a];
+    this.reordered(a);
+  }
+
+  /** `panes` changed order: the grid and sidebar follow, and the order is saved. */
+  private reordered(focus: Pane) {
     for (const p of this.panes) (this.grid.append(p.el), this.list.append(p.row)); // DOM order = grid order, sidebar too
     this.relayout();
-    this.focusPane(a);
+    this.focusPane(focus);
     save(); // the reorder is the saved pane order
   }
 
@@ -1988,7 +1997,8 @@ function cycleThread(back: boolean) {
  * land among; `done` gets the target and whether to land after it. */
 function dragRow(el: HTMLElement, peers: () => HTMLElement[], done: (over: HTMLElement, after: boolean) => void) {
   el.addEventListener("mousedown", (e) => {
-    if (e.button || (e.target as HTMLElement).closest("button:not(.thread-select), .agent, input")) return;
+    const inner = (e.target as HTMLElement).closest("button:not(.thread-select), .agent, input");
+    if (e.button || (inner && inner !== el)) return;
     const from = { x: e.clientX, y: e.clientY };
     let dragging = false;
     let over: HTMLElement | null = null;
@@ -2062,7 +2072,7 @@ function renderSide() {
     folder.className = "project-icon";
     folder.setAttribute("aria-hidden", "true");
     folder.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7V5h7l2 2h9v13H3Z"/></svg>';
-    h.append(chev, folder, name);
+    h.append(chev, folder, name, mini("+", `New worktree in ${basename(repo)}`, () => newThread(repo)));
     const group = document.createElement("div");
     group.className = "group";
     group.id = `project-${uid()}`;
@@ -3248,7 +3258,8 @@ const dlg = $<HTMLDialogElement>("#new");
 const dlgRepo = $<HTMLSelectElement>("#new-repo");
 const dlgErr = $("#new-err");
 
-function newThread() {
+/** `repo` presets the project and switches to worktree mode (the project "+"). */
+function newThread(repo?: string) {
   if ($<HTMLButtonElement>("#new-go").disabled) return dlg.showModal();
   hideMenu();
   togglePreferences(false);
@@ -3256,6 +3267,10 @@ function newThread() {
   for (const r of repos) dlgRepo.append(new Option(basename(r), r));
   dlgRepo.append(new Option("Choose a folder…", ""));
   if (current) dlgRepo.value = current.repo;
+  if (repo) {
+    dlgRepo.value = repo;
+    $<HTMLInputElement>('input[name="thread-mode"][value="worktree"]').checked = true;
+  }
   const agent = $<HTMLSelectElement>("#new-agent");
   agent.textContent = "";
   for (const s of startups) agent.append(new Option(s.label, s.cmd));
@@ -4235,7 +4250,7 @@ async function main() {
     } finally { closing = false; }
   });
 
-  for (const id of ["#new-thread", "#open-first"]) $(id).onclick = newThread;
+  for (const id of ["#new-thread", "#open-first"]) $(id).onclick = () => newThread();
   $("#preferences-btn").onclick = () => togglePreferences();
   $("#preferences-close").onclick = () => (togglePreferences(false), $("#preferences-btn").focus());
   $("#shortcuts").onclick = () => {

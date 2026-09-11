@@ -348,6 +348,17 @@ try {
     await page.fill('#side-filter', '');
     assert.equal(await page.locator('.repo').first().getAttribute('aria-expanded'), 'false');
     await page.locator('.repo').first().click();
+    // The project header's own "+" opens the dialog preset to that repo, in worktree mode, without folding the project.
+    await page.locator('.repo').nth(1).hover();
+    await audit('project-add-hover');
+    await page.locator('.repo').nth(1).locator('button').click();
+    assert.equal(await page.locator('#new-repo').inputValue(), 'C:\\projects\\tools');
+    assert.equal(await page.locator('input[name="thread-mode"]:checked').inputValue(), 'worktree');
+    assert.equal(await page.locator('#new-go').textContent(), 'Create worktree');
+    await audit('project-add-dialog');
+    await page.click('#new-cancel');
+    if (width <= 760) await page.click('#side-toggle'); // cancel is outside the sidebar overlay, which closes it
+    assert.equal(await page.locator('.repo').nth(1).getAttribute('aria-expanded'), 'true');
     await page.locator('.thread-select').filter({ hasText: 'review-keyboard-navigation' }).click();
     assert.equal(await page.locator('#wsname').textContent(), 'review-keyboard-navigation');
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x07')));
@@ -546,6 +557,18 @@ try {
     await page.mouse.up();
     await page.waitForFunction(() => window.qa.saved.threads[0].name === 'review-keyboard-navigation', null, { timeout: 5000 })
       .catch(() => assert.fail('Thread-name buttons must still support drag-to-reorder'));
+    // Agent rows drag within their thread; the pane grid and saved order follow.
+    const agentRows = page.locator('.thread').filter({ has: page.locator('.thread-select', { hasText: 'search-polish' }) }).locator('.agent');
+    const codex = await agentRows.nth(1).boundingBox();
+    const claude = await agentRows.nth(0).boundingBox();
+    await page.mouse.move(codex.x + codex.width / 2, codex.y + codex.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(codex.x + codex.width / 2, claude.y + 3, { steps: 10 });
+    await audit('agent-drag');
+    await page.mouse.up();
+    await page.waitForFunction(() => window.qa.saved.threads.find(t => t.name === 'search-polish').panes.map(p => p.cmd).join() === 'codex,claude,claude,claude', null, { timeout: 5000 })
+      .catch(() => assert.fail('Agent rows must drag-to-reorder within their thread'));
+    assert.equal(await agentRows.first().locator('.agent-name').textContent(), 'codex');
     await page.goto(base + '?empty');
     await page.waitForSelector('#empty:not(.hidden)');
     await audit('empty-workspace');

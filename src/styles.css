@@ -1966,7 +1966,7 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
 .side-head { padding: 0 2px 4px 6px; font-size: 12px; }
 .side-head button { width: 28px; height: 28px; padding: 0; font-size: 18px; border: 1px solid transparent; }
 .repo {
-  display: grid; grid-template-columns: 8px 15px minmax(0, 1fr); gap: 6px; align-items: center;
+  display: grid; grid-template-columns: 8px 15px minmax(0, 1fr) auto; gap: 6px; align-items: center;
   min-height: 32px; padding: 5px 4px; margin-top: 4px; color: var(--text); border: 0;
   white-space: nowrap; border-radius: 4px;
 }
@@ -1975,6 +1975,9 @@ kbd { font: 10px var(--mono); color: var(--faint); margin-left: 8px; }
 .repo > .project-icon { width: 15px; height: 15px; color: var(--muted); }
 .project-icon svg { display: block; width: 100%; height: 100%; }
 .repo > .project-name { font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; }
+.repo > button { width: 24px; height: 24px; padding: 0; font-size: 15px; line-height: 1; border: 1px solid transparent; opacity: 0; }
+.repo:hover > button, .repo:focus-within > button { opacity: 1; }
+.repo > button:hover { background: var(--raise); border-color: var(--line-strong); color: var(--text); }
 .group { margin: 0 0 8px 10px; padding-left: 0; border: 0; }
 .thread, .thread.on, .thread:hover { margin: 2px 0 4px; padding: 2px 4px 5px; border: 1px solid transparent; border-radius: 7px; background: transparent; box-shadow: none; }
 .thread.on { background: var(--raise); border-color: var(--line-strong); }
