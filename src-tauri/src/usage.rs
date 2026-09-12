@@ -763,12 +763,7 @@ fn shape_codex(value: &serde_json::Value, live: bool) -> Option<CodexPlan> {
 }
 
 fn codex_homes() -> Vec<PathBuf> {
-    if let Some(home) = std::env::var_os("CODEX_HOME") { return vec![home.into()]; }
     let mut homes = Vec::new();
-    if let Some(home) = std::env::var_os("ORCA_CODEX_HOME").map(PathBuf::from)
-        .or_else(|| std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("orca/codex-runtime-home/home"))) {
-        homes.push(home);
-    }
     if let Some(home) = std::env::var_os("USERPROFILE") { homes.push(PathBuf::from(home).join(".codex")); }
     homes
 }
@@ -1010,6 +1005,7 @@ mod tests {
     #[ignore = "Reads the signed-in account's live usage"]
     fn codex_live_usage() {
         let plan = super::codex_plan_usage().unwrap();
+        assert!(!plan.plan.stale, "Codex usage must come from the live API, not local fallback");
         println!("Codex usage: {} windows, local fallback: {}, banked resets reported: {}", plan.plan.limits.len(), plan.plan.stale, plan.banked_resets.is_some());
     }
 
