@@ -1516,6 +1516,16 @@ class Pane {
    * opencode pane with no reported session yet (made before Loom captured one)
    * asks once instead of guessing. */
   async spawn(resume: boolean) {
+    if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
+      try {
+        if (!(await invoke<boolean>("has_codex_session", { sid: this.sessionId }))) this.sessionId = undefined;
+      } catch (e) {
+        this.dead = true;
+        this.term.write(`\r\nCould not check saved session: ${String(e)} — Enter retries\r\n`);
+        this.paint();
+        return;
+      }
+    }
     if (resume && !this.sessionId && (this.agent === "codex" || this.agent === "opencode") && !ownSession(this.startup)) {
       this.dead = true;
       if (!this.resumeNotice) {
@@ -1533,6 +1543,7 @@ class Pane {
     }
     this.resumeNotice?.remove();
     this.resumeNotice = undefined;
+    if (!resume) this.sessionId = undefined;
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
     const can =
@@ -4618,8 +4629,10 @@ async function main() {
     if (closing) return;
     closing = true;
     try {
+      await pollSessions();
       await flushSave();
       await saveQueue; // flushSave swallows the error into a toast; this rethrows it, so a failed save cancels the close
+      await invoke("pty_shutdown");
       await getCurrentWindow().destroy();
     } catch (e) {
       toast(`Could not close safely: ${String(e)}`);
@@ -4824,7 +4837,8 @@ async function main() {
   // Codex's notify script and the opencode plugin drop the session id a pane is
   // really on (agent.ts). Only the next launch needs it, so it rides the 4 s
   // tick — on the 250 ms one it cost a file open per pane, under the pty lock.
-  const pollSessions = async () => {
+  let sessionPoll: Promise<void> | undefined;
+  const pollSessions = () => sessionPoll ??= (async () => {
     const panes = threads.flatMap((t) => t.panes).filter((p) => p.agent === "codex" || p.agent === "opencode");
     if (!panes.length) return;
     const got = await invoke<[string, string][]>("take_sessions", { ids: panes.map((p) => p.id) }).catch(() => []);
@@ -4834,7 +4848,7 @@ async function main() {
       if (p && validSessionId(sid) && sid !== p.sessionId) (p.sessionId = sid), (changed = true);
     }
     if (changed) save();
-  };
+  })().finally(() => { sessionPoll = undefined; });
 
   // Context and token totals, read from Claude Code's own transcripts.
   // ponytail: a 4s poll beside the wake one — the Rust side reads only what was

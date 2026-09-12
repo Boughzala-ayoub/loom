@@ -24,6 +24,7 @@ try {
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
       if (location.search.includes('resume')) state.threads[0].panes = [{ cmd: 'codex' }, { cmd: 'codex' }];
       if (location.search.includes('legacy')) state.threads[0].panes = [{ cmd: 'opencode', sid: 'old-placeholder-a' }, { cmd: 'opencode', sid: 'old-placeholder-b' }];
+      if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
       const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false };
       mockWindows('main');
@@ -41,6 +42,8 @@ try {
           return location.search.includes('restore') ? new Promise(resolve => setTimeout(resolve, qa.panes.length * 30)) : undefined;
         }
         if (cmd === 'take_wakes') return qa.wakes.splice(0);
+        if (cmd === 'has_codex_session') return args.sid !== 'missing-session';
+        if (cmd === 'codex_sessions') return [{ id: 'valid-session', title: 'Saved Codex conversation' }];
         if (cmd === 'take_sessions') {
           const mine = qa.sessions.filter(([id]) => args.ids.includes(id));
           qa.sessions = qa.sessions.filter(s => !mine.includes(s));
@@ -618,6 +621,20 @@ try {
     assert.ok(restored.some(c => c.includes('resume 11111111-2222-4333-8444-555555555555')));
     assert.ok(restored.some(c => c.includes('resume aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')));
     assert.ok(restored.every(c => !c.includes('--last') && !c.includes('||')));
+    await page.goto(base + '?stale-codex');
+    await page.waitForSelector('.resume-notice');
+    assert.equal(await page.evaluate(() => window.qa.panes.some(p => p.argv.at(-1).startsWith('codex'))), false, 'A missing session must not enter the failing resume loop');
+    await audit('missing-codex-recovery');
+    await page.locator('.resume-notice button').filter({ hasText: 'Choose session' }).click();
+    await page.waitForSelector('#session-list button');
+    await audit('codex-session-picker');
+    await page.locator('#session-list button').click();
+    await page.waitForFunction(() => window.qa.panes.some(p => p.argv.at(-1).includes('resume valid-session')));
+    await page.goto(base + '?stale-codex');
+    await page.waitForSelector('.resume-notice');
+    await page.locator('.resume-notice button').filter({ hasText: 'Start new' }).click();
+    await page.waitForFunction(() => window.qa.panes.some(p => p.argv.at(-1).startsWith('codex')));
+    assert.ok(await page.evaluate(() => window.qa.panes.filter(p => p.argv.at(-1).startsWith('codex')).every(p => !p.argv.at(-1).includes('resume'))));
     await page.goto(base + '?legacy');
     await page.waitForSelector('.resume-notice');
     await audit('legacy-session-recovery');
@@ -700,9 +717,16 @@ try {
     assert.equal(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'plugin:window|destroy')), false, 'A failed save must not close the window');
     await page.evaluate(async () => {
       window.qa.failSave = false;
+      const paneId = window.qa.calls.filter(c => c.cmd === 'take_sessions').at(-1).args.ids[0];
+      window.qa.sessions.push([paneId, 'last-turn-before-close']);
       await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null });
     });
     await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'plugin:window|destroy'));
+    assert.ok(await page.evaluate(() => window.qa.saved.threads.flatMap(t => t.panes).some(p => p.sessionId === 'last-turn-before-close')), 'Close must capture the final notification before saving');
+    assert.ok(await page.evaluate(() => {
+      const calls = window.qa.calls.map(c => c.cmd);
+      return calls.indexOf('pty_shutdown') >= 0 && calls.indexOf('pty_shutdown') < calls.indexOf('plugin:window|destroy');
+    }), 'Native cleanup must run before the window is destroyed');
     assert.deepEqual(errors, [], 'No browser runtime errors');
     console.log(`PASS ${width}px`);
     await context.close();

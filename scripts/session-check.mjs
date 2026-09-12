@@ -1,7 +1,7 @@
 // No API calls. Exercises provider hooks and the launcher with two panes.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, existsSync, unlinkSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { launch } from '../src/agent.ts';
@@ -9,18 +9,31 @@ import { Loom } from '../src-tauri/src/loom-opencode.js';
 
 const pane = `loom-check-${Date.now()}`;
 const marker = name => join(tmpdir(), 'loom-session-check', name + '.session');
+const codexHome = mkdtempSync(join(tmpdir(), 'loom-codex-check-'));
+const sessions = join(codexHome, 'sessions', '2026', '09', '12');
+mkdirSync(sessions, { recursive: true });
+const rollout = (id, source) => writeFileSync(join(sessions, `rollout-test-${id}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id, source } }) + '\n');
+const notify = (name, id) => {
+  const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from('& $env:LOOM_SESSION_HOOK $env:LOOM_SESSION_EVENT', 'utf16le').toString('base64')], {
+    env: { ...process.env, CODEX_HOME: codexHome, LOOM_PANE: name, LOOM_SESSION_FILE: marker(name), LOOM_SESSION_HOOK: resolve('src-tauri/src/loom-session.ps1'), LOOM_SESSION_EVENT: JSON.stringify({ type: 'agent-turn-complete', 'thread-id': id }) },
+    windowsHide: true, encoding: 'utf8', timeout: 10000,
+  });
+  assert.equal(run.status, 0, String(run.error || run.stderr));
+};
 try {
   const ids = ['11111111-2222-4333-8444-555555555555', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'];
   for (const [i, session_id] of ids.entries()) {
     const name = pane + i;
-    const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from('& $env:LOOM_SESSION_HOOK $env:LOOM_SESSION_EVENT', 'utf16le').toString('base64')], {
-      env: { ...process.env, LOOM_PANE: name, LOOM_SESSION_FILE: marker(name), LOOM_SESSION_HOOK: resolve('src-tauri/src/loom-session.ps1'), LOOM_SESSION_EVENT: JSON.stringify({ type: 'agent-turn-complete', 'thread-id': session_id }) },
-      windowsHide: true, encoding: 'utf8', timeout: 5000,
-    });
-    assert.equal(run.status, 0, run.stderr);
+    rollout(session_id, 'cli');
+    notify(name, session_id);
     assert.equal(readFileSync(marker(name), 'utf8'), session_id);
     assert.ok(launch('codex', 'placeholder', true, undefined, session_id).at(-1).includes(`resume ${session_id}`));
   }
+  notify(pane + '0', 'ephemeral-child');
+  assert.equal(readFileSync(marker(pane + '0'), 'utf8'), ids[0], 'An unsaved internal thread must not replace the resumable session');
+  rollout('guardian-child', { subagent: { other: 'guardian' } });
+  notify(pane + '0', 'guardian-child');
+  assert.equal(readFileSync(marker(pane + '0'), 'utf8'), ids[0], 'A persisted subagent must not replace the pane session');
   process.env.LOOM_PANE = pane + 'oc';
   process.env.LOOM_SESSION_FILE = marker(process.env.LOOM_PANE);
   const plugin = await Loom({ client: { session: { get: async () => ({ data: {} }) } } });
@@ -30,7 +43,8 @@ try {
   assert.equal(readFileSync(marker(process.env.LOOM_PANE), 'utf8'), 'ses_first');
   await plugin['chat.message']({ sessionID: 'ses_selected' });
   assert.equal(readFileSync(marker(process.env.LOOM_PANE), 'utf8'), 'ses_selected');
-  console.log('PASS per-pane Codex markers, exact resume, OpenCode selection and subagent isolation');
+  console.log('PASS per-pane Codex markers, exact resume, ephemeral/guardian rejection, OpenCode selection and subagent isolation');
 } finally {
   for (const suffix of ['0', '1', 'oc']) if (existsSync(marker(pane + suffix))) unlinkSync(marker(pane + suffix));
+  rmSync(codexHome, { recursive: true, force: true });
 }

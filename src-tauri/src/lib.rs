@@ -23,8 +23,9 @@ const LOOM_STATUS: &str = include_str!("loom-status.ps1");
 const OPENCODE_PLUGIN: &str = include_str!("loom-opencode.js");
 
 struct Session {
-    master: Box<dyn MasterPty + Send>,
+    // Close the input pipe before ClosePseudoConsole runs in master's Drop.
     writer: Box<dyn Write + Send>,
+    master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
 }
@@ -239,7 +240,7 @@ fn pty_spawn(
         let _ = handle.emit(&exit_ev, code);
     });
 
-    ptys.0.lock().unwrap().insert(
+    let previous = ptys.0.lock().unwrap().insert(
         id,
         Session {
             master: pair.master,
@@ -248,6 +249,9 @@ fn pty_spawn(
             pid,
         },
     );
+    // Dropping a ConPTY can wait for its output to drain. Never do that while
+    // holding the map lock that other panes' writes and resizes need.
+    if let Some(mut previous) = previous { previous.kill(); }
     Ok(())
 }
 
@@ -273,12 +277,19 @@ fn pty_resize(ptys: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pty_kill(ptys: State<Ptys>, id: String) -> Result<(), String> {
-    if let Some(mut s) = ptys.0.lock().unwrap().remove(&id) {
+    let session = ptys.0.lock().unwrap().remove(&id);
+    if let Some(mut s) = session {
         s.kill();
     }
     Ok(())
+}
+
+#[tauri::command(async)]
+fn pty_shutdown(ptys: State<Ptys>) {
+    let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
+    for (_, mut session) in sessions { session.kill(); }
 }
 
 /// One git invocation in `dir`, stdout back, stderr as the error. The thread
@@ -527,11 +538,22 @@ fn opencode_sessions(dir: String) -> Result<Vec<serde_json::Value>, String> {
 // ponytail: one full walk per open of the picker, 20 newest matches.
 #[tauri::command(async)]
 fn codex_sessions(app: AppHandle, dir: String) -> Result<Vec<serde_json::Value>, String> {
-    use std::io::BufRead;
-    let home = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
+    codex_session_rows(&codex_home(&app)?, &dir, None)
+}
+
+fn codex_home(app: &AppHandle) -> Result<PathBuf, String> {
+    std::env::var_os("CODEX_HOME").map(PathBuf::from)
         .or_else(|| app.path().home_dir().ok().map(|h| h.join(".codex")))
-        .ok_or("no home dir")?;
+        .ok_or_else(|| "no home dir".to_string())
+}
+
+#[tauri::command(async)]
+fn has_codex_session(app: AppHandle, sid: String) -> Result<bool, String> {
+    Ok(!codex_session_rows(&codex_home(&app)?, "", Some(&sid))?.is_empty())
+}
+
+fn codex_session_rows(home: &std::path::Path, dir: &str, sid: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+    use std::io::BufRead;
     let mut names = std::collections::HashMap::new();
     for line in std::fs::read_to_string(home.join("session_index.jsonl")).unwrap_or_default().lines() {
         if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
@@ -557,14 +579,22 @@ fn codex_sessions(app: AppHandle, dir: String) -> Result<Vec<serde_json::Value>,
     let want = norm(&dir);
     let mut rows = Vec::new();
     for (_, path) in files {
+        if sid.is_some_and(|id| !path.file_name().unwrap().to_string_lossy().ends_with(&format!("-{id}.jsonl"))) {
+            continue;
+        }
         let Ok(file) = std::fs::File::open(&path) else { continue };
         let mut lines = std::io::BufReader::new(file).lines().map_while(Result::ok);
         let Some(meta) = lines.next().and_then(|l| serde_json::from_str::<serde_json::Value>(&l).ok()) else { continue };
         let payload = &meta["payload"];
-        if meta["type"] != "session_meta" || !payload["cwd"].as_str().is_some_and(|c| norm(c) == want) {
+        if meta["type"] != "session_meta" || payload["source"].get("subagent").is_some() {
             continue;
         }
         let Some(id) = payload["id"].as_str() else { continue };
+        if let Some(sid) = sid {
+            if id == sid { return Ok(vec![serde_json::json!({ "id": id })]); }
+            continue;
+        }
+        if !payload["cwd"].as_str().is_some_and(|c| norm(c) == want) { continue; }
         let title = names.get(id).cloned().or_else(|| {
             // The first prompt you typed: a user message that is not one of the
             // injected instruction blocks (`# AGENTS.md …`, `<environment_context>`).
@@ -793,14 +823,12 @@ pub fn run() {
             }
             // The frontend may cancel close if its final save fails.
             if matches!(event, tauri::WindowEvent::Destroyed) {
-                for (_, mut s) in window.state::<Ptys>().0.lock().unwrap().drain() {
-                    s.kill();
-                }
+                pty_shutdown(window.state::<Ptys>());
             }
         })
         .invoke_handler(tauri::generate_handler![
-            pty_spawn, pty_write, pty_resize, pty_kill, load_state, save_state, open_vscode,
-            git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, usage::session_usage, usage::has_session, usage::plan_usage, usage::codex_plan_usage,
+            pty_spawn, pty_write, pty_resize, pty_kill, pty_shutdown, load_state, save_state, open_vscode,
+            git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, has_codex_session, usage::session_usage, usage::has_session, usage::plan_usage, usage::codex_plan_usage,
             usage::model_options, usage::context_profile,
             dictate::dictate_start,
             dictate::dictate_stop,
@@ -813,6 +841,25 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{drain_wakes, sweep_stale_profiles, take_utf8};
+
+    #[test]
+    fn codex_resume_rejects_missing_and_internal_sessions() {
+        let root = std::env::temp_dir().join(format!("loom-resume-test-{}", std::process::id()));
+        let sessions = root.join("sessions/2026/09/12");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for (id, source) in [("root", serde_json::json!("cli")), ("child", serde_json::json!({"subagent":{"other":"guardian"}}))] {
+            std::fs::write(sessions.join(format!("rollout-test-{id}.jsonl")), format!("{}\n", serde_json::json!({
+                "type": "session_meta", "payload": {"id": id, "source": source, "cwd": "C:\\project"}
+            }))).unwrap();
+        }
+        let rows = super::codex_session_rows(&root, "c:/project/", None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "root");
+        assert_eq!(super::codex_session_rows(&root, "", Some("root")).unwrap().len(), 1);
+        assert!(super::codex_session_rows(&root, "", Some("child")).unwrap().is_empty());
+        assert!(super::codex_session_rows(&root, "", Some("ephemeral")).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn image_preview_reads_bytes_and_rejects_invalid_files() {
