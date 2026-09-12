@@ -213,6 +213,14 @@ try {
     const bounds = await page.locator('#diff-body img').boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= 900, 'Image fits the preview');
     await page.click('#diff-close');
+    for (const homePath of ['~\\AppData\\Local\\Temp\\opencode\\g375.png', '~/AppData/Local/Temp/opencode/g375b.png']) {
+      await clickTerminalPath(homePath);
+      await page.waitForFunction(() => document.querySelector('#diff-body img')?.naturalWidth === 1600);
+      const actualPath = await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'read_image').at(-1).args.path);
+      assert.equal(actualPath.replaceAll('/', '\\'), 'C:\\Users\\test\\' + homePath.slice(2).replaceAll('/', '\\'));
+      await audit('image-preview-home-' + (homePath.includes('g375b') ? 'slash' : 'backslash'));
+      await page.click('#diff-close');
+    }
     await page.evaluate(() => window.qa.failImage = true);
     await clickTerminalPath('"C:\\My Pictures\\missing image.png"');
     await page.waitForFunction(() => document.querySelector('#diff-body').textContent.includes('Image file not found')).catch(async e => {
@@ -224,6 +232,8 @@ try {
     await page.click('#diff-close');
     await clickTerminalPath('src/main.ts:12');
     await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'open_vscode' && c.args.goto.endsWith('src/main.ts:12')));
+    await clickTerminalPath('~\\src\\main.ts:12:3');
+    await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'open_vscode' && c.args.goto === 'C:\\Users\\test\\src\\main.ts:12:3'));
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     // Exercise every palette through the UI, including light -> dark -> default.

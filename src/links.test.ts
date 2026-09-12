@@ -21,6 +21,13 @@ for (const path of ['node_modules\\.cache\\ui-check\\theme-0-768.png', 'C:\\My P
   eq(link.range.start.x, path.startsWith('"') ? 4 : 3);
 }
 const path = 'node_modules/.cache/ui-check/theme-picker-0-768.png';
+for (const path of ['~\\AppData\\Local\\Temp\\opencode\\g375.png', '~/AppData/Local/Temp/opencode/g375b.png', '~\\My Pictures\\screen shot.png', '~/src/main.ts:12:3']) {
+  for (const cols of [200, 20]) {
+    const link = fileLinks(buffer('Read ' + path, cols), 1)[0];
+    eq(link.text, path);
+    eq(link.range.start, { x: 6, y: 1 });
+  }
+}
 const wrapped = fileLinks(buffer(path, 20), 2)[0];
 eq(wrapped.text, path);
 eq(wrapped.range, { start: { x: 1, y: 1 }, end: { x: path.length % 20, y: 3 } });

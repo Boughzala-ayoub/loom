@@ -1394,13 +1394,16 @@ class Pane {
         cb(
           fileLinks(this.term.buffer.active, y).map((link) => ({
             ...link,
-            activate: () => {
-              const path = link.text.replace(/:\d+(?::\d+)?$/, "");
-              if (imageMime(path)) return openTab(this.th, basename(path), { file: path });
-              void invoke("open_vscode", {
-                dir: this.th.dir,
-                goto: ABS_RE.test(link.text) ? link.text : `${this.th.dir}\\${link.text}`,
-              }).catch((e) => toast(String(e)));
+            activate: async () => {
+              try {
+                const target = /^~[\\/]/.test(link.text) ? await join(await homeDir(), link.text.slice(2)) : link.text;
+                const path = target.replace(/:\d+(?::\d+)?$/, "");
+                if (imageMime(path)) return openTab(this.th, basename(path), { file: path });
+                await invoke("open_vscode", {
+                  dir: this.th.dir,
+                  goto: ABS_RE.test(target) ? target : `${this.th.dir}\\${target}`,
+                });
+              } catch (e) { toast(String(e)); }
             },
           })),
         );

@@ -7,7 +7,7 @@ const IMAGE_TYPES = new Map(Object.entries({
 export const imageMime = (path: string) => IMAGE_TYPES.get(path.split('.').pop()!.toLowerCase());
 
 // Quoted paths may contain spaces. Unquoted absolute Windows paths may too.
-const PATH_RE = /["'`]([^"'`\r\n]+\.[A-Za-z]\w{0,7}(?::\d+(?::\d+)?)?)["'`]|(?:[A-Za-z]:[\\/]|\\\\)[^\r\n"*?<>|]+?\.[A-Za-z]\w{0,7}(?::\d+(?::\d+)?)?(?=$|[\s"'`),;\]])|[\\/]?(?:[\p{L}\p{N}_.-]+[\\/])*[\p{L}\p{N}_.-]+\.[A-Za-z]\w{0,7}(?::\d+(?::\d+)?)?/gu;
+const PATH_RE = /["'`]([^"'`\r\n]+\.[A-Za-z]\w{0,7}(?::\d+(?::\d+)?)?)["'`]|(?:[A-Za-z]:[\\/]|\\\\|~[\\/])[^\r\n"*?<>|]+?\.[A-Za-z]\w{0,7}(?::\d+(?::\d+)?)?(?=$|[\s"'`),;\]])|[\\/]?(?:[\p{L}\p{N}_.-]+[\\/])*[\p{L}\p{N}_.-]+\.[A-Za-z]\w{0,7}(?::\d+(?::\d+)?)?/gu;
 
 /** Join terminal wraps and keep cell coordinates, including wide characters. */
 export function fileLinks(buffer: IBuffer, y: number) {
