@@ -9,8 +9,8 @@
  *
  * Modifiers are always dropped, whatever key triggered this: xterm discards a
  * wheel carrying `shiftKey` outright, and `altKey` is its `fastScrollModifier`
- * (x5). Alt+Arrow is the binding, so forwarding the real modifier state would
- * scroll five times too far. */
+ * (x5). Alt+Shift+Arrow is the binding, so forwarding its modifiers would
+ * prevent scrolling. */
 export const LINES = 3;
 
 export function wheelInit(

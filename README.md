@@ -108,7 +108,7 @@ integration below.
 | Dictate into the focused agent pane | hold `F4` and talk, or click `◉ speak` |
 | Zoom a pane | `F2`, double-click its header, or `⛶` |
 | Jump to a pane waiting on you | `F3` |
-| Scroll a pane | `Alt+↑` / `Alt+↓`, or the mouse wheel |
+| Scroll a pane | `Alt+Shift+↑` / `Alt+Shift+↓`, or the mouse wheel |
 | Open the thread in VS Code | `F5` or the `VS Code` button |
 | Thread actions | `⋯` on its row or in the thread bar, or right-click the row (rename lives here) |
 | Fold / reorder the sidebar | click a project, `▾` on a thread; drag a row to move it |

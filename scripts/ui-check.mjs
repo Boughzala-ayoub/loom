@@ -139,6 +139,22 @@ try {
     }
     const escape = () => page.keyboard.press('Escape');
     await audit('workspace');
+    // Codex uses Alt+Up to answer queued questions. It must reach the PTY.
+    const codexPane = page.locator('.grid:not(.hidden) .pane').nth(1);
+    await codexPane.locator('.pane-title').click();
+    await codexPane.locator('.xterm-helper-textarea').focus();
+    await page.evaluate(() => {
+      window.qa.keyStart = window.qa.calls.length;
+      window.qa.keyboardWheels = [];
+      document.addEventListener('wheel', e => window.qa.keyboardWheels.push([e.deltaY, e.altKey, e.shiftKey]), true);
+    });
+    await page.keyboard.press('Alt+ArrowUp');
+    await page.keyboard.press('Alt+ArrowDown');
+    assert.deepEqual(await page.evaluate(() => window.qa.calls.slice(window.qa.keyStart).filter(c => c.cmd === 'pty_write').map(c => c.args.data)), ['\x1b[1;3A', '\x1b[1;3B'], 'Plain Alt+arrows must reach Codex unchanged');
+    assert.equal(await page.evaluate(() => window.qa.keyboardWheels.length), 0, 'Codex shortcuts must not scroll Loom');
+    await page.keyboard.press('Alt+Shift+ArrowUp');
+    await page.keyboard.press('Alt+Shift+ArrowDown');
+    assert.deepEqual(await page.evaluate(() => window.qa.keyboardWheels), [[-3, false, false], [3, false, false]], 'Alt+Shift+arrows must scroll without forwarding modifiers');
     for (const zoomed of [false, true]) {
       if (zoomed) await page.keyboard.press('F2');
       for (const entry of ['toolbar', 'sidebar']) {

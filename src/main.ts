@@ -1667,7 +1667,7 @@ class Pane {
     this.th.focusPane(this);
   }
 
-  /** Alt+Arrow scrolling: hand xterm a wheel event on the element it already
+  /** Alt+Shift+Arrow scrolling: hand xterm a wheel event on the element it already
    * listens on and let it encode one for whatever the app negotiated. See
    * scroll.ts for why this isn't a hand-written escape sequence. */
   scroll(up: boolean) {
@@ -4811,9 +4811,8 @@ async function main() {
       else if (e.ctrlKey && (e.key === "=" || e.key === "+")) setFont(fontSize + 1);
       else if (e.ctrlKey && e.key === "-") setFont(fontSize - 1);
       else if (e.ctrlKey && e.key === "0") setFont(13);
-      // Claude Code owns the alt screen, so this is the only way to scroll it
-      // off the keyboard. Consumed here or xterm forwards ESC[1;3A to the pty.
-      else if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && current?.active)
+      // Leave plain Alt+arrows to the terminal app (Codex's queued questions).
+      else if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && current?.active)
         current.active.scroll(e.key === "ArrowUp");
       else return;
       e.preventDefault();
