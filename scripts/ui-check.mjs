@@ -10,7 +10,7 @@ assert.equal((await fetch(base)).status, 200, 'Production preview must be servin
 const out = resolve('node_modules/.cache/ui-check', process.env.UI_THEME || '');
 mkdirSync(out, { recursive: true });
 const mocks = readFileSync('node_modules/@tauri-apps/api/mocks.js', 'utf8').replace(/^export \{.*$/m, '');
-const browser = await chromium.launch({ channel: 'chrome', headless: true });
+const browser = await chromium.launch({ channel: 'chrome', headless: true, ignoreDefaultArgs: ['--hide-scrollbars'] });
 let checks = 0;
 try {
   for (const width of (process.env.UI_WIDTHS || '320,375,768,1024,1280').split(',').map(Number)) {
@@ -90,6 +90,7 @@ try {
           if (a[0] === 'status') return qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0';
           if (a.includes('--numstat')) return '18\t4\tsrc/main.ts\n7\t2\tsrc/styles.css\n';
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
+          if ((a[0] === 'diff' || a[0] === 'show') && qa.longDiff) return 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1,601 @@\n context line one\n' + '+added line\n'.repeat(600);
           if (a[0] === 'diff' || a[0] === 'show') return (a.includes('-U999999') ? ' context line one\n context line two\n' : '') + 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old navigation\n+const description = "A long line of source code that should remain readable when reviewing changes inside a narrow workspace window.";\n';
           if (a[0] === 'log') return 'abc123 Improve workspace navigation\n';
           if (a[0] === 'branch') return 'main\nloom/search-polish\n';
@@ -491,9 +492,23 @@ try {
     // The overview ruler: one mark per run of changed rows, the removal above the addition.
     assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('#diff-ruler i')].map(m => [m.className, parseFloat(m.style.top) < 100])), [['del', true], ['add', true]]);
     assert.ok(await page.evaluate(() => { const [d, a] = document.querySelectorAll('#diff-ruler i'); return d.getBoundingClientRect().top < a.getBoundingClientRect().top; }), 'Ruler marks keep row order');
+    await page.evaluate(() => window.qa.longDiff = true);
     await page.click('#diff-full');
     await page.waitForFunction(() => document.querySelector('#diff-body').textContent.includes('context line one') && window.qa.saved.ui.diffFull);
     await audit('diff-full');
+    assert.ok(await page.evaluate(() => {
+      const body = document.querySelector('#diff-body');
+      const ruler = document.querySelector('#diff-ruler').getBoundingClientRect();
+      return body.scrollHeight > body.clientHeight && body.getBoundingClientRect().right <= ruler.left;
+    }), 'Diff markers must have their own strip outside the scrollbar');
+    const scroll = await page.locator('#diff-body').boundingBox();
+    await page.mouse.move(scroll.x + scroll.width - 7, scroll.y + 30);
+    await page.mouse.down();
+    await page.mouse.move(scroll.x + scroll.width - 7, scroll.y + scroll.height / 2, { steps: 10 });
+    await page.mouse.up();
+    await page.waitForFunction(() => document.querySelector('#diff-body').scrollTop > 0);
+    await audit('diff-scrolled');
+    await page.evaluate(() => window.qa.longDiff = false);
     await page.click('#diff-full');
     await page.waitForFunction(() => !document.querySelector('#diff-body').textContent.includes('context line one'));
     // Once the file has no changes left, its diff tab closes on the next re-read.

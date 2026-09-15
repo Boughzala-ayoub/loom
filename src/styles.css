@@ -1680,7 +1680,7 @@ dialog h2 {
   position: relative;
   display: flex;
 }
-/* Marks along the scrollbar, one per run of changed rows; a row's share of the
+/* Marks beside the scrollbar, one per run of changed rows; a row's share of the
    height is its share of the rows. */
 #diff-ruler {
   position: absolute;
@@ -1702,15 +1702,15 @@ dialog h2 {
 #diff-body {
   flex: 1;
   min-width: 0;
-  margin: 0;
+  margin: 0 8px 0 0; /* Reserve the ruler's strip outside the scrollbar. */
   padding: 8px 12px;
   overflow: auto;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.45;
   color: var(--muted);
-  scrollbar-width: thin;
-  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: auto;
+  scrollbar-color: var(--muted) var(--panel);
 }
 #diff-body {
   padding: 0 0 8px;
