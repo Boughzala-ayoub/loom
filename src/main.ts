@@ -908,6 +908,7 @@ const DEFAULT_STARTUPS: Startup[] = [
 let startups: Startup[] = [...DEFAULT_STARTUPS];
 let fontSize = 13; // Ctrl+= / Ctrl+- / Ctrl+0, global to every pane, persisted
 let paneCount = 1; // the new-thread form's pane count, persisted so it keeps your last pick
+let silent = false; // Preferences → Notifications: no chimes, no taskbar flash; persisted
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -945,6 +946,7 @@ function mini(label: string, title: string, fn: () => void) {
  * ponytail: WebAudio sine instead of shipping audio assets. */
 let audio: AudioContext | undefined;
 function chime(from: number, to: number, peak = 0.15, len = 0.3) {
+  if (silent) return; // every sound routes through here: the wake blip and the mic cues
   audio ??= new AudioContext();
   if (audio.state === "suspended") audio.resume(); // no gesture yet on restore
   const t = audio.currentTime;
@@ -1463,7 +1465,12 @@ class Pane {
     // either way — a deep normal-buffer scrollback would only hold memory.
     this.term.options.scrollback = this.agent === "shell" ? 5000 : 1500;
     this.term.open(this.host);
-    this.gpu(this.th === current);
+    // WebGL from the start, hidden or not (the budget in gpu() still caps it).
+    // A hidden pane on the DOM renderer re-renders every row on every scroll
+    // (xterm's selection refresh bypasses its render pause) and, with no width
+    // to measure in display:none, caches nothing — 8 restored agent panes
+    // streaming in the background ate ~90% of the main thread; on WebGL, ~20%.
+    this.gpu(true);
     this.term.onTitleChange((t) => {
       // Agents redraw the title with a spinner glyph while working, ~10 times a
       // second; paint() strips it, so those are the same title — skip them.
@@ -1690,7 +1697,8 @@ class Pane {
     this.paint();
     beep();
     // Loom isn't on screen: flash the taskbar button too. Cleared in main().
-    if (!document.hasFocus())
+    // The sidebar dot and the `N waiting` chip still say who wants you in silent mode.
+    if (!silent && !document.hasFocus())
       getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
   }
 
@@ -2232,6 +2240,7 @@ const flushSave = (): Promise<unknown> => {
       theme: theme.label,
       fontSize,
       paneCount,
+      silent,
       ui: { thread: threads.indexOf(current!), sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
         sideScroll: $("#threads").scrollTop,
         foldedSections: [...foldedSections], foldedDirs: [...foldedDirs],
@@ -4445,6 +4454,13 @@ function paintTheme() {
   b.title = `Colour theme: ${theme.label} — click to change`;
 }
 
+function paintSilent() {
+  const b = $("#silent");
+  b.textContent = silent ? "🔕 silent" : "🔔 sound + taskbar";
+  b.title = silent ? "No chime, no taskbar flash — click to turn them back on" : "Chime and flash the taskbar when an agent wants you — click to silence";
+  b.setAttribute("aria-pressed", String(silent));
+}
+
 function paintLang() {
   const b = $("#lang");
   b.textContent = `${lang.label} ▾`;
@@ -4586,6 +4602,7 @@ async function main() {
     theme?: string;
     fontSize?: number;
     paneCount?: number;
+    silent?: boolean;
     ui?: { thread?: number; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
@@ -4605,6 +4622,7 @@ async function main() {
   // Before any Pane exists — the Terminal is built with it. Hand-editable file.
   fontSize = Math.min(Math.max(saved.fontSize ?? fontSize, 8), 24);
   paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
+  silent = saved.silent === true;
   repos = saved.repos ?? [];
   reposFolded = new Set(saved.reposFolded ?? []);
   sideQuery = saved.ui?.sideQuery ?? "";
@@ -4715,14 +4733,16 @@ async function main() {
   const langBtn = $("#lang");
   const themeBtn = $("#theme");
   // keep pane focus
-  for (const b of [dictate, prefixBtn, langBtn, themeBtn]) b.onmousedown = (e) => e.preventDefault();
+  for (const b of [dictate, prefixBtn, langBtn, themeBtn, $("#silent")]) b.onmousedown = (e) => e.preventDefault();
   dictate.onclick = () => mic(recording ? micStop : micStart);
   prefixBtn.onclick = () => showMenu(prefixBtn, prefixMenu);
   langBtn.onclick = () => showMenu(langBtn, langMenu);
   themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
+  $("#silent").onclick = () => ((silent = !silent), paintSilent(), save());
   micState("");
   paintPrefix();
   paintLang();
+  paintSilent();
   paintTheme();
   $("#layout").onclick = () => {
     if (!current) return;

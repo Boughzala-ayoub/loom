@@ -26,7 +26,10 @@ try {
       if (location.search.includes('legacy')) state.threads[0].panes = [{ cmd: 'opencode', sid: 'old-placeholder-a' }, { cmd: 'opencode', sid: 'old-placeholder-b' }];
       if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
-      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false };
+      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false, beeps: 0 };
+      // Count chimes instead of playing them; only createOscillator matters.
+      const node = { connect() { return node; }, start() {}, stop() {}, frequency: { setValueAtTime() {} }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } };
+      window.AudioContext = class { state = 'running'; currentTime = 0; destination = node; resume() {} createGain() { return node; } createOscillator() { qa.beeps++; return node; } };
       mockWindows('main');
       mockIPC((cmd, args = {}) => {
         qa.calls.push({ cmd, args });
@@ -367,6 +370,26 @@ try {
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x07')));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 6);
     await audit('all-agents-waiting');
+    // Silent mode: a wake still marks the pane waiting, but neither chimes nor flashes the taskbar.
+    await page.goto(base);
+    await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+    const flashes = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'plugin:window|request_user_attention').length);
+    await page.evaluate(() => { document.hasFocus = () => false; window.qa.panes[0].onOut.onmessage('\x07'); });
+    await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 1);
+    assert.equal(await page.evaluate(() => window.qa.beeps), 1, 'A wake chimes by default');
+    assert.equal(await flashes(), 1, 'A wake while unfocused flashes the taskbar by default');
+    await page.click('#preferences-btn');
+    await page.click('#silent');
+    await page.waitForFunction(() => window.qa.saved.silent === true);
+    assert.equal(await page.locator('#silent').getAttribute('aria-pressed'), 'true');
+    await audit('preferences-silent');
+    await page.evaluate(() => window.qa.panes[1].onOut.onmessage('\x07'));
+    await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 2);
+    assert.equal(await page.evaluate(() => window.qa.beeps), 1, 'Silent mode must not chime');
+    assert.equal(await flashes(), 1, 'Silent mode must not flash the taskbar');
+    await page.goto(base + '?restore');
+    await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+    assert.equal(await page.locator('#silent').getAttribute('aria-pressed'), 'true', 'Silent mode must survive a relaunch');
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     if (width <= 760) await page.click('#side-toggle');
