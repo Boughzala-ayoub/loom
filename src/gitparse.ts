@@ -48,9 +48,9 @@ export function sumStat(stats: Iterable<Stat>): Stat {
 
 /** How one line of `git diff` output is coloured. Headers before the first
  * hunk are "meta"; the `---`/`+++` file lines are meta too, not a change. */
-export function diffClass(line: string): "add" | "del" | "hunk" | "meta" | "" {
+export function diffClass(line: string, inHunk = false): "add" | "del" | "hunk" | "meta" | "" {
   if (line.startsWith("@@")) return "hunk";
-  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
+  if (!inHunk && (line.startsWith("+++") || line.startsWith("---"))) return "meta";
   if (line.startsWith("+")) return "add";
   if (line.startsWith("-")) return "del";
   if (/^(diff |index |new file|deleted file|similarity|rename |copy |Binary)/.test(line)) return "meta";
@@ -65,9 +65,12 @@ export function diffRows(text: string): DiffRow[] {
   const rows: DiffRow[] = [];
   let o = 0;
   let n = 0;
+  let inHunk = false;
   for (const line of text.split("\n")) {
-    const kind = diffClass(line);
+    if (line.startsWith("diff --git")) inHunk = false;
+    const kind = diffClass(line, inHunk);
     if (kind === "hunk") {
+      inHunk = true;
       const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
       o = m ? +m[1] : 0;
       n = m ? +m[2] : 0;
@@ -95,14 +98,17 @@ export type Node = { name: string; path: string; dirs: Node[]; files: { name: st
 
 export function tree(paths: string[]): Node {
   const root: Node = { name: "", path: "", dirs: [], files: [], count: 0 };
+  const dirs = new Map<string, Node>();
   paths.forEach((p, i) => {
     const parts = p.split("/");
     let node = root;
     node.count++;
     for (const part of parts.slice(0, -1)) {
-      let d = node.dirs.find((x) => x.name === part);
+      const path = node.path ? `${node.path}/${part}` : part;
+      let d = dirs.get(path);
       if (!d) {
-        d = { name: part, path: node.path ? `${node.path}/${part}` : part, dirs: [], files: [], count: 0 };
+        d = { name: part, path, dirs: [], files: [], count: 0 };
+        dirs.set(path, d);
         node.dirs.push(d);
       }
       node = d;
@@ -147,8 +153,12 @@ export function gitAct(sec: Sec, act: Act, files: Change[]): string[][] {
  * header git wrote for the file, and a multi-file diff restarts it at each
  * `diff --git`. Empty when `at` is above the first hunk. */
 export function hunkPatch(rows: DiffRow[], at: number): string {
+  if (!rows[at]) return "";
   let start = at;
-  while (start >= 0 && rows[start].kind !== "hunk") start--;
+  while (start >= 0 && rows[start].kind !== "hunk") {
+    if (rows[start].text.startsWith("diff --git")) return "";
+    start--;
+  }
   if (start < 0) return "";
   let end = start + 1;
   while (end < rows.length && rows[end].kind !== "hunk" && !rows[end].text.startsWith("diff --git")) end++;

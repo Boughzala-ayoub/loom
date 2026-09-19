@@ -33,7 +33,7 @@ check("numstat parses lines and binaries", [...ns.entries()], [
 ]);
 check("sum", sumStat(ns.values()), { add: 12, del: 8 });
 
-check("diff classes", ["@@ -1,2 +1,3 @@", "+++ b/x", "--- a/x", "+added", "-removed", "diff --git a/x b/x", " context", "index 1..2"].map(diffClass), [
+check("diff classes", ["@@ -1,2 +1,3 @@", "+++ b/x", "--- a/x", "+added", "-removed", "diff --git a/x b/x", " context", "index 1..2"].map(line => diffClass(line)), [
   "hunk", "meta", "meta", "add", "del", "meta", "", "meta",
 ]);
 
@@ -87,6 +87,7 @@ const two = [
   "+ten",
 ].join(String.fromCharCode(10));
 const tr = diffRows(two);
+check("each file restarts header parsing", tr.slice(8, 15).map(r => r.kind), ["meta", "meta", "meta", "meta", "hunk", "", "add"]);
 check(
   "one hunk carries its own file header",
   hunkPatch(tr, 6).split(String.fromCharCode(10)),
@@ -98,6 +99,18 @@ check(
   ["diff --git a/b.ts b/b.ts", "index 333..444 100644", "--- a/b.ts", "+++ b/b.ts", "@@ -9 +10,2 @@", " nine", "+ten", ""],
 );
 check("above the first hunk there is nothing to apply", hunkPatch(tr, 1), "");
+check("a later file header must not select the previous file's hunk", hunkPatch(tr, 10), "");
+check("a missing row has no hunk", [hunkPatch(tr, -1), hunkPatch(tr, tr.length)], ["", ""]);
+
+const markers = diffRows("--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n---removed\n+++added\n same\n");
+check("header-like content inside a hunk keeps its class and line numbers", markers.map(r => [r.kind, r.old, r.neu]), [
+  ["meta", 0, 0], ["meta", 0, 0], ["hunk", 0, 0], ["del", 1, 0], ["add", 0, 1], ["", 2, 2],
+]);
+
+const wide = tree(Array.from({ length: 2000 }, (_, i) => `dir${i}/src/file.ts`).concat(["dir0/src/second.ts"]));
+check("wide trees reuse folders and retain input order and file indexes",
+  [wide.count, wide.dirs.length, wide.dirs[0].count, wide.dirs[0].dirs[0].files, wide.dirs[1999].name],
+  [2001, 2000, 2, [{ name: "file.ts", i: 0 }, { name: "second.ts", i: 2000 }], "dir1999"]);
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");
