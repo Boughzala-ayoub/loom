@@ -669,8 +669,12 @@ try {
       window.qa.sessions.push([codex[0].id, '11111111-2222-4333-8444-555555555555'], [codex[1].id, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee']);
     });
     await page.waitForFunction(() => window.qa.saved.threads[0].panes.every(p => p.sessionId));
+    const codexStateIds = await page.evaluate(() => window.qa.panes.filter(p => p.argv.at(-1).startsWith('codex')).map(p => p.codexStateId));
+    assert.equal(new Set(codexStateIds).size, 2, 'Concurrent Codex panes must have separate SQLite directories');
+    assert.ok(codexStateIds.every(Boolean));
     await page.goto(base + '?restore');
     await page.waitForFunction(() => window.qa.panes.length === 4);
+    assert.deepEqual(await page.evaluate(() => window.qa.panes.filter(p => p.argv.at(-1).startsWith('codex')).map(p => p.codexStateId)), codexStateIds, 'Restored panes must reuse their persistent SQLite directories');
     const restored = await page.evaluate(() => window.qa.panes.filter(p => p.argv.at(-1).startsWith('codex')).map(p => p.argv.at(-1)));
     assert.ok(restored.some(c => c.includes('resume 11111111-2222-4333-8444-555555555555')));
     assert.ok(restored.some(c => c.includes('resume aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')));

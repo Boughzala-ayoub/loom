@@ -108,12 +108,17 @@ fn pty_spawn(
     id: String,
     cwd: Option<String>,
     argv: Vec<String>,
+    codex_state_id: Option<String>,
     cols: u16,
     rows: u16,
     on_out: tauri::ipc::Channel<String>,
 ) -> Result<(), String> {
     if argv.is_empty() {
         return Err("empty argv".into());
+    }
+    if codex_state_id.as_ref().is_some_and(|id| id.is_empty() || id.len() > 128
+        || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')) {
+        return Err("invalid Codex state id".into());
     }
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -143,6 +148,14 @@ fn pty_spawn(
 
     let hooks_arg = hooks.display().to_string();
     let mut cmd = CommandBuilder::new(&argv[0]);
+    if let Some(sid) = codex_state_id {
+        // Codex's shared log DB can lock out concurrent startups. Keep each
+        // pane's SQLite state across relaunches; auth/config/rollouts still
+        // use CODEX_HOME. An explicit sqlite_home in Codex config still wins.
+        let sqlite = data_dir(&app).join("codex-sqlite").join(sid);
+        std::fs::create_dir_all(&sqlite).map_err(|e| e.to_string())?;
+        cmd.env("CODEX_SQLITE_HOME", sqlite);
+    }
     if argv.len() == 5 && argv[0].eq_ignore_ascii_case("cmd.exe") && argv[3] == "/c" {
         // ConPTY quotes argv MSVC-style; cmd.exe does not understand \" inside
         // its command string. Expand the whole command after that quoting step.

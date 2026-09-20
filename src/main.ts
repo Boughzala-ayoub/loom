@@ -1561,6 +1561,7 @@ class Pane {
       id: this.id,
       cwd: this.th.dir,
       argv: launch(this.startup, this.sid, can, this.effort || undefined, this.sessionId),
+      codexStateId: this.agent === "codex" ? this.sid : undefined,
       cols: this.term.cols,
       rows: this.term.rows,
       onOut: this.out,
