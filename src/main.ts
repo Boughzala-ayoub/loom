@@ -909,6 +909,7 @@ let startups: Startup[] = [...DEFAULT_STARTUPS];
 let fontSize = 13; // Ctrl+= / Ctrl+- / Ctrl+0, global to every pane, persisted
 let paneCount = 1; // the new-thread form's pane count, persisted so it keeps your last pick
 let silent = false; // Preferences → Notifications: no chimes, no taskbar flash; persisted
+let planUsage = true; // Preferences → Plan usage: off = no top-bar chips and no account API calls; persisted
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -2242,6 +2243,7 @@ const flushSave = (): Promise<unknown> => {
       fontSize,
       paneCount,
       silent,
+      planUsage,
       ui: { thread: threads.indexOf(current!), sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
         sideScroll: $("#threads").scrollTop,
         foldedSections: [...foldedSections], foldedDirs: [...foldedDirs],
@@ -4414,6 +4416,7 @@ function paintPlan(provider: PlanProvider) {
   const info = PLAN_PROVIDERS[provider];
   const plan = plans[provider];
   const b = $(`#${info.button}`);
+  if (!planUsage) return void (b.className = "hidden");
   const s = provider === "codex"
     ? plan?.limits.slice().sort((a, b) => b.percent - a.percent)[0]
     : plan?.limits.find((l) => l.group === "session") ?? plan?.limits[0];
@@ -4431,6 +4434,7 @@ function paintPlan(provider: PlanProvider) {
  * minutes is as often as it's worth asking. A failure keeps the last good
  * numbers and shows why underneath them. */
 async function pollPlan(provider: PlanProvider) {
+  if (!planUsage) return;
   const plan = plans[provider];
   try {
     const got = await invoke<Plan>(PLAN_PROVIDERS[provider].command);
@@ -4473,6 +4477,15 @@ function paintTheme() {
   const b = $("#theme");
   b.textContent = `◑ ${theme.label} ▾`;
   b.title = `Colour theme: ${theme.label} — click to change`;
+}
+
+function paintPlanUsage() {
+  const b = $("#plan-usage");
+  b.textContent = planUsage ? "shown" : "off";
+  b.title = planUsage
+    ? "Claude and Codex plan usage in the top bar — click to hide it and stop asking the accounts"
+    : "Plan usage is off: no chips, no calls to the usage endpoints — click to show it";
+  b.setAttribute("aria-pressed", String(planUsage));
 }
 
 function paintSilent() {
@@ -4624,6 +4637,7 @@ async function main() {
     fontSize?: number;
     paneCount?: number;
     silent?: boolean;
+    planUsage?: boolean;
     ui?: { thread?: number; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
@@ -4644,6 +4658,7 @@ async function main() {
   fontSize = Math.min(Math.max(saved.fontSize ?? fontSize, 8), 24);
   paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
   silent = saved.silent === true;
+  planUsage = saved.planUsage !== false;
   repos = saved.repos ?? [];
   reposFolded = new Set(saved.reposFolded ?? []);
   sideQuery = saved.ui?.sideQuery ?? "";
@@ -4754,16 +4769,27 @@ async function main() {
   const langBtn = $("#lang");
   const themeBtn = $("#theme");
   // keep pane focus
-  for (const b of [dictate, prefixBtn, langBtn, themeBtn, $("#silent")]) b.onmousedown = (e) => e.preventDefault();
+  for (const b of [dictate, prefixBtn, langBtn, themeBtn, $("#silent"), $("#plan-usage")]) b.onmousedown = (e) => e.preventDefault();
   dictate.onclick = () => mic(recording ? micStop : micStart);
   prefixBtn.onclick = () => showMenu(prefixBtn, prefixMenu);
   langBtn.onclick = () => showMenu(langBtn, langMenu);
   themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
   $("#silent").onclick = () => ((silent = !silent), paintSilent(), save());
+  $("#plan-usage").onclick = () => {
+    planUsage = !planUsage;
+    if (openMenu === planMenus.claude || openMenu === planMenus.codex) hideMenu();
+    for (const provider of ["claude", "codex"] as const) {
+      paintPlan(provider);
+      void pollPlan(provider); // back on: fresh numbers now, not in five minutes
+    }
+    paintPlanUsage();
+    save();
+  };
   micState("");
   paintPrefix();
   paintLang();
   paintSilent();
+  paintPlanUsage();
   paintTheme();
   $("#layout").onclick = () => {
     if (!current) return;

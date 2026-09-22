@@ -210,6 +210,23 @@ try {
         await escape();
       }
     }
+    // Plan usage off: no chips and no calls to either usage endpoint, relaunch included.
+    const planCalls = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'plan_usage' || c.cmd === 'codex_plan_usage').length);
+    const chipsShown = () => page.evaluate(() => ['plan', 'codex-plan'].filter(id => getComputedStyle(document.getElementById(id)).display !== 'none').length);
+    await page.click('#preferences-btn');
+    await page.click('#plan-usage');
+    assert.equal(await chipsShown(), 0, 'Plan usage off hides both chips');
+    await audit('plan-usage-off');
+    await page.waitForFunction(() => window.qa.saved?.planUsage === false);
+    await page.goto(base + '?restore');
+    await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+    assert.equal(await planCalls(), 0, 'Plan usage off makes no usage calls at launch');
+    assert.equal(await chipsShown(), 0);
+    await page.click('#preferences-btn');
+    await page.click('#plan-usage');
+    await page.waitForFunction(() => document.querySelector('#codex-plan svg') && document.querySelector('#plan svg'));
+    assert.equal(await planCalls(), 2, 'Turning it back on fetches both right away');
+    assert.equal(await chipsShown(), 2);
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     // Click the rendered terminal link, including its wrapped form on phones.

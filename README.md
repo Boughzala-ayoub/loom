@@ -267,6 +267,10 @@ the endpoint the desktop app asks — the copy cached in `~\.claude.json` goes
 stale for days — using the OAuth token `claude` already signed in with. Polled
 every five minutes because that endpoint rate-limits hard, and a failed refresh
 keeps the last good numbers with the reason underneath rather than blanking.
+Preferences → Plan usage turns the Claude and Codex chips off; while off, Loom
+draws neither and never calls either usage endpoint. Turning it back on
+fetches both at once. The per-pane context gauges read local transcripts and
+stay either way.
 The pane config panel's model list is fetched live too, so a model Anthropic
 adds shows up without a Loom release.
 
