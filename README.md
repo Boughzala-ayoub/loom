@@ -159,7 +159,9 @@ seconds, so a thread with work in it reads as such before you open it.
 `⋯` on a thread row (or right-click it, or `⋯` in the thread bar) lists Close
 thread, which leaves the folder and branch alone; Delete worktree (keep branch),
 which runs `git worktree remove --force`; and Delete worktree and branch, which
-also runs `git branch -D`. Each asks first, and the thread's panes are closed
+also runs `git branch -D`. Each asks first, and the dialog counts what exists
+nowhere else: uncommitted files in the worktree, and for a branch delete the
+commits no other branch or remote holds. The thread's panes are closed
 before git is asked, since a folder with a shell still in it cannot be removed.
 
 ### Shell panes

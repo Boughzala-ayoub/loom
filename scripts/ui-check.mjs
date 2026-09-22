@@ -98,6 +98,7 @@ try {
           if (a[0] === 'log') return 'abc123 Improve workspace navigation\n';
           if (a[0] === 'branch') return 'main\nloom/search-polish\n';
           if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\tOn main: workspace polish\n';
+          if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
           if (a[0] === 'rev-list') return '0\t2';
           if (a.includes('--show-toplevel')) return args.dir;
           if (a.includes('@{upstream}')) return 'origin/main';
@@ -475,6 +476,24 @@ try {
     await page.locator('.menu-item').filter({ hasText: /^Rename/ }).click();
     await audit('rename');
     await escape();
+    // Deleting a worktree names what exists nowhere else before it goes.
+    const deleteDetail = async () => {
+      await page.click('#wsmore');
+      await page.locator('.menu-item').filter({ hasText: /^Delete worktree and branch/ }).click();
+      await page.waitForSelector('#confirm[open]');
+      return page.textContent('#confirm-detail');
+    };
+    await page.evaluate(() => window.qa.unmerged = '2');
+    const risky = await deleteDetail();
+    assert.match(risky, /3 uncommitted files will be deleted/);
+    assert.match(risky, /2 commits exist only on loom\//);
+    await audit('confirm-delete-worktree');
+    await page.click('#confirm button[value=cancel]');
+    await page.evaluate(() => { window.qa.unmerged = '0'; window.qa.clean = true; });
+    assert.doesNotMatch(await deleteDetail(), /⚠/);
+    await page.click('#confirm button[value=cancel]');
+    await page.evaluate(() => { delete window.qa.unmerged; window.qa.clean = false; });
+    assert.ok(!(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'git_run' && c.args.args[1] === 'remove'))), 'Cancel must not remove anything');
     await page.locator('.grid:not(.hidden) .cfg').first().click();
     await audit('pane-settings');
     await escape();

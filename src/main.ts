@@ -2598,17 +2598,37 @@ const git = (dir: string, ...args: string[]) => invoke<string>("git_run", { dir,
 const gitOk = (dir: string, ok: number[], ...args: string[]) =>
   invoke<string>("git_run", { dir, args, ok });
 
+/** What deleting a worktree destroys that exists nowhere else: uncommitted
+ * files, and with `branch` the commits no other branch or remote holds. Empty
+ * when nothing, else warning lines framed for the confirm's detail. */
+async function atRisk(th: Thread, branch: boolean): Promise<string> {
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const [dirty, only] = await Promise.all([
+    git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(s => parseStatus(s).length, () => -1),
+    branch && th.branch
+      ? git(th.repo, "rev-list", "--count", th.branch, "--not", `--exclude=${th.branch}`, "--branches", "--remotes")
+          .then(s => +s.trim(), () => -1)
+      : 0,
+  ]);
+  const lines = [
+    dirty < 0 ? "⚠ Could not read the worktree's status." : dirty ? `⚠ ${plural(dirty, "uncommitted file")} will be deleted.` : "",
+    only < 0 ? `⚠ Could not check whether ${th.branch} is merged.` : only ? `⚠ ${plural(only, "commit")} ${only === 1 ? "exists" : "exist"} only on ${th.branch}.` : "",
+  ].filter(Boolean);
+  return lines.length ? `\n${lines.join("\n")}\n` : "";
+}
+
 /** Take a thread out of the list, and out of git as far as `mode` says:
  * "close" keeps the worktree on disk, "worktree" removes the folder and keeps
  * the branch, "all" deletes the branch too. Panes go first either way — a
  * folder with a shell still in it cannot be removed. */
 async function removeThread(th: Thread, mode: "close" | "worktree" | "all") {
+  const risk = mode === "close" || !th.isWorktree ? "" : await atRisk(th, mode === "all");
   const what =
     mode === "close"
       ? `Close ${th.name}?`
       : mode === "worktree"
-        ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n\nThe branch ${th.branch} is kept.`
-        : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n\nCommits only on that branch are lost.`;
+        ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept.`
+        : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost.`;
   if (th.panes.length || mode !== "close") {
     if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return;
   }
