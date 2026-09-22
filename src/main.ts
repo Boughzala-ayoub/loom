@@ -1300,6 +1300,7 @@ class Pane {
   private unlisten: UnlistenFn[] = [];
   private out = new Channel<string>();
   private idle = 0;
+  private codexStatus = false;
   private resumeNotice?: HTMLElement;
   /** This pane's own row under its thread in the sidebar — Orca lists each
    * agent session under its worktree, and a thread with a claude and a codex
@@ -1510,8 +1511,8 @@ class Pane {
     // event bus' JSON round-trip through every other listener.
     this.out.onmessage = (d) => {
       this.lastOut = Date.now(); // settle() waits on this
-      this.term.write(d);
-      this.activity(d);
+      this.term.write(d, () => { if (this.agent === "codex") this.activity(); });
+      if (this.agent !== "codex") this.activity();
     };
     await this.spawn(!!sid);
     new ResizeObserver(() => this.resize()).observe(this.host);
@@ -1554,6 +1555,7 @@ class Pane {
     if (!resume) this.sessionId = undefined;
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
+    this.codexStatus = false;
     const can =
       resume &&
       (this.agent !== "claude" ||
@@ -1608,16 +1610,19 @@ class Pane {
   /** Agent panes have no OSC 133 to say "working": output that keeps coming
    * is the signal, and 1.5 s of quiet ends it. Output right after a keystroke
    * is the echo, not the agent — a real answer keeps drawing well past that. */
-  private activity(d: string) {
-    if (this.agent === "shell" || Date.now() - this.lastIn < 300) return;
+  private activity() {
+    if (this.agent === "shell") return;
     if (this.agent === "codex") {
       // ponytail: codex keeps drawing while idle (the astra prompt's star field),
       // so output alone says nothing. Its "Working (3s • esc to interrupt)"
-      // line is the tell; OSC 9 (wake) or Esc ends the turn. Ratatui repaints
-      // only changed cells, so the text shows up once — no quiet timer here.
-      if (!this.busy && !this.waiting && /esc to interrupt/i.test(d)) ((this.busy = true), this.paint());
+      // line is the tell; OSC 9 (wake) or Esc ends the turn. Read the rendered
+      // screen after xterm joins PTY chunks, including the first post-key redraw.
+      const status = /esc\s+to\s+interrupt/i.test(this.screen());
+      if (status && !this.codexStatus && !this.waiting) ((this.busy = true), this.paint());
+      this.codexStatus = status;
       return;
     }
+    if (Date.now() - this.lastIn < 300) return;
     clearTimeout(this.idle);
     this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
     if (this.busy || this.waiting) return;
@@ -1819,12 +1824,14 @@ class Pane {
       mic(() => invoke("dictate_stop").then(() => {}, () => {}));
     }
     clearTimeout(this.idle);
+    cancelAnimationFrame(this.raf);
     this.unlisten.forEach((u) => u());
-    await invoke("pty_kill", { id: this.id }).catch(() => {});
+    this.out.onmessage = () => {};
     this.gpu(false);
     this.term.dispose();
     this.el.remove();
     this.row.remove();
+    await invoke("pty_kill", { id: this.id }).catch(() => {});
   }
 
   /** OSC 133 from shell-init.ps1. All it drives is the pane's busy state — ;C a
@@ -2005,10 +2012,11 @@ class Thread {
     }))) return;
     if (this.zoomed === p) this.toggleZoom(p);
     this.panes.splice(i, 1);
-    await p.dispose();
+    const cleanup = p.dispose();
     this.relayout();
     this.focusPane(this.panes[Math.min(i, this.panes.length - 1)] ?? null);
     save(); // else the pane is back on the next launch
+    await cleanup;
   }
 
   /** Ctrl+Alt+Arrow: the pane whose box lies that way from the focused one,
@@ -2168,9 +2176,10 @@ class Thread {
   }
 
   async dispose() {
-    await Promise.all(this.panes.splice(0).map((p) => p.dispose()));
+    const cleanup = Promise.all(this.panes.splice(0).map((p) => p.dispose()));
     this.grid.remove();
     this.row.remove();
+    await cleanup;
   }
 }
 
@@ -2636,10 +2645,11 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all") {
   }
   const i = threads.indexOf(th);
   threads.splice(i, 1);
-  await th.dispose();
+  const cleanup = th.dispose();
   renderSide();
   show(threads[Math.min(i, threads.length - 1)] ?? null);
   save();
+  await cleanup;
   if (mode === "close" || !th.isWorktree) return;
   try {
     // The killed panes' processes take a beat to die, and Windows refuses to

@@ -23,10 +23,11 @@ try {
       state.theme = theme;
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
       if (location.search.includes('resume')) state.threads[0].panes = [{ cmd: 'codex' }, { cmd: 'codex' }];
+      if (location.search.includes('close-race')) state.threads[0].zoomed = 0;
       if (location.search.includes('legacy')) state.threads[0].panes = [{ cmd: 'opencode', sid: 'old-placeholder-a' }, { cmd: 'opencode', sid: 'old-placeholder-b' }];
       if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
-      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false, beeps: 0 };
+      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [] };
       // Count chimes instead of playing them; only createOscillator matters.
       const node = { connect() { return node; }, start() {}, stop() {}, frequency: { setValueAtTime() {} }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } };
       window.AudioContext = class { state = 'running'; currentTime = 0; destination = node; resume() {} createGain() { return node; } createOscillator() { qa.beeps++; return node; } };
@@ -44,6 +45,7 @@ try {
           args.onOut.onmessage('\x1b]0;Review workspace navigation\x07\x1b[34m❯ loom\x1b[0m\r\n\r\nReady to work on this thread.\r\nChanges stay in its own worktree.\r\n\r\n\x1b[32m+ Ready\x1b[0m  \x1b[33m~ Pending\x1b[0m  \x1b[31m- Removed\x1b[0m\r\n\x1b[34mBlue\x1b[0m  \x1b[35mMagenta\x1b[0m  \x1b[36mCyan\x1b[0m\r\n');
           return location.search.includes('restore') ? new Promise(resolve => setTimeout(resolve, qa.panes.length * 30)) : undefined;
         }
+        if (cmd === 'pty_kill' && qa.holdKills) return new Promise(resolve => qa.pendingKills.push(resolve));
         if (cmd === 'take_wakes') return qa.wakes.splice(0);
         if (cmd === 'has_codex_session') return args.sid !== 'missing-session';
         if (cmd === 'codex_sessions') return [{ id: 'valid-session', title: 'Saved Codex conversation' }];
@@ -112,12 +114,41 @@ try {
     page.setDefaultTimeout(10000);
     const errors = [];
     page.on('pageerror', e => { errors.push(e.message); console.error('Browser:', e.message); });
-    await page.goto(base);
+    await page.goto(base + (process.env.UI_CLOSE_ONLY ? '?resume&close-race' : ''));
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved).catch(async e => {
       console.error(await page.evaluate(() => ({ panes: document.querySelectorAll('.pane').length, calls: window.qa?.calls.map(c => c.cmd), text: document.body.innerText.slice(0, 1000) })));
       throw e;
     });
     await page.waitForTimeout(250);
+    if (process.env.UI_CLOSE_ONLY) {
+      const checkClose = async name => {
+        const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+          scrollWidth: document.documentElement.scrollWidth,
+          clientWidth: document.documentElement.clientWidth,
+        }));
+        assert.ok(scrollWidth <= clientWidth, `${name}@${width}: horizontal overflow`);
+        await page.screenshot({ path: `${out}/${name}-${width}.png` });
+        checks++;
+      };
+      await page.evaluate(() => { window.qa.holdKills = true; });
+      await page.locator('.grid:not(.hidden) .pane-head button[title="Close pane"]').first().click();
+      await page.click('#confirm-action');
+      await page.waitForFunction(() => document.querySelectorAll('.grid:not(.hidden) .pane').length === 1 && window.qa.saved?.threads[0].panes.length === 1, null, { timeout: 1500 });
+      assert.equal(await page.locator('.grid:not(.hidden) .pane:visible').count(), 1, 'A slow Codex shutdown must leave its sibling visible');
+      await checkClose('codex-pane-close-pending');
+      await page.goto(base + '?resume&close-race');
+      await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+      await page.evaluate(() => { window.qa.holdKills = true; });
+      await page.click('#wsmore');
+      await page.locator('#menu-list .menu-item').filter({ hasText: 'Close thread' }).click();
+      await page.click('#confirm-action');
+      await page.waitForFunction(() => document.querySelector('#wsname').textContent !== 'search-polish' && [...document.querySelectorAll('.grid:not(.hidden) .pane')].some(p => p.getBoundingClientRect().height > 0), null, { timeout: 1500 });
+      await checkClose('codex-thread-close-pending');
+      assert.deepEqual(errors, []);
+      console.log(`PASS slow Codex close ${width}px`);
+      await context.close();
+      continue;
+    }
     // The skill's scrollWidth invariant, plus visible control bounds to catch clipping.
     async function audit(name) {
       const result = await page.evaluate(() => {
@@ -374,6 +405,16 @@ try {
     }
     assert.deepEqual(await page.evaluate(() => window.qa.saved.threads.map(t => t.panes.map(p => p.cmd))), [['claude', 'codex'], ['claude', 'opencode', ''], ['claude']]);
     assert.ok(await page.evaluate(() => window.qa.panes.slice(-2).every(p => p.cwd.endsWith('review-keyboard-navigation'))), 'Spawn in the selected thread folder');
+    if (width <= 760) await page.click('#side-toggle');
+    await page.locator('.agent').filter({ hasText: /^codex/ }).first().click();
+    await page.locator('.grid:not(.hidden) .xterm-helper-textarea').last().focus();
+    await page.keyboard.type('x');
+    await page.evaluate(() => {
+      const codex = window.qa.panes.find(p => p.argv.join(' ').includes('codex'));
+      codex.onOut.onmessage('Working (26s • esc to ');
+      codex.onOut.onmessage('interrupt)\r\n');
+    });
+    await page.waitForFunction(() => [...document.querySelectorAll('.agent')].find(el => el.querySelector('.agent-name')?.textContent === 'codex')?.dataset.state === 'busy');
     if (width <= 760) await page.click('#side-toggle');
     await page.evaluate(() => window.qa.panes.forEach((p, i) => p.onOut.onmessage('\x1b]0;' + (i === 5 ? 'Terminal\x07\x1b]133;C' : ['◐', '⠙', '✳'][i % 3] + ' Agent session') + '\x07Working (3s • esc to interrupt)\r\n')));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=busy]').length === 6);
