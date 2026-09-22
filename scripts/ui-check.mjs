@@ -232,7 +232,8 @@ try {
     // Click the rendered terminal link, including its wrapped form on phones.
     const imagePath = 'node_modules\\.cache\\ui-check\\theme-picker-0-768.png';
     let linkRow = 0;
-    async function clickTerminalPath(path) {
+    // `line` clicks that many rows below the first, for text that spans rows.
+    async function clickTerminalPath(path, line = 0) {
       const pane = page.locator('.grid:not(.hidden) .pane').first();
       const id = await pane.getAttribute('data-id');
       const row = linkRow++;
@@ -240,7 +241,7 @@ try {
       await page.waitForTimeout(150);
       const size = await page.evaluate(id => window.qa.calls.filter(c => ['pty_spawn', 'pty_resize'].includes(c.cmd) && c.args.id === id).at(-1).args, id);
       const r = await pane.locator('.xterm-screen').boundingBox();
-      const top = r.y + r.height / size.rows * (row + 0.5);
+      const top = r.y + r.height / size.rows * (row + line + 0.5);
       await page.mouse.move(r.x + 1, top);
       await page.mouse.move(r.x + r.width / size.cols * 5, top);
       await page.waitForTimeout(150);
@@ -262,6 +263,18 @@ try {
       await audit('image-preview-home-' + (homePath.includes('g375b') ? 'slash' : 'backslash'));
       await page.click('#diff-close');
     }
+    // Claude Code breaks a path longer than its box onto indented rows of its
+    // own; clicking a continuation row still opens the whole path.
+    const cols = await page.evaluate(() => {
+      const id = document.querySelector('.grid:not(.hidden) .pane').dataset.id;
+      return window.qa.calls.filter(c => ['pty_spawn', 'pty_resize'].includes(c.cmd) && c.args.id === id).at(-1).args.cols;
+    });
+    const deep = '~\\AppData\\Local\\Temp\\claude\\' + 'scratchpad-'.repeat(Math.ceil(2 * cols / 11)) + '\\shots\\fight-3boss-1280.png';
+    await clickTerminalPath('● Reading ' + deep.slice(0, cols - 10) + '\r\n  ' + deep.slice(cols - 10, 2 * cols - 12) + '\r\n  ' + deep.slice(2 * cols - 12), 1);
+    await page.waitForFunction(() => document.querySelector('#diff-body img')?.naturalWidth === 1600);
+    assert.equal((await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'read_image').at(-1).args.path)).replaceAll('/', '\\'), 'C:\\Users\\test\\' + deep.slice(2));
+    await audit('image-preview-claude-wrap');
+    await page.click('#diff-close');
     await page.evaluate(() => window.qa.failImage = true);
     await clickTerminalPath('"C:\\My Pictures\\missing image.png"');
     await page.waitForFunction(() => document.querySelector('#diff-body').textContent.includes('Image file not found')).catch(async e => {

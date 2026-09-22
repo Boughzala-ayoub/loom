@@ -32,6 +32,27 @@ const wrapped = fileLinks(buffer(path, 20), 2)[0];
 eq(wrapped.text, path);
 eq(wrapped.range, { start: { x: 1, y: 1 }, end: { x: path.length % 20, y: 3 } });
 eq(fileLinks(buffer('Viewed Image at 10:30'), 1).length, 0);
+// Claude Code breaks a path longer than its box onto indented rows itself;
+// xterm sees separate lines, not a wrap.
+function screen(lines: string[], cols: number): IBuffer {
+  const rows = lines.map(l => l.padEnd(cols));
+  return {
+    length: rows.length,
+    getLine: (i: number) => rows[i] === undefined ? undefined : {
+      isWrapped: false, length: cols,
+      getCell: (col: number) => ({ getWidth: () => 1, getChars: () => rows[i][col] }),
+    },
+  } as unknown as IBuffer;
+}
+const deep = '~\\AppData\\Local\\Temp\\claude\\scratchpad\\shots\\fight-3boss-1280.png';
+const read = screen(['● Reading ' + deep.slice(0, 30), '  ' + deep.slice(30)], 40);
+for (const y of [1, 2]) eq(fileLinks(read, y), [{ text: deep, range: { start: { x: 11, y: 1 }, end: { x: 2 + deep.length - 30, y: 2 } } }]);
+const result = screen(['  ⎿  ' + deep.slice(0, 25), '     ' + deep.slice(25, 50), '     ' + deep.slice(50)], 30);
+for (const y of [1, 2, 3]) eq(fileLinks(result, y), [{ text: deep, range: { start: { x: 6, y: 1 }, end: { x: 5 + deep.length - 50, y: 3 } } }]);
+// Word wrap that happens to reach the edge is two lines: the word would have fit.
+const prose = screen(['Edited the file at src/main.ts', '  and ran the tests again'], 30);
+eq(fileLinks(prose, 1).map(l => l.text), ['src/main.ts']);
+eq(fileLinks(prose, 2), []);
 eq(imageMime('C:\\Photos\\Screen.PNG'), 'image/png');
 eq(imageMime('src/main.ts'), undefined);
 eq(imageMime('image.png.exe'), undefined);
