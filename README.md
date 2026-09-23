@@ -80,8 +80,8 @@ panes in the same folder resume separate conversations. Loom never falls back
 silently to a fresh conversation after a resume error.
 
 Codex reports its thread through its `notify` setting, which Loom passes on the
-command line: after every completed turn a script records the thread for that
-pane. Nothing to trust or enable. OpenCode uses Loom's local plugin.
+command line: after every completed turn `loom.exe --codex-notify` records the
+thread for that pane. Nothing to trust or enable. OpenCode uses Loom's local plugin.
 
 Older panes have no verified session ID and show **Choose session** in the
 pane, which lists the folder's conversations for that agent.
@@ -90,10 +90,13 @@ a themed in-app confirmation, with Cancel focused by default.
 
 When an agent quits, the pane says `[exited N] — Enter relaunches`, and Enter
 brings it back into the same session. Agents no longer run inside a PowerShell:
-`claude.exe` runs bare and the npm-shimmed `codex` and `opencode` run under
-`cmd.exe`. That is where most of the memory went. A PowerShell host is about
-65 MB per pane; cmd is 4 MB. Shell panes still get PowerShell with the OSC 133
-integration below.
+`claude.exe` runs bare, `opencode` runs under `cmd.exe`, and an npm-installed
+`codex` runs its native `codex.exe` directly. npm's shim would otherwise keep a
+`cmd.exe` and a `node.exe` idle under every codex pane, about 25 MB between
+them. A codex that `cmd` would resolve some other way (pnpm, bun, a `codex.exe`
+earlier on PATH), or a startup line with `cmd` syntax in it, still goes through
+`cmd.exe` as before. A PowerShell host is about 65 MB per pane. Shell panes
+still get PowerShell with the OSC 133 integration below.
 
 | Action | How |
 | --- | --- |
@@ -218,10 +221,12 @@ Claude Code's confirmation. Picks made mid-turn are queued by claude itself and
 show `sent — waiting for claude to confirm` until they land.
 
 What the panel reports as current comes from a statusline tee: Loom's
-`--settings` points `statusLine` at `loom-status.ps1`, which drops the payload
-Claude Code pushes on every state change into `%TEMP%\loom-status\<pane>` and
-then chains to whatever statusline you configured, so your own bar draws
-unchanged. That marker follows a `/model` typed by hand the moment it runs;
+`--settings` points `statusLine` at `loom.exe --statusline`, which drops the
+payload Claude Code pushes on every state change into `%TEMP%\loom-status\<pane>`
+and then chains to whatever statusline you configured, so your own bar draws
+unchanged. It runs about once a second across a dozen panes, which is why it is
+loom.exe and not a script: ~35 ms a run, where the PowerShell it replaced took
+over a second. That marker follows a `/model` typed by hand the moment it runs;
 the transcript, which only learns at the next turn, is the fallback.
 
 ## Context and plan usage
@@ -337,7 +342,7 @@ Temporary menus and confirmation dialogs do not reopen.
   strips one, but PowerShell's `Set-Content -Encoding utf8` adds it and other
   tools may not cope). An older file with `spaces` in it loads as threads on
   the checkouts themselves.
-- `shell-init.ps1`, `loom-status.ps1`, `claude-hooks.json` — rewritten from the
+- `shell-init.ps1`, `claude-hooks.json` — rewritten from the
   binary whenever they differ; edits are lost.
 
 Every pane gets `TERM=xterm-256color`, `COLORTERM=truecolor` and

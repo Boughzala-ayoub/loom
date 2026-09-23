@@ -23,10 +23,9 @@ const CODEX_FLAGS =
 // Codex runs `notify` after every completed turn with the event as one JSON
 // argument, thread id included — and unlike its hooks, it needs no trust
 // prompt (a hook given on the command line never gets one, so it never ran).
-// `$LOOM_SESSION_HOOK` is replaced by the Rust side with the path of
-// loom-session.ps1, which drops the id where take_wakes picks it up.
-export const CODEX_NOTIFY =
-  `-c "notify=['powershell.exe','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File','$LOOM_SESSION_HOOK']"`;
+// `$LOOM_EXE` is replaced by the Rust side with loom.exe's own path; its
+// --codex-notify mode (helper.rs) drops the id where take_sessions picks it up.
+export const CODEX_NOTIFY = `-c "notify=['$LOOM_EXE','--codex-notify']"`;
 
 export const validSessionId = (id: string) => /^[a-zA-Z0-9_-]{1,128}$/.test(id);
 
@@ -58,6 +57,8 @@ export function ownSession(cmd: string): boolean {
  * that was never written exits, so it checks the transcript exists first.
  *
  * codex and opencode are npm shims (.cmd), so they need cmd.exe — a 4 MB host.
+ * The Rust side launches an npm codex's native codex.exe straight from this
+ * line instead (helper.rs: codex_direct), skipping cmd and node entirely.
  * Their actual session IDs arrive from the provider (codex's notify script,
  * opencode's plugin), separately from Claude's preassigned sid. Never guess by
  * directory or hide resume errors: a codex resume without an id is its picker,

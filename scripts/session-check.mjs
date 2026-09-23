@@ -13,9 +13,12 @@ const codexHome = mkdtempSync(join(tmpdir(), 'loom-codex-check-'));
 const sessions = join(codexHome, 'sessions', '2026', '09', '12');
 mkdirSync(sessions, { recursive: true });
 const rollout = (id, source) => writeFileSync(join(sessions, `rollout-test-${id}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id, source } }) + '\n');
+// Codex's notify program is loom.exe itself: build it first (cargo build), or
+// point LOOM_EXE at another one.
+const loomExe = process.env.LOOM_EXE || resolve('src-tauri/target/debug/loom.exe');
 const notify = (name, id) => {
-  const run = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from('& $env:LOOM_SESSION_HOOK $env:LOOM_SESSION_EVENT', 'utf16le').toString('base64')], {
-    env: { ...process.env, CODEX_HOME: codexHome, LOOM_PANE: name, LOOM_SESSION_FILE: marker(name), LOOM_SESSION_HOOK: resolve('src-tauri/src/loom-session.ps1'), LOOM_SESSION_EVENT: JSON.stringify({ type: 'agent-turn-complete', 'thread-id': id }) },
+  const run = spawnSync(loomExe, ['--codex-notify', JSON.stringify({ type: 'agent-turn-complete', 'thread-id': id })], {
+    env: { ...process.env, CODEX_HOME: codexHome, LOOM_PANE: name, LOOM_SESSION_FILE: marker(name) },
     windowsHide: true, encoding: 'utf8', timeout: 10000,
   });
   assert.equal(run.status, 0, String(run.error || run.stderr));

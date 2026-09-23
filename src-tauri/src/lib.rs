@@ -8,15 +8,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 mod dictate;
+mod helper;
 mod usage;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
 /// Extra Claude Code settings, handed to each pane's `claude` via --settings.
+/// Its statusline is loom.exe itself (helper.rs), whose path replaces
+/// __LOOM_EXE__ at spawn.
 const CLAUDE_HOOKS: &str = include_str!("claude-hooks.json");
-/// Statusline tee: saves each payload for `usage::session_usage`, then chains
-/// to the statusline the user configured. Its path replaces __LOOM_STATUS__ in
-/// CLAUDE_HOOKS at spawn.
-const LOOM_STATUS: &str = include_str!("loom-status.ps1");
 /// opencode plugin: turns session.idle into the same wake marker claude's Stop
 /// hook drops. Installed globally (opencode loads local plugins from nowhere
 /// else); inert outside a Loom pane.
@@ -131,15 +130,12 @@ fn pty_spawn(
 
     let init = data_dir(&app).join("shell-init.ps1");
     ensure_file(&init, SHELL_INIT)?;
-    let status = data_dir(&app).join("loom-status.ps1");
-    ensure_file(&status, LOOM_STATUS)?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let hooks = data_dir(&app).join("claude-hooks.json");
-    // The path lands inside a JSON string, so its backslashes need escaping.
-    let hooks_json =
-        CLAUDE_HOOKS.replace("__LOOM_STATUS__", &status.display().to_string().replace('\\', "\\\\"));
+    // Claude Code runs the statusline through a shell (Git Bash here), which
+    // eats unquoted backslashes; forward slashes also need no JSON escaping.
+    let hooks_json = CLAUDE_HOOKS.replace("__LOOM_EXE__", &exe.display().to_string().replace('\\', "/"));
     ensure_file(&hooks, &hooks_json)?;
-    let session_hook = data_dir(&app).join("loom-session.ps1");
-    ensure_file(&session_hook, include_str!("loom-session.ps1"))?;
     if argv.iter().any(|a| a.contains("opencode")) {
         if let Ok(home) = app.path().home_dir() {
             let _ = ensure_file(&home.join(".config/opencode/plugins/loom.js"), OPENCODE_PLUGIN);
@@ -147,7 +143,25 @@ fn pty_spawn(
     }
 
     let hooks_arg = hooks.display().to_string();
-    let mut cmd = CommandBuilder::new(&argv[0]);
+    let cmd_line = (argv.len() == 5 && argv[0].eq_ignore_ascii_case("cmd.exe") && argv[3] == "/c")
+        // Codex's notify program goes in by path (agent.ts: CODEX_NOTIFY).
+        .then(|| argv[4].replace("$LOOM_EXE", &exe.display().to_string()));
+    let pane_dir = cwd.as_deref().map(std::path::Path::new).filter(|d| d.is_dir());
+    let direct = cmd_line.as_deref().and_then(|line| helper::codex_direct(line, pane_dir));
+    let mut cmd = match &direct {
+        Some((exe, args, env)) => {
+            let mut cmd = CommandBuilder::new(exe);
+            cmd.args(args);
+            for k in ["CODEX_MANAGED_BY_BUN", "CODEX_MANAGED_BY_PNPM", "CODEX_MANAGED_BY_VITE_PLUS"] {
+                cmd.env_remove(k);
+            }
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            cmd
+        }
+        None => CommandBuilder::new(&argv[0]),
+    };
     if let Some(sid) = codex_state_id {
         // Codex's shared log DB can lock out concurrent startups. Keep each
         // pane's SQLite state across relaunches; auth/config/rollouts still
@@ -156,12 +170,13 @@ fn pty_spawn(
         std::fs::create_dir_all(&sqlite).map_err(|e| e.to_string())?;
         cmd.env("CODEX_SQLITE_HOME", sqlite);
     }
-    if argv.len() == 5 && argv[0].eq_ignore_ascii_case("cmd.exe") && argv[3] == "/c" {
+    if direct.is_some() {
+        // argv is already in place.
+    } else if let Some(line) = cmd_line {
         // ConPTY quotes argv MSVC-style; cmd.exe does not understand \" inside
         // its command string. Expand the whole command after that quoting step.
         cmd.args(["/d", "/s", "/c", "%LOOM_COMMAND%"]);
-        // Codex's notify script goes in by path (agent.ts: CODEX_NOTIFY).
-        cmd.env("LOOM_COMMAND", argv[4].replace("$LOOM_SESSION_HOOK", &session_hook.display().to_string()));
+        cmd.env("LOOM_COMMAND", line);
     } else {
         cmd.args(argv[1..].iter().map(|a| if a == "$LOOM_HOOKS" { &hooks_arg } else { a }));
     }
@@ -757,6 +772,12 @@ pub fn run() {
     // terminal's console for the direct case (and fails harmlessly when there
     // already is one, as in debug, or none at all, as from Explorer).
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Helper modes the agents run (helper.rs): gone before any window exists.
+    match args.first().map(String::as_str) {
+        Some("--statusline") => std::process::exit(helper::statusline()),
+        Some("--codex-notify") => std::process::exit(helper::codex_notify(args.get(1).map(String::as_str))),
+        _ => {}
+    }
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V")) {
         #[link(name = "kernel32")]
         extern "system" {
