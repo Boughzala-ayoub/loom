@@ -1259,6 +1259,29 @@ const LAYOUT_LABEL: Record<LayoutMode, string> = { grid: "▦ grid", rows: "▤ 
 const GL_BUDGET = 12;
 const glLive: Pane[] = [];
 
+// Restored claude panes boot BOOTS at a time. A claude start is CPU-heavy, and ten
+// at once starve each other: a function-hooks plugin gets 10s to load and misses
+// it ("hooks module did not load: not loaded within 10000ms"). A slot frees when
+// the pane's SessionStart marker lands, or after 15s so a stuck boot can't stall
+// the rest.
+const BOOTS = 2;
+let booting = 0;
+const bootWaiting: (() => void)[] = [];
+async function bootSlot(): Promise<() => void> {
+  while (booting >= BOOTS) await new Promise<void>((r) => bootWaiting.push(r));
+  booting++;
+  return () => {
+    booting--;
+    bootWaiting.shift()?.();
+  };
+}
+async function booted(pane: string) {
+  for (let i = 0; i < 60; i++) {
+    if (await invoke<boolean>("pane_booted", { pane }).catch(() => true)) return;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 class Pane {
   readonly id = uid();
   readonly el = document.createElement("div");
@@ -1560,7 +1583,8 @@ class Pane {
       resume &&
       (this.agent !== "claude" ||
         (await invoke<boolean>("has_session", { dir: this.th.dir, sid: this.sid }).catch(() => false)));
-    await invoke("pty_spawn", {
+    const release = restoring && this.agent === "claude" ? await bootSlot() : undefined;
+    const ok = await invoke("pty_spawn", {
       id: this.id,
       cwd: this.th.dir,
       argv: launch(this.startup, this.sid, can, this.effort || undefined, this.sessionId),
@@ -1568,10 +1592,12 @@ class Pane {
       cols: this.term.cols,
       rows: this.term.rows,
       onOut: this.out,
-    }).catch((e) => {
+    }).then(() => true, (e) => {
       this.dead = true;
       this.term.write(`\r\n\x1b[31m${e}\x1b[0m — Enter retries\r\n`);
+      return false;
     });
+    if (release) void (ok ? booted(this.id) : Promise.resolve()).then(release);
     this.paint();
   }
 

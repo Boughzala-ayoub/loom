@@ -100,6 +100,13 @@ pub fn has_session(dir: String, sid: String) -> bool {
         .is_file()
 }
 
+/// Whether the pane's claude is up: its SessionStart hook has written the
+/// loom-tx marker. Pane ids are fresh every launch, so any marker is this boot's.
+#[tauri::command]
+pub fn pane_booted(pane: String) -> bool {
+    std::env::temp_dir().join("loom-tx").join(pane).is_file()
+}
+
 /// 200k, or the big window when the configured model asks for one. A `/model`
 /// typed inside a running session isn't written to disk anywhere, so it isn't
 /// seen here — `session_usage` widens the window if a session outgrows it.
