@@ -113,6 +113,7 @@ try {
     await context.addInitScript({ content: mocks + '\n(' + setup.toString() + ')(' + JSON.stringify(process.env.UI_THEME || 'loom') + ');' });
     const page = await context.newPage();
     page.setDefaultTimeout(10000);
+    page.setDefaultNavigationTimeout(60000);
     const errors = [];
     page.on('pageerror', e => { errors.push(e.message); console.error('Browser:', e.message); });
     await page.goto(base + (process.env.UI_CLOSE_ONLY ? '?resume&close-race' : ''));
@@ -176,6 +177,7 @@ try {
     }
     const escape = () => page.keyboard.press('Escape');
     await audit('workspace');
+    assert.ok(await page.locator('#tabs .tab.panes').evaluate(tab => tab.getBoundingClientRect().width >= 80), 'The sidebar must not squeeze the pane tab out of view');
     // Codex uses Alt+Up to answer queued questions. It must reach the PTY.
     const codexPane = page.locator('.grid:not(.hidden) .pane').nth(1);
     await codexPane.locator('.pane-title').click();
@@ -432,7 +434,7 @@ try {
       animation.currentTime = time;
       return getComputedStyle(label, '::before').content;
     })));
-    assert.ok(frames[0].every(frame => frame?.includes('· ⠋')) && frames[1].every(frame => frame?.includes('· ⠙')), 'Every listed agent and CLI animates the braille spinner after its name');
+    assert.ok(frames[0].every(frame => frame?.includes('⠋')) && frames[1].every(frame => frame?.includes('⠙')), 'Every listed agent and CLI animates the braille spinner before its session title');
     await audit('all-agents-working');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').animationName === 'none')), 'Reduced motion stops the spinner');
@@ -472,7 +474,45 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     if (width <= 760) await page.click('#side-toggle');
     assert.ok(await page.locator('.thread-top button').evaluateAll((buttons, min) => buttons.every(b => b.getBoundingClientRect().width >= min && b.getBoundingClientRect().height >= min), width <= 760 ? 32 : 24));
-    assert.ok(await page.locator('.agent').evaluateAll((rows, max) => rows.every(row => row.getBoundingClientRect().height <= max), width <= 760 ? 34 : 28));
+    const sidebarCollisions = () => page.locator('#side').evaluate(side => {
+      const failures = [];
+      for (const row of side.querySelectorAll('.thread-top')) {
+        const name = row.querySelector('.thread-select').getBoundingClientRect();
+        if (!name.width) continue;
+        const tools = row.querySelector('.thread-tools').getBoundingClientRect();
+        const meta = row.querySelector('.thread-meta').getBoundingClientRect();
+        if (row.closest('.thread').classList.contains('listed')) {
+          if (name.right > meta.left || meta.right > tools.left || Math.abs(name.top - tools.top) > 1) failures.push('expanded header overlaps');
+        } else if (name.right > tools.left || meta.top < name.bottom) failures.push('collapsed header overlaps');
+      }
+      for (const row of side.querySelectorAll('.agent')) {
+        if (!row.getBoundingClientRect().height) continue;
+        const name = row.querySelector('.agent-name').getBoundingClientRect();
+        const title = row.querySelector('.agent-title').getBoundingClientRect();
+        if (name.right > title.left || title.top >= name.bottom || row.getBoundingClientRect().height > 32) failures.push('agent row must stay compact on one line');
+      }
+      return failures;
+    });
+    assert.deepEqual(await sidebarCollisions(), []);
+    await page.locator('.thread-top').first().hover();
+    await audit('sidebar-compact-hover');
+    const currentThread = page.locator('.thread.on');
+    await currentThread.locator('.fold').click();
+    assert.equal(await currentThread.locator('.agents').isVisible(), false);
+    assert.equal(await currentThread.locator('.pips').isVisible(), true);
+    assert.deepEqual(await sidebarCollisions(), []);
+    await audit('thread-collapsed');
+    await currentThread.locator('.fold').click();
+    assert.equal(await currentThread.locator('.agents').isVisible(), true);
+    assert.equal(await currentThread.locator('.pips').isVisible(), false);
+    assert.deepEqual(await sidebarCollisions(), []);
+    await audit('thread-expanded');
+    if (width > 760) {
+      await page.evaluate(() => document.documentElement.style.setProperty('--side-w', '240px'));
+      assert.deepEqual(await sidebarCollisions(), [], 'Existing saved sidebar widths must still work');
+      await audit('sidebar-saved-width');
+      await page.evaluate(() => document.documentElement.style.removeProperty('--side-w'));
+    }
     await page.locator('.repo').first().focus();
     await page.keyboard.press('Enter');
     assert.equal(await page.locator('.repo').first().getAttribute('aria-expanded'), 'false');
@@ -707,6 +747,23 @@ try {
     await page.check('input[value=worktree]');
     await page.fill('#new-name', 'keyboard-pass');
     await audit('new-worktree');
+    const unthemedOptions = await page.locator('#new select').evaluateAll(selects => {
+      const css = getComputedStyle(document.documentElement);
+      const rgb = token => {
+        const hex = css.getPropertyValue(token).trim();
+        return `rgb(${[1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(', ')})`;
+      };
+      return selects.flatMap(select => [select, ...select.options]).filter(el => {
+        const style = getComputedStyle(el);
+        return style.backgroundColor !== rgb('--panel') || style.color !== rgb('--text');
+      }).map(el => el.id || el.textContent);
+    });
+    assert.deepEqual(unthemedOptions, [], 'Native selects and their options must use opaque theme colors');
+    await page.locator('#new-agent').focus();
+    await page.keyboard.press('Alt+ArrowDown');
+    await audit('new-agent-dropdown');
+    await escape();
+    assert.equal(await page.locator('#new').evaluate(dialog => dialog.open), true, 'Escape closes the dropdown before the dialog');
     await page.click('#new-advanced summary');
     await audit('new-advanced');
     await page.fill('#new-base', 'main');

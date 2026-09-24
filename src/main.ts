@@ -1953,8 +1953,7 @@ class Thread {
     new ResizeObserver(() => { if (this.grid.clientWidth) this.relayout(); }).observe(this.grid);
     this.row.className = "thread";
     this.row.dataset.id = this.id;
-    // One line: chevron, name, the agents as pips, what changed, how long ago.
-    // Add and ⋯ float over the tail on hover, so they cost no width at rest.
+    // Group metadata below collapsed names; expanded headers keep it inline.
     const top = document.createElement("div");
     top.className = "thread-top";
     this.label.className = "thread-name thread-select";
@@ -1969,7 +1968,10 @@ class Thread {
     this.pips.className = "pips";
     this.stat.className = "thread-stat";
     this.age.className = "thread-age";
-    top.append(this.fold, this.label, this.pips, this.stat, this.age, tools);
+    const meta = document.createElement("div");
+    meta.className = "thread-meta";
+    meta.append(this.pips, this.stat, this.age);
+    top.append(this.fold, this.label, tools, meta);
     this.label.ondblclick = () => renameThread(this);
     this.list.className = "agents";
     this.list.id = `agents-${this.id}`;
@@ -2275,7 +2277,7 @@ let sideQuery = "";
 let sideOpen = !matchMedia("(max-width: 760px)").matches;
 /** Sidebar widths, dragged from their inner edge. A CSS variable rather than
  * an inline width so the narrow-window drawer rules still win. */
-const SIDE_W = { side: 240, changes: 300 };
+const SIDE_W = { side: 280, changes: 300 };
 const sideW = { ...SIDE_W };
 function applySideW() {
   document.documentElement.style.setProperty("--side-w", `${sideW.side}px`);
