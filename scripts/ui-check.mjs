@@ -48,6 +48,7 @@ try {
         if (cmd === 'pty_kill' && qa.holdKills) return new Promise(resolve => qa.pendingKills.push(resolve));
         if (cmd === 'take_wakes') return qa.wakes.splice(0);
         if (cmd === 'has_codex_session') return args.sid !== 'missing-session';
+        if (cmd === 'pane_booted') return true;
         if (cmd === 'codex_sessions') return [{ id: 'valid-session', title: 'Saved Codex conversation' }];
         if (cmd === 'take_sessions') {
           const mine = qa.sessions.filter(([id]) => args.ids.includes(id));
@@ -162,7 +163,7 @@ try {
           if (!bounds.width || !bounds.height) return false;
           const close = head.querySelector('button[title="Close pane"]').getBoundingClientRect();
           const zoom = head.querySelector('button[title="Zoom (F2)"]').getBoundingClientRect();
-          return Math.abs(bounds.right - close.right - 4) > 1 || Math.abs(close.left - zoom.right - 6) > 1;
+          return Math.abs(bounds.right - close.right - 4) > 1 || Math.abs(close.left - zoom.right - 2) > 1;
         }).map(head => head.querySelector('.pane-title').textContent);
         return { width: root.clientWidth, scroll: root.scrollWidth, offenders, misplacedPaneActions };
       });
@@ -383,9 +384,11 @@ try {
       await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
       await page.waitForTimeout(250);
     }
+    // Language and prefix sit beside Speak, showing what the next dictation will use.
     for (const id of ['lang', 'prefix', 'layout']) {
-      assert.equal(await page.locator('#bar #' + id).isVisible(), true, id + ' must be visible in the top bar');
+      assert.equal(await page.locator('#strip #' + id).isVisible(), true, id + ' must be visible in the thread strip');
     }
+    assert.match(await page.locator('#prefix').textContent(), /\/prompt/, 'The prefix in use is shown without opening anything');
     assert.equal(await page.locator('#switch-thread').count(), 0);
     if (width <= 760) await page.click('#side-toggle');
     await audit('sidebar-hierarchy');
@@ -406,7 +409,8 @@ try {
     assert.deepEqual(await page.evaluate(() => window.qa.saved.threads.map(t => t.panes.map(p => p.cmd))), [['claude', 'codex'], ['claude', 'opencode', ''], ['claude']]);
     assert.ok(await page.evaluate(() => window.qa.panes.slice(-2).every(p => p.cwd.endsWith('review-keyboard-navigation'))), 'Spawn in the selected thread folder');
     if (width <= 760) await page.click('#side-toggle');
-    await page.locator('.agent').filter({ hasText: /^codex/ }).first().click();
+    // Its thread is folded now that another one is current: the pip opens the same pane.
+    await page.locator('.pip[title^="codex"]').first().click();
     await page.locator('.grid:not(.hidden) .xterm-helper-textarea').last().focus();
     await page.keyboard.type('x');
     await page.evaluate(() => {
@@ -419,14 +423,16 @@ try {
     await page.evaluate(() => window.qa.panes.forEach((p, i) => p.onOut.onmessage('\x1b]0;' + (i === 5 ? 'Terminal\x07\x1b]133;C' : ['◐', '⠙', '✳'][i % 3] + ' Agent session') + '\x07Working (3s • esc to interrupt)\r\n')));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=busy]').length === 6);
     assert.equal(await page.locator('.agent-title').filter({ hasText: /[◐⠙✳]/ }).count(), 0, 'Provider titles do not duplicate the spinner');
-    const frames = await page.locator('.agent-title').evaluateAll(labels => [0, 100].map(time => labels.map(label => {
+    // Folded threads show their agents as pips; every pip carries the working state.
+    assert.equal(await page.locator('.pip[data-state=busy]').count(), 6, 'Every folded agent shows as working on its pip');
+    const frames = await page.locator('.agent-title:visible').evaluateAll(labels => [0, 100].map(time => labels.map(label => {
       const animation = label.getAnimations({ subtree: true }).find(a => a.animationName === 'agent-spin');
       if (!animation) return null;
       animation.pause();
       animation.currentTime = time;
       return getComputedStyle(label, '::before').content;
     })));
-    assert.ok(frames[0].every(frame => frame?.includes('· ⠋')) && frames[1].every(frame => frame?.includes('· ⠙')), 'Every agent and CLI animates the braille spinner after its name');
+    assert.ok(frames[0].every(frame => frame?.includes('· ⠋')) && frames[1].every(frame => frame?.includes('· ⠙')), 'Every listed agent and CLI animates the braille spinner after its name');
     await audit('all-agents-working');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').animationName === 'none')), 'Reduced motion stops the spinner');
@@ -502,6 +508,16 @@ try {
     await page.locator('.picker-row').filter({ hasText: 'search-polish / codex' }).click();
     assert.equal(await page.locator('#waiting').textContent(), '3 waiting', 'Opening one agent must clear only its own notification');
     assert.match(await page.locator('.thread.on .agent.on').textContent(), /codex/);
+    // Ctrl+K, even from inside a terminal: every agent, the ones still waiting first.
+    await page.keyboard.press('Control+k');
+    await page.waitForSelector('#thread-picker[open]');
+    const rank = { waiting: 0, busy: 1, '': 2, dead: 3 };
+    const states = await page.locator('.picker-row').evaluateAll(rows => rows.map(r => r.dataset.state));
+    assert.equal(states.length, 4, 'Ctrl+K lists every agent, not only the waiting ones');
+    assert.equal(states.filter(s => s === 'waiting').length, 3);
+    assert.deepEqual(states, [...states].sort((a, b) => rank[a] - rank[b]), 'Waiting agents lead the list');
+    await audit('go-to-agent');
+    await escape();
     const closePane = page.locator('.grid:not(.hidden) .pane-head button[title="Close pane"]').first();
     await closePane.click();
     await audit('confirm-close-pane');
@@ -516,8 +532,10 @@ try {
       if (id === 'theme') {
         await page.click('#preferences-btn');
         await audit('preferences');
+        await page.click('#theme');
+      } else {
+        await page.click('#' + id);
       }
-      await page.click('#' + id);
       await audit(id + '-menu');
       if (id !== 'theme') {
         await page.locator('.menu-item').nth(1).locator('span').first().click();
@@ -678,7 +696,9 @@ try {
     assert.equal(await page.locator('#waiting').textContent(), '2 waiting');
     await page.click('#waiting');
     await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${window.qa.panes.at(-1).id}`, payload: 0 }));
-    assert.equal(await page.locator('.picker-row').count(), 1, 'An exited pane must leave the waiting list immediately');
+    // The open list repaints once per frame, however many panes changed.
+    await page.waitForFunction(() => document.querySelectorAll('.picker-row').length === 1, null, { timeout: 1000 }).catch(() => {});
+    assert.equal(await page.locator('.picker-row').count(), 1, 'An exited pane must leave the waiting list within a frame');
     await escape();
     await page.keyboard.press('F3');
     assert.equal(await page.locator('#waiting').isVisible(), false);

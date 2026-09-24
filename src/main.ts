@@ -888,6 +888,7 @@ function applyTheme(t: Theme) {
   for (const k of THEMES.flatMap((x) => Object.keys(x.vars))) root.style.removeProperty(k);
   for (const [k, v] of Object.entries(t.vars)) root.style.setProperty(k, v);
   root.style.colorScheme = t.scheme ?? "dark";
+  root.dataset.scheme = t.scheme ?? "dark"; // light themes get lighter shadows and glass
   termColors = undefined; // the palette moved
   for (const p of threads.flatMap((t) => t.panes)) p.term.options.theme = termTheme();
 }
@@ -929,9 +930,18 @@ function toast(msg: string) {
   toastTimer = window.setTimeout(() => t.classList.add("hidden"), 6000);
 }
 
-function mini(label: string, title: string, fn: () => void) {
+/** A line icon from styles.css (`.i-x`, `.i-plus`, …): a mask painted in currentColor. */
+const glyph = (name: string) => {
+  const i = document.createElement("i");
+  i.className = `i i-${name}`;
+  return i;
+};
+
+/** A small toolbar button. A string label is text; a glyph makes it an icon button. */
+function mini(label: string | Node, title: string, fn: () => void) {
   const b = document.createElement("button");
-  b.textContent = label;
+  b.append(label);
+  if (typeof label !== "string") b.classList.add("icon");
   b.title = title;
   b.setAttribute("aria-label", title);
   b.onmousedown = (e) => e.preventDefault(); // don't steal terminal focus
@@ -1114,7 +1124,7 @@ function paneAt(x: number, y: number) {
 
 const MIC_TIP = "Dictate into the focused agent pane — click, or hold F4";
 const MIC_OFF = "Dictation needs a pane with an agent running";
-const MIC_LABEL = { "": "◉ speak", rec: "◉ listening", busy: "◌ working", err: "⚠ mic" };
+const MIC_LABEL = { "": "Speak", rec: "Listening", busy: "Transcribing", err: "Mic error" };
 /** Typed into the pane the moment recording starts, so the dictation arrives as
  * an argument to a slash command instead of a bare message. `enter` submits the
  * finished transcript for you; without it you get a chance to fix a word. */
@@ -1193,7 +1203,7 @@ function micState(s = micUi, msg = "") {
   const b = $<HTMLButtonElement>("#dictate");
   const ready = !!current?.active?.agentUp;
   b.className = s;
-  b.textContent = MIC_LABEL[s];
+  b.querySelector(".lbl")!.textContent = MIC_LABEL[s];
   b.disabled = !s && !ready; // a running recording keeps its stop button either way
   b.title = msg || (ready || s ? MIC_TIP : MIC_OFF);
 }
@@ -1253,7 +1263,14 @@ async function micStop() {
 
 type LayoutMode = "grid" | "rows" | "cols";
 const LAYOUTS: LayoutMode[] = ["grid", "rows", "cols"];
-const LAYOUT_LABEL: Record<LayoutMode, string> = { grid: "▦ grid", rows: "▤ rows", cols: "▥ cols" };
+const LAYOUT_LABEL: Record<LayoutMode, string> = { grid: "grid", rows: "rows", cols: "cols" };
+/** The layout button: the shape it is in, as an icon and a word. */
+function paintLayout(mode: LayoutMode) {
+  const label = document.createElement("span");
+  label.className = "lbl";
+  label.textContent = LAYOUT_LABEL[mode];
+  $("#layout").replaceChildren(glyph(`layout-${mode}`), label);
+}
 
 /** Panes holding a WebGL context, least recently shown first. See Pane.gpu(). */
 const GL_BUDGET = 12;
@@ -1298,6 +1315,7 @@ class Pane {
   waiting = false; // the agent rang: turn finished / wants input
   dead = false; // the process exited; Enter relaunches it
   appTitle = ""; // OSC 0/2 from the running app
+  label = ""; // appTitle as shown: spinner stripped, a name when there is none
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
   sid = ""; // and the claude session it owns, so the next launch resumes it
@@ -1318,6 +1336,7 @@ class Pane {
   private gl?: WebglAddon;
   private host = document.createElement("div");
   private title = document.createElement("span");
+  private stateTag = document.createElement("span");
   private gauge = document.createElement("span");
   private cfg: HTMLButtonElement;
   private unlisten: UnlistenFn[] = [];
@@ -1332,10 +1351,16 @@ class Pane {
   private rowLabel = document.createElement("span");
   private rowName = document.createElement("strong");
   private rowState = document.createElement("small");
-  /** Provider mark in the header and the sidebar row; swapped in start()
-   * once the agent is known. */
+  /** The pane as one mark on its thread's folded row: provider icon, state
+   * ring, one click to open it. Owned here so painting a pane touches only
+   * its own nodes, whatever the sidebar holds. A mouse shortcut only: the
+   * agent rows and Ctrl+K reach the same pane from the keyboard. */
+  readonly pip = document.createElement("span");
+  /** Provider mark in the header, the sidebar row and the pip; swapped in
+   * start() once the agent is known. */
   private ico: SVGSVGElement = icon("shell");
   private rowIco: SVGSVGElement = icon("shell");
+  private pipIco: SVGSVGElement = icon("shell");
 
   constructor(readonly th: Thread) {
     this.el.className = "pane";
@@ -1343,6 +1368,13 @@ class Pane {
     this.row.className = "agent";
     this.row.onclick = (e) => {
       e.stopPropagation(); // the thread row behind it would only re-show
+      revealPane(this);
+    };
+    this.pip.className = "pip";
+    this.pip.setAttribute("aria-hidden", "true");
+    this.pip.append(this.pipIco);
+    this.pip.onclick = (e) => {
+      e.stopPropagation();
       revealPane(this);
     };
     const copy = document.createElement("span");
@@ -1354,6 +1386,7 @@ class Pane {
     this.row.append(this.rowIco, copy, this.rowState);
     this.host.className = "pane-term";
     this.title.className = "pane-title";
+    this.stateTag.className = "pane-state";
     this.gauge.className = "ctx hidden";
     this.gauge.onmousedown = (e) => e.preventDefault(); // don't steal terminal focus
     this.gauge.onclick = (e) => {
@@ -1363,7 +1396,7 @@ class Pane {
       // only read the transcript when it actually opened.
       if (!menu.classList.contains("hidden")) loadProfile(this);
     };
-    this.cfg = mini("⚙", "Model and effort for this pane", () => {
+    this.cfg = mini(glyph("sliders"), "Model and effort for this pane", () => {
       if (cfgPane !== this) (cfgNote = ""), (cfgDone = null); // another pane's verdict isn't this one's
       cfgPane = this; // the dropdowns hold the rest of the state
       showMenu(this.cfg, configMenu);
@@ -1375,10 +1408,10 @@ class Pane {
     actions.className = "pane-actions";
     actions.append(
       this.cfg,
-      mini("⛶", "Zoom (F2)", () => this.th.toggleZoom(this)),
-      mini("✕", "Close pane", () => this.th.closePane(this)),
+      mini(glyph("maximize"), "Zoom (F2)", () => this.th.toggleZoom(this)),
+      mini(glyph("x"), "Close pane", () => this.th.closePane(this)),
     );
-    head.append(this.ico, this.title, this.gauge, actions);
+    head.append(this.ico, this.title, this.stateTag, this.gauge, actions);
     this.el.append(head, this.host);
     this.el.addEventListener("mousedown", () => this.th.focusPane(this));
     this.term.attachCustomKeyEventHandler((e) => {
@@ -1479,7 +1512,7 @@ class Pane {
   async start(startup: string, sid?: string) {
     this.startup = startup;
     this.agent = agentOf(startup);
-    for (const k of ["ico", "rowIco"] as const) {
+    for (const k of ["ico", "rowIco", "pipIco"] as const) {
       const fresh = icon(this.agent);
       this[k].replaceWith(fresh);
       this[k] = fresh;
@@ -1746,23 +1779,29 @@ class Pane {
     // something under them sets one (codex never does) — the agent's name
     // says more, and a shell's says nothing.
     const app = /\.exe\s*$/i.test(this.appTitle) ? (this.agent === "shell" ? "" : this.agent) : this.appTitle;
-    const state = this.dead ? "exited" : this.busy ? "running" : this.waiting ? "waiting" : app;
-    this.title.textContent = String(index + 1).padStart(2, "0") + (state ? ` · ${state}` : "");
+    // Provider title spinners go: the pane's own state says "working" once, in
+    // Loom's colours, wherever the pane shows.
+    const own = this.agent === "shell" ? app : app.replace(SPIN, "");
+    const title = (this.label = own && own !== this.agent ? own : this.agent === "shell" ? "Terminal" : "Agent session");
+    const state = this.dead ? "dead" : this.waiting ? "waiting" : this.busy ? "busy" : "";
+    const word = this.dead ? "Exited" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
+    this.title.textContent = title;
+    this.title.title = `${this.agent}, pane ${index + 1}: ${this.appTitle || title}`;
+    this.stateTag.textContent = state ? word : "";
     this.el.classList.toggle("busy", this.busy);
     this.el.classList.toggle("waiting", this.waiting);
     this.el.classList.toggle("dead", this.dead);
     this.el.classList.toggle("active", this.th.active === this);
-    // The sidebar row: the agent, then whatever it titled itself — a shell's
-    // own path says nothing, so only a real title follows the name.
+    // The sidebar row: the agent, then whatever it titled itself.
     this.rowName.textContent = this.agent;
-    // Replace provider title spinners with the shared animation after the name.
-    const rowTitle = this.agent === "shell" ? app : app.replace(SPIN, "");
-    this.rowLabel.textContent = rowTitle && rowTitle !== this.agent ? rowTitle : this.agent === "shell" ? "Terminal" : "Agent session";
-    this.rowState.textContent = this.dead ? "Exited" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
-    this.row.title = `${this.agent}: ${this.appTitle || this.rowLabel.textContent}`;
-    this.row.setAttribute("aria-label", `${this.agent}, ${this.rowLabel.textContent}, ${this.rowState.textContent}`);
-    this.row.dataset.state = this.dead ? "dead" : this.waiting ? "waiting" : this.busy ? "busy" : "";
+    this.rowLabel.textContent = title;
+    this.rowState.textContent = word;
+    this.row.title = `${this.agent}: ${this.appTitle || title}`;
+    this.row.setAttribute("aria-label", `${this.agent}, ${title}, ${word}`);
+    this.row.dataset.state = state;
     this.row.classList.toggle("on", this.th === current && this.th.active === this);
+    this.pip.dataset.state = state;
+    this.pip.title = `${this.agent}: ${title} (${word})`;
     this.th.paint(); // the thread row sums its panes
     // Exiting or relaunching changes whether this pane can be dictated into.
     if (this.th === current && this.th.active === this) micRefresh();
@@ -1857,6 +1896,7 @@ class Pane {
     this.term.dispose();
     this.el.remove();
     this.row.remove();
+    this.pip.remove();
     await invoke("pty_kill", { id: this.id }).catch(() => {});
   }
 
@@ -1882,21 +1922,22 @@ class Thread {
   active: Pane | null = null;
   zoomed: Pane | null = null;
   layout: LayoutMode = "cols";
-  /** Agent rows tucked under the thread row; persisted. */
-  folded = false;
+  /** Agent rows listed under the thread row: set by its chevron, persisted.
+   * Unset, the thread you are on lists its agents and the rest fold them into
+   * pips, so thirty threads still fit on one screen. */
+  open: boolean | undefined;
   /** Diff tabs open over this thread's panes, and the one showing — null is
    * the panes themselves. Orca keeps diffs as tabs beside the agent; so do we. */
   tabs: DiffTab[] = [];
   tab: DiffTab | null = null;
   commitDraft = "";
   private label = document.createElement("button");
-  private sub = document.createElement("span");
   private list = document.createElement("div");
-  private count = document.createElement("span");
+  private pips = document.createElement("span");
   private stat = document.createElement("span");
   private age = document.createElement("span");
-  private fold = mini("▾", "Collapse agents", () => this.setFolded(!this.folded));
-  private add = mini("+", "Add agent or CLI to this thread", () => this.addMenu(this.add));
+  private fold = mini(glyph("chevron"), "Fold agents", () => this.setOpen(!this.listed));
+  private add = mini(glyph("plus"), "Add agent or CLI to this thread", () => this.addMenu(this.add));
   /** Lines changed against HEAD and files touched, from pollStats(). */
   changed = { add: 0, del: 0, files: 0 };
   colW: number[] = [];
@@ -1911,36 +1952,32 @@ class Thread {
     this.grid.className = "grid";
     new ResizeObserver(() => { if (this.grid.clientWidth) this.relayout(); }).observe(this.grid);
     this.row.className = "thread";
-    this.row.title = dir;
     this.row.dataset.id = this.id;
+    // One line: chevron, name, the agents as pips, what changed, how long ago.
+    // Add and ⋯ float over the tail on hover, so they cost no width at rest.
     const top = document.createElement("div");
     top.className = "thread-top";
     this.label.className = "thread-name thread-select";
     this.label.textContent = name;
-    this.count.className = "thread-n";
     this.fold.classList.add("fold");
-    const more = mini("⋯", "Thread actions", () => showMenu(more, threadMenu(this)));
+    const more = mini(glyph("more"), "Thread actions", () => showMenu(more, threadMenu(this)));
     more.classList.add("more");
-    this.add.className = "thread-add";
-    top.append(this.fold, this.label, this.add, more);
-    const meta = document.createElement("div");
-    meta.className = "thread-meta";
-    this.label.title = `${name} · ${this.isWorktree ? "Worktree" : "Checkout"}`;
-    meta.append(this.count, this.age);
-    this.sub.className = "thread-sub";
+    this.add.classList.add("thread-add");
+    const tools = document.createElement("span");
+    tools.className = "thread-tools";
+    tools.append(this.add, more);
+    this.pips.className = "pips";
     this.stat.className = "thread-stat";
     this.age.className = "thread-age";
-    const sub = document.createElement("div");
-    sub.className = "thread-line";
-    sub.append(this.sub, this.stat);
+    top.append(this.fold, this.label, this.pips, this.stat, this.age, tools);
     this.label.ondblclick = () => renameThread(this);
     this.list.className = "agents";
     this.list.id = `agents-${this.id}`;
     this.list.setAttribute("role", "group");
     this.list.setAttribute("aria-label", "Agents and terminals");
     this.fold.setAttribute("aria-controls", this.list.id);
-    this.fold.setAttribute("aria-expanded", "true");
-    this.row.append(top, sub, meta, this.list);
+    this.row.append(top, this.list);
+    this.setStat(this.changed);
     this.row.onclick = () => show(this);
     this.row.oncontextmenu = (e) => {
       e.preventDefault();
@@ -1960,20 +1997,33 @@ class Thread {
     return this.dir !== this.repo;
   }
 
-  setFolded(f: boolean, persist = true) {
-    this.folded = f;
-    this.list.classList.toggle("hidden", f);
-    this.fold.textContent = f ? "▸" : "▾";
-    this.fold.title = f ? "Show agents" : "Collapse agents";
+  /** Whether the agent rows show: the chevron's choice, else "is it current". */
+  get listed() {
+    return this.open ?? this === current;
+  }
+
+  setOpen(o: boolean) {
+    this.open = o;
+    this.paintFold();
+    save();
+  }
+
+  private shown?: boolean;
+  private paintFold() {
+    const on = this.listed;
+    if (on === this.shown) return; // paint() runs per pane repaint; skip the DOM when nothing moved
+    this.shown = on;
+    this.list.classList.toggle("hidden", !on);
+    this.row.classList.toggle("listed", on);
+    this.fold.title = on ? "Fold agents" : "List agents";
     this.fold.setAttribute("aria-label", this.fold.title);
-    this.fold.setAttribute("aria-expanded", String(!f));
-    if (persist) save();
+    this.fold.setAttribute("aria-expanded", String(on));
   }
 
   rename(n: string) {
     this.name = n;
     this.label.textContent = n;
-    if (this === current) paintHead();
+    this.setStat(this.changed); // the tooltip names it too
     save();
   }
 
@@ -1986,8 +2036,9 @@ class Thread {
 
   setStat(s: { add: number; del: number; files: number }) {
     this.changed = s;
-    this.sub.textContent = this.branch ? `⑂ ${this.branch}` : "Local folder";
-    this.sub.title = this.branch ? `Branch: ${this.branch}` : "Folder without a Git branch";
+    // The branch is usually loom/<name>, which the row already says; it lives
+    // in the tooltip and the top bar instead of a line of its own.
+    this.row.title = `${this.name}\n${this.branch ? `Branch ${this.branch}` : "Folder without a Git branch"}\n${this.dir}`;
     this.stat.innerHTML = statHtml(s);
     if (this === current) paintHead();
   }
@@ -2006,6 +2057,7 @@ class Thread {
     this.panes.push(p);
     this.grid.append(p.el);
     this.list.append(p.row); // sidebar order = grid order
+    this.pips.append(p.pip);
     dragRow(p.row, () => this.panes.map((q) => q.row), (over, after) => {
       moveNextTo(this.panes, p, this.panes.find((q) => q.row === over)!, after);
       this.reordered(p);
@@ -2018,7 +2070,7 @@ class Thread {
 
   addMenu(at: HTMLElement) {
     showMenu(at, startupMenu((cmd) => {
-      this.setFolded(false);
+      if (this.open === false) this.open = undefined; // the pane you add is one you want to see
       this.tab = null;
       show(this);
       void this.addPane({ cmd }).then(p => {
@@ -2078,6 +2130,7 @@ class Thread {
     this.panes.forEach((q, i) => q.paint(i));
     p?.focus();
     micRefresh(); // dictation follows the focused pane
+    if (changed && this === current) paintTabs(); // the panes tab wears the focused agent's mark and the count
     if (changed) save();
   }
 
@@ -2085,8 +2138,8 @@ class Thread {
    * you. One state per row, worst first — a thread with a pane waiting is
    * waiting whatever the others are up to. */
   paint() {
-    this.count.textContent = `${this.panes.length} ${this.panes.length === 1 ? "pane" : "panes"}`;
     this.add.disabled = this.panes.length >= MAX_PANES;
+    this.paintFold(); // "current" may have moved
     const state = this.panes.some((p) => p.waiting)
       ? "waiting"
       : this.panes.some((p) => p.busy)
@@ -2130,7 +2183,7 @@ class Thread {
 
   /** `panes` changed order: the grid and sidebar follow, and the order is saved. */
   private reordered(focus: Pane) {
-    for (const p of this.panes) (this.grid.append(p.el), this.list.append(p.row)); // DOM order = grid order, sidebar too
+    for (const p of this.panes) (this.grid.append(p.el), this.list.append(p.row), this.pips.append(p.pip)); // DOM order = grid order, sidebar too
     this.relayout();
     this.focusPane(focus);
     save(); // the reorder is the saved pane order
@@ -2256,7 +2309,7 @@ const flushSave = (): Promise<unknown> => {
         dir: t.dir,
         branch: t.branch,
         name: t.name,
-        folded: t.folded || undefined,
+        open: t.open,
         panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined })),
         layout: t.layout,
         active: t.panes.indexOf(t.active!),
@@ -2329,61 +2382,84 @@ function revealPane(p: Pane) {
 
 /** The header chip: how many panes want you, across every thread. One glance
  * covers what a zoomed pane or another thread's tab would hide. */
+let waitingShown = -1;
+let pickerRaf = 0;
 function paintWaiting() {
   const n = threads.reduce((s, t) => s + t.panes.filter((p) => p.waiting).length, 0);
-  const b = $("#waiting");
-  b.classList.toggle("hidden", !n);
-  b.textContent = `${n} waiting`;
-  if (picker.open) renderPicker();
+  // Every pane repaint lands here; rewriting the same text would still relayout the bar.
+  if (n !== waitingShown) {
+    waitingShown = n;
+    const b = $("#waiting");
+    b.classList.toggle("hidden", !n);
+    b.textContent = `${n} waiting`;
+  }
+  // Once per frame however many panes changed: a burst of state flips must not
+  // rebuild the open list once per pane.
+  if (picker.open && !pickerRaf) pickerRaf = requestAnimationFrame(() => ((pickerRaf = 0), picker.open && renderPicker()));
 }
 
 // Agents waiting for input, in sidebar order.
 const picker = $<HTMLDialogElement>("#thread-picker");
 const pickerQuery = $<HTMLInputElement>("#picker-query");
 
-function openPicker() {
+/** Ctrl+K lists every agent, the ones that want you first; the waiting chip
+ * opens the same list narrowed to those. */
+let pickAll = false;
+function openPicker(all = false) {
   hideMenu();
   togglePreferences(false);
+  pickAll = all;
   pickerQuery.value = "";
+  pickerQuery.placeholder = all ? "Go to an agent, thread or project" : "Filter waiting agents";
+  $("#picker-title").textContent = all ? "All agents" : "Waiting for you";
   renderPicker();
   picker.showModal();
   pickerQuery.focus();
 }
+
+const STATE_RANK: Record<string, number> = { waiting: 0, busy: 1, "": 2, dead: 3 };
+const STATE_WORD: Record<string, string> = { waiting: "Waiting", busy: "Working", "": "Ready", dead: "Exited" };
 
 function renderPicker() {
   const list = $("#picker-list");
   const focused = document.activeElement as HTMLElement | null;
   const focusKey = list.contains(focused) ? focused?.dataset.key : undefined;
   const q = pickerQuery.value.trim().toLowerCase();
+  const stateOf = (p: Pane) => (p.dead ? "dead" : p.waiting ? "waiting" : p.busy ? "busy" : "");
+  // Sidebar order within each state: sort() is stable.
+  const rows = threads
+    .flatMap((th) => th.panes.map((p) => ({ th, p, state: stateOf(p) })))
+    .filter(({ state }) => pickAll || state === "waiting")
+    .filter(({ th, p }) => !q || `${basename(th.repo)} ${th.name} ${th.branch} ${p.agent} ${p.appTitle}`.toLowerCase().includes(q))
+    .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
   list.replaceChildren();
-  for (const th of threads) {
-    const panes = th.panes.filter((p) => p.waiting && !p.dead);
-    for (const p of panes) {
-      if (q && !`${basename(th.repo)} ${th.name} ${th.branch} ${p.agent} ${p.appTitle}`.toLowerCase().includes(q)) continue;
-      const row = document.createElement("button");
-      row.className = "picker-row";
-      row.dataset.key = p.id;
-      const label = document.createElement("span");
-      label.className = "picker-label";
-      label.textContent = `${th.name} / ${p.agent}`;
-      const detail = document.createElement("span");
-      detail.className = "picker-detail";
-      detail.textContent = p.appTitle || `${basename(th.repo)} / ${th.branch || "checkout"}`;
-      const state = document.createElement("span");
-      state.className = "picker-state";
-      state.textContent = "Waiting";
-      state.classList.add("warn");
-      row.append(label, state, detail);
-      row.onclick = () => {
-        picker.close();
-        revealPane(p);
-      };
-      list.append(row);
-    }
+  for (const { th, p, state } of rows) {
+    const row = document.createElement("button");
+    row.className = "picker-row";
+    row.dataset.key = p.id;
+    row.dataset.state = state;
+    const label = document.createElement("span");
+    label.className = "picker-label";
+    label.textContent = `${th.name} / ${p.agent}`;
+    const detail = document.createElement("span");
+    detail.className = "picker-detail";
+    detail.textContent = p.label;
+    const project = document.createElement("span");
+    project.className = "picker-project";
+    project.textContent = basename(th.repo);
+    const tag = document.createElement("span");
+    tag.className = "picker-state";
+    tag.textContent = STATE_WORD[state];
+    row.append(icon(p.agent), label, tag, detail, project);
+    row.onclick = () => {
+      picker.close();
+      revealPane(p);
+    };
+    list.append(row);
   }
   $("#picker-empty").classList.toggle("hidden", list.childElementCount > 0);
   $("#picker-empty").textContent = q ? "No matches. Try a project, thread, branch or agent name."
-    : "Nothing waiting. Agents that need you will appear here.";
+    : pickAll ? "No agents yet. Start a thread to add one." : "Nothing waiting. Agents that need you will appear here.";
   if (focusKey) {
     const next = [...list.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.dataset.key === focusKey);
     (next ?? pickerQuery).focus();
@@ -2480,11 +2556,6 @@ function moveNextTo<T>(list: T[], x: T, target: T, after: boolean) {
 function renderSide() {
   const side = $("#threads");
   side.textContent = "";
-  const head = document.createElement("div");
-  head.className = "side-head";
-  head.textContent = "Projects";
-  head.append(mini("+", "New thread", newThread));
-  side.append(head);
   const rowsOf = (repo: string) => threads.filter((t) => t.repo === repo);
   for (const repo of repos.filter((r) => rowsOf(r).length)) {
     const h = document.createElement("div");
@@ -2497,16 +2568,13 @@ function renderSide() {
     };
     h.dataset.repo = repo;
     h.title = repo;
-    const chev = document.createElement("i");
-    chev.className = "chev";
     const name = document.createElement("span");
     name.className = "project-name";
     name.textContent = basename(repo);
-    const folder = document.createElement("span");
-    folder.className = "project-icon";
-    folder.setAttribute("aria-hidden", "true");
-    folder.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7V5h7l2 2h9v13H3Z"/></svg>';
-    h.append(chev, folder, name, mini("+", `New worktree in ${basename(repo)}`, () => newThread(repo)));
+    const count = document.createElement("span");
+    count.className = "project-n";
+    count.textContent = String(rowsOf(repo).length);
+    h.append(glyph("chevron"), name, count, mini(glyph("plus"), `New worktree in ${basename(repo)}`, () => newThread(repo)));
     const group = document.createElement("div");
     group.className = "group";
     group.id = `project-${uid()}`;
@@ -2565,31 +2633,35 @@ function show(th: Thread | null) {
   paintTabs();
   void showTab();
   if (changesOpen) void refreshChanges();
-  $("#layout").textContent = LAYOUT_LABEL[th?.layout ?? "cols"];
+  paintLayout(th?.layout ?? "cols");
   // The grid was display:none, so its terminals measured 0 — refit on reveal.
   th?.panes.forEach((p) => p.resize());
   th?.focusPane(th.active ?? th.panes[0] ?? null);
   save();
 }
 
-/** The thread bar: name, branch chip, change stats, and the Changes toggle's badge. */
+/** The top bar's breadcrumb (project, thread, branch, change stats) and the
+ * Changes toggle's badge. The folder is the breadcrumb's tooltip. */
 function paintHead() {
   const th = current;
+  $("#wsrepo").textContent = th ? basename(th.repo) : "";
   $("#wsname").textContent = th?.name ?? "";
-  $("#wsname").title = th?.name ?? "";
-  $("#wsbranch").textContent = th?.branch ?? "";
-  $("#wsbranch").classList.toggle("hidden", !th?.branch);
+  // Worktree branches are loom/<name>: say it only when it says something new.
+  const branch = th?.branch && th.branch !== `loom/${th.name}` && th.branch !== th.name ? th.branch : "";
+  $("#wsbranch").textContent = branch;
+  $("#wsbranch").classList.toggle("hidden", !branch);
   $("#wsstat").innerHTML = th ? statHtml(th.changed) : "";
-  $("#wspath").textContent = th?.dir ?? "";
-  $("#wspath").title = th?.dir ?? "";
-  changesBtn.textContent = th?.changed.files ? `Changes ${th.changed.files}` : "Changes";
+  $("#crumbs").title = th ? `${th.name}\n${th.branch ? `Branch ${th.branch}` : "Folder without a Git branch"}\n${th.dir}` : "";
+  $("#changes-n").textContent = th?.changed.files ? String(th.changed.files) : "";
   for (const id of ["#changes-btn", "#wsmore", "#add-pane", "#layout", "#vscode"]) {
     $<HTMLButtonElement>(id).disabled = !th;
   }
 }
 
 type ThreadState = {
-  repo: string; dir: string; branch: string; name: string; folded?: boolean;
+  repo: string; dir: string; branch: string; name: string; open?: boolean;
+  /** Pre-redesign: agents collapsed by hand. Read once as open: false. */
+  folded?: boolean;
   active?: number; zoomed?: number; colW?: number[]; rowH?: number[];
   tabs?: Omit<DiffTab, "load">[]; tab?: number; commitDraft?: string;
 };
@@ -2597,7 +2669,7 @@ type ThreadState = {
 async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMode = "cols") {
   const th = new Thread(st.repo, st.dir, st.branch, st.name);
   th.layout = layout;
-  if (st.folded) th.setFolded(true, false);
+  th.open = st.open ?? (st.folded ? false : undefined);
   threads.push(th); // before any await, so restore order is saved order
   // A thread on the checkout itself follows whatever branch is checked out
   // there, so ask git rather than trust what was saved.
@@ -2728,7 +2800,7 @@ const threadMenu = (th: Thread): Menu => ({
     item("Changes", () => (show(th), toggleChanges(true)));
     item("Open in VS Code", () => void invoke("open_vscode", { dir: th.dir }).catch((e) => toast(String(e))));
     item("Rename…", () => renameThread(th));
-    item(th.folded ? "Show agents" : "Collapse agents", () => th.setFolded(!th.folded));
+    item(th.listed ? "Fold agents" : "List agents", () => th.setOpen(!th.listed));
     item("Close thread" + (th.isWorktree ? " (keep worktree)" : ""), () => removeThread(th, "close"));
     if (th.isWorktree) {
       item("Delete worktree (keep branch)", () => removeThread(th, "worktree"), true);
@@ -2781,11 +2853,12 @@ function closeTab(th: Thread, t: DiffTab) {
 function paintTabs() {
   const th = current;
   tabsEl.textContent = "";
-  tabsEl.classList.toggle("hidden", !th); // only the empty state has no bar
+  $("#strip").classList.toggle("hidden", !th); // only the empty state has no bar
   if (!th) return;
   // The panes are the first tab: a way back that keeps the diffs open. It wears
   // the focused pane's agent mark, so it reads as the agent, not another diff.
-  mk(th.active ? icon(th.active.agent) : "▦", th.name, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()))
+  const n = th.panes.length;
+  mk(th.active ? icon(th.active.agent) : "▦", n === 1 ? (th.active?.agent ?? "pane") : `${n} panes`, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()))
     .classList.add("panes");
   function mk(glyph: string | Node, label: string, on: boolean, pick: () => void, close?: () => void) {
     const b = document.createElement("div");
@@ -4457,7 +4530,13 @@ function paintPlan(provider: PlanProvider) {
     ? plan?.limits.slice().sort((a, b) => b.percent - a.percent)[0]
     : plan?.limits.find((l) => l.group === "session") ?? plan?.limits[0];
   b.className = `plan-chip sev-${s?.severity ?? "ok"}`;
-  b.replaceChildren(icon(provider), document.createTextNode(s ? `${Math.round(s.percent)}%` : "—"));
+  // Hovering repaints for a fresh countdown in the tooltip; rebuilding the
+  // chip then would swap the icon out from under the pointer mid-click.
+  const text = s ? `${Math.round(s.percent)}%` : "—";
+  if (b.dataset.text !== text || !b.firstChild) {
+    b.dataset.text = text;
+    b.replaceChildren(icon(provider), document.createTextNode(text));
+  }
   b.setAttribute("aria-label", `${info.name} usage${s ? `, ${Math.round(s.percent)}% used` : " unavailable"}`);
   if (!s) { b.title = `${info.name}: ${planErrors[provider] || "Fetching usage…"}`; return; }
   b.title =
@@ -4511,7 +4590,7 @@ async function pollPlan(provider: PlanProvider) {
 
 function paintTheme() {
   const b = $("#theme");
-  b.textContent = `◑ ${theme.label} ▾`;
+  b.textContent = theme.label;
   b.title = `Colour theme: ${theme.label} — click to change`;
 }
 
@@ -4526,25 +4605,31 @@ function paintPlanUsage() {
 
 function paintSilent() {
   const b = $("#silent");
-  b.textContent = silent ? "🔕 silent" : "🔔 sound + taskbar";
+  b.textContent = silent ? "Silent" : "Sound and taskbar";
   b.title = silent ? "No chime, no taskbar flash — click to turn them back on" : "Chime and flash the taskbar when an agent wants you — click to silence";
   b.setAttribute("aria-pressed", String(silent));
 }
 
+/** A dictation setting beside Speak: its current value, then a caret. Always
+ * in sight, so a glance says what the next dictation will type. */
+function paintSetting(b: HTMLElement, value: string, title: string) {
+  const label = document.createElement("span");
+  label.className = "lbl";
+  label.textContent = value;
+  b.replaceChildren(label, glyph("chevron"));
+  b.title = title;
+}
+
 function paintLang() {
-  const b = $("#lang");
-  b.textContent = `${lang.label} ▾`;
-  b.title = lang.code
+  paintSetting($("#lang"), lang.label, lang.code
     ? `Dictation is transcribed as ${lang.label} — click to change`
-    : "Dictation language is detected per clip — click to change";
+    : "Dictation language is detected per clip — click to change");
 }
 
 function paintPrefix() {
-  const b = $("#prefix");
-  b.textContent = `${prefix.text.trim() || "no prefix"}${prefix.enter ? " ⏎" : ""} ▾`;
-  b.title = prefix.enter
+  paintSetting($("#prefix"), `${prefix.text.trim() || "no prefix"}${prefix.enter ? " ⏎" : ""}`, prefix.enter
     ? "Dictation is sent the moment it lands — click to change"
-    : "Dictation is inserted and waits for your Enter — click to change";
+    : "Dictation is inserted and waits for your Enter — click to change");
 }
 
 const hideMenu = () => menu.classList.add("hidden");
@@ -4785,7 +4870,8 @@ async function main() {
   $("#changes-refresh").onclick = () => void (pollStats(), refreshChanges());
   $("#changes-more").onclick = () => showMenu($("#changes-more"), repoMenu);
   $("#wsmore").onclick = () => current && showMenu($("#wsmore"), threadMenu(current));
-  $("#waiting").onclick = openPicker;
+  $("#waiting").onclick = () => openPicker();
+  $("#search").onclick = () => openPicker(true);
   $("#rename-cancel").onclick = () => renameDlg.close();
   $("#keys-close").onclick = () => $<HTMLDialogElement>("#keys").close();
   $<HTMLInputElement>("#side-filter").oninput = (e) => {
@@ -4831,7 +4917,7 @@ async function main() {
     if (!current) return;
     current.layout = LAYOUTS[(LAYOUTS.indexOf(current.layout) + 1) % LAYOUTS.length];
     current.relayout();
-    $("#layout").textContent = LAYOUT_LABEL[current.layout];
+    paintLayout(current.layout);
     save();
   };
 
@@ -4897,6 +4983,8 @@ async function main() {
         return; // native dialogs close themselves
       }
       if (e.key === "F1") $<HTMLDialogElement>("#keys").showModal();
+      // Ctrl+K is kill-line in a shell, but Loom already owns Ctrl+B and Ctrl+F there too.
+      else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") openPicker(true);
       else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "g") toggleChanges();
       else if (e.ctrlKey && e.key === "b") toggleSide();
       else if (e.key === "F2" && current?.active) current.toggleZoom(current.active);

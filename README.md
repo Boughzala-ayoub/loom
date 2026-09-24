@@ -55,23 +55,27 @@ name: the thread is created on that branch, off HEAD. Spelling it like a
 remote ref (`origin/x`) that isn't there is refused as a typo. **Open checkout**
 also supports folders that are not Git repositories.
 
-The sidebar lists threads under the project they came from, and under each
-thread one row per pane, the way Orca lists agent sessions under a worktree:
-the provider's mark, the agent (`claude`, `codex`, `opencode`, `shell`) and
-whatever it titled itself. Projects fold on click and threads fold on their
-`▾`; both orders change by dragging a row up or down its list, and all of
-that is remembered. The box at the top filters threads by project, name,
-branch, agent, or agent title. Project headings contain indented threads or
-checkouts, with their agents and terminals nested below. Filtering reveals
-matching threads even when their project is collapsed.
+The sidebar lists threads under the project they came from, one line each:
+the thread's name, a mark per agent, the lines it has changed, and how long
+since anything drew. The thread you are on also lists one row per pane, the way
+Orca lists agent sessions under a worktree: the provider's mark, the agent
+(`claude`, `codex`, `opencode`, `shell`) and whatever it titled itself. Other
+threads fold their agents into the marks, and clicking a mark opens that pane,
+so thirty threads fit on one screen. A thread's chevron lists or folds its
+agents by hand, and that choice sticks. Projects fold on click; both orders
+change by dragging a row up or down its list, and all of that is remembered.
+The box at the top filters threads by project, name, branch, agent, or agent
+title, and reveals matching threads even when their project is collapsed.
 
 `1 waiting` in the top bar counts panes waiting on you across
 every thread. Click it to choose an agent from the waiting list, or press `F3`
-to jump to the next one. Choosing an agent reveals its terminal and clears
-only its waiting indicator. Every
-row has a dot: pulsing while that agent is working, yellow when it has finished
-a turn and is waiting on you, red when it has exited. The thread's own dot is
-the worst of its panes. Clicking an agent row focuses that pane; if the thread
+to jump to the next one. `Ctrl+K` (or the search field in the top bar) lists
+every agent in every thread, waiting ones first, then working, idle and exited;
+type to filter by project, thread, branch, agent or title. Choosing an agent
+reveals its terminal and clears only its waiting indicator. A thread's knot on
+the sidebar rail is the worst of its panes: lit, with a light running down the
+rail, while an agent works; yellow when one has finished a turn and is waiting
+on you; red when all have exited. Agent marks carry the same colours as a dot. Clicking an agent row focuses that pane; if the thread
 is zoomed, the zoom moves to it, so a zoomed thread reads one agent at a time.
 
 Threads, branches, and panes come back on the next launch. Claude keeps its
@@ -103,18 +107,19 @@ still get PowerShell with the OSC 133 integration below.
 | New thread | `+ Thread`, then Open checkout or Create worktree |
 | Switch thread | click its row, or `Ctrl+Tab` / `Ctrl+Shift+Tab` |
 | Choose a waiting agent | click the waiting count |
+| Go to any agent | `Ctrl+K`, or the search field in the top bar |
 | Preferences | `⚙` in the top bar |
-| Add / close a pane | `+` on the thread bar, or `✕` on the pane header |
+| Add / close a pane | `+` in the thread strip, or `✕` on the pane header |
 | Relaunch a dead pane | focus it and press Enter |
 | Resize panes | drag the gap between them |
 | Move a pane | drag its header onto another pane — they swap |
-| Dictate into the focused agent pane | hold `F4` and talk, or click `◉ speak` |
-| Zoom a pane | `F2`, double-click its header, or `⛶` |
+| Dictate into the focused agent pane | hold `F4` and talk, or click `Speak`; the language and prefix beside it are one click each |
+| Zoom a pane | `F2`, double-click its header, or the zoom button on its header |
 | Jump to a pane waiting on you | `F3` |
 | Scroll a pane | `Alt+Shift+↑` / `Alt+Shift+↓`, or the mouse wheel |
 | Open the thread in VS Code | `F5` or the `VS Code` button |
-| Thread actions | `⋯` on its row or in the thread bar, or right-click the row (rename lives here) |
-| Fold / reorder the sidebar | click a project, `▾` on a thread; drag a row to move it |
+| Thread actions | `⋯` on its row or in the thread strip, or right-click the row (rename lives here) |
+| Fold / reorder the sidebar | click a project, the chevron on a thread; drag a row to move it |
 | Filter threads | the search box above the list |
 | Show / hide the sidebar | `Ctrl+B` |
 | Move focus between panes | `Ctrl+Alt+←↑↓→` |

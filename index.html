@@ -10,66 +10,69 @@
   </head>
 
   <body>
+    <!-- One bar: where you are on the left, what needs you on the right. -->
     <header id="bar">
-      <button id="side-toggle" aria-label="Toggle projects" aria-controls="side" aria-expanded="true" title="Toggle projects (Ctrl+B)">☰</button>
+      <button id="side-toggle" class="icon" aria-label="Toggle projects" aria-controls="side" aria-expanded="true" title="Toggle projects (Ctrl+B)"><i class="i i-menu"></i></button>
       <img src="/src/logo.svg" class="mark" alt="" />
-      <span class="brand">loom<span class="cursor"></span></span>
+      <nav id="crumbs" aria-label="Current thread">
+        <span id="wsrepo"></span>
+        <span id="wsname"></span>
+        <span id="wsbranch" class="chip hidden"></span>
+        <span id="wsstat"></span>
+      </nav>
       <span class="spacer"></span>
-      <div id="quick-settings" role="group" aria-label="Dictation and pane layout">
-        <button id="lang" aria-description="Dictation language" title="Language dictation transcribes as">English ▾</button>
-        <button id="prefix" aria-description="Dictation prefix" title="What dictation types before the transcript">/prompt ▾</button>
-        <button id="layout" aria-description="Pane layout" title="Cycle pane layout: grid / rows / columns">▥ cols</button>
-      </div>
-      <button id="waiting" class="hidden warn" title="Choose a waiting agent. F3 jumps to the next one."></button>
+      <button id="search" title="Go to any thread or agent (Ctrl+K)"><i class="i i-search"></i><span class="lbl">Go to agent…</span><kbd>Ctrl K</kbd></button>
+      <button id="waiting" class="hidden" title="Choose a waiting agent. F3 jumps to the next one."></button>
       <button id="plan" class="hidden" title="Claude plan usage"></button>
       <button id="codex-plan" class="hidden" title="Codex plan usage"></button>
-      <button id="new-thread" class="primary" title="Cut a new thread: a worktree with an agent in it">+ Thread</button>
-      <button id="preferences-btn" aria-label="Preferences" aria-expanded="false" aria-controls="preferences" title="Preferences">⚙</button>
+      <button id="new-thread" class="primary" title="Cut a new thread: a worktree with an agent in it"><i class="i i-plus"></i><span class="lbl">Thread</span></button>
+      <button id="preferences-btn" class="icon" aria-label="Preferences" aria-expanded="false" aria-controls="preferences" title="Preferences"><i class="i i-sliders"></i></button>
     </header>
 
     <div id="body">
       <!-- Threads, grouped under the checkout they were cut from. Rows are built in main.ts. -->
       <aside id="side">
-        <input id="side-filter" aria-label="Filter threads" spellcheck="false" placeholder="Filter threads…" title="Filter by project, name, branch or agent" />
+        <label class="filter"><i class="i i-search"></i><input id="side-filter" aria-label="Filter threads" spellcheck="false" placeholder="Filter threads" title="Filter by project, name, branch or agent" /></label>
         <div id="threads"></div>
-        <p id="side-empty" class="hidden muted">No matching threads.</p>
+        <p id="side-empty" class="hidden muted">No thread matches that filter.</p>
         <div id="side-resize" class="side-resize" title="Drag to resize, double-click to reset"></div>
       </aside>
 
       <div id="main">
-        <div id="wsbar">
-          <div class="wsidentity">
-          <span id="wsname"></span>
-          <span id="wsbranch" class="chip hidden"></span>
-          <span id="wsstat"></span>
-          <span id="wspath" class="muted"></span>
+        <!-- The panes and the open diffs as tabs, Orca's bar, with the thread's
+             own actions on the right. Always up while a thread shows: coming and
+             going would resize every pane. -->
+        <div id="strip" class="hidden">
+          <div id="tabs"></div>
+          <div id="wsactions">
+            <button id="add-pane" class="icon" title="Add a pane to this thread" aria-label="Add a pane"><i class="i i-plus"></i></button>
+            <span class="split-btn">
+              <button id="dictate" title="Dictate into the focused pane — click, or hold F4"><i class="i i-mic"></i><span class="lbl">Speak</span></button>
+              <button id="lang" aria-description="Dictation language" title="Language dictation transcribes as"></button>
+              <button id="prefix" aria-description="Dictation prefix" title="What dictation types before the transcript"></button>
+            </span>
+            <button id="layout" title="Cycle pane layout: grid / rows / columns"></button>
+            <button id="changes-btn" title="Changes in this thread's worktree (Ctrl+Shift+G)"><i class="i i-diff"></i><span class="lbl">Changes</span><b id="changes-n"></b></button>
+            <button id="wsmore" class="icon" title="Thread actions" aria-label="Thread actions"><i class="i i-more"></i></button>
           </div>
-          <span class="spacer"></span>
-          <button id="add-pane" class="primary" title="Add a pane to this thread">+</button>
-          <button id="dictate" title="Dictate into the focused pane — click, or hold F4">◉ speak</button>
-          <button id="changes-btn" title="Changes in this thread's worktree">⎇</button>
-          <button id="wsmore" title="Thread actions">⋯</button>
         </div>
-
-        <!-- The panes and the open diffs as tabs, Orca's bar. Always up while a
-             thread shows: coming and going would resize every pane. -->
-        <div id="tabs" class="hidden"></div>
 
         <div id="work">
           <main id="stage">
             <div id="empty">
-              <div class="empty-mark"><img src="/src/logo.svg" alt="" />loom</div>
-              <p>Open a project, choose an agent, and start working.</p>
-              <p class="muted">Use a separate worktree when you want an isolated branch.</p>
-              <button id="open-first" class="primary">New thread…</button>
+              <img class="empty-mark" src="/src/logo.svg" alt="" />
+              <h1>Start a thread</h1>
+              <p>Each thread is a branch of work with its own agents. Run as many as you like; they keep going while you look elsewhere.</p>
+              <button id="open-first" class="primary">New thread</button>
+              <p class="muted keys-hint"><span><kbd>Ctrl K</kbd> go to an agent</span><span><kbd>F3</kbd> next waiting</span><span><kbd>F1</kbd> all shortcuts</span></p>
             </div>
             <!-- One file's diff, over the panes. Esc or ✕ closes. -->
             <div id="diff" class="hidden">
               <div class="diff-head">
                 <span id="diff-name"></span>
                 <span class="spacer"></span>
-                <button id="diff-full" title="Show the whole file around each change, or only the hunks">⊞ full file</button>
-                <button id="diff-close" title="Close (Esc)">✕</button>
+                <button id="diff-full" title="Show the whole file around each change, or only the hunks">Full file</button>
+                <button id="diff-close" class="icon" title="Close (Esc)" aria-label="Close"><i class="i i-x"></i></button>
               </div>
               <div class="diff-scroll">
                 <pre id="diff-body"></pre>
@@ -86,14 +89,14 @@
               <button id="panel-changes" role="tab" aria-selected="true">Changes</button>
               <button id="panel-files" role="tab" aria-selected="false" title="Every file in this thread's folder">Files</button>
               <span class="spacer"></span>
-              <button id="changes-refresh" title="Re-read git now">↻</button>
-              <button id="changes-close" aria-label="Close changes" title="Close changes">✕</button>
+              <button id="changes-refresh" class="icon" title="Re-read git now" aria-label="Refresh"><i class="i i-refresh"></i></button>
+              <button id="changes-close" class="icon" aria-label="Close changes" title="Close changes"><i class="i i-x"></i></button>
             </div>
             <div class="changes-top">
               <div class="changes-tools">
-                <button id="pr-btn" title="Push the branch and open GitHub's compare page">⎇ Create PR</button>
+                <button id="pr-btn" title="Push the branch and open GitHub's compare page"><i class="i i-branch"></i>Create PR</button>
                 <span class="spacer"></span>
-                <button id="changes-more" title="Fetch, pull, push, branch, stash, amend">⋯</button>
+                <button id="changes-more" class="icon" title="Fetch, pull, push, branch, stash, amend" aria-label="More git actions"><i class="i i-more"></i></button>
               </div>
               <div class="changes-ref">
                 <span id="changes-branch"></span>
@@ -102,8 +105,8 @@
               <div id="changes-base" class="muted"></div>
               <textarea id="commit-msg" aria-label="Commit message" rows="2" placeholder="Describe your changes" spellcheck="false"></textarea>
               <div class="commit-row">
-                <button id="commit-btn" class="primary" title="git add -A && git commit">✓ Commit</button>
-                <button id="commit-more" class="primary" title="Commit options">▾</button>
+                <button id="commit-btn" class="primary" title="git add -A && git commit">Commit</button>
+                <button id="commit-more" class="primary icon" title="Commit options" aria-label="Commit options"><i class="i i-chevron"></i></button>
               </div>
             </div>
             <div id="changes-body"></div>
@@ -121,7 +124,7 @@
       id="find"
       class="hidden"
       spellcheck="false"
-      placeholder="find…"
+      placeholder="Find"
       title="Enter / Shift+Enter — Esc closes"
     />
 
@@ -129,19 +132,25 @@
     <div id="toast" class="hidden" role="status"></div>
 
     <section id="preferences" class="hidden" aria-labelledby="preferences-title">
-      <div class="panel-heading"><h2 id="preferences-title">Preferences</h2><button id="preferences-close" aria-label="Close preferences">✕</button></div>
-      <div class="preference-row"><span>Theme</span><button id="theme" title="Colour theme">◑ loom</button></div>
-      <div class="preference-row"><span>Notifications</span><button id="silent" title="Chime and taskbar flash when an agent wants you">🔔 sound + taskbar</button></div>
+      <div class="panel-heading"><h2 id="preferences-title">Preferences</h2><button id="preferences-close" class="icon" aria-label="Close preferences"><i class="i i-x"></i></button></div>
+      <div class="preference-row"><span>Theme</span><button id="theme" title="Colour theme">loom</button></div>
+      <div class="preference-row"><span>Notifications</span><button id="silent" title="Chime and taskbar flash when an agent wants you">Sound and taskbar</button></div>
       <div class="preference-row"><span>Plan usage</span><button id="plan-usage" title="Claude and Codex plan usage in the top bar">shown</button></div>
       <div class="preference-actions"><button id="vscode" title="Open this thread in VS Code (F5)">Open in VS Code</button><button id="shortcuts">Keyboard shortcuts <kbd>F1</kbd></button></div>
     </section>
 
+    <!-- Ctrl+K goes to any agent; the waiting chip opens the same list narrowed to
+         the agents that want you. -->
     <dialog id="thread-picker" aria-labelledby="picker-title">
-      <div class="panel-heading"><h2 id="picker-title">Waiting for you</h2><button id="picker-close" aria-label="Close waiting list">✕</button></div>
-      <input id="picker-query" type="search" aria-label="Filter waiting agents" placeholder="Filter waiting agents…" autocomplete="off" spellcheck="false" />
-      <p id="picker-hint" class="muted">Choose an agent to review its turn. F3 jumps to the next one.</p>
+      <div class="picker-search">
+        <i class="i i-search"></i>
+        <input id="picker-query" type="search" aria-label="Filter agents" placeholder="Go to agent" autocomplete="off" spellcheck="false" />
+        <button id="picker-close" class="icon" aria-label="Close"><i class="i i-x"></i></button>
+      </div>
+      <h2 id="picker-title" class="picker-title">Waiting for you</h2>
       <div id="picker-list"></div>
       <p id="picker-empty" class="hidden muted" role="status"></p>
+      <p id="picker-hint" class="muted keys-hint"><span><kbd>↑</kbd><kbd>↓</kbd> choose</span><span><kbd>Enter</kbd> open</span><span><kbd>F3</kbd> next waiting</span></p>
     </dialog>
 
     <!-- Bars are built in main.ts; an empty box beats 28 lines of <i>. -->
@@ -150,7 +159,7 @@
     <dialog id="rename" aria-labelledby="rename-title">
       <form id="rename-form" method="dialog">
         <h2 id="rename-title">Rename thread</h2>
-        <label>name <input id="rename-name" spellcheck="false" autocomplete="off" /></label>
+        <label>Name <input id="rename-name" spellcheck="false" autocomplete="off" /></label>
         <div class="new-actions">
           <button type="button" id="rename-cancel" formnovalidate>Cancel</button>
           <button type="submit" class="primary">Rename</button>
@@ -179,6 +188,7 @@
     <dialog id="keys" aria-labelledby="keys-title">
       <h2 id="keys-title">Keyboard shortcuts</h2>
       <table>
+        <tr><td>Ctrl+K</td><td>go to any thread or agent</td></tr>
         <tr><td>F1</td><td>this list</td></tr>
         <tr><td>F2</td><td>zoom the focused pane</td></tr>
         <tr><td>F3</td><td>jump to the next pane waiting on you</td></tr>
