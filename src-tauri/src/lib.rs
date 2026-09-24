@@ -401,12 +401,22 @@ fn read_file(dir: String, path: String) -> Result<String, String> {
 
 #[tauri::command(async)]
 fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, String> {
-    let path = std::path::Path::new(&dir).join(path);
+    let requested = std::path::Path::new(&path);
+    let mut path = std::path::Path::new(&dir).join(requested);
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif") {
         return Err("Unsupported image format".into());
     }
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        // Harnesses can display just a basename in a tool summary. Keep full
+        // paths exact, but find a unique artifact inside this thread's folder.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && requested.file_name() == Some(requested.as_os_str()) => {
+            path = find_image(std::path::Path::new(&dir), requested)?;
+            std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
         return Err("Not an image file".into());
     }
@@ -415,6 +425,36 @@ fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, String>
     file.take((32 << 20) + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     if bytes.len() > 32 << 20 { return Err("Image exceeds the 32 MB preview limit".into()); }
     Ok(tauri::ipc::Response::new(bytes))
+}
+
+fn find_image(root: &std::path::Path, name: &std::path::Path) -> Result<PathBuf, String> {
+    let mut dirs = vec![root.to_path_buf()];
+    let mut found: Option<PathBuf> = None;
+    let mut entries = 0;
+    let started = std::time::Instant::now();
+    // ponytail: bounded on-demand walk, including ignored caches; index artifacts
+    // if projects outgrow this limit. Never choose from an incomplete search.
+    while let Some(dir) = dirs.pop() {
+        let children = std::fs::read_dir(&dir).map_err(|e| format!("Could not search {}: {e}. Open the full image path.", dir.display()))?;
+        for child in children {
+            entries += 1;
+            if entries > 100_000 || started.elapsed().as_secs() >= 3 {
+                return Err("Image search limit reached. Open the full image path.".into());
+            }
+            let child = child.map_err(|e| e.to_string())?;
+            let kind = child.file_type().map_err(|e| e.to_string())?;
+            if kind.is_symlink() { continue; }
+            if kind.is_dir() {
+                if child.file_name() != ".git" { dirs.push(child.path()); }
+            } else if kind.is_file() && child.file_name().to_string_lossy().eq_ignore_ascii_case(&name.to_string_lossy()) {
+                if let Some(first) = found {
+                    return Err(format!("More than one image named {}: {} and {}. Open the full image path.", name.display(), first.display(), child.path().display()));
+                }
+                found = Some(child.path());
+            }
+        }
+    }
+    found.ok_or_else(|| format!("Image {} was not found under {}. Open its full path if it is outside this folder.", name.display(), root.display()))
 }
 
 /// `git_run` with the patch on stdin, which is the only way to hand `git apply`
@@ -906,9 +946,26 @@ mod tests {
         let response = super::read_image(root.clone(), "screen shot.PNG".into()).unwrap().body().unwrap();
         assert!(matches!(response, InvokeResponseBody::Raw(bytes) if bytes == image));
         assert!(super::read_image(root.clone(), dir.join("screen shot.PNG").to_string_lossy().into()).is_ok());
+        // Harness summaries show only the basename, even for ignored artifacts.
+        let shots = dir.join("node_modules/.cache/ui-check");
+        std::fs::create_dir_all(&shots).unwrap();
+        std::fs::write(shots.join("workspace-1280.png"), image).unwrap();
+        let response = super::read_image(root.clone(), "workspace-1280.png".into()).unwrap().body().unwrap();
+        assert!(matches!(response, InvokeResponseBody::Raw(bytes) if bytes == image));
+        assert!(super::read_image(root.clone(), "node_modules/.cache/ui-check/workspace-1280.png".into()).is_ok());
+        // An explicit missing path must not silently open another artifact.
+        assert!(super::read_image(root.clone(), "missing/workspace-1280.png".into()).is_err());
+        assert!(super::read_image(root.clone(), dir.join("missing/workspace-1280.png").to_string_lossy().into()).is_err());
+        let other = dir.join("output");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("workspace-1280.png"), image).unwrap();
+        assert!(super::read_image(root.clone(), "workspace-1280.png".into()).err().unwrap().contains("More than one image"));
+        // A real root-level file still wins over same-named nested files.
+        std::fs::write(dir.join("workspace-1280.png"), image).unwrap();
+        assert!(super::read_image(root.clone(), "workspace-1280.png".into()).is_ok());
         assert!(super::read_image(root.clone(), "missing.png".into()).is_err());
         assert!(super::read_image(root.clone(), "script.exe".into()).is_err());
-        let large = std::fs::File::create(dir.join("large.png")).unwrap();
+        let large = std::fs::File::create(shots.join("large.png")).unwrap();
         large.set_len((32 << 20) + 1).unwrap();
         drop(large);
         assert!(super::read_image(root, "large.png".into()).is_err());
