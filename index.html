@@ -21,6 +21,7 @@
         <span id="wsstat"></span>
       </nav>
       <span class="spacer"></span>
+      <button id="dashboard-btn" aria-label="Control center" aria-pressed="false" title="Control center (Ctrl+Shift+D)"><i class="i i-layout-grid"></i><span class="lbl">Overview</span></button>
       <button id="search" title="Go to any thread or agent (Ctrl+K)"><i class="i i-search"></i><span class="lbl">Go to agent…</span><kbd>Ctrl K</kbd></button>
       <button id="waiting" class="hidden" title="Choose a waiting agent. F3 jumps to the next one."></button>
       <button id="plan" class="hidden" title="Claude plan usage"></button>
@@ -39,6 +40,21 @@
       </aside>
 
       <div id="main">
+        <section id="dashboard" class="hidden" aria-labelledby="dashboard-title">
+          <div class="dashboard-head">
+            <div><h1 id="dashboard-title">Control center</h1><p id="dashboard-summary" class="muted"></p></div>
+            <div class="dashboard-actions"><button id="dashboard-back">Back to thread</button><button id="dashboard-next" class="primary">Next waiting <kbd>F3</kbd></button></div>
+          </div>
+          <div id="dashboard-counts" role="group" aria-label="Filter by status"></div>
+          <div class="dashboard-filters">
+            <label class="filter"><i class="i i-search"></i><input id="dashboard-query" type="search" aria-label="Search threads, agents, branches or output" placeholder="Search sessions or output" spellcheck="false" /></label>
+            <select id="dashboard-project" aria-label="Filter by project"><option value="">All projects</option></select>
+          </div>
+          <div class="dashboard-results"><span id="dashboard-results" role="status"></span><button id="dashboard-reset" class="hidden">Clear filters</button><span class="spacer"></span><button id="dashboard-compact" aria-pressed="false"><i class="i i-layout-rows" aria-hidden="true"></i>Compact view</button></div>
+          <div id="dashboard-list" aria-label="Agent sessions"></div>
+          <p id="dashboard-empty" class="hidden" role="status"></p>
+          <details class="dashboard-help muted"><summary>How statuses work</summary><p>Waiting means an agent signaled for attention. Working follows terminal activity; quiet agents may still be thinking. Previewing a session keeps its waiting alert. Opening its thread or sending input clears it.</p></details>
+        </section>
         <!-- The panes and the open diffs as tabs, Orca's bar, with the thread's
              own actions on the right. Always up while a thread shows: coming and
              going would resize every pane. -->
@@ -139,6 +155,15 @@
       <div class="preference-actions"><button id="vscode" title="Open this thread in VS Code (F5)">Open in VS Code</button><button id="shortcuts">Keyboard shortcuts <kbd>F1</kbd></button></div>
     </section>
 
+    <dialog id="dashboard-preview" aria-labelledby="dashboard-preview-title">
+      <div class="panel-heading"><h2 id="dashboard-preview-title"></h2><button id="dashboard-preview-close" class="icon" aria-label="Close preview"><i class="i i-x"></i></button></div>
+      <p id="dashboard-preview-meta" class="muted"></p>
+      <div class="dashboard-preview-bar"><span id="dashboard-preview-status"></span><span id="dashboard-preview-usage" class="muted"></span></div>
+      <div id="dashboard-preview-output" role="region" aria-label="Live terminal"></div>
+      <p id="dashboard-control-result" role="status"></p>
+      <div class="dashboard-preview-actions dashboard-preview-footer"><button id="dashboard-process" type="button">Stop process</button><span class="muted">Click the terminal to interact. Esc goes to the agent.</span><button id="dashboard-preview-open">Open thread</button></div>
+    </dialog>
+
     <!-- Ctrl+K goes to any agent; the waiting chip opens the same list narrowed to
          the agents that want you. -->
     <dialog id="thread-picker" aria-labelledby="picker-title">
@@ -189,6 +214,7 @@
       <h2 id="keys-title">Keyboard shortcuts</h2>
       <table>
         <tr><td>Ctrl+K</td><td>go to any thread or agent</td></tr>
+        <tr><td>Ctrl+Shift+D</td><td>toggle the control center</td></tr>
         <tr><td>F1</td><td>this list</td></tr>
         <tr><td>F2</td><td>zoom the focused pane</td></tr>
         <tr><td>F3</td><td>jump to the next pane waiting on you</td></tr>

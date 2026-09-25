@@ -1119,6 +1119,7 @@ function fmtReset(iso: string | null) {
  * element of its own. */
 function paneAt(x: number, y: number) {
   const el = document.elementFromPoint(x, y)?.closest(".pane");
+  if (dashboardPreviewPane?.el === el) return dashboardPreviewPane;
   return current?.panes.find((p) => p.el === el) ?? null;
 }
 
@@ -1201,7 +1202,7 @@ function micState(s = micUi, msg = "") {
   if (s === "err") micErrTimer = window.setTimeout(() => micUi === "err" && micState(""), 5000);
   waveShow(s === "rec"); // every start/stop path lands here — F4, button, blur, close
   const b = $<HTMLButtonElement>("#dictate");
-  const ready = !!current?.active?.agentUp;
+  const ready = !dashboardOpen && !!current?.active?.agentUp;
   b.className = s;
   b.querySelector(".lbl")!.textContent = MIC_LABEL[s];
   b.disabled = !s && !ready; // a running recording keeps its stop button either way
@@ -1212,7 +1213,7 @@ const micRefresh = () => micState();
 
 async function micStart() {
   const pane = current?.active;
-  if (recording || !pane?.agentUp) return;
+  if (dashboardOpen || recording || !pane?.agentUp) return;
   // A config command is being typed into a pane right now — a dictation prefix
   // pasted into the middle of it mangles both. Clears on the next press.
   if (cfgBusy) return micState("err", "model/effort change in progress — try again");
@@ -1313,6 +1314,7 @@ class Pane {
   });
   busy = false;
   waiting = false; // the agent rang: turn finished / wants input
+  waitingSince = 0;
   dead = false; // the process exited; Enter relaunches it
   appTitle = ""; // OSC 0/2 from the running app
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
@@ -1540,9 +1542,11 @@ class Pane {
       // A dead pane has nowhere to send keys; Enter brings the process back.
       if (this.dead) return void (d === "\r" && this.spawn(true));
       this.lastIn = Date.now();
-      this.seen(); // typing into the pane = you've seen it
-      if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint()); // Esc interrupts the turn
-      invoke("pty_write", { id: this.id, data: d });
+      const waitingSince = this.waitingSince;
+      void invoke("pty_write", { id: this.id, data: d }).then(() => {
+        if (this.waitingSince === waitingSince) this.seen(); // A failed write must leave the attention signal intact.
+        if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint());
+      }, e => toast(`Could not write to ${this.agent}: ${String(e)}`));
     });
     this.term.parser.registerOscHandler(133, (d) => (this.mark(d), true));
     // Codex reports a finished turn (and an approval prompt) as OSC 9 — see
@@ -1759,6 +1763,7 @@ class Pane {
     }
     if (this.waiting) return;
     this.waiting = true;
+    this.waitingSince = Date.now();
     this.busy = false;
     this.paint();
     beep();
@@ -1783,7 +1788,7 @@ class Pane {
     // Loom's colours, wherever the pane shows.
     const own = this.agent === "shell" ? app : app.replace(SPIN, "");
     const title = (this.label = own && own !== this.agent ? own : this.agent === "shell" ? "Terminal" : "Agent session");
-    const state = this.dead ? "dead" : this.waiting ? "waiting" : this.busy ? "busy" : "";
+    const state = paneState(this);
     const word = this.dead ? "Exited" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
     this.title.textContent = title;
     this.title.title = `${this.agent}, pane ${index + 1}: ${this.appTitle || title}`;
@@ -1859,7 +1864,7 @@ class Pane {
   }
 
   focus() {
-    this.seen();
+    if (!dashboardPreview.open || dashboardPreviewPane !== this) this.seen(); // Inspecting a preview stays unread until input is sent.
     this.term.focus();
   }
 
@@ -2334,7 +2339,7 @@ const flushSave = (): Promise<unknown> => {
       paneCount,
       silent,
       planUsage,
-      ui: { thread: threads.indexOf(current!), sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
+      ui: { thread: threads.indexOf(current!), dashboard: dashboardOpen, dashboardCompact, sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
         sideScroll: $("#threads").scrollTop,
         foldedSections: [...foldedSections], foldedDirs: [...foldedDirs],
         panel, openDirs: [...openDirs], diffFull },
@@ -2365,6 +2370,11 @@ function setFont(n: number) {
 
 /** F3: cycle to the next pane waiting on you, wherever it lives. */
 function jumpWaiting() {
+  if (dashboardOpen) {
+    renderDashboard();
+    if (dashboardNext) revealPane(dashboardNext);
+    return;
+  }
   const all = threads.flatMap((t) => t.panes);
   const waiting = all.filter((p) => p.waiting);
   if (!waiting.length) return;
@@ -2421,16 +2431,274 @@ function openPicker(all = false) {
 
 const STATE_RANK: Record<string, number> = { waiting: 0, busy: 1, "": 2, dead: 3 };
 const STATE_WORD: Record<string, string> = { waiting: "Waiting", busy: "Working", "": "Ready", dead: "Exited" };
+const paneState = (p: Pane) => p.dead ? "dead" : p.waiting ? "waiting" : p.busy ? "busy" : "";
+
+let dashboardOpen = false;
+let dashboardFilter = "all";
+let dashboardTimer = 0;
+let dashboardSignature = "";
+let dashboardCompact = false;
+let dashboardNext: Pane | undefined;
+let dashboardPreviewPane: Pane | null = null;
+let dashboardPreviewSlot: Comment | null = null;
+const dashboardPreview = $<HTMLDialogElement>("#dashboard-preview");
+const dashboardPreviewOutput = $("#dashboard-preview-output");
+let dashboardControlBusy = false;
+const dashboardQuery = $<HTMLInputElement>("#dashboard-query");
+const dashboardProject = $<HTMLSelectElement>("#dashboard-project");
+
+function toggleDashboard(on = !dashboardOpen) {
+  dashboardOpen = on;
+  document.body.classList.toggle("dashboard-open", on);
+  $("#dashboard").classList.toggle("hidden", !on);
+  $("#dashboard-btn").setAttribute("aria-pressed", String(on));
+  clearInterval(dashboardTimer);
+  if (on) {
+    hideMenu();
+    togglePreferences(false);
+    closeFind(false);
+    if (recording) mic(micStop);
+    if (matchMedia("(max-width: 760px)").matches) toggleSide(false);
+    renderDashboard();
+    dashboardQuery.focus();
+    // Only read the existing terminal buffers while the overview is visible.
+    dashboardTimer = window.setInterval(() => { if (!document.hidden) renderDashboard(); }, 1000);
+  } else {
+    closeDashboardPreview();
+    current?.panes.forEach(p => p.resize());
+  }
+  micRefresh();
+  save();
+}
+
+function renderDashboard() {
+  const projects = [...new Set(threads.map(t => t.repo))];
+  if (JSON.stringify(projects) !== JSON.stringify([...dashboardProject.options].slice(1).map(o => o.value))) {
+    const selected = dashboardProject.value;
+    dashboardProject.replaceChildren(new Option("All projects", ""), ...projects.map(repo => new Option(basename(repo), repo)));
+    dashboardProject.value = projects.includes(selected) ? selected : "";
+  }
+  const q = dashboardQuery.value.trim().toLowerCase();
+  const all = threads.flatMap(th => th.panes.map(p => {
+    const state = paneState(p);
+    const buf = p.term.buffer.active;
+    const lines: string[] = [];
+    // ponytail: rendered terminal lines, not an inferred task summary. Provider task events can replace this when available.
+    for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
+      const line = buf.getLine(y);
+      const text = line?.translateToString(false) ?? "";
+      if (line?.isWrapped && lines.length) lines[lines.length - 1] += text;
+      else lines.push(text);
+    }
+    const preview = lines.map(line => line.trim()).filter(Boolean).slice(-3).join("\n");
+    const stamp = state === "waiting" ? p.waitingSince : p.lastOut;
+    const age = stamp ? `${state === "waiting" ? "Waiting" : "Output"} ${ago(stamp)}` : "No output yet";
+    return { th, p, state, preview, age };
+  }));
+  const scoped = all.filter(({ th, p, preview }) => (!dashboardProject.value || th.repo === dashboardProject.value)
+    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${preview}`.toLowerCase().includes(q)));
+  const counts = $("#dashboard-counts");
+  const labels: Record<string, string> = { all: "All sessions", waiting: "Waiting for you", busy: "Working", "": "Idle", dead: "Exited" };
+  if (!counts.childElementCount) {
+    for (const state of ["all", "waiting", "busy", "", "dead"]) {
+      const button = document.createElement("button");
+      button.dataset.state = state;
+      button.append(document.createElement("b"), document.createElement("span"));
+      button.querySelector("span")!.textContent = state === "all" ? "All" : state === "waiting" ? "Waiting" : labels[state];
+      button.onclick = () => { dashboardFilter = state; renderDashboard(); };
+      counts.append(button);
+    }
+  }
+  for (const button of counts.querySelectorAll("button")) {
+    const state = button.dataset.state!;
+    button.querySelector("b")!.textContent = String(state === "all" ? scoped.length : scoped.filter(r => r.state === state).length);
+    button.setAttribute("aria-pressed", String(dashboardFilter === state));
+  }
+  const waiting = all.filter(r => r.state === "waiting").length;
+  $("#dashboard-summary").textContent = `${all.length} sessions across ${threads.length} threads. ${waiting ? `${waiting} waiting for you.` : "Nothing waiting for you."}`;
+  $<HTMLButtonElement>("#dashboard-back").disabled = !current;
+  const rows = scoped.filter(r => dashboardFilter === "all" || r.state === dashboardFilter)
+    .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || (a.state === "waiting" ? a.p.waitingSince - b.p.waitingSince : 0));
+  dashboardNext = rows.find(r => r.state === "waiting")?.p;
+  $<HTMLButtonElement>("#dashboard-next").disabled = !dashboardNext;
+  $("#dashboard-next").title = dashboardNext ? `Open the oldest waiting session in this view: ${dashboardNext.th.name} / ${dashboardNext.agent}` : "No waiting sessions match this view";
+  const results = $("#dashboard-results");
+  const resultCount = `${rows.length} of ${all.length} sessions`;
+  if (results.textContent !== resultCount) results.textContent = resultCount;
+  $("#dashboard-reset").classList.toggle("hidden", !q && !dashboardProject.value && dashboardFilter === "all");
+  $("#dashboard").classList.toggle("compact", dashboardCompact);
+  $("#dashboard-compact").setAttribute("aria-pressed", String(dashboardCompact));
+  const list = $("#dashboard-list");
+  // Keep the DOM and keyboard focus stable between unchanged refreshes.
+  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, preview, age])]);
+  if (signature !== dashboardSignature) {
+    dashboardSignature = signature;
+    const focused = list.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.key : undefined;
+    const fragment = document.createDocumentFragment();
+    let group: string | undefined;
+    for (const { th, p, state, preview, age } of rows) {
+      if (state !== group) {
+        group = state;
+        const heading = document.createElement("h2");
+        heading.className = "dashboard-group";
+        heading.dataset.state = state;
+        heading.textContent = `${labels[state]} (${rows.filter(r => r.state === state).length})`;
+        fragment.append(heading);
+      }
+      const card = document.createElement("div");
+      card.className = "dashboard-card";
+      const row = document.createElement("button");
+      row.className = "dashboard-row";
+      row.dataset.key = p.id;
+      row.dataset.state = state;
+      row.title = `${dashboardCompact ? "Open" : "Preview"} ${p.agent} in ${th.name}`;
+      if (!dashboardCompact) row.setAttribute("aria-haspopup", "dialog");
+      const identity = document.createElement("span");
+      identity.className = "dashboard-identity";
+      identity.append(icon(p.agent));
+      const name = document.createElement("strong");
+      name.textContent = `${th.name} / ${p.agent}`;
+      identity.append(name);
+      const location = document.createElement("span");
+      location.className = "dashboard-location";
+      location.textContent = `${basename(th.repo)} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
+      const activity = document.createElement("span");
+      activity.className = "dashboard-activity";
+      const title = document.createElement("span");
+      title.textContent = p.label;
+      const output = document.createElement("pre");
+      output.textContent = preview || "No terminal output yet. Open the session to get started.";
+      output.setAttribute("aria-label", "Latest terminal lines");
+      activity.append(title, output);
+      const status = document.createElement("span");
+      status.className = "dashboard-status";
+      status.textContent = labels[state];
+      const time = document.createElement("span");
+      time.className = "dashboard-age";
+      time.textContent = age;
+      row.append(identity, location, activity, status, time);
+      const previewPane = () => {
+        dashboardPreviewPane = p;
+        dashboardPreviewSlot = document.createComment("preview pane returns here");
+        p.el.replaceWith(dashboardPreviewSlot);
+        dashboardPreviewOutput.append(p.el);
+        $("#dashboard-control-result").textContent = "";
+        dashboardPreview.showModal();
+        $("#dashboard-preview-close").focus(); // Opening a preview should not focus the terminal or acknowledge an alert.
+        p.gpu(true);
+        p.resize();
+        renderDashboard();
+      };
+      row.onclick = dashboardCompact ? () => revealPane(p) : previewPane;
+      const open = document.createElement("button");
+      open.className = dashboardCompact ? "dashboard-preview-button" : "dashboard-open-terminal";
+      open.innerHTML = dashboardCompact ? '<i class="i i-eye" aria-hidden="true"></i>' : '<i class="i i-terminal" aria-hidden="true"></i><span>Open terminal</span>';
+      open.dataset.key = `${dashboardCompact ? "preview" : "open"}-${p.id}`;
+      open.title = `${dashboardCompact ? "Preview" : "Open"} ${p.agent} in ${th.name}, pane ${th.panes.indexOf(p) + 1}`;
+      open.setAttribute("aria-label", open.title);
+      if (dashboardCompact) open.setAttribute("aria-haspopup", "dialog");
+      open.onclick = dashboardCompact ? previewPane : () => revealPane(p);
+      card.append(row, open);
+      fragment.append(card);
+    }
+    list.replaceChildren(fragment);
+    if (focused) ([...list.querySelectorAll<HTMLButtonElement>("button")].find(b => b.dataset.key === focused) ?? dashboardQuery).focus({ preventScroll: true });
+  }
+  $("#dashboard-empty").classList.toggle("hidden", rows.length > 0);
+  $("#dashboard-empty").textContent = !all.length ? "No sessions yet. Create a thread to start an agent."
+    : q || dashboardProject.value ? "No sessions match. Try another search or project."
+    : dashboardFilter === "waiting" ? "Nothing waiting for you. Other sessions will appear here when they need attention."
+    : "No sessions with this status.";
+  if (dashboardPreview.open) {
+    const selected = all.find(r => r.p === dashboardPreviewPane);
+    if (!selected) return closeDashboardPreview();
+    const { p, th, state, age } = selected;
+    $("#dashboard-preview-title").textContent = `${th.name} / ${p.agent}`;
+    $("#dashboard-preview-meta").textContent = `${th.repo} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
+    $("#dashboard-preview-status").textContent = `${labels[state]} · ${age}`;
+    $("#dashboard-preview-status").dataset.state = state;
+    const u = p.usage;
+    $("#dashboard-preview-usage").textContent = u ? [u.liveModel || u.model, u.window ? `${Math.round(u.ctx / u.window * 100)}% context` : "", `${u.mainTurns} turns`].filter(Boolean).join(" · ") : "";
+    $<HTMLButtonElement>("#dashboard-preview-open").disabled = dashboardControlBusy;
+    $<HTMLButtonElement>("#dashboard-preview-close").disabled = dashboardControlBusy;
+    const process = $<HTMLButtonElement>("#dashboard-process");
+    process.disabled = dashboardControlBusy;
+    process.textContent = p.dead ? needsSession(p) ? "Choose session" : "Relaunch" : "Stop process";
+  }
+}
+
+function closeDashboardPreview() {
+  const p = dashboardPreviewPane;
+  if (!p) return;
+  if (dashboardPreviewSlot) {
+    if (p.th.panes.includes(p)) {
+      dashboardPreviewSlot.replaceWith(p.el);
+      p.resize();
+    } else dashboardPreviewSlot.remove();
+    dashboardPreviewSlot = null;
+  }
+  dashboardPreviewPane = null;
+  dashboardPreview.close();
+  const key = dashboardCompact ? `preview-${p.id}` : p.id;
+  if (dashboardOpen) ([...$("#dashboard-list").querySelectorAll<HTMLButtonElement>("button")].find(b => b.dataset.key === key) ?? dashboardQuery).focus({ preventScroll: true });
+}
+
+dashboardQuery.oninput = renderDashboard;
+dashboardProject.onchange = renderDashboard;
+$("#dashboard-btn").onclick = () => { if (dashboardOpen) show(current); else toggleDashboard(true); };
+$("#dashboard-back").onclick = () => show(current);
+$("#dashboard-next").onclick = jumpWaiting;
+$("#dashboard-reset").onclick = () => {
+  dashboardQuery.value = "";
+  dashboardProject.value = "";
+  dashboardFilter = "all";
+  renderDashboard();
+  dashboardQuery.focus();
+};
+$("#dashboard-compact").onclick = () => { dashboardCompact = !dashboardCompact; renderDashboard(); save(); };
+$("#dashboard-preview-close").onclick = closeDashboardPreview;
+dashboardPreview.oncancel = e => {
+  e.preventDefault();
+  if (!dashboardControlBusy && !dashboardPreviewOutput.contains(document.activeElement)) closeDashboardPreview();
+};
+$("#dashboard-preview-open").onclick = () => {
+  if (dashboardPreviewPane && dashboardPreviewPane.th.panes.includes(dashboardPreviewPane)) revealPane(dashboardPreviewPane);
+};
+dashboardPreview.onclose = () => {
+  if (!dashboardPreview.open) closeDashboardPreview(); // Also restore if another caller closes the native dialog.
+};
+const needsSession = (p: Pane) => (p.agent === "codex" || p.agent === "opencode") && !p.sessionId && !ownSession(p.startup);
+$("#dashboard-process").onclick = async () => {
+  const p = dashboardPreviewPane;
+  if (!p || dashboardControlBusy) return;
+  if (p.dead && needsSession(p)) return void p.chooseSession();
+  const stop = !p.dead;
+  if (stop && !(await confirm(`Stop ${p.agent} in ${p.th.name}?`, {
+    title: "Stop process", kind: "warning", action: "Stop process",
+    detail: "This terminates this pane's process and its child processes. Unsaved work in those processes may be lost. The pane stays available to relaunch.",
+  }))) return;
+  if (stop && p.dead) return;
+  dashboardControlBusy = true;
+  renderDashboard();
+  try {
+    if (stop) await invoke("pty_kill", { id: p.id });
+    else await p.spawn(true);
+  } catch (error) {
+    if (dashboardPreviewPane === p) $("#dashboard-control-result").textContent = String(error);
+  } finally {
+    dashboardControlBusy = false;
+    renderDashboard();
+  }
+};
 
 function renderPicker() {
   const list = $("#picker-list");
   const focused = document.activeElement as HTMLElement | null;
   const focusKey = list.contains(focused) ? focused?.dataset.key : undefined;
   const q = pickerQuery.value.trim().toLowerCase();
-  const stateOf = (p: Pane) => (p.dead ? "dead" : p.waiting ? "waiting" : p.busy ? "busy" : "");
   // Sidebar order within each state: sort() is stable.
   const rows = threads
-    .flatMap((th) => th.panes.map((p) => ({ th, p, state: stateOf(p) })))
+    .flatMap((th) => th.panes.map((p) => ({ th, p, state: paneState(p) })))
     .filter(({ state }) => pickAll || state === "waiting")
     .filter(({ th, p }) => !q || `${basename(th.repo)} ${th.name} ${th.branch} ${p.agent} ${p.appTitle}`.toLowerCase().includes(q))
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
@@ -2619,6 +2887,7 @@ function filterSide() {
 }
 
 function show(th: Thread | null) {
+  if (dashboardOpen) toggleDashboard(false);
   current = th;
   if (matchMedia("(max-width: 760px)").matches) toggleSide(false);
   for (const t of threads) {
@@ -4689,11 +4958,11 @@ function toggleSide(on?: boolean) {
 // --- Ctrl+F: one shared input parked over the active pane -----------------
 const find = $<HTMLInputElement>("#find");
 
-function closeFind() {
+function closeFind(focus = true) {
   find.classList.add("hidden");
   $("#find-n").textContent = "";
   current?.active?.search.clearDecorations();
-  current?.active?.focus();
+  if (focus) current?.active?.focus();
 }
 
 function toggleFind() {
@@ -4761,7 +5030,7 @@ async function main() {
     paneCount?: number;
     silent?: boolean;
     planUsage?: boolean;
-    ui?: { thread?: number; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
+    ui?: { thread?: number; dashboard?: boolean; dashboardCompact?: boolean; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
   } = {};
@@ -4785,6 +5054,7 @@ async function main() {
   repos = saved.repos ?? [];
   reposFolded = new Set(saved.reposFolded ?? []);
   sideQuery = saved.ui?.sideQuery ?? "";
+  dashboardCompact = saved.ui?.dashboardCompact === true;
   $<HTMLInputElement>("#side-filter").value = sideQuery;
   if (saved.ui?.sideW?.side) sideW.side = saved.ui.sideW.side;
   if (saved.ui?.sideW?.changes) sideW.changes = saved.ui.sideW.changes;
@@ -4934,19 +5204,20 @@ async function main() {
         : paneAt(payload.position.x / devicePixelRatio, payload.position.y / devicePixelRatio);
     const over = payload.type === "enter" || payload.type === "over" ? at : null;
     for (const p of current?.panes ?? []) p.el.classList.toggle("drop", p === over);
+    dashboardPreviewPane?.el.classList.toggle("drop", dashboardPreviewPane === over);
     if (payload.type !== "drop" || !at) return;
     const text = dropText(payload.paths);
     if (!text) return;
-    current!.focusPane(at);
+    at.th.focusPane(at);
     at.term.paste(text); // not pty_write: paste honors bracketed-paste mode
   });
 
   // Ctrl+wheel over the panes: the terminal font-size gesture. Capture, so
   // xterm never turns it into a scroll.
-  $("#stage").addEventListener(
+  document.addEventListener(
     "wheel",
     (e) => {
-      if (!e.ctrlKey) return;
+      if (!e.ctrlKey || !(e.target as Element).closest(".pane")) return;
       e.preventDefault();
       setFont(fontSize + (e.deltaY < 0 ? 1 : -1));
     },
@@ -4987,6 +5258,14 @@ async function main() {
       if (e.key === "F1") $<HTMLDialogElement>("#keys").showModal();
       // Ctrl+K is kill-line in a shell, but Loom already owns Ctrl+B and Ctrl+F there too.
       else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "k") openPicker(true);
+      else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "d") {
+        if (dashboardOpen) show(current); else toggleDashboard(true);
+      }
+      else if (dashboardOpen && e.key !== "F3" && !(e.ctrlKey && (e.key === "b" || e.key === "Tab" || /^[1-9]$/.test(e.key)))) {
+        // Keep terminal commands from falling through to WebView shortcuts, especially F5 reload.
+        if ((!e.altKey && ["F2", "F4", "F5"].includes(e.key)) || (e.ctrlKey && ["f", "g"].includes(e.key.toLowerCase()))) e.preventDefault();
+        return;
+      }
       else if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "g") toggleChanges();
       else if (e.ctrlKey && e.key === "b") toggleSide();
       else if (e.key === "F2" && current?.active) current.toggleZoom(current.active);
@@ -5122,6 +5401,7 @@ async function main() {
   );
   renderSide();
   show(threads[saved.ui?.thread ?? 0] ?? threads[0] ?? null);
+  if (saved.ui?.dashboard) toggleDashboard(true);
   toggleChanges(saved.ui?.changesOpen ?? false);
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;

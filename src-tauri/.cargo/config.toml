@@ -1,9 +1,10 @@
 # whisper-rs-sys generates its FFI bindings with bindgen, which needs
 # libclang.dll (its bundled fallback bindings are Linux-generated and fail the
 # struct-layout asserts on MSVC). Rather than a 2.5 GB LLVM install, the DLL
-# comes from a pip package unpacked next to the crate:
+# comes from a pip package unpacked next to the crate. The npm `pretauri` hook
+# prepares it automatically, including in new Git worktrees. For direct Cargo:
 #
-#   cd src-tauri && pip install --target .build libclang
+#   node scripts/setup-native.mjs   # from the repo root, before running Cargo
 #
 # ~80 MB, no admin, nothing installed system-wide. `relative` resolves against
 # this file's parent directory, so a moved checkout still builds.

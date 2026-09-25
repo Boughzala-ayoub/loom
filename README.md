@@ -28,15 +28,19 @@ and CMake — whisper.cpp is compiled from source for dictation.
 
 ```
 npm install
-cd src-tauri && pip install --target .build libclang && cd ..   # once, see below
 npm run tauri dev     # dev, hot-reloads the frontend
 npm run tauri build   # release + installer
 ```
 
-whisper-rs generates its bindings with bindgen, which wants `libclang.dll`. That
-one pip command drops it (~80 MB, no admin, nothing system-wide) where
-`src-tauri\.cargo\config.toml` already points `LIBCLANG_PATH`; a full LLVM
-install works too and needs no config. The crate's own bundled fallback bindings
+Both `npm run tauri` commands prepare `libclang.dll` before Cargo starts. New
+worktrees reuse the DLL from the main checkout when available. Otherwise, setup
+uses Python with pip to install `libclang==18.1.1` into the ignored
+`src-tauri/.build` folder. Setup skips worktrees that already have the DLL and
+respects an explicit `LIBCLANG_PATH`. No administrator access is needed.
+
+Use `npm run tauri` so this setup runs. Before invoking Cargo or `npx tauri`
+directly, run `node scripts/setup-native.mjs` from the repo root once per worktree.
+The crate's own bundled fallback bindings
 are Linux-generated and fail their layout asserts on MSVC, so bindgen has to run.
 
 ## Using it
@@ -77,6 +81,31 @@ the sidebar rail is the worst of its panes: lit, with a light running down the
 rail, while an agent works; yellow when one has finished a turn and is waiting
 on you; red when all have exited. Agent marks carry the same colours as a dot. Clicking an agent row focuses that pane; if the thread
 is zoomed, the zoom moves to it, so a zoomed thread reads one agent at a time.
+
+**Overview** in the top bar opens the control center. Press `Ctrl+Shift+D` to
+switch between it and your thread. It lists sessions across every open thread,
+with waiting agents first, then working, idle, and exited sessions. Filter by
+status or project, or search thread names, branches, agents, and terminal output.
+Each row shows the latest three terminal lines. Click a row to preview that agent,
+or use **Next waiting** to open the oldest waiting session matching your filters.
+`F3` follows those filters while the overview is open. **Compact view** hides
+the inline output so more sessions fit on screen. In compact view, click a row
+to open its thread or the eye icon to preview the agent. Loom remembers this choice
+and whether the overview was open.
+
+The preview opens the live terminal in a centered modal. Opening it keeps the
+agent's waiting alert; sending input clears it. Type, paste, select, and scroll
+directly in the terminal. Esc goes to the agent while the terminal has focus.
+Use the close button to return to the overview, or **Open thread** to switch
+to its thread. The same pane returns to its original position, preserving the
+running session. You can also stop its process after confirmation or relaunch
+an exited session from the modal.
+When a restored session needs a conversation selected, **Choose session** opens
+the existing session picker.
+
+Waiting means the agent signaled that a turn finished or input is needed. Working
+uses Loom's existing activity detection. Idle means no work was detected, so a
+quiet agent may still be thinking. Terminal previews show output, not task summaries.
 
 Threads, branches, and panes come back on the next launch. Claude keeps its
 pinned session ID. Codex and OpenCode report their actual session IDs, so two
