@@ -1678,9 +1678,10 @@ class Pane {
     if (this.agent === "codex") {
       // ponytail: codex keeps drawing while idle (the astra prompt's star field),
       // so output alone says nothing. Its "Working (3s • esc to interrupt)"
-      // line is the tell; OSC 9 (wake) or Esc ends the turn. Read the rendered
-      // screen after xterm joins PTY chunks, including the first post-key redraw.
-      const status = /esc\s+to\s+interrupt/i.test(this.screen());
+      // line is the tell. Clear busy when it disappears, even without OSC 9.
+      // Read the live screen after xterm joins PTY chunks, not scrolled history.
+      const status = /esc\s+to\s+interrupt/i.test(this.screen(true));
+      if (!status && this.busy) ((this.busy = false), this.paint());
       if (status && !this.codexStatus && !this.waiting) ((this.busy = true), this.paint());
       this.codexStatus = status;
       return;
@@ -1813,12 +1814,13 @@ class Pane {
   }
 
   /** What the pane is showing, so a command can be checked for having taken.
-   * The visible rows only: a TUI keeps its answer on screen. */
-  screen() {
+   * Defaults to visible rows; live reads ignore the user's scrollback position. */
+  screen(live = false) {
     const buf = this.term.buffer.active;
+    const start = live ? buf.baseY : buf.viewportY;
     let s = "";
     for (let y = 0; y < this.term.rows; y++)
-      s += (buf.getLine(buf.viewportY + y)?.translateToString(true) ?? "") + "\n";
+      s += (buf.getLine(start + y)?.translateToString(true) ?? "") + "\n";
     return s;
   }
 
@@ -3211,7 +3213,7 @@ async function showTab() {
     img.alt = imagePath;
     try {
       const bytes = await invoke<ArrayBuffer>("read_image", { dir: th.dir, path: imagePath });
-      if (current !== th || th.tab !== t) return;
+      if (current !== th || th.tab !== t || gen !== showGen) return;
       const url = URL.createObjectURL(new Blob([bytes], { type: imageMime(imagePath) }));
       img.onload = () => URL.revokeObjectURL(url);
       img.onerror = () => { URL.revokeObjectURL(url); if (body.contains(img)) body.textContent = "Could not display this image."; };
@@ -3219,7 +3221,20 @@ async function showTab() {
       body.replaceChildren(img);
       shownTab = t;
     } catch (e) {
-      if (current === th && th.tab === t) body.textContent = `Could not open image: ${String(e)}`;
+      if (current !== th || th.tab !== t || gen !== showGen) return;
+      const matches = e && typeof e === "object" && "matches" in e ? e.matches : null;
+      if (Array.isArray(matches) && matches.length > 1 && matches.every(path => typeof path === "string")) {
+        const choices = document.createElement("div");
+        choices.className = "image-choices";
+        const heading = document.createElement("strong");
+        heading.textContent = "Choose an image";
+        choices.append(heading);
+        for (const path of matches) {
+          const relative = path.slice(th.dir.length + 1);
+          choices.append(mini(relative, path, () => openTab(th, t.label, { file: path })));
+        }
+        body.replaceChildren(choices);
+      } else body.textContent = `Could not open image: ${String(e)}`;
     }
     return;
   }

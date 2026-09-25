@@ -63,6 +63,7 @@ try {
         if (cmd === 'read_file') return 'export const answer = 42;\n// ' + args.path + '\n';
         if (cmd === 'read_image') {
           if (qa.failImage) throw new Error('Image file not found');
+          if (qa.imageMatches && args.path === 'dashboard-message-sent-375.png') throw { matches: qa.imageMatches };
           const canvas = document.createElement('canvas');
           canvas.width = 1600; canvas.height = 1000;
           const ctx = canvas.getContext('2d');
@@ -176,13 +177,27 @@ try {
           const r = el.getBoundingClientRect();
           return r.width && r.height && (r.top < bar.top || r.bottom > bar.bottom);
         }).map(el => el.id);
-        return { width: root.clientWidth, scroll: root.scrollWidth, offenders, misplacedPaneActions, clippedHeader };
+        const clippedTerminals = [...document.querySelectorAll('.pane-term .xterm-screen')].flatMap(screen => {
+          const r = screen.getBoundingClientRect();
+          if (!r.width || !r.height) return [];
+          const host = screen.closest('.pane-term');
+          const bounds = host.getBoundingClientRect();
+          const style = getComputedStyle(host);
+          const pane = host.closest('.pane');
+          const bottom = pane.getBoundingClientRect().bottom - parseFloat(getComputedStyle(pane).borderBottomWidth) - 4;
+          const right = bounds.right - parseFloat(style.paddingRight);
+          return r.bottom > bottom + 0.5 || r.right > right + 0.5
+            ? [{ pane: host.closest('.pane').dataset.id, bottom: r.bottom, limit: bottom, right: r.right, rightLimit: right }]
+            : [];
+        });
+        return { width: root.clientWidth, scroll: root.scrollWidth, offenders, misplacedPaneActions, clippedHeader, clippedTerminals };
       });
       assert.equal(result.width, width);
       assert.ok(result.scroll <= width, `${name}@${width}: ${JSON.stringify(result)}`);
       assert.deepEqual(result.offenders, [], `${name}@${width}: clipped controls`);
       assert.deepEqual(result.clippedHeader, [], `${name}@${width}: header controls must fit vertically`);
       assert.deepEqual(result.misplacedPaneActions, [], `${name}@${width}: fullscreen and close must stay together at the right edge`);
+      assert.deepEqual(result.clippedTerminals, [], `${name}@${width}: terminal cells must stay clear of the pane's bottom edge`);
       await page.screenshot({ path: `${out}/${name}-${width}.png`, animations: 'disabled' });
       checks++;
     }
@@ -416,6 +431,51 @@ try {
     }
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+    // Full-screen agents put their status line in the last terminal row.
+    await page.evaluate(() => window.qa.panes.forEach(pane => {
+      const { rows } = window.qa.calls.filter(c => ['pty_spawn', 'pty_resize'].includes(c.cmd) && c.args.id === pane.id).at(-1).args;
+      pane.onOut.onmessage(`\x1b[${rows};1H\x1b[30;43mLast row: gjpqy\x1b[0m`);
+    }));
+    await page.waitForTimeout(100);
+    await audit('terminal-last-row');
+    await page.goto(base);
+    await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+    // Codex must finish even if its OSC notification is missing. Output silence
+    // alone is not completion: long-running tools can leave the status visible.
+    const codexOutput = text => page.evaluate(text => window.qa.panes.find(p => p.argv.join(' ').includes('codex')).onOut.onmessage(text), text);
+    const codexRow = page.locator('.agent').filter({ has: page.locator('.agent-name', { hasText: /^codex$/ }) });
+    await codexOutput('\x1b[2J\x1b[H' + 'Earlier output\r\n'.repeat(100) + 'Working (3s • esc to ');
+    await codexOutput('interrupt)\r\n');
+    await page.waitForFunction(() => [...document.querySelectorAll('.agent')].some(el => el.querySelector('.agent-name')?.textContent === 'codex' && el.dataset.state === 'busy'));
+    await page.waitForTimeout(1600);
+    assert.equal(await codexRow.getAttribute('data-state'), 'busy', 'A quiet working Codex is still busy');
+    const statusPane = page.locator('.grid:not(.hidden) .pane').nth(1);
+    const statusScreen = statusPane.locator('.xterm-screen');
+    await statusScreen.scrollIntoViewIfNeeded();
+    const slider = statusPane.locator('.xterm .scrollbar.vertical .slider');
+    const scrollBefore = await slider.evaluate(el => parseFloat(el.style.top));
+    const terminalBounds = await statusScreen.boundingBox();
+    await page.mouse.move(terminalBounds.x + 30, terminalBounds.y + 40);
+    await page.mouse.wheel(0, -1500);
+    await page.waitForTimeout(250);
+    assert.ok(await slider.evaluate(el => parseFloat(el.style.top)) < scrollBefore, 'The test must scroll into terminal history');
+    await codexOutput('\r');
+    await page.waitForTimeout(100);
+    assert.equal(await codexRow.getAttribute('data-state'), 'busy', 'Scrolling away from the live Working line must not clear busy');
+    await codexOutput('\x1b[2J\x1b[HCompleted the changes.\r\nWorked for 24m 59s\r\n\r\n❯ Ask Codex to do anything');
+    await page.waitForFunction(() => [...document.querySelectorAll('.agent')].some(el => el.querySelector('.agent-name')?.textContent === 'codex' && el.dataset.state === ''), null, { timeout: 1500 });
+    await codexOutput('\x1b[2;3H·\x1b[4;9H✦');
+    await page.waitForTimeout(100);
+    assert.equal(await codexRow.getAttribute('data-state'), '', 'Codex returns to Ready without a completion notification');
+    await page.mouse.wheel(0, 10000);
+    await page.waitForTimeout(100);
+    await audit('codex-idle-without-notification');
+    if (process.env.UI_CODEX_STATUS_ONLY) {
+      await context.close();
+      continue;
+    }
+    await page.goto(base);
+    await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     assert.ok(await page.locator('#tabs .tab.panes').evaluate(tab => tab.getBoundingClientRect().width >= 80), 'The sidebar must not squeeze the pane tab out of view');
     // Codex uses Alt+Up to answer queued questions. It must reach the PTY.
     const codexPane = page.locator('.grid:not(.hidden) .pane').nth(1);
@@ -528,6 +588,25 @@ try {
     const bounds = await page.locator('#diff-body img').boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width && bounds.y + bounds.height <= 900, 'Image fits the preview');
     await page.click('#diff-close');
+    const matches = ['loom', 'porcelain', 'screenshots with spaces'].map(folder => `C:\\projects\\loom\\search-polish\\node_modules\\.cache\\ui-check\\${folder}\\dashboard-message-sent-375.png`);
+    await page.evaluate(matches => window.qa.imageMatches = matches, matches);
+    for (const [i, path] of matches.entries()) {
+      await clickTerminalPath('dashboard-message-sent-375.png');
+      await page.waitForSelector('.image-choices button');
+      assert.equal(await page.locator('.image-choices button').count(), matches.length);
+      await audit('image-choices-' + i);
+      const choice = page.locator('.image-choices button').nth(i);
+      if (i === 1) {
+        await choice.focus();
+        await page.keyboard.press('Enter');
+      } else await choice.click();
+      await page.waitForFunction(() => document.querySelector('#diff-body img')?.naturalWidth === 1600);
+      assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'read_image').at(-1).args.path), path);
+      await page.waitForFunction(path => window.qa.saved.threads[0].tabs.some(t => t.source.file === path), path);
+      assert.equal(await page.locator('#tabs .tab:not(.panes)').count(), 1, 'Selection reuses the image tab');
+      await audit('image-choice-open-' + i);
+      await page.click('#diff-close');
+    }
     for (const homePath of ['~\\AppData\\Local\\Temp\\opencode\\g375.png', '~/AppData/Local/Temp/opencode/g375b.png']) {
       await clickTerminalPath(homePath);
       await page.waitForFunction(() => document.querySelector('#diff-body img')?.naturalWidth === 1600);
@@ -561,6 +640,10 @@ try {
     await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'open_vscode' && c.args.goto.endsWith('src/main.ts:12')));
     await clickTerminalPath('~\\src\\main.ts:12:3');
     await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'open_vscode' && c.args.goto === 'C:\\Users\\test\\src\\main.ts:12:3'));
+    if (process.env.UI_IMAGE_ONLY) {
+      await context.close();
+      continue;
+    }
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     // Exercise every palette through the UI, including light -> dark -> default.

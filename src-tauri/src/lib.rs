@@ -400,7 +400,7 @@ fn read_file(dir: String, path: String) -> Result<String, String> {
 }
 
 #[tauri::command(async)]
-fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, String> {
+fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, serde_json::Value> {
     let requested = std::path::Path::new(&path);
     let mut path = std::path::Path::new(&dir).join(requested);
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
@@ -415,7 +415,7 @@ fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, String>
             path = find_image(std::path::Path::new(&dir), requested)?;
             std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?
         }
-        Err(e) => return Err(format!("{}: {e}", path.display())),
+        Err(e) => return Err(format!("{}: {e}", path.display()).into()),
     };
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
         return Err("Not an image file".into());
@@ -427,9 +427,9 @@ fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, String>
     Ok(tauri::ipc::Response::new(bytes))
 }
 
-fn find_image(root: &std::path::Path, name: &std::path::Path) -> Result<PathBuf, String> {
+fn find_image(root: &std::path::Path, name: &std::path::Path) -> Result<PathBuf, serde_json::Value> {
     let mut dirs = vec![root.to_path_buf()];
-    let mut found: Option<PathBuf> = None;
+    let mut found = Vec::new();
     let mut entries = 0;
     let started = std::time::Instant::now();
     // ponytail: bounded on-demand walk, including ignored caches; index artifacts
@@ -447,14 +447,16 @@ fn find_image(root: &std::path::Path, name: &std::path::Path) -> Result<PathBuf,
             if kind.is_dir() {
                 if child.file_name() != ".git" { dirs.push(child.path()); }
             } else if kind.is_file() && child.file_name().to_string_lossy().eq_ignore_ascii_case(&name.to_string_lossy()) {
-                if let Some(first) = found {
-                    return Err(format!("More than one image named {}: {} and {}. Open the full image path.", name.display(), first.display(), child.path().display()));
-                }
-                found = Some(child.path());
+                found.push(child.path());
             }
         }
     }
-    found.ok_or_else(|| format!("Image {} was not found under {}. Open its full path if it is outside this folder.", name.display(), root.display()))
+    found.sort();
+    match found.len() {
+        0 => Err(format!("Image {} was not found under {}. Open its full path if it is outside this folder.", name.display(), root.display()).into()),
+        1 => Ok(found.pop().unwrap()),
+        _ => Err(serde_json::json!({ "matches": found })),
+    }
 }
 
 /// `git_run` with the patch on stdin, which is the only way to hand `git apply`
@@ -947,7 +949,7 @@ mod tests {
         assert!(matches!(response, InvokeResponseBody::Raw(bytes) if bytes == image));
         assert!(super::read_image(root.clone(), dir.join("screen shot.PNG").to_string_lossy().into()).is_ok());
         // Harness summaries show only the basename, even for ignored artifacts.
-        let shots = dir.join("node_modules/.cache/ui-check");
+        let shots = dir.join("node_modules").join(".cache").join("ui-check");
         std::fs::create_dir_all(&shots).unwrap();
         std::fs::write(shots.join("workspace-1280.png"), image).unwrap();
         let response = super::read_image(root.clone(), "workspace-1280.png".into()).unwrap().body().unwrap();
@@ -959,7 +961,17 @@ mod tests {
         let other = dir.join("output");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("workspace-1280.png"), image).unwrap();
-        assert!(super::read_image(root.clone(), "workspace-1280.png".into()).err().unwrap().contains("More than one image"));
+        let third = shots.join("porcelain");
+        std::fs::create_dir_all(&third).unwrap();
+        std::fs::write(third.join("workspace-1280.png"), image).unwrap();
+        let error = serde_json::to_value(super::read_image(root.clone(), "workspace-1280.png".into()).err().unwrap()).unwrap();
+        let mut expected = vec![shots.join("workspace-1280.png"), other.join("workspace-1280.png"), third.join("workspace-1280.png")];
+        expected.sort();
+        assert_eq!(error["matches"], serde_json::json!(expected));
+        for path in error["matches"].as_array().unwrap() {
+            let response = super::read_image(root.clone(), path.as_str().unwrap().into()).unwrap().body().unwrap();
+            assert!(matches!(response, InvokeResponseBody::Raw(bytes) if bytes == image));
+        }
         // A real root-level file still wins over same-named nested files.
         std::fs::write(dir.join("workspace-1280.png"), image).unwrap();
         assert!(super::read_image(root.clone(), "workspace-1280.png".into()).is_ok());
