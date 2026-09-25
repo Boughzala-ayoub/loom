@@ -76,6 +76,9 @@ try {
           if (qa.failSessions) throw new Error('OpenCode could not list sessions');
           return [{ id: 'ses_first', title: 'Fix sidebar navigation' }, { id: 'ses_second', title: 'Review terminal layout' }];
         }
+        if (cmd === 'last_messages') return Object.fromEntries(args.panes.map(([id, agent]) => [id, {
+          user: `Review the ${agent} changes`, agent: `The ${agent} changes are ready`,
+        }]));
         if (cmd === 'session_usage') return Object.fromEntries(args.panes.map(([id, , sid]) => [id, { ctx: 48000, window: 200000, input: 12000, output: 2400, cacheRead: 16000, cacheWrite: 800, turns: 6, mainTurns: 6, sid, model: 'sonnet', effort: 'high', liveModel: 'sonnet', liveEffort: 'high' }]));
         if (cmd === 'context_profile') return { buckets: [{ label: 'Read', tokens: 24000 }, { label: 'Prompts', tokens: 3000 }], series: [1000, 18000, 48000], drops: [], ctx: 48000, est: 27000 };
         if (cmd === 'plan_usage') {
@@ -223,7 +226,10 @@ try {
     await page.waitForFunction(() => document.querySelector('#waiting').textContent === '2 waiting');
     await page.click('#dashboard-btn');
     await page.waitForSelector('.dashboard-row');
+    await page.waitForFunction(() => document.querySelector('.dashboard-message')?.textContent.includes('Review the'));
     assert.equal(await page.locator('.dashboard-row').count(), 4);
+    assert.deepEqual(await page.locator('.dashboard-row').filter({ hasText: 'search-polish / claude' }).locator('.dashboard-message').evaluateAll(lines => lines.map(line => [line.querySelector('b').textContent, line.querySelector('span').textContent])),
+      [['You', 'Review the claude changes'], ['Agent', 'The claude changes are ready']], 'Expanded rows show the conversation rather than terminal status lines');
     assert.equal(await page.locator('#waiting').textContent(), '2 waiting', 'Overview must not mark the selected terminal as seen');
     assert.deepEqual(await page.locator('.dashboard-row').evaluateAll(rows => rows.map(r => r.dataset.state)), ['waiting', 'waiting', 'busy', 'dead']);
     await audit('dashboard-all');
@@ -307,6 +313,7 @@ try {
     await page.waitForFunction(() => document.querySelector('#waiting').textContent === '2 waiting');
     await page.click('#dashboard-compact');
     await audit('dashboard-compact');
+    assert.equal(await page.locator('.dashboard-message:visible').count(), 0, 'Compact rows hide the message excerpts');
     const compactPreview = page.locator('.dashboard-card').filter({ hasText: 'review-keyboard-navigation / claude' }).locator('.dashboard-preview-button');
     assert.equal(await compactPreview.textContent(), '', 'Compact preview uses only an icon');
     await compactPreview.focus();
@@ -914,6 +921,10 @@ try {
     await page.click('#layout');
     assert.match(await page.locator('#layout').textContent(), /rows/);
     await escape();
+    await page.waitForFunction(() => [...document.querySelectorAll('.grid:not(.hidden) .pane')].every(pane => {
+      const screen = pane.querySelector('.xterm-screen');
+      return !screen || screen.getBoundingClientRect().bottom <= pane.getBoundingClientRect().bottom - 4;
+    }), null, { timeout: 1500 });
     await audit('layout-rows');
     await page.keyboard.press('F1');
     await audit('shortcuts');

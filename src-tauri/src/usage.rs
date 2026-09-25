@@ -128,7 +128,7 @@ fn context_window(home: &Path) -> u64 {
 /// more. The marker comes from the SessionStart hook in claude-hooks.json;
 /// falling back to the pinned id covers panes started before that existed, and
 /// panes where claude was launched without Loom's --settings.
-fn transcript(marks: &Path, home: &Path, pane: &str, dir: &str, sid: &str) -> PathBuf {
+pub(crate) fn transcript(marks: &Path, home: &Path, pane: &str, dir: &str, sid: &str) -> PathBuf {
     std::fs::read_to_string(marks.join(pane))
         .map(|p| PathBuf::from(p.trim()))
         .ok()

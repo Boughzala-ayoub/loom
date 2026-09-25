@@ -2440,6 +2440,10 @@ let dashboardFilter = "all";
 let dashboardTimer = 0;
 let dashboardSignature = "";
 let dashboardCompact = false;
+type DashboardMessages = { user: string; agent: string };
+const dashboardMessages = new Map<string, DashboardMessages & { session: string; input: number; waiting: number; dead: boolean }>();
+let dashboardMessagesBusy = false;
+let dashboardMessagesPolled = 0;
 let dashboardNext: Pane | undefined;
 let dashboardPreviewPane: Pane | null = null;
 let dashboardPreviewSlot: Comment | null = null;
@@ -2448,6 +2452,32 @@ const dashboardPreviewOutput = $("#dashboard-preview-output");
 let dashboardControlBusy = false;
 const dashboardQuery = $<HTMLInputElement>("#dashboard-query");
 const dashboardProject = $<HTMLSelectElement>("#dashboard-project");
+const dashboardSession = (p: Pane) => p.agent === "claude" ? p.sid : p.sessionId || "";
+
+async function refreshDashboardMessages(force = false) {
+  if (!dashboardOpen || dashboardCompact || dashboardMessagesBusy || !force && Date.now() - dashboardMessagesPolled < 4000) return;
+  dashboardMessagesPolled = Date.now();
+  const requests = threads.flatMap(t => t.panes).filter(p => p.agent !== "shell" && dashboardSession(p))
+    .map(p => ({ p, session: dashboardSession(p), input: p.lastIn, waiting: p.waitingSince, dead: p.dead }))
+    .filter(({ p, session, input, waiting, dead }) => {
+      const old = dashboardMessages.get(p.id);
+      return force || !old || old.session !== session || old.input !== input || old.waiting !== waiting || old.dead !== dead;
+    });
+  if (!requests.length) return;
+  dashboardMessagesBusy = true;
+  try {
+    const got = await invoke<Record<string, DashboardMessages>>("last_messages", {
+      panes: requests.map(({ p, session }) => [p.id, p.agent, p.th.dir, session]),
+    });
+    for (const { p, session, input, waiting, dead } of requests) {
+      if (dashboardSession(p) !== session) continue;
+      dashboardMessages.set(p.id, { session, input, waiting, dead, user: got[p.id]?.user || "", agent: got[p.id]?.agent || "" });
+    }
+    dashboardSignature = "";
+    if (dashboardOpen) renderDashboard();
+  } catch { /* Keep the last messages and retry on the next poll. */ }
+  finally { dashboardMessagesBusy = false; }
+}
 
 function toggleDashboard(on = !dashboardOpen) {
   dashboardOpen = on;
@@ -2462,9 +2492,10 @@ function toggleDashboard(on = !dashboardOpen) {
     if (recording) mic(micStop);
     if (matchMedia("(max-width: 760px)").matches) toggleSide(false);
     renderDashboard();
+    void refreshDashboardMessages(true);
     dashboardQuery.focus();
     // Only read the existing terminal buffers while the overview is visible.
-    dashboardTimer = window.setInterval(() => { if (!document.hidden) renderDashboard(); }, 1000);
+    dashboardTimer = window.setInterval(() => { if (!document.hidden) { renderDashboard(); void refreshDashboardMessages(); } }, 1000);
   } else {
     closeDashboardPreview();
     current?.panes.forEach(p => p.resize());
@@ -2485,7 +2516,7 @@ function renderDashboard() {
     const state = paneState(p);
     const buf = p.term.buffer.active;
     const lines: string[] = [];
-    // ponytail: rendered terminal lines, not an inferred task summary. Provider task events can replace this when available.
+    // Keep terminal lines searchable, including while the expanded card shows conversation messages.
     for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
       const line = buf.getLine(y);
       const text = line?.translateToString(false) ?? "";
@@ -2495,10 +2526,12 @@ function renderDashboard() {
     const preview = lines.map(line => line.trim()).filter(Boolean).slice(-3).join("\n");
     const stamp = state === "waiting" ? p.waitingSince : p.lastOut;
     const age = stamp ? `${state === "waiting" ? "Waiting" : "Output"} ${ago(stamp)}` : "No output yet";
-    return { th, p, state, preview, age };
+    const cached = dashboardMessages.get(p.id);
+    const messages = cached?.session === dashboardSession(p) ? cached : undefined;
+    return { th, p, state, preview, age, messages };
   }));
-  const scoped = all.filter(({ th, p, preview }) => (!dashboardProject.value || th.repo === dashboardProject.value)
-    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${preview}`.toLowerCase().includes(q)));
+  const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
+    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
   const counts = $("#dashboard-counts");
   const labels: Record<string, string> = { all: "All sessions", waiting: "Waiting for you", busy: "Working", "": "Idle", dead: "Exited" };
   if (!counts.childElementCount) {
@@ -2532,13 +2565,13 @@ function renderDashboard() {
   $("#dashboard-compact").setAttribute("aria-pressed", String(dashboardCompact));
   const list = $("#dashboard-list");
   // Keep the DOM and keyboard focus stable between unchanged refreshes.
-  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, preview, age])]);
+  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age, messages }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, preview, age, messages?.user, messages?.agent])]);
   if (signature !== dashboardSignature) {
     dashboardSignature = signature;
     const focused = list.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.key : undefined;
     const fragment = document.createDocumentFragment();
     let group: string | undefined;
-    for (const { th, p, state, preview, age } of rows) {
+    for (const { th, p, state, preview, age, messages } of rows) {
       if (state !== group) {
         group = state;
         const heading = document.createElement("h2");
@@ -2566,12 +2599,27 @@ function renderDashboard() {
       location.textContent = `${basename(th.repo)} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
       const activity = document.createElement("span");
       activity.className = "dashboard-activity";
-      const title = document.createElement("span");
-      title.textContent = p.label;
-      const output = document.createElement("pre");
-      output.textContent = preview || "No terminal output yet. Open the session to get started.";
-      output.setAttribute("aria-label", "Latest terminal lines");
-      activity.append(title, output);
+      if (p.agent === "shell") {
+        const title = document.createElement("span");
+        title.textContent = p.label;
+        const output = document.createElement("pre");
+        output.textContent = preview || "No terminal output yet. Open the session to get started.";
+        output.setAttribute("aria-label", "Latest terminal lines");
+        activity.append(title, output);
+      } else {
+        activity.setAttribute("aria-label", "Last messages");
+        for (const [label, value] of [["You", messages?.user || "No message yet."], ["Agent", messages?.agent || "No reply yet."]]) {
+          const line = document.createElement("span");
+          line.className = "dashboard-message";
+          const who = document.createElement("b");
+          who.textContent = label;
+          const text = document.createElement("span");
+          text.textContent = value;
+          text.title = value;
+          line.append(who, text);
+          activity.append(line);
+        }
+      }
       const status = document.createElement("span");
       status.className = "dashboard-status";
       status.textContent = labels[state];
@@ -2657,7 +2705,7 @@ $("#dashboard-reset").onclick = () => {
   renderDashboard();
   dashboardQuery.focus();
 };
-$("#dashboard-compact").onclick = () => { dashboardCompact = !dashboardCompact; renderDashboard(); save(); };
+$("#dashboard-compact").onclick = () => { dashboardCompact = !dashboardCompact; renderDashboard(); void refreshDashboardMessages(true); save(); };
 $("#dashboard-preview-close").onclick = closeDashboardPreview;
 dashboardPreview.oncancel = e => {
   e.preventDefault();

@@ -86,10 +86,11 @@ is zoomed, the zoom moves to it, so a zoomed thread reads one agent at a time.
 switch between it and your thread. It lists sessions across every open thread,
 with waiting agents first, then working, idle, and exited sessions. Filter by
 status or project, or search thread names, branches, agents, and terminal output.
-Each row shows the latest three terminal lines. Click a row to preview that agent,
+Expanded agent rows show your last message and the agent's last message from its
+session. Shell rows still show terminal output. Click a row to preview that agent,
 or use **Next waiting** to open the oldest waiting session matching your filters.
 `F3` follows those filters while the overview is open. **Compact view** hides
-the inline output so more sessions fit on screen. In compact view, click a row
+the inline messages so more sessions fit on screen. In compact view, click a row
 to open its thread or the eye icon to preview the agent. Loom remembers this choice
 and whether the overview was open.
 
@@ -105,7 +106,7 @@ the existing session picker.
 
 Waiting means the agent signaled that a turn finished or input is needed. Working
 uses Loom's existing activity detection. Idle means no work was detected, so a
-quiet agent may still be thinking. Terminal previews show output, not task summaries.
+quiet agent may still be thinking. The preview shows the live terminal.
 
 Threads, branches, and panes come back on the next launch. Claude keeps its
 pinned session ID. Codex and OpenCode report their actual session IDs, so two

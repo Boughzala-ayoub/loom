@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -632,18 +632,8 @@ fn codex_session_rows(home: &std::path::Path, dir: &str, sid: Option<&str>) -> R
             }
         }
     }
-    fn walk(dir: &std::path::Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
-        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
-                out.push((e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p));
-            }
-        }
-    }
     let mut files = Vec::new();
-    walk(&home.join("sessions"), &mut files);
+    codex_rollouts(&home.join("sessions"), &mut files);
     files.sort_by(|a, b| b.0.cmp(&a.0));
     let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
     let want = norm(&dir);
@@ -686,6 +676,133 @@ fn codex_session_rows(home: &std::path::Path, dir: &str, sid: Option<&str>) -> R
         }
     }
     Ok(rows)
+}
+
+fn codex_rollouts(dir: &std::path::Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            codex_rollouts(&p, out);
+        } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
+            out.push((e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p));
+        }
+    }
+}
+
+#[derive(Default, serde::Serialize, Debug, PartialEq)]
+struct LastMessages {
+    user: String,
+    agent: String,
+}
+
+fn message_text(content: &serde_json::Value, kind: &str) -> String {
+    let raw = if let Some(s) = content.as_str() {
+        s.to_string()
+    } else {
+        content.as_array().into_iter().flatten()
+            .filter(|part| part["type"] == kind)
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>().join(" ")
+    };
+    let trimmed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = trimmed.chars();
+    let short: String = chars.by_ref().take(500).collect();
+    if chars.next().is_some() { format!("{short}…") } else { short }
+}
+
+fn collect_message(last: &mut LastMessages, provider: &str, v: &serde_json::Value) {
+    let (role, content, kind) = match provider {
+        "claude" if !v["isSidechain"].as_bool().unwrap_or(false)
+            && !v["isCompactSummary"].as_bool().unwrap_or(false)
+            && !v["isMeta"].as_bool().unwrap_or(false) => {
+            let role = v["type"].as_str().unwrap_or("");
+            (role, &v["message"]["content"], "text")
+        }
+        "codex" if v["type"] == "response_item" && v["payload"]["type"] == "message" => {
+            let role = v["payload"]["role"].as_str().unwrap_or("");
+            if role == "assistant" && v["payload"]["phase"] == "analysis" { return; }
+            (role, &v["payload"]["content"], if role == "user" { "input_text" } else { "output_text" })
+        }
+        "opencode" => (v["info"]["role"].as_str().unwrap_or(""), &v["parts"], "text"),
+        _ => return,
+    };
+    if role != "user" && role != "assistant" { return; }
+    if role == "user" && !last.user.is_empty() || role == "assistant" && !last.agent.is_empty() { return; }
+    let text = message_text(content, kind);
+    if text.is_empty() { return; }
+    if role == "user" && (text.starts_with("<task-notification>") || text.starts_with("<system-reminder>")
+        || text.starts_with("<environment_context>") || text.starts_with("<local-command")) { return; }
+    if role == "user" { last.user = text; } else { last.agent = text; }
+}
+
+fn recent_messages(path: &std::path::Path, provider: &str) -> LastMessages {
+    let mut last = LastMessages::default();
+    let Ok(mut file) = std::fs::File::open(path) else { return last };
+    let Ok(mut end) = file.metadata().map(|m| m.len()) else { return last };
+    let mut reversed = Vec::new();
+    while end > 0 && (last.user.is_empty() || last.agent.is_empty()) {
+        let start = end.saturating_sub(64 * 1024);
+        let mut chunk = vec![0; (end - start) as usize];
+        if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut chunk).is_err() { break; }
+        for byte in chunk.into_iter().rev() {
+            if byte == b'\n' {
+                if reversed.is_empty() { continue; }
+                reversed.reverse();
+                if let Ok(v) = serde_json::from_slice(&reversed) { collect_message(&mut last, provider, &v); }
+                reversed.clear();
+                if !last.user.is_empty() && !last.agent.is_empty() { break; }
+            } else { reversed.push(byte); }
+        }
+        end = start;
+    }
+    if end == 0 && !reversed.is_empty() && (last.user.is_empty() || last.agent.is_empty()) {
+        reversed.reverse();
+        if let Ok(v) = serde_json::from_slice(&reversed) { collect_message(&mut last, provider, &v); }
+    }
+    last
+}
+
+fn opencode_messages(dir: &str, sid: &str) -> LastMessages {
+    use std::os::windows::process::CommandExt;
+    let Ok(out) = std::process::Command::new("cmd.exe")
+        .args(["/d", "/s", "/c", &format!("opencode export {sid} --pure")])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .creation_flags(0x0800_0000)
+        .output() else { return LastMessages::default() };
+    if !out.status.success() { return LastMessages::default(); }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return LastMessages::default() };
+    opencode_export_messages(&v)
+}
+
+fn opencode_export_messages(v: &serde_json::Value) -> LastMessages {
+    let mut last = LastMessages::default();
+    for message in v["messages"].as_array().into_iter().flatten().rev() {
+        collect_message(&mut last, "opencode", message);
+        if !last.user.is_empty() && !last.agent.is_empty() { break; }
+    }
+    last
+}
+
+#[tauri::command(async)]
+fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> HashMap<String, LastMessages> {
+    let mut codex_files = Vec::new();
+    if panes.iter().any(|(_, agent, _, _)| agent == "codex") {
+        if let Ok(home) = codex_home(&app) { codex_rollouts(&home.join("sessions"), &mut codex_files); }
+    }
+    let home = app.path().home_dir().unwrap_or_default();
+    let marks = std::env::temp_dir().join("loom-tx");
+    panes.into_iter().filter_map(|(id, agent, dir, sid)| {
+        if sid.is_empty() || sid.len() > 128 || !sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return None; }
+        let last = match agent.as_str() {
+            "claude" => recent_messages(&usage::transcript(&marks, &home, &id, &dir, &sid), "claude"),
+            "codex" => codex_files.iter().find(|(_, path)| path.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&format!("-{sid}.jsonl"))))
+                .map(|(_, path)| recent_messages(path, "codex")).unwrap_or_default(),
+            "opencode" => opencode_messages(&dir, &sid),
+            _ => return None,
+        };
+        Some((id, last))
+    }).collect()
 }
 
 /// (pane id, effort level) pairs; effort is the marker's content — empty when
@@ -905,7 +1022,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pty_spawn, pty_write, pty_resize, pty_kill, pty_shutdown, load_state, save_state, open_vscode,
             git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, has_codex_session, usage::session_usage, usage::has_session, usage::pane_booted, usage::plan_usage, usage::codex_plan_usage,
-            usage::model_options, usage::context_profile,
+            usage::model_options, usage::context_profile, last_messages,
             dictate::dictate_start,
             dictate::dictate_stop,
             dictate::dictate_level
@@ -934,6 +1051,50 @@ mod tests {
         assert_eq!(super::codex_session_rows(&root, "", Some("root")).unwrap().len(), 1);
         assert!(super::codex_session_rows(&root, "", Some("child")).unwrap().is_empty());
         assert!(super::codex_session_rows(&root, "", Some("ephemeral")).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dashboard_reads_latest_human_and_agent_messages() {
+        let root = std::env::temp_dir().join(format!("loom-last-messages-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let claude = root.join("claude.jsonl");
+        let records = [
+            serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":"Earlier request"}]}}),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"Earlier answer"}]}}),
+            serde_json::json!({"type":"user","message":{"content":[{"type":"text","text":"Check the final patch"}]}}),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"The patch is ready"}]}}),
+            serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":"tool output"}]}}),
+            serde_json::json!({"type":"user","isCompactSummary":true,"message":{"content":"Not a human prompt"}}),
+            serde_json::json!({"type":"user","message":{"content":"<task-notification>Background task finished</task-notification>"}}),
+            serde_json::json!({"type":"assistant","isSidechain":true,"message":{"content":[{"type":"text","text":"Subagent reply"}]}}),
+            serde_json::json!({"type":"progress","data":"x".repeat(70_000)}),
+        ];
+        std::fs::write(&claude, records.iter().map(|v| format!("{v}\n")).collect::<String>()).unwrap();
+        assert_eq!(super::recent_messages(&claude, "claude"), super::LastMessages {
+            user: "Check the final patch".into(), agent: "The patch is ready".into(),
+        });
+
+        let codex = root.join("codex.jsonl");
+        let records = [
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Previous answer"}]}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"New request"}]}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Working on it"}]}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"analysis","content":[{"type":"output_text","text":"Private reasoning"}]}}),
+        ];
+        std::fs::write(&codex, records.iter().map(|v| format!("{v}\n")).collect::<String>()).unwrap();
+        assert_eq!(super::recent_messages(&codex, "codex"), super::LastMessages {
+            user: "New request".into(), agent: "Working on it".into(),
+        });
+
+        let export = serde_json::json!({"messages":[
+            {"info":{"role":"user"},"parts":[{"type":"text","text":"Review this"}]},
+            {"info":{"role":"assistant"},"parts":[{"type":"reasoning","text":"Private"},{"type":"text","text":"Reviewed"}]},
+            {"info":{"role":"assistant"},"parts":[{"type":"tool","text":"Not a reply"}]},
+        ]});
+        assert_eq!(super::opencode_export_messages(&export), super::LastMessages {
+            user: "Review this".into(), agent: "Reviewed".into(),
+        });
         std::fs::remove_dir_all(root).unwrap();
     }
 
