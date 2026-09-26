@@ -3598,9 +3598,11 @@ async function showTab() {
     const img = document.createElement("img");
     img.alt = imagePath;
     try {
-      const bytes = await invoke<ArrayBuffer>("read_image", { dir: th.dir, path: imagePath });
+      // After one failed ipc:// fetch, Tauri answers over postMessage for the
+      // rest of the window's life, and raw bytes then arrive as a number array.
+      const bytes = await invoke<ArrayBuffer | number[]>("read_image", { dir: th.dir, path: imagePath });
       if (current !== th || th.tab !== t || gen !== showGen) return;
-      const url = URL.createObjectURL(new Blob([bytes], { type: imageMime(imagePath) }));
+      const url = URL.createObjectURL(new Blob([bytes instanceof ArrayBuffer ? bytes : new Uint8Array(bytes)], { type: imageMime(imagePath) }));
       img.onload = () => URL.revokeObjectURL(url);
       img.onerror = () => { URL.revokeObjectURL(url); if (body.contains(img)) body.textContent = "Could not display this image."; };
       img.src = url;
