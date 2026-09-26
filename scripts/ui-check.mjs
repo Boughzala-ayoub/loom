@@ -1010,10 +1010,10 @@ try {
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x07')));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 6);
     await audit('all-agents-waiting');
-    // Silent mode: a wake still marks the pane waiting, but neither chimes nor flashes the taskbar.
+    // Sound and taskbar notifications can be enabled independently.
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
-    const flashes = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'plugin:window|request_user_attention').length);
+    const flashes = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'plugin:window|request_user_attention' && c.args.value?.type === 'Informational').length);
     await page.evaluate(async () => {
       window.qa.focused = false; // The native window, not document.hasFocus().
       await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://blur' });
@@ -1023,17 +1023,56 @@ try {
     assert.equal(await page.evaluate(() => window.qa.beeps), 1, 'A wake chimes by default');
     assert.equal(await flashes(), 1, 'A wake while unfocused flashes the taskbar by default');
     await page.click('#preferences-btn');
-    await page.click('#silent');
-    await page.waitForFunction(() => window.qa.saved.silent === true);
-    assert.equal(await page.locator('#silent').getAttribute('aria-pressed'), 'true');
-    await audit('preferences-silent');
+    await audit('notifications-both');
+    await page.click('#notification-sound');
+    await page.waitForFunction(() => window.qa.saved.soundEnabled === false && window.qa.saved.taskbarEnabled === true);
+    assert.equal(await page.locator('#notification-sound').getAttribute('aria-pressed'), 'false');
+    await audit('notifications-taskbar-only');
     await page.evaluate(() => window.qa.panes[1].onOut.onmessage('\x07'));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 2);
-    assert.equal(await page.evaluate(() => window.qa.beeps), 1, 'Silent mode must not chime');
-    assert.equal(await flashes(), 1, 'Silent mode must not flash the taskbar');
+    assert.equal(await page.evaluate(() => window.qa.beeps), 1, 'Disabling sound must stop chimes');
+    assert.equal(await flashes(), 2, 'Disabling sound must leave taskbar flashing enabled');
+    await page.click('#notification-taskbar');
+    await page.waitForFunction(() => window.qa.saved.soundEnabled === false && window.qa.saved.taskbarEnabled === false);
+    assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'plugin:window|request_user_attention').at(-1).args.value), null, 'Disabling taskbar flashing clears an active flash');
+    await audit('notifications-off');
+    await page.evaluate(() => window.qa.panes[2].onOut.onmessage('\x07'));
+    await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 3);
+    assert.equal(await page.evaluate(() => window.qa.beeps), 1);
+    assert.equal(await flashes(), 2);
+    await page.click('#notification-sound');
+    await page.waitForFunction(() => window.qa.saved.soundEnabled === true && window.qa.saved.taskbarEnabled === false);
+    await audit('notifications-sound-only');
+    await page.evaluate(() => window.qa.panes[3].onOut.onmessage('\x07'));
+    await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 4);
+    assert.equal(await page.evaluate(() => window.qa.beeps), 2, 'Sound can be enabled without taskbar flashing');
+    assert.equal(await flashes(), 2);
     await page.goto(base + '?restore');
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
-    assert.equal(await page.locator('#silent').getAttribute('aria-pressed'), 'true', 'Silent mode must survive a relaunch');
+    assert.equal(await page.locator('#notification-sound').getAttribute('aria-pressed'), 'true', 'Sound preference survives relaunch');
+    assert.equal(await page.locator('#notification-taskbar').getAttribute('aria-pressed'), 'false', 'Taskbar preference survives relaunch independently');
+    await page.click('#preferences-btn');
+    await page.click('#notification-sound');
+    await page.click('#notification-taskbar');
+    await page.waitForFunction(() => window.qa.saved.soundEnabled === false && window.qa.saved.taskbarEnabled === true);
+    await page.goto(base + '?restore');
+    await page.waitForFunction(() => window.qa.saved);
+    assert.equal(await page.locator('#notification-sound').getAttribute('aria-pressed'), 'false');
+    assert.equal(await page.locator('#notification-taskbar').getAttribute('aria-pressed'), 'true');
+    for (const silent of [true, false]) {
+      await page.evaluate(silent => {
+        const saved = JSON.parse(localStorage.getItem('qa-state'));
+        delete saved.soundEnabled;
+        delete saved.taskbarEnabled;
+        saved.silent = silent;
+        localStorage.setItem('qa-state', JSON.stringify(saved));
+      }, silent);
+      await page.goto(base + '?restore');
+      await page.waitForFunction(() => window.qa.saved);
+      assert.equal(await page.locator('#notification-sound').getAttribute('aria-pressed'), String(!silent), 'Migrate legacy sound setting');
+      assert.equal(await page.locator('#notification-taskbar').getAttribute('aria-pressed'), String(!silent), 'Migrate legacy taskbar setting');
+      assert.equal(await page.evaluate(() => 'silent' in window.qa.saved), false, 'Save only the independent preferences');
+    }
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     if (width <= 760) await page.click('#side-toggle');

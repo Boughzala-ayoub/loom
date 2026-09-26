@@ -150,7 +150,8 @@
     <section id="preferences" class="hidden" aria-labelledby="preferences-title">
       <div class="panel-heading"><h2 id="preferences-title">Preferences</h2><button id="preferences-close" class="icon" aria-label="Close preferences"><i class="i i-x"></i></button></div>
       <div class="preference-row"><span>Theme</span><button id="theme" title="Colour theme">loom</button></div>
-      <div class="preference-row"><span>Notifications</span><button id="silent" title="Chime and taskbar flash when an agent wants you">Sound and taskbar</button></div>
+      <div class="preference-row"><span id="sound-label">Sound</span><button id="notification-sound" aria-labelledby="sound-label" aria-pressed="true" title="Play notification sounds and dictation cues">on</button></div>
+      <div class="preference-row"><span id="taskbar-label">Taskbar flash</span><button id="notification-taskbar" aria-labelledby="taskbar-label" aria-pressed="true" title="Flash the taskbar when an agent wants you and Loom is in the background">on</button></div>
       <div class="preference-row"><span>Plan usage</span><button id="plan-usage" title="Claude and Codex plan usage in the top bar">shown</button></div>
       <div class="preference-row"><span>Agent overlay</span><button id="overlay-pref" aria-pressed="false">off</button></div>
       <div class="preference-row"><span id="keep-awake-label">Keep PC awake</span><button id="keep-awake" aria-labelledby="keep-awake-label" aria-describedby="keep-awake-help" aria-pressed="false">off</button></div>

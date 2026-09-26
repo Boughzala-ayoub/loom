@@ -911,7 +911,8 @@ const DEFAULT_STARTUPS: Startup[] = [
 let startups: Startup[] = [...DEFAULT_STARTUPS];
 let fontSize = 13; // Ctrl+= / Ctrl+- / Ctrl+0, global to every pane, persisted
 let paneCount = 1; // the new-thread form's pane count, persisted so it keeps your last pick
-let silent = false; // Preferences → Notifications: no chimes, no taskbar flash; persisted
+let soundEnabled = true;
+let taskbarEnabled = true;
 let keepAwake = false;
 let planUsage = true; // Preferences → Plan usage: off = no top-bar chips and no account API calls; persisted
 const OVERLAY_MODES = ["off", "background", "always"] as const;
@@ -964,7 +965,7 @@ function mini(label: string | Node, title: string, fn: () => void) {
  * ponytail: WebAudio sine instead of shipping audio assets. */
 let audio: AudioContext | undefined;
 function chime(from: number, to: number, peak = 0.15, len = 0.3) {
-  if (silent) return; // every sound routes through here: the wake blip and the mic cues
+  if (!soundEnabled) return; // every sound routes through here: the wake blip and the mic cues
   audio ??= new AudioContext();
   if (audio.state === "suspended") audio.resume(); // no gesture yet on restore
   const t = audio.currentTime;
@@ -1813,8 +1814,8 @@ class Pane {
     this.paint();
     beep();
     // Loom isn't on screen: flash the taskbar button too. Cleared in main().
-    // The sidebar dot and the `N waiting` chip still say who wants you in silent mode.
-    if (!silent && !loomFocused)
+    // The sidebar dot and waiting count remain visible with notifications off.
+    if (taskbarEnabled && !loomFocused)
       getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
   }
 
@@ -2376,7 +2377,8 @@ const flushSave = (): Promise<unknown> => {
       theme: theme.label,
       fontSize,
       paneCount,
-      silent,
+      soundEnabled,
+      taskbarEnabled,
       keepAwake,
       planUsage,
       overlay: overlayMode,
@@ -5277,11 +5279,12 @@ function paintPlanUsage() {
   b.setAttribute("aria-pressed", String(planUsage));
 }
 
-function paintSilent() {
-  const b = $("#silent");
-  b.textContent = silent ? "Silent" : "Sound and taskbar";
-  b.title = silent ? "No chime, no taskbar flash — click to turn them back on" : "Chime and flash the taskbar when an agent wants you — click to silence";
-  b.setAttribute("aria-pressed", String(silent));
+function paintNotifications() {
+  for (const [id, enabled] of [["#notification-sound", soundEnabled], ["#notification-taskbar", taskbarEnabled]] as const) {
+    const b = $(id);
+    b.textContent = enabled ? "on" : "off";
+    b.setAttribute("aria-pressed", String(enabled));
+  }
 }
 
 async function setKeepAwake(enabled: boolean) {
@@ -5448,6 +5451,8 @@ async function main() {
     fontSize?: number;
     paneCount?: number;
     silent?: boolean;
+    soundEnabled?: boolean;
+    taskbarEnabled?: boolean;
     keepAwake?: boolean;
     planUsage?: boolean;
     overlay?: boolean | OverlayMode;
@@ -5471,7 +5476,9 @@ async function main() {
   // Before any Pane exists — the Terminal is built with it. Hand-editable file.
   fontSize = Math.min(Math.max(saved.fontSize ?? fontSize, 8), 24);
   paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
-  silent = saved.silent === true;
+  // Preserve the old combined preference until each new setting is saved.
+  soundEnabled = saved.soundEnabled ?? (saved.silent !== true);
+  taskbarEnabled = saved.taskbarEnabled ?? (saved.silent !== true);
   await setKeepAwake(saved.keepAwake === true);
   planUsage = saved.planUsage !== false;
   // true was "in background" before there was an "always".
@@ -5589,12 +5596,18 @@ async function main() {
   const langBtn = $("#lang");
   const themeBtn = $("#theme");
   // keep pane focus
-  for (const b of [dictate, prefixBtn, langBtn, themeBtn, $("#silent"), $("#plan-usage")]) b.onmousedown = (e) => e.preventDefault();
+  for (const b of [dictate, prefixBtn, langBtn, themeBtn, $("#notification-sound"), $("#notification-taskbar"), $("#plan-usage")]) b.onmousedown = (e) => e.preventDefault();
   dictate.onclick = () => mic(recording ? micStop : micStart);
   prefixBtn.onclick = () => showMenu(prefixBtn, prefixMenu);
   langBtn.onclick = () => showMenu(langBtn, langMenu);
   themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
-  $("#silent").onclick = () => ((silent = !silent), paintSilent(), save());
+  $("#notification-sound").onclick = () => ((soundEnabled = !soundEnabled), paintNotifications(), save());
+  $("#notification-taskbar").onclick = () => {
+    taskbarEnabled = !taskbarEnabled;
+    if (!taskbarEnabled) getCurrentWindow().requestUserAttention(null).catch(() => {});
+    paintNotifications();
+    save();
+  };
   $("#keep-awake").onclick = () => void setKeepAwake(!keepAwake);
   $("#plan-usage").onclick = () => {
     planUsage = !planUsage;
@@ -5623,7 +5636,7 @@ async function main() {
   micState("");
   paintPrefix();
   paintLang();
-  paintSilent();
+  paintNotifications();
   paintPlanUsage();
   paintOverlayPref();
   paintTheme();
