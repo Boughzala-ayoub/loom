@@ -53,4 +53,4 @@ whisper-rs = "0.16.0"
 #   cargo update -p windows-core@0.62.x --precise 0.61.2
 cpal = "0.18.1"
 # Already in the tree through tao and wry: the overlay shows without taking focus.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power"] }

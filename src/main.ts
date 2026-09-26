@@ -912,6 +912,7 @@ let startups: Startup[] = [...DEFAULT_STARTUPS];
 let fontSize = 13; // Ctrl+= / Ctrl+- / Ctrl+0, global to every pane, persisted
 let paneCount = 1; // the new-thread form's pane count, persisted so it keeps your last pick
 let silent = false; // Preferences → Notifications: no chimes, no taskbar flash; persisted
+let keepAwake = false;
 let planUsage = true; // Preferences → Plan usage: off = no top-bar chips and no account API calls; persisted
 const OVERLAY_MODES = ["off", "background", "always"] as const;
 type OverlayMode = (typeof OVERLAY_MODES)[number];
@@ -2376,6 +2377,7 @@ const flushSave = (): Promise<unknown> => {
       fontSize,
       paneCount,
       silent,
+      keepAwake,
       planUsage,
       overlay: overlayMode,
       overlayCap,
@@ -5280,6 +5282,22 @@ function paintSilent() {
   b.setAttribute("aria-pressed", String(silent));
 }
 
+async function setKeepAwake(enabled: boolean) {
+  const button = $<HTMLButtonElement>("#keep-awake");
+  button.disabled = true;
+  try {
+    await invoke("set_keep_awake", { enabled });
+    keepAwake = enabled;
+    void save();
+  } catch (e) {
+    toast(`Could not change keep-awake: ${String(e)}`);
+  } finally {
+    button.textContent = keepAwake ? "on" : "off";
+    button.setAttribute("aria-pressed", String(keepAwake));
+    button.disabled = false;
+  }
+}
+
 /** A dictation setting beside Speak: its current value, then a caret. Always
  * in sight, so a glance says what the next dictation will type. */
 function paintSetting(b: HTMLElement, value: string, title: string) {
@@ -5428,6 +5446,7 @@ async function main() {
     fontSize?: number;
     paneCount?: number;
     silent?: boolean;
+    keepAwake?: boolean;
     planUsage?: boolean;
     overlay?: boolean | OverlayMode;
     overlayCap?: number;
@@ -5451,6 +5470,7 @@ async function main() {
   fontSize = Math.min(Math.max(saved.fontSize ?? fontSize, 8), 24);
   paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
   silent = saved.silent === true;
+  await setKeepAwake(saved.keepAwake === true);
   planUsage = saved.planUsage !== false;
   // true was "in background" before there was an "always".
   overlayMode = saved.overlay === true ? "background" : OVERLAY_MODES.find(m => m === saved.overlay) ?? "off";
@@ -5573,6 +5593,7 @@ async function main() {
   langBtn.onclick = () => showMenu(langBtn, langMenu);
   themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
   $("#silent").onclick = () => ((silent = !silent), paintSilent(), save());
+  $("#keep-awake").onclick = () => void setKeepAwake(!keepAwake);
   $("#plan-usage").onclick = () => {
     planUsage = !planUsage;
     if (openMenu === planMenus.claude || openMenu === planMenus.codex) hideMenu();

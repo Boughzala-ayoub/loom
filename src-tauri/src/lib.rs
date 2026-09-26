@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
 mod dictate;
+mod awake;
 mod helper;
 mod usage;
 
@@ -1082,6 +1083,7 @@ pub fn run() {
             // main window owns the terminals, and the overlay must not keep the
             // app running without it.
             if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
+                let _ = awake::apply(false);
                 pty_shutdown(window.state::<Ptys>());
                 if let Some(o) = window.app_handle().get_webview_window("overlay") {
                     let _ = o.destroy();
@@ -1091,7 +1093,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pty_spawn, pty_write, pty_resize, pty_kill, pty_shutdown, load_state, save_state, open_vscode,
             git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, has_codex_session, usage::session_usage, usage::has_session, usage::pane_booted, usage::plan_usage, usage::codex_plan_usage,
-            usage::model_options, usage::context_profile, last_messages, overlay,
+            usage::model_options, usage::context_profile, last_messages, overlay, awake::set_keep_awake,
             dictate::dictate_start,
             dictate::dictate_stop,
             dictate::dictate_level

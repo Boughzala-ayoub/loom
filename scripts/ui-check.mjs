@@ -38,6 +38,10 @@ try {
       mockIPC((cmd, args = {}) => {
         qa.calls.push({ cmd, args });
         if (cmd === 'load_state') return JSON.stringify(location.search.includes('empty') ? {} : state);
+        if (cmd === 'set_keep_awake') {
+          if (qa.failAwake || location.search.includes('awake-error')) throw new Error('Test power request failed');
+          qa.keepAwake = args.enabled;
+        }
         if (cmd === 'save_state') {
           if (qa.failSave) throw new Error('Test disk write failed');
           const write = () => { qa.saved = JSON.parse(args.json); localStorage.setItem('qa-state', args.json); };
@@ -208,6 +212,35 @@ try {
     }
     const escape = () => page.keyboard.press('Escape');
     await audit('workspace');
+    assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'false');
+    await page.click('#preferences-btn');
+    await page.click('#keep-awake');
+    await page.waitForFunction(() => window.qa.keepAwake === true && window.qa.saved.keepAwake === true);
+    assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'true');
+    await audit('keep-awake-on');
+    await page.goto(base + '?restore');
+    await page.waitForFunction(() => window.qa.saved && window.qa.keepAwake === true);
+    assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'true', 'Restore the native request on launch');
+    await page.click('#preferences-btn');
+    await page.evaluate(() => { window.qa.failAwake = true; });
+    await page.click('#keep-awake');
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('Test power request failed'));
+    assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'true', 'A failed release must remain shown as on');
+    await audit('keep-awake-error');
+    await page.evaluate(() => { window.qa.failAwake = false; });
+    await page.click('#keep-awake');
+    await page.waitForFunction(() => window.qa.keepAwake === false && window.qa.saved.keepAwake === false);
+    await audit('keep-awake-off');
+    await page.goto(base + '?restore');
+    await page.waitForFunction(() => window.qa.saved && window.qa.keepAwake === false);
+    assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'false', 'Off survives relaunch');
+    await page.click('#preferences-btn');
+    await page.click('#keep-awake');
+    await page.waitForFunction(() => window.qa.saved.keepAwake === true);
+    await page.goto(base + '?restore&awake-error');
+    await page.waitForFunction(() => window.qa.saved);
+    assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'false', 'A failed startup request must not claim to keep the PC awake');
+    assert.equal(await page.evaluate(() => window.qa.saved.keepAwake), false);
     // The overview must observe every thread without consuming its notifications.
     await page.goto(base + '?dashboard');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
