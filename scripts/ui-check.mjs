@@ -260,6 +260,12 @@ try {
     await page.waitForFunction(size => window.qa.saved.fontSize === size, previewFontSize);
     assert.equal(await page.locator('#waiting').textContent(), '2 waiting', 'Preview must not acknowledge a waiting agent');
     await audit('dashboard-preview');
+    await page.mouse.click(modal.x + 4, modal.y + 4);
+    assert.equal(await page.locator('#dashboard-preview').isVisible(), true, 'Clicking inside the dialog keeps it open');
+    await page.mouse.click(modal.x / 2, modal.y + modal.height / 2);
+    assert.equal(await page.locator('#dashboard-preview').isVisible(), false, 'Clicking the backdrop closes the preview');
+    assert.equal(await page.evaluate(() => window.qa.previewNode.parentElement === window.qa.previewParent), true, 'Backdrop close restores the live pane');
+    await previewClaude();
     await escape();
     assert.equal(await page.evaluate(() => window.qa.previewNode.parentElement === window.qa.previewParent), true, 'Closing restores the original grid');
     assert.deepEqual(await page.evaluate(() => [...window.qa.previewParent.querySelectorAll(':scope > .pane')].map(p => p.dataset.id)), await page.evaluate(() => window.qa.previewOrder), 'Pane order is preserved');

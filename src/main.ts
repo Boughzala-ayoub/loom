@@ -2707,6 +2707,11 @@ $("#dashboard-reset").onclick = () => {
 };
 $("#dashboard-compact").onclick = () => { dashboardCompact = !dashboardCompact; renderDashboard(); void refreshDashboardMessages(true); save(); };
 $("#dashboard-preview-close").onclick = closeDashboardPreview;
+dashboardPreview.onclick = e => {
+  if (dashboardControlBusy || e.target !== dashboardPreview) return;
+  const { left, right, top, bottom } = dashboardPreview.getBoundingClientRect();
+  if (e.clientX < left || e.clientX >= right || e.clientY < top || e.clientY >= bottom) closeDashboardPreview();
+};
 dashboardPreview.oncancel = e => {
   e.preventDefault();
   if (!dashboardControlBusy && !dashboardPreviewOutput.contains(document.activeElement)) closeDashboardPreview();
