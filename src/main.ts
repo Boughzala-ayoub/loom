@@ -1,5 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -17,6 +17,8 @@ import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, 
 import { wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
+import { readMenu, echoes, type Menu as AgentMenu } from "./prompt";
+import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
 const MAX_PANES = 16;
@@ -911,6 +913,10 @@ let fontSize = 13; // Ctrl+= / Ctrl+- / Ctrl+0, global to every pane, persisted
 let paneCount = 1; // the new-thread form's pane count, persisted so it keeps your last pick
 let silent = false; // Preferences → Notifications: no chimes, no taskbar flash; persisted
 let planUsage = true; // Preferences → Plan usage: off = no top-bar chips and no account API calls; persisted
+const OVERLAY_MODES = ["off", "background", "always"] as const;
+type OverlayMode = (typeof OVERLAY_MODES)[number];
+let overlayMode: OverlayMode = "off"; // Preferences → Agent overlay; persisted
+let overlayCap = 420; // The tallest the overlay grows to fit its list; set by dragging its height; persisted
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -996,6 +1002,19 @@ type Usage = {
   liveModel: string;
   liveEffort: string;
 };
+
+/** The context pill: a pane header's gauge, and the overview's copy of it. */
+function paintGauge(el: HTMLElement, u: Usage) {
+  const pct = Math.min(100, Math.round((u.ctx / u.window) * 100));
+  // 90% is about where Claude Code starts compacting on you.
+  el.className = `ctx${pct >= 90 ? " hot" : pct >= 70 ? " warm" : ""}`;
+  el.style.setProperty("--pct", `${pct}%`);
+  el.textContent = `${pct}%`;
+  el.title =
+    `Context ${tok(u.ctx)} of ${tok(u.window)} — ${pct}% full\n` +
+    `${u.turns} turns · ${tok(u.output)} out · ${tok(u.input + u.cacheWrite)} in · ` +
+    `${tok(u.cacheRead)} cached`;
+}
 
 /** What a pane's context is made of and how it got there — see the `Bucket` doc
  * in src-tauri/src/usage.rs for what the numbers do and don't mean. `series` and
@@ -1312,10 +1331,25 @@ class Pane {
     allowProposedApi: true, // parser.registerOscHandler
     theme: termTheme(),
   });
-  busy = false;
+  private _busy = false;
+  busySince = 0; // when this stretch of work began, for the overview's "Working · 12m"
+  quietSince = Date.now(); // when it last stopped working (or was made), for "Idle · 5m"
+  get busy() { return this._busy; }
+  set busy(on: boolean) {
+    if (on && !this._busy) this.busySince = Date.now();
+    if (!on && this._busy) this.quietSince = Date.now();
+    this._busy = on;
+  }
   waiting = false; // the agent rang: turn finished / wants input
   waitingSince = 0;
-  dead = false; // the process exited; Enter relaunches it
+  private _dead = false;
+  exitedAt = 0;
+  /** The process exited; Enter relaunches it. */
+  get dead() { return this._dead; }
+  set dead(on: boolean) {
+    if (on && !this._dead) this.exitedAt = Date.now();
+    this._dead = on;
+  }
   appTitle = ""; // OSC 0/2 from the running app
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
   startup = ""; // command this pane booted with, persisted for restore
@@ -1344,7 +1378,7 @@ class Pane {
   private unlisten: UnlistenFn[] = [];
   private out = new Channel<string>();
   private idle = 0;
-  private codexStatus = false;
+  private interruptHint = false; // codex and opencode: their "esc … interrupt" hint was on screen
   private resumeNotice?: HTMLElement;
   /** This pane's own row under its thread in the sidebar — Orca lists each
    * agent session under its worktree, and a thread with a claude and a codex
@@ -1541,6 +1575,9 @@ class Pane {
     this.term.onData((d) => {
       // A dead pane has nowhere to send keys; Enter brings the process back.
       if (this.dead) return void (d === "\r" && this.spawn(true));
+      // Focus reports (ConPTY turns them on) are the page losing or gaining
+      // focus, not you answering: pass them on, leave the alert alone.
+      if (d === "\x1b[I" || d === "\x1b[O") return void invoke("pty_write", { id: this.id, data: d }).catch(() => {});
       this.lastIn = Date.now();
       const waitingSince = this.waitingSince;
       void invoke("pty_write", { id: this.id, data: d }).then(() => {
@@ -1571,8 +1608,9 @@ class Pane {
     // event bus' JSON round-trip through every other listener.
     this.out.onmessage = (d) => {
       this.lastOut = Date.now(); // settle() waits on this
-      this.term.write(d, () => { if (this.agent === "codex") this.activity(); });
-      if (this.agent !== "codex") this.activity();
+      const readsScreen = this.agent === "codex" || this.agent === "opencode";
+      this.term.write(d, () => { if (readsScreen) this.activity(); });
+      if (!readsScreen) this.activity();
     };
     await this.spawn(!!sid);
     new ResizeObserver(() => this.resize()).observe(this.host);
@@ -1615,7 +1653,7 @@ class Pane {
     if (!resume) this.sessionId = undefined;
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
-    this.codexStatus = false;
+    this.interruptHint = false;
     const can =
       resume &&
       (this.agent !== "claude" ||
@@ -1675,15 +1713,17 @@ class Pane {
    * is the echo, not the agent — a real answer keeps drawing well past that. */
   private activity() {
     if (this.agent === "shell") return;
-    if (this.agent === "codex") {
-      // ponytail: codex keeps drawing while idle (the astra prompt's star field),
-      // so output alone says nothing. Its "Working (3s • esc to interrupt)"
-      // line is the tell. Clear busy when it disappears, even without OSC 9.
-      // Read the live screen after xterm joins PTY chunks, not scrolled history.
-      const status = /esc\s+to\s+interrupt/i.test(this.screen(true));
+    if (this.agent === "codex" || this.agent === "opencode") {
+      // ponytail: both keep drawing while idle (codex's star field, opencode's
+      // TUI), so output alone says nothing. Their interrupt hint is the tell:
+      // codex's "Working (3s • esc to interrupt)", opencode's "esc interrupt"
+      // footer ("esc again to interrupt" after one press). Clear busy when it
+      // goes, even without a ring. Read the live screen after xterm joins PTY
+      // chunks, not scrolled history.
+      const status = /\besc\s+(?:again\s+)?(?:to\s+)?interrupt/i.test(this.screen(true));
       if (!status && this.busy) ((this.busy = false), this.paint());
-      if (status && !this.codexStatus && !this.waiting) ((this.busy = true), this.paint());
-      this.codexStatus = status;
+      if (status && !this.interruptHint && !this.waiting) ((this.busy = true), this.paint());
+      this.interruptHint = status;
       return;
     }
     if (Date.now() - this.lastIn < 300) return;
@@ -1770,11 +1810,11 @@ class Pane {
     beep();
     // Loom isn't on screen: flash the taskbar button too. Cleared in main().
     // The sidebar dot and the `N waiting` chip still say who wants you in silent mode.
-    if (!silent && !document.hasFocus())
+    if (!silent && !loomFocused)
       getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
   }
 
-  private seen() {
+  seen() {
     if (!this.waiting) return;
     this.waiting = false;
     this.paint();
@@ -1854,15 +1894,8 @@ class Pane {
     this.usage = u;
     if (drawn) return;
     if (!u) return void (this.gauge.className = "ctx hidden");
-    const pct = Math.min(100, Math.round((u.ctx / u.window) * 100));
-    // 90% is about where Claude Code starts compacting on you.
-    this.gauge.className = `ctx${pct >= 90 ? " hot" : pct >= 70 ? " warm" : ""}`;
-    this.gauge.style.setProperty("--pct", `${pct}%`);
-    this.gauge.textContent = `${pct}%`;
-    this.gauge.title =
-      `Context ${tok(u.ctx)} of ${tok(u.window)} — ${pct}% full\n` +
-      `${u.turns} turns · ${tok(u.output)} out · ${tok(u.input + u.cacheWrite)} in · ` +
-      `${tok(u.cacheRead)} cached\nClick for what filled it`;
+    paintGauge(this.gauge, u);
+    this.gauge.title += "\nClick for what filled it";
   }
 
   focus() {
@@ -2341,6 +2374,8 @@ const flushSave = (): Promise<unknown> => {
       paneCount,
       silent,
       planUsage,
+      overlay: overlayMode,
+      overlayCap,
       ui: { thread: threads.indexOf(current!), dashboard: dashboardOpen, dashboardCompact, sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
         sideScroll: $("#threads").scrollTop,
         foldedSections: [...foldedSections], foldedDirs: [...foldedDirs],
@@ -2433,6 +2468,7 @@ function openPicker(all = false) {
 
 const STATE_RANK: Record<string, number> = { waiting: 0, busy: 1, "": 2, dead: 3 };
 const STATE_WORD: Record<string, string> = { waiting: "Waiting", busy: "Working", "": "Ready", dead: "Exited" };
+const STATUS: Record<string, string> = { ...STATE_WORD, "": "Idle" }; // The overview's words: "Idle" says less than "Ready" about a quiet agent.
 const paneState = (p: Pane) => p.dead ? "dead" : p.waiting ? "waiting" : p.busy ? "busy" : "";
 
 let dashboardOpen = false;
@@ -2445,6 +2481,8 @@ const dashboardMessages = new Map<string, DashboardMessages & { session: string;
 let dashboardMessagesBusy = false;
 let dashboardMessagesPolled = 0;
 let dashboardNext: Pane | undefined;
+let dashboardRows: Pane[] = []; // The listed order, which the preview's previous/next follow.
+const dashboardDrafts = new Map<string, string>(); // Quick replies survive the list's rebuilds.
 let dashboardPreviewPane: Pane | null = null;
 let dashboardPreviewSlot: Comment | null = null;
 const dashboardPreview = $<HTMLDialogElement>("#dashboard-preview");
@@ -2465,18 +2503,23 @@ async function refreshDashboardMessages(force = false) {
     });
   if (!requests.length) return;
   dashboardMessagesBusy = true;
-  try {
-    const got = await invoke<Record<string, DashboardMessages>>("last_messages", {
-      panes: requests.map(({ p, session }) => [p.id, p.agent, p.th.dir, session]),
-    });
-    for (const { p, session, input, waiting, dead } of requests) {
-      if (dashboardSession(p) !== session) continue;
-      dashboardMessages.set(p.id, { session, input, waiting, dead, user: got[p.id]?.user || "", agent: got[p.id]?.agent || "" });
-    }
-    dashboardSignature = "";
-    if (dashboardOpen) renderDashboard();
-  } catch { /* Keep the last messages and retry on the next poll. */ }
-  finally { dashboardMessagesBusy = false; }
+  // Each opencode pane gets its own call: its export takes seconds, and the
+  // others should not wait on it. Each batch shows as soon as it's in.
+  const batches = [requests.filter(r => r.p.agent !== "opencode"), ...requests.filter(r => r.p.agent === "opencode").map(r => [r])];
+  await Promise.all(batches.filter(b => b.length).map(async batch => {
+    try {
+      const got = await invoke<Record<string, DashboardMessages>>("last_messages", {
+        panes: batch.map(({ p, session }) => [p.id, p.agent, p.th.dir, session]),
+      });
+      for (const { p, session, input, waiting, dead } of batch) {
+        if (dashboardSession(p) !== session) continue;
+        dashboardMessages.set(p.id, { session, input, waiting, dead, user: got[p.id]?.user || "", agent: got[p.id]?.agent || "" });
+      }
+      dashboardSignature = "";
+      if (dashboardOpen) renderDashboard();
+    } catch { /* Keep the last messages and retry on the next poll. */ }
+  }));
+  dashboardMessagesBusy = false;
 }
 
 function toggleDashboard(on = !dashboardOpen) {
@@ -2504,6 +2547,19 @@ function toggleDashboard(on = !dashboardOpen) {
   save();
 }
 
+/** The live screen, not wherever you scrolled, with wrapped rows joined. */
+function liveScreen(p: Pane) {
+  const buf = p.term.buffer.active;
+  const lines: string[] = [];
+  for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
+    const line = buf.getLine(y);
+    const text = line?.translateToString(false) ?? "";
+    if (line?.isWrapped && lines.length) lines[lines.length - 1] += text;
+    else lines.push(text);
+  }
+  return lines.join("\n");
+}
+
 function renderDashboard() {
   const projects = [...new Set(threads.map(t => t.repo))];
   if (JSON.stringify(projects) !== JSON.stringify([...dashboardProject.options].slice(1).map(o => o.value))) {
@@ -2514,21 +2570,16 @@ function renderDashboard() {
   const q = dashboardQuery.value.trim().toLowerCase();
   const all = threads.flatMap(th => th.panes.map(p => {
     const state = paneState(p);
-    const buf = p.term.buffer.active;
-    const lines: string[] = [];
     // Keep terminal lines searchable, including while the expanded card shows conversation messages.
-    for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
-      const line = buf.getLine(y);
-      const text = line?.translateToString(false) ?? "";
-      if (line?.isWrapped && lines.length) lines[lines.length - 1] += text;
-      else lines.push(text);
-    }
-    const preview = lines.map(line => line.trim()).filter(Boolean).slice(-3).join("\n");
-    const stamp = state === "waiting" ? p.waitingSince : p.lastOut;
-    const age = stamp ? `${state === "waiting" ? "Waiting" : "Output"} ${ago(stamp)}` : "No output yet";
+    const screen = liveScreen(p);
+    const preview = screen.split("\n").map(line => line.trim()).filter(Boolean).slice(-3).join("\n");
+    // Not the last output: opencode and codex redraw while idle.
+    const stamp = state === "waiting" ? p.waitingSince : state === "busy" ? p.busySince : state === "dead" ? p.exitedAt : p.quietSince;
+    const age = stamp ? `${STATUS[state]} · ${ago(stamp)}` : STATUS[state];
     const cached = dashboardMessages.get(p.id);
     const messages = cached?.session === dashboardSession(p) ? cached : undefined;
-    return { th, p, state, preview, age, messages };
+    const menu = state === "waiting" && p.agent !== "shell" ? readMenu(screen) : null;
+    return { th, p, state, preview, age, messages, menu };
   }));
   const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
     && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
@@ -2539,21 +2590,22 @@ function renderDashboard() {
       const button = document.createElement("button");
       button.dataset.state = state;
       button.append(document.createElement("b"), document.createElement("span"));
-      button.querySelector("span")!.textContent = state === "all" ? "All" : state === "waiting" ? "Waiting" : labels[state];
+      button.querySelector("span")!.textContent = state === "all" ? "All" : STATUS[state];
       button.onclick = () => { dashboardFilter = state; renderDashboard(); };
       counts.append(button);
     }
   }
   for (const button of counts.querySelectorAll("button")) {
     const state = button.dataset.state!;
-    button.querySelector("b")!.textContent = String(state === "all" ? scoped.length : scoped.filter(r => r.state === state).length);
+    const n = state === "all" ? scoped.length : scoped.filter(r => r.state === state).length;
+    button.querySelector("b")!.textContent = String(n);
     button.setAttribute("aria-pressed", String(dashboardFilter === state));
+    button.disabled = !n && state !== "all" && dashboardFilter !== state; // An active filter stays clickable after it empties.
   }
-  const waiting = all.filter(r => r.state === "waiting").length;
-  $("#dashboard-summary").textContent = `${all.length} sessions across ${threads.length} threads. ${waiting ? `${waiting} waiting for you.` : "Nothing waiting for you."}`;
   $<HTMLButtonElement>("#dashboard-back").disabled = !current;
   const rows = scoped.filter(r => dashboardFilter === "all" || r.state === dashboardFilter)
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || (a.state === "waiting" ? a.p.waitingSince - b.p.waitingSince : 0));
+  dashboardRows = rows.map(r => r.p);
   dashboardNext = rows.find(r => r.state === "waiting")?.p;
   $<HTMLButtonElement>("#dashboard-next").disabled = !dashboardNext;
   $("#dashboard-next").title = dashboardNext ? `Open the oldest waiting session in this view: ${dashboardNext.th.name} / ${dashboardNext.agent}` : "No waiting sessions match this view";
@@ -2565,13 +2617,16 @@ function renderDashboard() {
   $("#dashboard-compact").setAttribute("aria-pressed", String(dashboardCompact));
   const list = $("#dashboard-list");
   // Keep the DOM and keyboard focus stable between unchanged refreshes.
-  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age, messages }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, preview, age, messages?.user, messages?.agent])]);
+  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age, messages, menu }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, preview, age, messages?.user, messages?.agent, menu,
+    p.usage && [p.usage.liveModel || p.usage.model, p.usage.ctx, p.usage.window, p.usage.turns]])]);
   if (signature !== dashboardSignature) {
     dashboardSignature = signature;
-    const focused = list.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.key : undefined;
+    const active = list.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
+    const focused = active?.dataset.key;
+    const caret = active instanceof HTMLInputElement ? [active.selectionStart, active.selectionEnd] as const : undefined;
     const fragment = document.createDocumentFragment();
     let group: string | undefined;
-    for (const { th, p, state, preview, age, messages } of rows) {
+    for (const { th, p, state, preview, age, messages, menu } of rows) {
       if (state !== group) {
         group = state;
         const heading = document.createElement("h2");
@@ -2606,9 +2661,18 @@ function renderDashboard() {
         output.textContent = preview || "No terminal output yet. Open the session to get started.";
         output.setAttribute("aria-label", "Latest terminal lines");
         activity.append(title, output);
+      } else if (menu?.question.length) {
+        // A menu's question is on screen, not in the transcript the messages come from.
+        const question = document.createElement("pre");
+        question.className = "dashboard-question";
+        question.textContent = menu.question.join("\n");
+        question.setAttribute("aria-label", `What ${p.agent} is asking`);
+        activity.append(question);
       } else {
         activity.setAttribute("aria-label", "Last messages");
-        for (const [label, value] of [["You", messages?.user || "No message yet."], ["Agent", messages?.agent || "No reply yet."]]) {
+        // Not read yet is not the same as nothing said: opencode's export takes seconds.
+        const loading = !messages && !!dashboardSession(p);
+        for (const [label, value] of [["You", loading ? "Loading…" : messages?.user || "No message yet."], ["Agent", loading ? "Loading…" : messages?.agent || "No reply yet."]]) {
           const line = document.createElement("span");
           line.className = "dashboard-message";
           const who = document.createElement("b");
@@ -2622,23 +2686,16 @@ function renderDashboard() {
       }
       const status = document.createElement("span");
       status.className = "dashboard-status";
-      status.textContent = labels[state];
-      const time = document.createElement("span");
-      time.className = "dashboard-age";
-      time.textContent = age;
-      row.append(identity, location, activity, status, time);
-      const previewPane = () => {
-        dashboardPreviewPane = p;
-        dashboardPreviewSlot = document.createComment("preview pane returns here");
-        p.el.replaceWith(dashboardPreviewSlot);
-        dashboardPreviewOutput.append(p.el);
-        $("#dashboard-control-result").textContent = "";
-        dashboardPreview.showModal();
-        $("#dashboard-preview-close").focus(); // Opening a preview should not focus the terminal or acknowledge an alert.
-        p.gpu(true);
-        p.resize();
-        renderDashboard();
-      };
+      status.textContent = age;
+      const usage = document.createElement("span");
+      usage.className = "dashboard-usage";
+      if (p.usage?.window) {
+        const gauge = document.createElement("span");
+        paintGauge(gauge, p.usage);
+        usage.append(p.usage.liveModel || p.usage.model, gauge);
+      }
+      row.append(identity, location, activity, status, usage);
+      const previewPane = () => openDashboardPreview(p);
       row.onclick = dashboardCompact ? () => revealPane(p) : previewPane;
       const open = document.createElement("button");
       open.className = dashboardCompact ? "dashboard-preview-button" : "dashboard-open-terminal";
@@ -2649,10 +2706,13 @@ function renderDashboard() {
       if (dashboardCompact) open.setAttribute("aria-haspopup", "dialog");
       open.onclick = dashboardCompact ? previewPane : () => revealPane(p);
       card.append(row, open);
+      if (!dashboardCompact && state === "waiting" && p.agent !== "shell") card.append(menu ? choiceRow(p, th, menu) : replyForm(p, th));
       fragment.append(card);
     }
     list.replaceChildren(fragment);
-    if (focused) ([...list.querySelectorAll<HTMLButtonElement>("button")].find(b => b.dataset.key === focused) ?? dashboardQuery).focus({ preventScroll: true });
+    const restored = focused ? [...list.querySelectorAll<HTMLElement>("[data-key]")].find(el => el.dataset.key === focused) : undefined;
+    if (focused) (restored ?? dashboardQuery).focus({ preventScroll: true });
+    if (caret && restored instanceof HTMLInputElement) restored.setSelectionRange(caret[0], caret[1]);
   }
   $("#dashboard-empty").classList.toggle("hidden", rows.length > 0);
   $("#dashboard-empty").textContent = !all.length ? "No sessions yet. Create a thread to start an agent."
@@ -2664,9 +2724,15 @@ function renderDashboard() {
     if (!selected) return closeDashboardPreview();
     const { p, th, state, age } = selected;
     $("#dashboard-preview-title").textContent = `${th.name} / ${p.agent}`;
-    $("#dashboard-preview-meta").textContent = `${th.repo} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
-    $("#dashboard-preview-status").textContent = `${labels[state]} · ${age}`;
+    $("#dashboard-preview-meta").textContent = `${basename(th.repo)} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
+    $("#dashboard-preview-meta").title = th.dir;
+    $("#dashboard-preview-status").textContent = age;
     $("#dashboard-preview-status").dataset.state = state;
+    const at = dashboardRows.indexOf(p);
+    $("#dashboard-preview-position").textContent = at < 0 ? "Not in this view" : `${at + 1} of ${dashboardRows.length}`;
+    const elsewhere = dashboardRows.some(r => r !== p);
+    $<HTMLButtonElement>("#dashboard-preview-prev").disabled = dashboardControlBusy || !elsewhere;
+    $<HTMLButtonElement>("#dashboard-preview-next").disabled = dashboardControlBusy || !elsewhere;
     const u = p.usage;
     $("#dashboard-preview-usage").textContent = u ? [u.liveModel || u.model, u.window ? `${Math.round(u.ctx / u.window * 100)}% context` : "", `${u.mainTurns} turns`].filter(Boolean).join(" · ") : "";
     $<HTMLButtonElement>("#dashboard-preview-open").disabled = dashboardControlBusy;
@@ -2677,9 +2743,8 @@ function renderDashboard() {
   }
 }
 
-function closeDashboardPreview() {
-  const p = dashboardPreviewPane;
-  if (!p) return;
+/** Put the previewed pane back where it came from, still running. */
+function returnPreviewPane(p: Pane) {
   if (dashboardPreviewSlot) {
     if (p.th.panes.includes(p)) {
       dashboardPreviewSlot.replaceWith(p.el);
@@ -2688,12 +2753,168 @@ function closeDashboardPreview() {
     dashboardPreviewSlot = null;
   }
   dashboardPreviewPane = null;
+}
+
+/** Open the preview on a pane, or switch an open preview to it. */
+function openDashboardPreview(p: Pane) {
+  const typing = dashboardPreviewOutput.contains(document.activeElement); // F3 from the terminal keeps you typing.
+  if (dashboardPreviewPane) returnPreviewPane(dashboardPreviewPane);
+  dashboardPreviewPane = p;
+  dashboardPreviewSlot = document.createComment("preview pane returns here");
+  p.el.replaceWith(dashboardPreviewSlot);
+  dashboardPreviewOutput.append(p.el);
+  $("#dashboard-control-result").textContent = "";
+  if (!dashboardPreview.open) {
+    dashboardPreview.showModal();
+    $("#dashboard-preview-close").focus(); // Opening a preview should not focus the terminal or acknowledge an alert.
+  }
+  p.gpu(true);
+  p.resize();
+  if (typing) p.term.focus();
+  renderDashboard();
+}
+
+/** Previous/next session in the listed order, wrapping; F3 skips to the oldest other waiting one. */
+function stepDashboardPreview(step: 1 | -1 | "waiting") {
+  const p = dashboardPreviewPane;
+  if (!p || dashboardControlBusy) return;
+  renderDashboard(); // Replying moves sessions between groups; follow the current order.
+  const rows = dashboardRows, i = rows.indexOf(p);
+  const next = step === "waiting" ? rows.find(r => r !== p && r.waiting)
+    : i < 0 ? rows[step > 0 ? 0 : rows.length - 1] : rows[(i + step + rows.length) % rows.length];
+  if (next && next !== p) openDashboardPreview(next);
+}
+
+/** Keys straight to the agent. Unlike typing, they leave the waiting alert
+ * alone, so an answer that stops part-way still shows as waiting. */
+function keys(p: Pane, data: string) {
+  p.lastIn = Date.now(); // The echo is not the agent working.
+  return invoke("pty_write", { id: p.id, data });
+}
+/** Enter, then clear the alert the way typing it would. */
+async function submit(p: Pane) {
+  const since = p.waitingSince;
+  await keys(p, "\r");
+  if (p.waitingSince === since) p.seen(); // A new alert raised meanwhile stays.
+}
+
+/** Paste, then press Enter only if the text shows up on screen. On a menu or
+ * anything else that doesn't take text, Enter would pick an option instead. */
+async function sendReply(p: Pane, text: string) {
+  const before = echoes(liveScreen(p), text);
+  await keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+  await p.settle(150, 1000);
+  if (echoes(liveScreen(p), text) <= before) throw new Error(`${p.agent} didn't show your text, so Loom didn't press Enter. Open the session to answer.`);
+  await submit(p);
+}
+
+/** Pick option `i` the way a person would: one arrow key at a time, reading the
+ * screen after each, and Enter only once `i` is highlighted. If the menu on
+ * screen stops matching the one the button came from, nothing is chosen. */
+async function choose(p: Pane, menu: AgentMenu, i: number) {
+  const same = (m: AgentMenu | null) => m?.options.join("\n") === menu.options.join("\n");
+  for (let step = 0; step <= menu.options.length; step++) {
+    const now = readMenu(liveScreen(p));
+    if (!now || !same(now)) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
+    if (now.selected === i) return submit(p);
+    await keys(p, (p.term.modes.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + (now.selected > i ? "A" : "B"));
+    await p.settle(80, 800);
+  }
+  throw new Error(`Loom couldn't move ${p.agent}'s highlight to that option. Open the session to answer.`);
+}
+
+/** Run one answer from a card: lock its controls, report a failure, then move
+ * on to the next waiting agent, since an answered card leaves the group. */
+async function answer(p: Pane, box: HTMLElement, send: () => Promise<void>) {
+  const controls = [...box.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input, button")];
+  if (controls.some(c => c.disabled)) return;
+  controls.forEach(c => (c.disabled = true));
+  try {
+    await send();
+  } catch (error) {
+    toast(error instanceof Error ? error.message : `Could not answer ${p.agent}: ${String(error)}`); // Write failures arrive as strings.
+  } finally {
+    controls.forEach(c => (c.disabled = false));
+    dashboardSignature = "";
+    renderDashboard();
+    ($("#dashboard-list").querySelector<HTMLElement>(".dashboard-reply :is(input, button)") ?? dashboardQuery).focus();
+  }
+}
+
+/** One line to answer a waiting agent without opening it. */
+function replyForm(p: Pane, th: Thread) {
+  const form = document.createElement("form");
+  form.className = "dashboard-reply";
+  const input = document.createElement("input");
+  input.dataset.key = `reply-${p.id}`;
+  input.placeholder = `Reply to ${p.agent}`;
+  input.setAttribute("aria-label", `Reply to ${p.agent} in ${th.name}`);
+  input.spellcheck = false;
+  input.value = dashboardDrafts.get(p.id) ?? "";
+  input.oninput = () => dashboardDrafts.set(p.id, input.value);
+  const send = document.createElement("button");
+  send.type = "submit";
+  send.textContent = "Send";
+  send.title = `Send to ${p.agent} and press Enter`;
+  form.append(input, send);
+  form.onsubmit = e => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (text) void answer(p, form, async () => {
+      await sendReply(p, text);
+      dashboardDrafts.delete(p.id);
+    });
+  };
+  return form;
+}
+
+/** The options of a menu on the agent's screen, one button each. */
+function choiceRow(p: Pane, th: Thread, menu: AgentMenu) {
+  const row = document.createElement("div");
+  row.className = "dashboard-reply dashboard-choices";
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", `Answer ${p.agent} in ${th.name}`);
+  if (menu.multi) {
+    const note = document.createElement("span");
+    note.textContent = "This question takes several choices. Open it to answer in the terminal.";
+    row.append(note);
+    return row;
+  }
+  menu.options.forEach((label, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.key = `choice-${p.id}-${i}`;
+    b.textContent = label;
+    b.title = `Choose "${label}" in ${p.agent}`;
+    b.onclick = () => void answer(p, row, () => choose(p, menu, i));
+    row.append(b);
+  });
+  return row;
+}
+
+function closeDashboardPreview() {
+  const p = dashboardPreviewPane;
+  if (!p) return;
+  returnPreviewPane(p);
   dashboardPreview.close();
   const key = dashboardCompact ? `preview-${p.id}` : p.id;
   if (dashboardOpen) ([...$("#dashboard-list").querySelectorAll<HTMLButtonElement>("button")].find(b => b.dataset.key === key) ?? dashboardQuery).focus({ preventScroll: true });
 }
 
 dashboardQuery.oninput = renderDashboard;
+// ↑/↓ walk the sessions, Home/End jump to the ends; Enter already previews.
+const dashboardRowButtons = () => [...$("#dashboard-list").querySelectorAll<HTMLButtonElement>(".dashboard-row")];
+dashboardQuery.onkeydown = e => {
+  if (e.key === "ArrowDown" && dashboardRowButtons()[0]) (e.preventDefault(), dashboardRowButtons()[0].focus());
+};
+$("#dashboard-list").onkeydown = e => {
+  const card = (e.target as HTMLElement).closest(".dashboard-card");
+  if (!card || e.target instanceof HTMLInputElement || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+  const rows = dashboardRowButtons(), i = rows.indexOf(card.querySelector(".dashboard-row")!);
+  const to = e.key === "Home" ? 0 : e.key === "End" ? rows.length - 1 : i + (e.key === "ArrowDown" ? 1 : -1);
+  e.preventDefault();
+  (rows[to] ?? (to < 0 ? dashboardQuery : rows[i])).focus();
+};
 dashboardProject.onchange = renderDashboard;
 $("#dashboard-btn").onclick = () => { if (dashboardOpen) show(current); else toggleDashboard(true); };
 $("#dashboard-back").onclick = () => show(current);
@@ -2707,6 +2928,17 @@ $("#dashboard-reset").onclick = () => {
 };
 $("#dashboard-compact").onclick = () => { dashboardCompact = !dashboardCompact; renderDashboard(); void refreshDashboardMessages(true); save(); };
 $("#dashboard-preview-close").onclick = closeDashboardPreview;
+$("#dashboard-preview-prev").onclick = () => stepDashboardPreview(-1);
+$("#dashboard-preview-next").onclick = () => stepDashboardPreview(1);
+// Capture phase, so F3 never reaches the terminal. ←/→ belong to the terminal while it has focus.
+dashboardPreview.addEventListener("keydown", e => {
+  const free = !dashboardPreviewOutput.contains(e.target as Node) && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+  const step = e.key === "F3" ? "waiting" : !free ? undefined : e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : undefined;
+  if (!step) return;
+  e.preventDefault();
+  e.stopPropagation();
+  stepDashboardPreview(step);
+}, true);
 dashboardPreview.onclick = e => {
   if (dashboardControlBusy || e.target !== dashboardPreview) return;
   const { left, right, top, bottom } = dashboardPreview.getBoundingClientRect();
@@ -2745,6 +2977,96 @@ $("#dashboard-process").onclick = async () => {
     renderDashboard();
   }
 };
+
+/** The agent overlay (overlay.ts): a small always-on-top window listing the
+ * agents waiting on you, then the ones working. "background" shows it while
+ * Loom is minimized or behind another app and something is waiting or working;
+ * "always" keeps it up either way. Clicking an agent brings Loom back on the
+ * overview with that agent previewed. It never takes focus on its own. */
+/** Whether Loom's window is the active one. WebView2 keeps document.hasFocus()
+ * true while the window is minimized or behind another app, so this follows
+ * the native window instead. */
+let loomFocused = true;
+// Ask on every change rather than trust the event: clicking the overlay
+// activates it, and its focus event reaches this window's listener too.
+const readFocus = () => Promise.all([getCurrentWindow().isFocused(), getCurrentWindow().isMinimized()])
+  .then(([f, m]) => ((loomFocused = f !== false && m !== true), syncOverlay()), () => {});
+void readFocus();
+void getCurrentWindow().onFocusChanged(readFocus);
+let overlayShown = false;
+// Its close button: hidden until Loom next comes to the front or goes behind.
+// Holds the focus state it was closed in.
+let overlayClosedAt: boolean | null = null;
+let overlaySent = "";
+const OVERLAY_VARS = ["--panel", "--text", "--muted", "--faint", "--edge", "--edge-hi", "--hover", "--accent", "--accent-dim", "--glow", "--warn", "--warn-dim", "--warn-glow", "--ui"];
+// In order: a build and a show sent back to back must not race to create the window.
+let overlayCall: Promise<unknown> = Promise.resolve();
+const overlayWindow = (show: boolean | null) =>
+  (overlayCall = overlayCall.then(() => invoke("overlay", { show })).catch(e => toast(`Could not update the agent overlay: ${String(e)}`)));
+
+function syncOverlay() {
+  if (overlayMode === "off") return;
+  if (overlayClosedAt !== null && overlayClosedAt !== loomFocused) overlayClosedAt = null;
+  const wanted = overlayClosedAt === null && (overlayMode === "always" || !loomFocused);
+  const rows = !wanted ? [] : threads.flatMap(th => th.panes.map(p => ({ th, p, state: paneState(p) })))
+    .filter(r => r.state === "waiting" || r.state === "busy")
+    .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || (a.state === "waiting" ? a.p.waitingSince - b.p.waitingSince : a.p.busySince - b.p.busySince))
+    .map(({ th, p, state }): OverlayRow => ({
+      id: p.id,
+      agent: p.agent,
+      waiting: state === "waiting",
+      name: th.panes.length > 1 ? `${th.name} · ${th.panes.indexOf(p) + 1}` : th.name,
+      time: ago(state === "waiting" ? p.waitingSince : p.busySince),
+      ask: state === "waiting" && p.agent !== "shell" ? asking(readMenu(liveScreen(p))) : "",
+    }));
+  const show = wanted && (rows.length > 0 || overlayMode === "always");
+  if (show) {
+    const style = getComputedStyle(document.documentElement);
+    const state: OverlayState = { rows, cap: overlayCap, vars: Object.fromEntries(OVERLAY_VARS.map(k => [k, style.getPropertyValue(k).trim()])), scheme: theme.scheme ?? "dark" };
+    const sent = JSON.stringify(state);
+    if (sent !== overlaySent) void emit("overlay-rows", state).then(() => (overlaySent = sent));
+  }
+  if (show === overlayShown) return;
+  overlayShown = show;
+  void overlayWindow(show);
+}
+
+/** One line for what a menu on the agent's screen asks: the specific lines
+ * (the tool, the command, the file) over the generic "Do you want to proceed?",
+ * which is kept only when it is all there is. */
+function asking(menu: AgentMenu | null) {
+  if (!menu) return "";
+  const specific = menu.question.filter(line => !line.endsWith("?"));
+  return (specific.length ? specific : menu.question).join(" · ") || "Asks you to choose";
+}
+
+/** Back from the overlay: Loom in front, on the overview, previewing `p`. */
+async function comeBack(p?: Pane) {
+  const w = getCurrentWindow();
+  await w.unminimize().catch(() => {});
+  await w.show().catch(() => {});
+  await w.setFocus().catch(() => {});
+  if (!dashboardOpen) toggleDashboard(true);
+  if (p && p.th.panes.includes(p)) openDashboardPreview(p);
+}
+
+// A freshly loaded overlay missed whatever was sent before it listened.
+void listen("overlay-ready", () => ((overlaySent = ""), syncOverlay()));
+void listen<string>("overlay-pick", e => void comeBack(threads.flatMap(t => t.panes).find(p => p.id === e.payload)));
+void listen("overlay-open", () => void comeBack());
+void listen("overlay-dismiss", () => ((overlayClosedAt = loomFocused), syncOverlay()));
+void listen<number>("overlay-cap", e => ((overlayCap = e.payload), save()));
+
+function paintOverlayPref() {
+  const b = $("#overlay-pref");
+  b.textContent = { off: "off", background: "in background", always: "always" }[overlayMode];
+  b.title = {
+    off: "Click to show a small window over other apps with the agents waiting and working",
+    background: "Shown over other apps while Loom is minimized or behind them, when an agent is waiting or working. Click to keep it up all the time",
+    always: "Always shown, over Loom too. Click to turn it off",
+  }[overlayMode];
+  b.setAttribute("aria-pressed", String(overlayMode !== "off"));
+}
 
 function renderPicker() {
   const list = $("#picker-list");
@@ -5098,6 +5420,8 @@ async function main() {
     paneCount?: number;
     silent?: boolean;
     planUsage?: boolean;
+    overlay?: boolean | OverlayMode;
+    overlayCap?: number;
     ui?: { thread?: number; dashboard?: boolean; dashboardCompact?: boolean; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
@@ -5119,6 +5443,9 @@ async function main() {
   paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
   silent = saved.silent === true;
   planUsage = saved.planUsage !== false;
+  // true was "in background" before there was an "always".
+  overlayMode = saved.overlay === true ? "background" : OVERLAY_MODES.find(m => m === saved.overlay) ?? "off";
+  overlayCap = saved.overlayCap ?? overlayCap;
   repos = saved.repos ?? [];
   reposFolded = new Set(saved.reposFolded ?? []);
   sideQuery = saved.ui?.sideQuery ?? "";
@@ -5247,11 +5574,26 @@ async function main() {
     paintPlanUsage();
     save();
   };
+  $("#overlay-pref").onclick = () => {
+    overlayMode = OVERLAY_MODES[(OVERLAY_MODES.indexOf(overlayMode) + 1) % OVERLAY_MODES.length];
+    overlayShown = false;
+    overlaySent = "";
+    overlayClosedAt = null;
+    // Off closes the window; on builds it hidden now, so it's loaded before it's needed.
+    void overlayWindow(overlayMode === "off" ? null : false);
+    syncOverlay();
+    paintOverlayPref();
+    save();
+  };
+  if (overlayMode !== "off") void overlayWindow(false);
+  // Also on a timer: a focus change can pass without an event, and the times tick.
+  setInterval(() => overlayMode !== "off" && void readFocus(), 1000);
   micState("");
   paintPrefix();
   paintLang();
   paintSilent();
   paintPlanUsage();
+  paintOverlayPref();
   paintTheme();
   $("#layout").onclick = () => {
     if (!current) return;
@@ -5364,7 +5706,7 @@ async function main() {
   // Claude's Stop/Notification hooks drop $TEMP\loom-wait\$env:LOOM_PANE; drain
   // it into pane.wake(). ponytail: a 250ms poll of one temp dir, no file watcher.
   setInterval(async () => {
-    const wakes = await invoke<[string, string][]>("take_wakes").catch(() => []);
+    const wakes = await invoke<[string, string][]>("take_wakes", { ids: threads.flatMap((t) => t.panes).map((p) => p.id) }).catch(() => []);
     if (!wakes.length) return;
     const effortById = new Map(wakes);
     for (const p of threads.flatMap((t) => t.panes)) {

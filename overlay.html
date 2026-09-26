@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Loom agents</title>
+    <!-- The overlay window (overlay.ts). Its colours arrive from the main window with the list. -->
+    <style>
+      :root { color-scheme: dark; font: 12px/1.4 var(--ui, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif); }
+      html, body { height: 100%; margin: 0; }
+      body { display: flex; flex-direction: column; box-sizing: border-box; border: 1px solid var(--edge-hi, #2b3a52); background: var(--panel, #0f1626); color: var(--text, #e6edf7); overflow: hidden; user-select: none; }
+      header { flex: none; display: flex; align-items: center; gap: 7px; height: 32px; padding: 0 5px 0 10px; border-bottom: 1px solid var(--edge, #1d2738); cursor: grab; }
+      header img { width: 15px; height: 15px; }
+      header b { flex: 1; font-weight: 600; }
+      button { display: flex; align-items: center; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+      button:focus-visible { outline: 1px solid var(--accent, #d97757); outline-offset: -1px; }
+      header button { justify-content: center; width: 24px; height: 24px; padding: 0; border-radius: 5px; color: var(--muted, #93a1b8); }
+      header button:hover, .row:hover { background: var(--hover, #ffffff12); }
+      header button:hover { color: var(--text, #e6edf7); }
+      header svg { width: 14px; height: 14px; }
+      /* The window is as tall as the list up to a cap; past it, this scrolls. */
+      #list { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
+      /* The rail: the warp the sidebar draws, with each agent a knot on it. No
+         moving light as in the sidebar: this sits over other apps all day. */
+      #rail { position: relative; padding: 2px 6px 8px 0; }
+      #rail::before { content: ""; position: absolute; left: 15px; top: 0; bottom: 0; width: 1px; background: var(--edge-hi, #2b3a52); }
+      h2 { display: flex; gap: 6px; margin: 8px 0 2px 30px; font: 600 11px/16px var(--ui, system-ui); }
+      h2 span { color: var(--faint, #66758c); font-weight: 400; font-variant-numeric: tabular-nums; }
+      h2.waiting { color: var(--warn, #e2b34c); }
+      h2.busy { color: var(--accent, #d97757); }
+      .row { position: relative; display: grid; grid-template-columns: 30px 13px minmax(0, 1fr) auto; grid-template-rows: 28px; grid-auto-rows: auto; align-items: center; column-gap: 7px; width: 100%; padding: 0 8px 0 0; border-radius: 0 6px 6px 0; text-align: left; }
+      .knot { justify-self: center; width: 7px; height: 7px; border-radius: 50%; }
+      .ico { width: 13px; height: 13px; }
+      .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .time { color: var(--faint, #66758c); font-size: 11px; font-variant-numeric: tabular-nums; }
+      /* Waiting is what needs you: bright, weighted, and amber. Working is for
+         reference: the same row, a step quieter. */
+      .waiting .knot { background: var(--warn, #e2b34c); box-shadow: 0 0 0 3px var(--warn-dim, #e2b34c33), 0 0 8px var(--warn-glow, #e2b34c55); }
+      .waiting .name { font-weight: 600; }
+      .waiting .time { color: var(--warn, #e2b34c); }
+      .busy .knot { background: var(--accent, #d97757); box-shadow: 0 0 0 3px var(--accent-dim, #d9775733); }
+      .busy .name { color: var(--muted, #93a1b8); }
+      .row:hover .name { color: var(--text, #e6edf7); }
+      /* What a waiting agent's menu asks, under its name. */
+      .ask { grid-column: 3 / -1; margin: -5px 0 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted, #93a1b8); font-size: 11px; }
+      .empty { margin: 10px 10px 4px 30px; color: var(--faint, #66758c); }
+    </style>
+    <script type="module" src="/src/overlay.ts"></script>
+  </head>
+  <body>
+    <header data-tauri-drag-region>
+      <img src="/src/logo.svg" alt="" data-tauri-drag-region />
+      <b data-tauri-drag-region>Loom</b>
+      <button id="open" title="Open the overview" aria-label="Open the overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
+      </button>
+      <button id="hide" title="Hide until you switch to or away from Loom" aria-label="Hide">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+      </button>
+    </header>
+    <div id="list"><div id="rail"></div></div>
+  </body>
+</html>

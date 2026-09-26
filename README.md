@@ -82,13 +82,25 @@ rail, while an agent works; yellow when one has finished a turn and is waiting
 on you; red when all have exited. Agent marks carry the same colours as a dot. Clicking an agent row focuses that pane; if the thread
 is zoomed, the zoom moves to it, so a zoomed thread reads one agent at a time.
 
-**Overview** in the top bar opens the control center. Press `Ctrl+Shift+D` to
+**Overview** in the top bar lists every agent session. Press `Ctrl+Shift+D` to
 switch between it and your thread. It lists sessions across every open thread,
 with waiting agents first, then working, idle, and exited sessions. Filter by
 status or project, or search thread names, branches, agents, and terminal output.
 Expanded agent rows show your last message and the agent's last message from its
-session. Shell rows still show terminal output. Click a row to preview that agent,
-or use **Next waiting** to open the oldest waiting session matching your filters.
+session. Shell rows still show terminal output. Claude rows also show the model
+and how full the context is, amber from 70% and red from 90%. A waiting agent's
+row has a reply box: type an answer and press Enter to send it without opening
+the terminal. Loom pastes the text and presses Enter only once the text shows up
+on the agent's screen; otherwise it leaves the text there and tells you to open
+the session. When the agent is showing a numbered menu instead, such as a
+permission prompt, the row shows the question and one button per option. A
+button moves the highlight with the arrow keys, checking the screen after each
+step, and presses Enter once its option is highlighted. If the menu changes
+first, nothing is chosen. Menus that take several choices have to be answered
+in the terminal. After an answer, focus moves to the next waiting agent.
+Click a row to preview that agent, or use **Next waiting** to open the oldest
+waiting session matching your filters. `Up` and `Down` move between rows and
+`Enter` previews the selected one.
 `F3` follows those filters while the overview is open. **Compact view** hides
 the inline messages so more sessions fit on screen. In compact view, click a row
 to open its thread or the eye icon to preview the agent. Loom remembers this choice
@@ -97,6 +109,9 @@ and whether the overview was open.
 The preview opens the live terminal in a centered modal. Opening it keeps the
 agent's waiting alert; sending input clears it. Type, paste, select, and scroll
 directly in the terminal. Esc goes to the agent while the terminal has focus.
+The arrows in the preview header, or `Left` and `Right` when the terminal isn't
+focused, switch to the previous or next session in the list. `F3` switches to the
+oldest other waiting session.
 Use the close button to return to the overview, or **Open thread** to switch
 to its thread. The same pane returns to its original position, preserving the
 running session. You can also stop its process after confirmation or relaunch
@@ -106,7 +121,25 @@ the existing session picker.
 
 Waiting means the agent signaled that a turn finished or input is needed. Working
 uses Loom's existing activity detection. Idle means no work was detected, so a
-quiet agent may still be thinking. The preview shows the live terminal.
+quiet agent may still be thinking. The preview shows the live terminal. The time
+beside each status counts from when the agent started waiting, started working,
+went quiet, or exited.
+
+**Agent overlay** (Preferences, off by default) is a small window that stays on
+top of other apps. It lists the agents waiting on you, oldest first, and below
+them the ones working, each with how long. A waiting agent that shows a
+question, such as a permission prompt, has that question under its name.
+**In background** shows it while Loom is minimized or behind another window and
+something is waiting or working. **Always** keeps it up, over Loom too. It
+never takes the keyboard from the app you're in.
+
+Its height follows the list. Drag it by its header, and resize it from its
+edges: the width stays where you leave it, and a height you drag to becomes the
+most it grows to before the list scrolls. Loom remembers all three. Click an
+agent to bring Loom back on the overview with that agent previewed, or the grid
+icon for the overview alone. The close button hides it until you next switch to
+or away from Loom. `node scripts/overlay-check.mjs` tests it in the real app;
+it moves the mouse for about two seconds.
 
 Threads, branches, and panes come back on the next launch. Claude keeps its
 pinned session ID. Codex and OpenCode report their actual session IDs, so two

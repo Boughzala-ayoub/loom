@@ -50,6 +50,48 @@ impl Session {
 struct Ptys(Mutex<HashMap<String, Session>>);
 #[derive(Default)]
 struct WindowStateReady(std::sync::atomic::AtomicBool);
+/// The main window's WebView2 folder, reused by the overlay: webviews on one
+/// folder share a browser process, a second folder would start another.
+struct ProfileDir(PathBuf);
+
+/// The small always-on-top list of working and waiting agents that Loom shows
+/// while it is in the background (overlay.ts). `Some(show)` builds it on first
+/// use and shows or hides it; `None` closes it when the preference is turned off.
+/// Async on purpose: building a window inside a synchronous command deadlocks
+/// on Windows, which runs those on the event-loop thread the build waits for.
+#[tauri::command]
+async fn overlay(app: AppHandle, show: Option<bool>) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
+    let existing = app.get_webview_window("overlay");
+    let Some(show) = show else {
+        return existing.map_or(Ok(()), |w| w.destroy().map_err(|e| e.to_string()));
+    };
+    let w = match existing {
+        Some(w) => w,
+        None => tauri::WebviewWindowBuilder::new(&app, "overlay", tauri::WebviewUrl::App("overlay.html".into()))
+            .title("Loom agents")
+            // Resizable; the window-state plugin puts back its size and place.
+            .inner_size(300.0, 240.0)
+            .min_inner_size(220.0, 110.0)
+            .decorations(false)
+            .maximizable(false)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(false)
+            .focused(false)
+            .background_color(tauri::window::Color(10, 15, 27, 255))
+            .data_directory(app.state::<ProfileDir>().0.clone())
+            .build()
+            .map_err(|e| e.to_string())?,
+    };
+    // Not w.show(): tao shows with SW_SHOW, which activates the window and
+    // would take the keyboard from whatever app you are typing in.
+    let hwnd = w.hwnd().map_err(|e| e.to_string())?;
+    unsafe {
+        let _ = ShowWindow(hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+    }
+    Ok(())
+}
 
 pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
     let mut dir = app.path().app_data_dir().expect("no app data dir");
@@ -547,15 +589,17 @@ fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
     ))
 }
 
-/// Pane ids whose Claude finished a turn since the last call, consumed as they
-/// are read. Hooks can't write into the pane itself — a BEL sent to CONOUT$ is
+/// Which of `ids` finished a turn since the last call, consumed as they are
+/// read. Hooks can't write into the pane itself — a BEL sent to CONOUT$ is
 /// swallowed by conhost and never reaches ConPTY — so they drop a file instead,
-/// exactly like aa does with WEZTERM_PANE.
+/// exactly like aa does with WEZTERM_PANE. The caller names its own panes: the
+/// folder is per user, not per Loom, and a second Loom running at the same time
+/// used to eat the other's markers. opencode's plugin has no other way to ring.
 // ponytail: (async) so the scan is off the main thread; the markers live in
 // their own %TEMP%\loom-wait\ folder, so a poll only walks Loom's own files.
 #[tauri::command(async)]
-fn take_wakes() -> Vec<(String, String)> {
-    drain_wakes(&std::env::temp_dir().join("loom-wait"))
+fn take_wakes(ids: Vec<String>) -> Vec<(String, String)> {
+    drain_wakes(&std::env::temp_dir().join("loom-wait"), &ids)
 }
 
 /// `(pane id, session id)` for every pane in `ids` whose codex notify script
@@ -807,20 +851,30 @@ fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -
 
 /// (pane id, effort level) pairs; effort is the marker's content — empty when
 /// the hook had none to report (resume then falls back to the global default).
-fn drain_wakes(dir: &std::path::Path) -> Vec<(String, String)> {
-    let mut ids = Vec::new();
+fn drain_wakes(dir: &std::path::Path, ids: &[String]) -> Vec<(String, String)> {
+    let mut woke = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return ids; // no folder yet = no hooks have fired
+        return woke; // no folder yet = no hooks have fired
     };
     for e in entries.flatten() {
         let name = e.file_name();
         let Some(id) = name.to_str() else { continue };
+        if !ids.iter().any(|x| x == id) {
+            // Another Loom's pane, left for its owner. One nobody took in a day
+            // belonged to a pane that closed first.
+            let stale = e.metadata().and_then(|m| m.modified()).ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(86_400));
+            if stale {
+                let _ = std::fs::remove_file(e.path());
+            }
+            continue;
+        }
         let Ok(effort) = std::fs::read_to_string(e.path()) else { continue };
-        if id.ends_with(".session") && effort.trim().is_empty() { continue; }
-        ids.push((id.to_string(), effort.trim().to_string()));
+        woke.push((id.to_string(), effort.trim().to_string()));
         let _ = std::fs::remove_file(e.path());
     }
-    ids
+    woke
 }
 
 /// Per-launch WebView2 user-data folder. WebView2's profile singleton is a
@@ -964,7 +1018,7 @@ pub fn run() {
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             use tauri::Manager;
-            if let Some(w) = app.webview_windows().values().next() {
+            if let Some(w) = app.get_webview_window("main") {
                 let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
@@ -1000,8 +1054,10 @@ pub fn run() {
                 .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
                 .build())?;
             let cfg = app.config().app.windows.first().expect("window config").clone();
+            let profile = webview_profile_dir(app.handle());
+            app.manage(ProfileDir(profile.clone()));
             tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
-                .data_directory(webview_profile_dir(app.handle()))
+                .data_directory(profile)
                 .enable_clipboard_access()
                 .build()?;
             app.state::<WindowStateReady>().0.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1014,15 +1070,20 @@ pub fn run() {
                 // Persist while running too: stopping `tauri dev` need not send CloseRequested.
                 let _ = window.app_handle().save_window_state(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS);
             }
-            // The frontend may cancel close if its final save fails.
-            if matches!(event, tauri::WindowEvent::Destroyed) {
+            // The frontend may cancel close if its final save fails. Only the
+            // main window owns the terminals, and the overlay must not keep the
+            // app running without it.
+            if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
                 pty_shutdown(window.state::<Ptys>());
+                if let Some(o) = window.app_handle().get_webview_window("overlay") {
+                    let _ = o.destroy();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
             pty_spawn, pty_write, pty_resize, pty_kill, pty_shutdown, load_state, save_state, open_vscode,
             git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, has_codex_session, usage::session_usage, usage::has_session, usage::pane_booted, usage::plan_usage, usage::codex_plan_usage,
-            usage::model_options, usage::context_profile, last_messages,
+            usage::model_options, usage::context_profile, last_messages, overlay,
             dictate::dictate_start,
             dictate::dictate_stop,
             dictate::dictate_level
@@ -1178,16 +1239,20 @@ mod tests {
     fn wake_markers_are_consumed_once() {
         let dir = std::env::temp_dir().join("loom-wake-test");
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(drain_wakes(&dir).is_empty(), "missing folder is not an error");
+        let mine = ["abc".to_string(), "def".to_string()];
+        assert!(drain_wakes(&dir, &mine).is_empty(), "missing folder is not an error");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("abc"), "max\r\n").unwrap(); // Set-Content may add a newline
         std::fs::write(dir.join("def"), "").unwrap();
+        std::fs::write(dir.join("other"), "").unwrap(); // Another Loom's pane
 
-        let mut got = drain_wakes(&dir);
+        let mut got = drain_wakes(&dir, &mine);
         got.sort();
         let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
         assert_eq!(got, vec![pair("abc", "max"), pair("def", "")]);
-        assert!(drain_wakes(&dir).is_empty(), "markers must not fire twice");
+        assert!(drain_wakes(&dir, &mine).is_empty(), "markers must not fire twice");
+        assert!(dir.join("other").exists(), "another Loom's marker is left for it");
+        assert_eq!(drain_wakes(&dir, &["other".to_string()]), vec![pair("other", "")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

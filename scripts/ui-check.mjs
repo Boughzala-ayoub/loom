@@ -50,8 +50,10 @@ try {
         }
         if (cmd === 'pty_kill' && qa.holdKills) return new Promise(resolve => qa.pendingKills.push(resolve));
         if (cmd === 'pty_write' && qa.failWrite) throw new Error('Test terminal write failed');
+        if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
         if (cmd === 'pty_kill' && qa.controlKill) return window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${args.id}`, payload: 1 });
         if (cmd === 'take_wakes') return qa.wakes.splice(0);
+        if (cmd === 'plugin:window|is_focused') return qa.focused ?? true;
         if (cmd === 'has_codex_session') return args.sid !== 'missing-session';
         if (cmd === 'pane_booted') return true;
         if (cmd === 'codex_sessions') return [{ id: 'valid-session', title: 'Saved Codex conversation' }];
@@ -371,8 +373,7 @@ try {
     await audit('dashboard-no-results');
     await page.click('#dashboard-reset');
     assert.equal(await page.locator('.dashboard-row').count(), 4);
-    await page.click('#dashboard-counts button[data-state=""]');
-    await audit('dashboard-idle-empty');
+    assert.equal(await page.locator('#dashboard-counts button[data-state=""]').isDisabled(), true, 'An empty status filter is disabled');
     await page.evaluate(() => window.qa.dashboardPanes[1].onOut.onmessage('\x1b]9;finished\x07'));
     await page.waitForFunction(() => document.querySelector('#dashboard-counts button[data-state=waiting] b').textContent === '3');
     await page.click('#dashboard-counts button[data-state=all]');
@@ -413,6 +414,197 @@ try {
     await page.fill('#dashboard-query', 'thread-39-');
     assert.equal(await page.locator('.dashboard-row').count(), 1);
     await audit('dashboard-many-threads');
+    // Triage: reply from the list, then step through sessions inside the preview.
+    await page.goto(base + '?dashboard');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    await page.waitForTimeout(1800);
+    await page.evaluate(() => {
+      const qa = window.qa;
+      const [a, b] = [qa.panes.find(p => p.cwd.endsWith('search-polish') && !p.codexStateId), qa.panes.find(p => p.cwd.endsWith('review-keyboard-navigation'))];
+      qa.replyPane = a.id;
+      qa.menuPane = b.id;
+      // b shows a Claude permission prompt; arrow keys move its highlight like the real one.
+      qa.menuSel = 0;
+      qa.drawMenu = () => b.onOut.onmessage('\x1b[2J\x1b[H Bash command\r\n\r\n   rm -rf build\r\n\r\n Do you want to proceed?\r\n'
+        + ['Yes', "Yes, and don't ask again", 'No, and tell Claude what to do differently (esc)'].map((o, i) => `${i === qa.menuSel ? ' ❯ ' : '   '}${i + 1}. ${o}`).join('\r\n') + '\r\n');
+      qa.echo = true;
+      qa.onWrite = ({ id, data }) => {
+        if (id === qa.menuPane && /^\x1b[[O][AB]$/.test(data)) ((qa.menuSel += data.endsWith('B') ? 1 : -1), qa.drawMenu());
+        else if (id === qa.replyPane && qa.echo) a.onOut.onmessage(data);
+      };
+      a.onOut.onmessage('\x1b]9;ready\x07');
+      qa.drawMenu();
+      b.onOut.onmessage('\x1b]9;ready\x07');
+    });
+    await page.click('#dashboard-btn');
+    await page.waitForSelector('.dashboard-usage .ctx', { timeout: 8000 });
+    assert.equal(await page.locator('.dashboard-reply input').count(), 1, 'Only a waiting agent at its input gets a reply box');
+    const menuCard = page.locator('.dashboard-card').filter({ hasText: 'review-keyboard-navigation / claude' });
+    assert.deepEqual(await menuCard.locator('.dashboard-choices button').allTextContents(), ['Yes', "Yes, and don't ask again", 'No, and tell Claude what to do differently (esc)'], 'A menu on screen becomes its options');
+    assert.match(await menuCard.locator('.dashboard-question').textContent(), /rm -rf build\nDo you want to proceed\?$/, 'The card shows what the agent asks');
+    await audit('dashboard-menu');
+    await page.focus('#dashboard-query');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('End');
+    assert.equal(await page.evaluate(() => document.activeElement === [...document.querySelectorAll('.dashboard-row')].at(-1)), true, 'Arrow keys walk the rows');
+    const reply = page.locator('.dashboard-card').filter({ hasText: 'search-polish / claude' }).locator('.dashboard-reply input');
+    await reply.fill('Yes, go ahead');
+    await page.waitForTimeout(1200);
+    assert.equal(await reply.inputValue(), 'Yes, go ahead', 'A draft survives live refreshes');
+    await audit('dashboard-reply-draft');
+    await page.evaluate(() => { window.qa.replyStart = window.qa.calls.length; });
+    await reply.press('Enter');
+    await page.waitForFunction(() => !document.querySelector('.dashboard-reply input'));
+    const replies = await page.evaluate(() => window.qa.calls.slice(window.qa.replyStart).filter(c => c.cmd === 'pty_write').map(c => c.args));
+    assert.ok(replies.every(w => w.id === replies[0].id) && replies[0].id === await page.evaluate(() => window.qa.replyPane), 'A reply only reaches its agent');
+    assert.ok(replies.some(w => w.data.includes('Yes, go ahead')) && replies.at(-1).data === '\r', 'A reply is typed, then submitted');
+    assert.equal(await page.evaluate(() => document.activeElement.closest('.dashboard-card')?.textContent.includes('review-keyboard-navigation')), true, 'Focus moves to the next waiting reply');
+    await page.locator('.dashboard-row').first().click();
+    await page.waitForSelector('#dashboard-preview[open]');
+    const previewTitle = () => page.locator('#dashboard-preview-title').textContent();
+    const firstPreview = await previewTitle();
+    await page.keyboard.press('ArrowRight');
+    assert.notEqual(await previewTitle(), firstPreview, 'Right arrow previews the next session');
+    assert.equal(await page.locator('#dashboard-preview-output > .pane').count(), 1, 'One pane is mounted at a time');
+    await page.click('#dashboard-preview-prev');
+    assert.equal(await previewTitle(), firstPreview);
+    await page.keyboard.press('ArrowLeft');
+    assert.equal(await page.locator('#dashboard-preview-position').textContent(), '4 of 4', 'Stepping wraps');
+    await page.keyboard.press('F3');
+    assert.equal(await previewTitle(), 'review-keyboard-navigation / claude', 'F3 previews the next waiting session');
+    await audit('dashboard-preview-stepped');
+    await page.click('#dashboard-preview-close');
+    assert.equal(await page.locator('.grid .pane').count(), 4, 'Stepping returns every pane to its thread');
+    // Choosing walks the highlight one arrow at a time, then presses Enter.
+    await page.evaluate(() => { window.qa.chooseStart = window.qa.calls.length; });
+    await menuCard.locator('.dashboard-choices button').nth(2).click();
+    await page.waitForFunction(() => !document.querySelector('.dashboard-choices'));
+    assert.deepEqual(await page.evaluate(() => window.qa.calls.slice(window.qa.chooseStart).filter(c => c.cmd === 'pty_write').map(c => [c.args.id === window.qa.menuPane, c.args.data])),
+      [[true, '\x1b[B'], [true, '\x1b[B'], [true, '\r']], 'Only that agent gets two arrows and Enter');
+    // Text that never shows up on screen is not submitted.
+    await page.evaluate(() => {
+      window.qa.echo = false;
+      window.qa.panes.find(p => p.id === window.qa.replyPane).onOut.onmessage('\x1b]9;ready\x07');
+      window.qa.refuseStart = window.qa.calls.length;
+    });
+    await page.locator('.dashboard-reply input').fill('Skip the tests');
+    await page.locator('.dashboard-reply input').press('Enter');
+    await page.waitForFunction(() => document.querySelector('#toast:not(.hidden)')?.textContent.includes("didn't show your text"));
+    assert.equal(await page.evaluate(() => window.qa.calls.slice(window.qa.refuseStart).some(c => c.cmd === 'pty_write' && c.args.data === '\r')), false, 'No Enter without an echo');
+    assert.equal(await page.locator('.dashboard-reply input').inputValue(), 'Skip the tests', 'The draft stays for another try');
+    await audit('dashboard-reply-refused');
+    // Agent overlay: off by default. On, it lists working and waiting agents while Loom is in the background.
+    await page.goto(base + '?dashboard');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    await page.waitForTimeout(1800);
+    const overlayCalls = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'overlay').map(c => c.args.show));
+    assert.deepEqual(await overlayCalls(), [], 'The overlay is off by default');
+    await page.click('#preferences-btn');
+    await page.click('#overlay-pref');
+    await page.waitForFunction(() => window.qa.saved.overlay === 'background');
+    assert.equal(await page.locator('#overlay-pref').textContent(), 'in background');
+    assert.deepEqual(await overlayCalls(), [false], 'Turning it on builds the overlay hidden');
+    await audit('overlay-preference');
+    await escape();
+    await page.evaluate(() => {
+      const qa = window.qa;
+      qa.overlayRows = [];
+      window.__TAURI_INTERNALS__.invoke('plugin:event|listen', { event: 'overlay-rows', handler: window.__TAURI_INTERNALS__.transformCallback(e => qa.overlayRows.push(e.payload)) });
+      qa.focused = false; // Loom goes to the background.
+      window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://blur' });
+      const p = qa.panes.find(p => p.cwd.endsWith('review-keyboard-navigation'));
+      qa.overlayPane = p.id;
+      // A permission prompt: the overlay says what it asks.
+      p.onOut.onmessage('\x1b[2J\x1b[H Bash command\r\n\r\n   rm -rf build\r\n\r\n Do you want to proceed?\r\n \u276f 1. Yes\r\n   2. No (esc)\r\n\x1b]9;ready\x07');
+    });
+    await page.waitForFunction(() => window.qa.calls.filter(c => c.cmd === 'overlay').at(-1).args.show === true);
+    // The ring's output reads as work until xterm parses it, so the first rows may say working.
+    await page.waitForFunction(() => window.qa.overlayRows.at(-1)?.rows[0]?.waiting);
+    const sentRows = await page.evaluate(() => window.qa.overlayRows.at(-1));
+    assert.deepEqual(sentRows.rows.map(r => [r.name, r.agent, r.waiting, r.time, r.ask]), [['review-keyboard-navigation', 'claude', true, 'now', 'Bash command · rm -rf build']], 'The overlay lists the waiting agent and what it asks');
+    assert.ok(sentRows.vars['--panel'], 'The overlay gets the theme colours');
+    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-cap', payload: 300 }));
+    await page.waitForFunction(() => window.qa.saved.overlayCap === 300);
+    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-pick', payload: window.qa.overlayPane }));
+    await page.waitForSelector('#dashboard-preview[open]');
+    assert.equal(await page.locator('#dashboard-preview-title').textContent(), 'review-keyboard-navigation / claude', 'A click previews that agent in the overview');
+    assert.ok(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'plugin:window|set_focus')), 'A click brings Loom to the front');
+    assert.equal(await page.locator('#waiting').textContent(), '1 waiting', 'Previewing keeps the alert');
+    await audit('overlay-pick');
+    await page.evaluate(() => ((window.qa.focused = true), window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://focus' })));
+    await page.waitForFunction(() => window.qa.calls.filter(c => c.cmd === 'overlay').at(-1).args.show === false);
+    await page.click('#dashboard-preview-close');
+    await page.evaluate(() => ((window.qa.focused = false), window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://blur' })));
+    await page.waitForFunction(() => window.qa.calls.filter(c => c.cmd === 'overlay').at(-1).args.show === true);
+    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-dismiss' }));
+    await page.waitForFunction(() => window.qa.calls.filter(c => c.cmd === 'overlay').at(-1).args.show === false);
+    await page.waitForTimeout(1200);
+    assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'overlay').at(-1).args.show), false, 'Hidden stays hidden while Loom is away');
+    await page.evaluate(() => ((window.qa.focused = true), window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://focus' })));
+    // Always: up over Loom itself, and with nothing to list it says so instead of vanishing.
+    await page.click('#preferences-btn');
+    await page.click('#overlay-pref');
+    await page.waitForFunction(() => window.qa.saved.overlay === 'always');
+    await page.waitForFunction(() => window.qa.calls.filter(c => c.cmd === 'overlay').at(-1).args.show === true);
+    assert.equal(await page.evaluate(() => window.qa.overlayRows.at(-1).rows.length), 1, 'Always lists agents while Loom is in front');
+    await page.click('#overlay-pref');
+    await page.waitForFunction(() => window.qa.saved.overlay === 'off');
+    assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'overlay').at(-1).args.show), null, 'Turning it off closes the window');
+    await escape();
+    // The overlay page itself: waiting and working in their own sections, the window as tall as the list.
+    const overlayPage = await context.newPage();
+    await overlayPage.setViewportSize({ width: 300, height: 240 });
+    await overlayPage.goto(base + '/overlay.html');
+    const row = (name, i, waiting, ask = '') => ({ id: `pane-${i}`, name, agent: i % 3 ? 'claude' : 'codex', waiting, time: i ? `${i}m` : 'now', ask });
+    const few = { rows: [row('search-polish', 0, true, 'Bash command · rm -rf build'), row('fix-settings · 2', 1, false), row('usageOverlay', 2, false)], cap: 420, vars: {}, scheme: 'dark' };
+    const lastSize = () => overlayPage.evaluate(() => JSON.parse(JSON.stringify(window.qa.calls.filter(c => c.cmd === 'plugin:window|set_size').at(-1)?.args.value ?? null))?.Logical);
+    // The window follows: apply the size the page asked for, as the real window would.
+    const follow = async () => { const size = await lastSize(); await overlayPage.setViewportSize({ width: 300, height: Math.round(size.height) }); return size.height; };
+    await overlayPage.waitForFunction(state => {
+      window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-rows', payload: state }); // Again until it renders: the page may not be listening yet.
+      return document.querySelectorAll('.row').length > 0;
+    }, few);
+    assert.deepEqual(await overlayPage.locator('h2').allTextContents(), ['Waiting1', 'Working2'], 'Waiting and working are separate sections');
+    assert.equal(await overlayPage.locator('.row.waiting .ask').textContent(), 'Bash command · rm -rf build', 'A waiting row says what it asks');
+    const natural = await overlayPage.evaluate(() => Math.ceil(document.querySelector('header').getBoundingClientRect().height + document.querySelector('#rail').getBoundingClientRect().height + 2));
+    assert.equal(Math.round((await lastSize()).height), natural, 'The window fits its list');
+    await follow();
+    assert.equal(await overlayPage.locator('#list').evaluate(el => el.scrollHeight <= el.clientHeight), true, 'A fitted list needs no scrolling');
+    assert.equal(await overlayPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'overlay: horizontal overflow');
+    await overlayPage.evaluate(() => {
+      window.qa.picked = [];
+      window.qa.caps = [];
+      const on = (event, list) => window.__TAURI_INTERNALS__.invoke('plugin:event|listen', { event, handler: window.__TAURI_INTERNALS__.transformCallback(e => list.push(e.payload)) });
+      on('overlay-pick', window.qa.picked);
+      on('overlay-cap', window.qa.caps);
+    });
+    await overlayPage.locator('.row').nth(1).click();
+    await overlayPage.waitForFunction(() => window.qa.picked.length === 1);
+    assert.deepEqual(await overlayPage.evaluate(() => window.qa.picked), ['pane-1'], 'A click reports that agent');
+    await overlayPage.mouse.move(0, 0);
+    await overlayPage.screenshot({ path: `${out}/overlay-${width}.png`, animations: 'disabled' });
+    // A long list stops at the cap and scrolls.
+    const many = { ...few, cap: 200, rows: [...few.rows, ...['a', 'b', 'c', 'd', 'e'].map((n, i) => row(n, i + 3, false))] };
+    await overlayPage.evaluate(state => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-rows', payload: state }), many);
+    await overlayPage.waitForFunction(() => document.querySelectorAll('.row').length === 8);
+    assert.equal(Math.round(await follow()), 200, 'A long list stops at the cap');
+    assert.equal(await overlayPage.locator('#list').evaluate(el => el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY === 'auto'), true, 'Past the cap, the list scrolls');
+    await overlayPage.screenshot({ path: `${out}/overlay-capped-${width}.png`, animations: 'disabled' });
+    // Dragging the height sets the cap once you let go.
+    await overlayPage.setViewportSize({ width: 300, height: 160 });
+    await overlayPage.waitForFunction(() => window.qa.caps.length === 1);
+    assert.deepEqual(await overlayPage.evaluate(() => window.qa.caps), [160], 'A dragged height becomes the cap');
+    await overlayPage.setViewportSize({ width: 220, height: 110 });
+    assert.equal(await overlayPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'overlay at its minimum size: horizontal overflow');
+    await overlayPage.screenshot({ path: `${out}/overlay-min-${width}.png`, animations: 'disabled' });
+    await overlayPage.setViewportSize({ width: 300, height: 240 });
+    await overlayPage.evaluate(state => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-rows', payload: state }), { ...few, rows: [] });
+    await overlayPage.waitForSelector('.empty');
+    assert.equal(await overlayPage.locator('.empty').textContent(), 'No agents are working or waiting.', 'Always mode with nothing to list says so');
+    await follow();
+    await overlayPage.screenshot({ path: `${out}/overlay-empty-${width}.png`, animations: 'disabled' });
+    checks += 4;
+    await overlayPage.close();
     await page.goto(base + '?dashboard&needs-session');
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     await page.click('#dashboard-btn');
@@ -789,7 +981,11 @@ try {
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     const flashes = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'plugin:window|request_user_attention').length);
-    await page.evaluate(() => { document.hasFocus = () => false; window.qa.panes[0].onOut.onmessage('\x07'); });
+    await page.evaluate(async () => {
+      window.qa.focused = false; // The native window, not document.hasFocus().
+      await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://blur' });
+      window.qa.panes[0].onOut.onmessage('\x07');
+    });
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 1);
     assert.equal(await page.evaluate(() => window.qa.beeps), 1, 'A wake chimes by default');
     assert.equal(await flashes(), 1, 'A wake while unfocused flashes the taskbar by default');

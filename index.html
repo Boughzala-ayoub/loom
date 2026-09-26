@@ -21,7 +21,7 @@
         <span id="wsstat"></span>
       </nav>
       <span class="spacer"></span>
-      <button id="dashboard-btn" aria-label="Control center" aria-pressed="false" title="Control center (Ctrl+Shift+D)"><i class="i i-layout-grid"></i><span class="lbl">Overview</span></button>
+      <button id="dashboard-btn" aria-label="Overview" aria-pressed="false" title="Overview (Ctrl+Shift+D)"><i class="i i-layout-grid"></i><span class="lbl">Overview</span></button>
       <button id="search" title="Go to any thread or agent (Ctrl+K)"><i class="i i-search"></i><span class="lbl">Go to agent…</span><kbd>Ctrl K</kbd></button>
       <button id="waiting" class="hidden" title="Choose a waiting agent. F3 jumps to the next one."></button>
       <button id="plan" class="hidden" title="Claude plan usage"></button>
@@ -42,7 +42,7 @@
       <div id="main">
         <section id="dashboard" class="hidden" aria-labelledby="dashboard-title">
           <div class="dashboard-head">
-            <div><h1 id="dashboard-title">Control center</h1><p id="dashboard-summary" class="muted"></p></div>
+            <h1 id="dashboard-title">Overview</h1>
             <div class="dashboard-actions"><button id="dashboard-back">Back to thread</button><button id="dashboard-next" class="primary">Next waiting <kbd>F3</kbd></button></div>
           </div>
           <div id="dashboard-counts" role="group" aria-label="Filter by status"></div>
@@ -152,16 +152,17 @@
       <div class="preference-row"><span>Theme</span><button id="theme" title="Colour theme">loom</button></div>
       <div class="preference-row"><span>Notifications</span><button id="silent" title="Chime and taskbar flash when an agent wants you">Sound and taskbar</button></div>
       <div class="preference-row"><span>Plan usage</span><button id="plan-usage" title="Claude and Codex plan usage in the top bar">shown</button></div>
+      <div class="preference-row"><span>Agent overlay</span><button id="overlay-pref" aria-pressed="false">off</button></div>
       <div class="preference-actions"><button id="vscode" title="Open this thread in VS Code (F5)">Open in VS Code</button><button id="shortcuts">Keyboard shortcuts <kbd>F1</kbd></button></div>
     </section>
 
     <dialog id="dashboard-preview" aria-labelledby="dashboard-preview-title">
-      <div class="panel-heading"><h2 id="dashboard-preview-title"></h2><button id="dashboard-preview-close" class="icon" aria-label="Close preview"><i class="i i-x"></i></button></div>
+      <div class="panel-heading"><h2 id="dashboard-preview-title"></h2><div class="dashboard-preview-nav"><button id="dashboard-preview-prev" class="icon" aria-label="Previous session" title="Previous session (←)"><i class="i i-chevron"></i></button><span id="dashboard-preview-position"></span><button id="dashboard-preview-next" class="icon" aria-label="Next session" title="Next session (→)"><i class="i i-chevron"></i></button><button id="dashboard-preview-close" class="icon" aria-label="Close preview"><i class="i i-x"></i></button></div></div>
       <p id="dashboard-preview-meta" class="muted"></p>
       <div class="dashboard-preview-bar"><span id="dashboard-preview-status"></span><span id="dashboard-preview-usage" class="muted"></span></div>
       <div id="dashboard-preview-output" role="region" aria-label="Live terminal"></div>
       <p id="dashboard-control-result" role="status"></p>
-      <div class="dashboard-preview-actions dashboard-preview-footer"><button id="dashboard-process" type="button">Stop process</button><span class="muted">Click the terminal to interact. Esc goes to the agent.</span><button id="dashboard-preview-open">Open thread</button></div>
+      <div class="dashboard-preview-actions dashboard-preview-footer"><button id="dashboard-process" type="button">Stop process</button><span class="muted">Click the terminal to type; Esc goes to the agent. ← → switch sessions, F3 the next waiting one.</span><button id="dashboard-preview-open">Open thread</button></div>
     </dialog>
 
     <!-- Ctrl+K goes to any agent; the waiting chip opens the same list narrowed to
@@ -214,7 +215,9 @@
       <h2 id="keys-title">Keyboard shortcuts</h2>
       <table>
         <tr><td>Ctrl+K</td><td>go to any thread or agent</td></tr>
-        <tr><td>Ctrl+Shift+D</td><td>toggle the control center</td></tr>
+        <tr><td>Ctrl+Shift+D</td><td>toggle the overview</td></tr>
+        <tr><td>↑ / ↓, Enter in the overview</td><td>move between sessions, preview one</td></tr>
+        <tr><td>← / →, F3 in a preview</td><td>previous / next session, next waiting one</td></tr>
         <tr><td>F1</td><td>this list</td></tr>
         <tr><td>F2</td><td>zoom the focused pane</td></tr>
         <tr><td>F3</td><td>jump to the next pane waiting on you</td></tr>
