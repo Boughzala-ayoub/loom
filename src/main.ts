@@ -1558,8 +1558,8 @@ class Pane {
     }
     this.sid = sid ?? crypto.randomUUID();
     this.cfg.classList.toggle("hidden", !this.isClaude); // nothing to configure in a shell
-    // An agent owns the alternate screen, and what scrolls off it is gone
-    // either way — a deep normal-buffer scrollback would only hold memory.
+    // Bound history per pane. Inline agents such as Codex use this scrollback;
+    // alternate-screen agents keep their transcript themselves.
     this.term.options.scrollback = this.agent === "shell" ? 5000 : 1500;
     this.term.open(this.host);
     // WebGL from the start, hidden or not (the budget in gpu() still caps it).

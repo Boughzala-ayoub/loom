@@ -17,10 +17,12 @@ export function agentOf(cmd: string): Agent {
  * pane turns into its yellow "waiting" state. Off by default, and by default
  * only when the terminal reports itself unfocused — hidden threads are, the
  * one you're looking at isn't, and it still wants the beep.
+ * Inline mode keeps history in xterm so its scrollbar can be dragged. Codex's
+ * alternate screen owns its transcript and leaves xterm no scrollback.
  * The title carries the thread id from startup, which notify only reports once
  * the first turn ends: see codexThread. */
 const CODEX_FLAGS =
-  "-c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
+  "-c tui.alternate_screen=never -c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
 
 /** The thread id in a codex pane's title. Codex cuts the item to 29
  * characters + "...", still unique enough to find the rollout by, and appends

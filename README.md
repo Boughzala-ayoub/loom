@@ -43,6 +43,30 @@ directly, run `node scripts/setup-native.mjs` from the repo root once per worktr
 The crate's own bundled fallback bindings
 are Linux-generated and fail their layout asserts on MSVC, so bindgen has to run.
 
+### Update the installed app while Loom is running
+
+From this checkout, run:
+
+```sh
+npm run update
+```
+
+This builds the current code and replaces `%LOCALAPPDATA%\Loom\loom.exe`.
+The running app and its terminals stay open. New features take effect on the
+next normal launch. The command keeps the previous executable beside the new
+one as `loom-before-update-<id>.exe` and prints its path. Backups are kept until
+you remove them after the old Loom process exits.
+
+For a custom installation directory or an existing build, use:
+
+```sh
+npm run update -- -InstallDir "D:\Apps\Loom"
+npm run update -- -Source "C:\builds\loom.exe"
+```
+
+`-Source` skips the build. A failed build leaves the installed app unchanged.
+The update command does not run the installer or restart Loom.
+
 ## Using it
 
 `+ Thread` opens the new-thread form. **Open checkout** starts an agent in

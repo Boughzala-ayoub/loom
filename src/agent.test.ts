@@ -12,7 +12,7 @@ function check(label: string, got: unknown, want: unknown) {
 
 const S = "11111111-2222-4333-8444-555555555555";
 const H = ["--settings", "$LOOM_HOOKS"];
-const CX = "-c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
+const CX = "-c tui.alternate_screen=never -c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
 
 check("agentOf claude", agentOf("claude --effort max"), "claude");
 check("agentOf claudette is a shell", agentOf("claudette"), "shell");
@@ -45,6 +45,7 @@ check(
 );
 
 check("fresh codex", launch("codex", S, false), ["cmd.exe", "/d", "/s", "/c", `codex ${CX} ${CODEX_NOTIFY}`]);
+check("Codex preserves an explicit screen-mode override", launch("codex -c tui.alternate_screen=always", S, false)[4], `codex ${CX} ${CODEX_NOTIFY} -c tui.alternate_screen=always`);
 check(
   "restored codex resumes its own real session",
   launch("codex -m o3", S, true, undefined, S),
