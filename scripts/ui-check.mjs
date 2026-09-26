@@ -895,10 +895,14 @@ try {
     });
     await audit('image-preview-error');
     await page.click('#diff-close');
-    await clickTerminalPath('src/main.ts:12');
-    await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'open_vscode' && c.args.goto.endsWith('src/main.ts:12')));
-    await clickTerminalPath('~\\src\\main.ts:12:3');
-    await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'open_vscode' && c.args.goto === 'C:\\Users\\test\\src\\main.ts:12:3'));
+    const editorCalls = await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'open_vscode').length);
+    for (const path of ['src/main.ts:12', '~\\src\\main.ts:12:3', 'C:\\Users\\test\\src\\main.ts:12', '/C:/Users/test/src/main.ts:473']) {
+      await clickTerminalPath(path);
+      assert.equal(await page.locator('.grid:not(.hidden) .pane').first().locator('.xterm').evaluate(el => el.classList.contains('xterm-cursor-pointer')), false, 'Ordinary file paths are not links');
+      assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'open_vscode').length), editorCalls, 'Clicking a file path must not launch VS Code');
+      assert.equal(await page.locator('#diff').isVisible(), false, 'Clicking a file path leaves the terminal visible');
+    }
+    await audit('terminal-file-paths');
     if (process.env.UI_IMAGE_ONLY) {
       await context.close();
       continue;

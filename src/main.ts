@@ -42,8 +42,6 @@ function confirm(message: string, options: { title: string; kind?: string; actio
   });
 }
 
-const ABS_RE = /^(?:[A-Za-z]:|[\\/])/;
-
 /** The live value of a palette custom property — one source of truth for the
  * bits of chrome CSS can't reach (xterm's own theme, find decorations). */
 const cssVar = (n: string) =>
@@ -1487,21 +1485,17 @@ class Pane {
     this.term.loadAddon(this.fit);
     this.term.loadAddon(this.search);
     this.term.loadAddon(new WebLinksAddon((_e, uri) => void openUrl(uri).catch(() => {})));
-    // Registered after web-links, so a URL still wins over the path shape inside it.
+    // Only images are clickable file paths. Web links still take precedence.
     this.term.registerLinkProvider({
       provideLinks: (y, cb) => {
         cb(
-          fileLinks(this.term.buffer.active, y).map((link) => ({
+          fileLinks(this.term.buffer.active, y).filter(link => imageMime(link.text.replace(/:\d+(?::\d+)?$/, ""))).map((link) => ({
             ...link,
             activate: async () => {
               try {
                 const target = /^~[\\/]/.test(link.text) ? await join(await homeDir(), link.text.slice(2)) : link.text;
                 const path = target.replace(/:\d+(?::\d+)?$/, "");
-                if (imageMime(path)) return openTab(this.th, basename(path), { file: path });
-                await invoke("open_vscode", {
-                  dir: this.th.dir,
-                  goto: ABS_RE.test(target) ? target : `${this.th.dir}\\${target}`,
-                });
+                openTab(this.th, basename(path), { file: path });
               } catch (e) { toast(String(e)); }
             },
           })),
