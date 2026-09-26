@@ -16,9 +16,9 @@ const SHELL_INIT: &str = include_str!("shell-init.ps1");
 /// Its statusline is loom.exe itself (helper.rs), whose path replaces
 /// __LOOM_EXE__ at spawn.
 const CLAUDE_HOOKS: &str = include_str!("claude-hooks.json");
-/// opencode plugin: turns session.idle into the same wake marker claude's Stop
-/// hook drops. Installed globally (opencode loads local plugins from nowhere
-/// else); inert outside a Loom pane.
+/// opencode plugin: turns session.idle and question/permission prompts into
+/// the same wake marker claude's Stop hook drops. Installed globally (opencode
+/// loads local plugins from nowhere else); inert outside a Loom pane.
 const OPENCODE_PLUGIN: &str = include_str!("loom-opencode.js");
 
 struct Session {
@@ -828,6 +828,14 @@ fn opencode_export_messages(v: &serde_json::Value) -> LastMessages {
     last
 }
 
+/// `sid` is the full thread id (notify) or the 29-character prefix codex's
+/// pane title carries until then (agent.ts: codexThread).
+fn rollout_is(path: &std::path::Path, sid: &str) -> bool {
+    path.file_stem().and_then(|n| n.to_str())
+        .and_then(|n| n.get(n.len().saturating_sub(36)..))
+        .is_some_and(|id| id.starts_with(sid))
+}
+
 #[tauri::command(async)]
 fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> HashMap<String, LastMessages> {
     let mut codex_files = Vec::new();
@@ -840,7 +848,7 @@ fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -
         if sid.is_empty() || sid.len() > 128 || !sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return None; }
         let last = match agent.as_str() {
             "claude" => recent_messages(&usage::transcript(&marks, &home, &id, &dir, &sid), "claude"),
-            "codex" => codex_files.iter().find(|(_, path)| path.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&format!("-{sid}.jsonl"))))
+            "codex" => codex_files.iter().find(|(_, path)| rollout_is(path, &sid))
                 .map(|(_, path)| recent_messages(path, "codex")).unwrap_or_default(),
             "opencode" => opencode_messages(&dir, &sid),
             _ => return None,
@@ -1144,6 +1152,10 @@ mod tests {
             serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","phase":"analysis","content":[{"type":"output_text","text":"Private reasoning"}]}}),
         ];
         std::fs::write(&codex, records.iter().map(|v| format!("{v}\n")).collect::<String>()).unwrap();
+        let rollout = std::path::Path::new("rollout-2026-09-26T05-42-29-01a0dc05-98a2-70c1-abe8-e95fe172076e.jsonl");
+        assert!(super::rollout_is(rollout, "01a0dc05-98a2-70c1-abe8-e95fe172076e"));
+        assert!(super::rollout_is(rollout, "01a0dc05-98a2-70c1-abe8-e95fe"), "the title's cut id");
+        assert!(!super::rollout_is(rollout, "01a0dc05-99dc-7242-b5fc-33105"), "a sibling thread");
         assert_eq!(super::recent_messages(&codex, "codex"), super::LastMessages {
             user: "New request".into(), agent: "Working on it".into(),
         });

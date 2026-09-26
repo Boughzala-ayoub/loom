@@ -11,7 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
-import { agentOf, launch, ownSession, validSessionId, type Agent } from "./agent";
+import { agentOf, codexThread, launch, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
 import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { wheelInit } from "./scroll";
@@ -1351,6 +1351,7 @@ class Pane {
     this._dead = on;
   }
   appTitle = ""; // OSC 0/2 from the running app
+  codexThread = ""; // the thread id codex titles its pane with (agent.ts: codexThread)
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
@@ -1566,6 +1567,8 @@ class Pane {
     // streaming in the background ate ~90% of the main thread; on WebGL, ~20%.
     this.gpu(true);
     this.term.onTitleChange((t) => {
+      const thread = this.agent === "codex" ? codexThread(t) : undefined;
+      if (thread) return void (this.codexThread = thread); // an id, not a name to show
       // Agents redraw the title with a spinner glyph while working, ~10 times a
       // second; paint() strips it, so those are the same title — skip them.
       const same = t.replace(SPIN, "") === this.appTitle.replace(SPIN, "");
@@ -2477,7 +2480,7 @@ let dashboardTimer = 0;
 let dashboardSignature = "";
 let dashboardCompact = false;
 type DashboardMessages = { user: string; agent: string };
-const dashboardMessages = new Map<string, DashboardMessages & { session: string; input: number; waiting: number; dead: boolean }>();
+const dashboardMessages = new Map<string, DashboardMessages & { session: string; input: number; busy: number; waiting: number; dead: boolean }>();
 let dashboardMessagesBusy = false;
 let dashboardMessagesPolled = 0;
 let dashboardNext: Pane | undefined;
@@ -2490,16 +2493,19 @@ const dashboardPreviewOutput = $("#dashboard-preview-output");
 let dashboardControlBusy = false;
 const dashboardQuery = $<HTMLInputElement>("#dashboard-query");
 const dashboardProject = $<HTMLSelectElement>("#dashboard-project");
-const dashboardSession = (p: Pane) => p.agent === "claude" ? p.sid : p.sessionId || "";
+// Codex's title names its thread from startup; notify only once a turn ends.
+const dashboardSession = (p: Pane) => p.agent === "claude" ? p.sid : p.codexThread || p.sessionId || "";
 
 async function refreshDashboardMessages(force = false) {
   if (!dashboardOpen || dashboardCompact || dashboardMessagesBusy || !force && Date.now() - dashboardMessagesPolled < 4000) return;
   dashboardMessagesPolled = Date.now();
   const requests = threads.flatMap(t => t.panes).filter(p => p.agent !== "shell" && dashboardSession(p))
-    .map(p => ({ p, session: dashboardSession(p), input: p.lastIn, waiting: p.waitingSince, dead: p.dead }))
-    .filter(({ p, session, input, waiting, dead }) => {
+    // busy: a read in the moment after Enter can miss the new prompt; once the
+    // agent is working, it is written. A reply sent from a card is no keystroke.
+    .map(p => ({ p, session: dashboardSession(p), input: p.lastIn, busy: p.busySince, waiting: p.waitingSince, dead: p.dead }))
+    .filter(({ p, session, input, busy, waiting, dead }) => {
       const old = dashboardMessages.get(p.id);
-      return force || !old || old.session !== session || old.input !== input || old.waiting !== waiting || old.dead !== dead;
+      return force || !old || old.session !== session || old.input !== input || old.busy !== busy || old.waiting !== waiting || old.dead !== dead;
     });
   if (!requests.length) return;
   dashboardMessagesBusy = true;
@@ -2511,9 +2517,9 @@ async function refreshDashboardMessages(force = false) {
       const got = await invoke<Record<string, DashboardMessages>>("last_messages", {
         panes: batch.map(({ p, session }) => [p.id, p.agent, p.th.dir, session]),
       });
-      for (const { p, session, input, waiting, dead } of batch) {
+      for (const { p, session, input, busy, waiting, dead } of batch) {
         if (dashboardSession(p) !== session) continue;
-        dashboardMessages.set(p.id, { session, input, waiting, dead, user: got[p.id]?.user || "", agent: got[p.id]?.agent || "" });
+        dashboardMessages.set(p.id, { session, input, busy, waiting, dead, user: got[p.id]?.user || "", agent: got[p.id]?.agent || "" });
       }
       dashboardSignature = "";
       if (dashboardOpen) renderDashboard();
@@ -2547,14 +2553,17 @@ function toggleDashboard(on = !dashboardOpen) {
   save();
 }
 
-/** The live screen, not wherever you scrolled, with wrapped rows joined. */
-function liveScreen(p: Pane) {
+/** The live screen, not wherever you scrolled, with wrapped rows joined. A
+ * menu wants the rows as drawn (`joined` false): Claude pads rules and headers
+ * to full width, the terminal flags the next row as their wrap, and a joined
+ * rule no longer ends the question above the options. */
+function liveScreen(p: Pane, joined = true) {
   const buf = p.term.buffer.active;
   const lines: string[] = [];
   for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
     const line = buf.getLine(y);
     const text = line?.translateToString(false) ?? "";
-    if (line?.isWrapped && lines.length) lines[lines.length - 1] += text;
+    if (joined && line?.isWrapped && lines.length) lines[lines.length - 1] += text;
     else lines.push(text);
   }
   return lines.join("\n");
@@ -2578,7 +2587,7 @@ function renderDashboard() {
     const age = stamp ? `${STATUS[state]} · ${ago(stamp)}` : STATUS[state];
     const cached = dashboardMessages.get(p.id);
     const messages = cached?.session === dashboardSession(p) ? cached : undefined;
-    const menu = state === "waiting" && p.agent !== "shell" ? readMenu(screen) : null;
+    const menu = state === "waiting" && p.agent !== "shell" ? readMenu(liveScreen(p, false)) : null;
     return { th, p, state, preview, age, messages, menu };
   }));
   const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
@@ -2814,7 +2823,7 @@ async function sendReply(p: Pane, text: string) {
 async function choose(p: Pane, menu: AgentMenu, i: number) {
   const same = (m: AgentMenu | null) => m?.options.join("\n") === menu.options.join("\n");
   for (let step = 0; step <= menu.options.length; step++) {
-    const now = readMenu(liveScreen(p));
+    const now = readMenu(liveScreen(p, false));
     if (!now || !same(now)) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
     if (now.selected === i) return submit(p);
     await keys(p, (p.term.modes.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + (now.selected > i ? "A" : "B"));
@@ -3017,7 +3026,7 @@ function syncOverlay() {
       waiting: state === "waiting",
       name: th.panes.length > 1 ? `${th.name} · ${th.panes.indexOf(p) + 1}` : th.name,
       time: ago(state === "waiting" ? p.waitingSince : p.busySince),
-      ask: state === "waiting" && p.agent !== "shell" ? asking(readMenu(liveScreen(p))) : "",
+      ask: state === "waiting" && p.agent !== "shell" ? asking(readMenu(liveScreen(p, false))) : "",
     }));
   const show = wanted && (rows.length > 0 || overlayMode === "always");
   if (show) {

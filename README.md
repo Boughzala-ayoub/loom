@@ -148,7 +148,9 @@ silently to a fresh conversation after a resume error.
 
 Codex reports its thread through its `notify` setting, which Loom passes on the
 command line: after every completed turn `loom.exe --codex-notify` records the
-thread for that pane. Nothing to trust or enable. OpenCode uses Loom's local plugin.
+thread for that pane. Nothing to trust or enable. Until that first turn ends, the
+overview finds the conversation by the thread id Codex puts in the pane's title
+(`tui.terminal_title`). OpenCode uses Loom's local plugin.
 
 Older panes have no verified session ID and show **Choose session** in the
 pane, which lists the folder's conversations for that agent.
@@ -360,7 +362,9 @@ Each agent says "done" its own way, and Loom listens to all of them:
   pane when a turn ends or it wants an approval. No files, no hooks.
 - **opencode** loads local plugins from `~\.config\opencode\plugins\` and from
   nowhere else, so the first opencode pane installs `loom.js` there. It writes
-  the wake marker below on `session.idle` and does nothing outside a Loom pane.
+  the wake marker below on `session.idle`, `question.asked` and
+  `permission.asked` (a question or permission prompt blocks mid-turn and never
+  goes idle), and does nothing outside a Loom pane.
 - **claude** uses hooks, below. Terminal BEL and OSC 99 (kitty notifications)
   count too, for anything else that rings.
 
@@ -426,7 +430,7 @@ takes itself for a child session and stops saving its transcript.
 - Windows only (ConPTY, `cmd.exe` / `powershell.exe`, hardcoded).
 - Create PR knows GitHub remotes only; other hosts get the error in the panel.
 - Startup commands are split on whitespace: no quoted arguments in the list.
-- Codex panes override a `notify` program set in `~/.codex/config.toml`.
+- Codex panes override `notify` and `tui.terminal_title` set in `~/.codex/config.toml`.
 - Hidden threads keep their xterm buffers; agent panes cap scrollback at 1500
   lines to hold that down.
 - Pane layout weights reset when the grid changes shape, including after a resize that changes its column count.

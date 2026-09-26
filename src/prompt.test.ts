@@ -69,6 +69,29 @@ const ask = `
 `;
 check("Options with descriptions", readMenu(ask)?.options, ["Split view", "Modal", "Type something."]);
 
+// Claude Code 2.1's AskUserQuestion, rows as drawn (liveScreen(p, false)).
+const claudeAsk = `
+❯ Use the AskUserQuestion tool to ask me whether I prefer tea
+  or coffee. Do nothing else.
+──────────────────────────────────────────────────────────────
+ ☐ Drink
+
+Do you prefer tea or coffee?
+
+❯ 1. Tea
+     You prefer tea.
+  2. Coffee
+     You prefer coffee.
+  3. Type something.
+──────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+`;
+check("Claude AskUserQuestion", readMenu(claudeAsk), {
+  question: ["☐ Drink", "Do you prefer tea or coffee?"], options: ["Tea", "Coffee", "Type something."], selected: 0, multi: false,
+});
+
 const multi = `
  Which checks should run?
  ❯ 1. [ ] Unit tests

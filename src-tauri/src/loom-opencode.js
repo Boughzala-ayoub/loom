@@ -4,12 +4,16 @@
 // config "plugin" list takes npm packages only, so the global plugins folder
 // is the one place a local file is picked up from.
 //
-// session.idle = the agent finished its turn and is waiting on you. The marker
-// is the same one claude's Stop hook drops: %TEMP%\loom-wait\<pane id>, which
-// Loom polls and turns into the pane's yellow "waiting" state.
+// session.idle = the agent finished its turn and is waiting on you. A question
+// or permission prompt blocks mid-turn and never goes idle, so those ring too.
+// The marker is the same one claude's Stop hook drops:
+// %TEMP%\loom-wait\<pane id>, which Loom polls and turns into the pane's
+// yellow "waiting" state.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+const WAKES = new Set(["session.idle", "question.asked", "permission.asked"]);
 
 export const Loom = async ({ client }) => ({
   "chat.message": async ({ sessionID }) => {
@@ -25,7 +29,7 @@ export const Loom = async ({ client }) => ({
       remember(event.properties?.info?.id);
     }
     const pane = process.env.LOOM_PANE;
-    if (!pane || event.type !== "session.idle") return;
+    if (!pane || !WAKES.has(event.type)) return;
     try {
       const dir = path.join(os.tmpdir(), "loom-wait");
       fs.mkdirSync(dir, { recursive: true });

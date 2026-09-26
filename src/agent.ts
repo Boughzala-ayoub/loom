@@ -16,9 +16,16 @@ export function agentOf(cmd: string): Agent {
 /** Codex answers a finished turn (and an approval prompt) with OSC 9, which the
  * pane turns into its yellow "waiting" state. Off by default, and by default
  * only when the terminal reports itself unfocused — hidden threads are, the
- * one you're looking at isn't, and it still wants the beep. */
+ * one you're looking at isn't, and it still wants the beep.
+ * The title carries the thread id from startup, which notify only reports once
+ * the first turn ends: see codexThread. */
 const CODEX_FLAGS =
-  "-c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always";
+  "-c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
+
+/** The thread id in a codex pane's title. Codex cuts the item to 29
+ * characters + "...", still unique enough to find the rollout by, and appends
+ * a spinner glyph while it works. */
+export const codexThread = (title: string) => /^([0-9a-f]{8}-[0-9a-f-]{12,27})(?:\.\.\.)?(?:\s+\S)?$/u.exec(title)?.[1];
 
 // Codex runs `notify` after every completed turn with the event as one JSON
 // argument, thread id included — and unlike its hooks, it needs no trust

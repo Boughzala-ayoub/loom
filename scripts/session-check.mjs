@@ -46,7 +46,16 @@ try {
   assert.equal(readFileSync(marker(process.env.LOOM_PANE), 'utf8'), 'ses_first');
   await plugin['chat.message']({ sessionID: 'ses_selected' });
   assert.equal(readFileSync(marker(process.env.LOOM_PANE), 'utf8'), 'ses_selected');
-  console.log('PASS per-pane Codex markers, exact resume, ephemeral/guardian rejection, OpenCode selection and subagent isolation');
+  // A question or permission prompt blocks mid-turn: it must ring like session.idle.
+  const wake = join(tmpdir(), 'loom-wait', process.env.LOOM_PANE);
+  for (const type of ['session.idle', 'question.asked', 'permission.asked']) {
+    await plugin.event({ event: { type, properties: {} } });
+    assert.ok(existsSync(wake), `${type} must drop the wake marker`);
+    unlinkSync(wake);
+  }
+  await plugin.event({ event: { type: 'question.replied', properties: {} } });
+  assert.ok(!existsSync(wake), 'an answer must not ring');
+  console.log('PASS per-pane Codex markers, exact resume, ephemeral/guardian rejection, OpenCode selection, subagent isolation and OpenCode wakes');
 } finally {
   for (const suffix of ['0', '1', 'oc']) if (existsSync(marker(pane + suffix))) unlinkSync(marker(pane + suffix));
   rmSync(codexHome, { recursive: true, force: true });

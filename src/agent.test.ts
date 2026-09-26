@@ -1,5 +1,5 @@
 // Self-check for agentOf / launch. Run: node src/agent.test.ts
-import { agentOf, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
+import { agentOf, codexThread, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
 
 let fails = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -12,7 +12,7 @@ function check(label: string, got: unknown, want: unknown) {
 
 const S = "11111111-2222-4333-8444-555555555555";
 const H = ["--settings", "$LOOM_HOOKS"];
-const CX = "-c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always";
+const CX = "-c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
 
 check("agentOf claude", agentOf("claude --effort max"), "claude");
 check("agentOf claudette is a shell", agentOf("claudette"), "shell");
@@ -62,6 +62,11 @@ check("two opencode panes stay distinct", launch("opencode", S, true, undefined,
 check("explicit codex resume isn't doubled", launch(`codex resume ${S}`, S, true)[4], `codex ${CX} ${CODEX_NOTIFY} resume ${S}`);
 check("explicit opencode session isn't doubled", launch("opencode --session ses_own", S, true, undefined, "ses_other")[4], "opencode --session ses_own");
 check("session IDs reject shell injection", validSessionId("abc & whoami"), false);
+// Titles codex 0.157 really drew with tui.terminal_title=['thread-id'].
+check("codex title: cut thread id", codexThread("01a0dc17-ee73-7f70-8741-74e25..."), "01a0dc17-ee73-7f70-8741-74e25");
+check("codex title: working spinner", codexThread("01a0dc54-f0cf-7cf1-a727-6ebc1... ⠴"), "01a0dc54-f0cf-7cf1-a727-6ebc1");
+check("codex title: whole thread id", codexThread("01a0dc05-98a2-70c1-abe8-e95fe172076e"), "01a0dc05-98a2-70c1-abe8-e95fe172076e");
+check("codex title: anything else is a name", codexThread("Ready | 01a0dc18-3d9f-7fd1-bc1e-e076f..."), undefined);
 check("ownSession codex resume", ownSession("codex resume abc"), true);
 check("ownSession codex flags only", ownSession("codex -m o3"), false);
 check("ownSession opencode --session=", ownSession("opencode --session=ses_x"), true);
