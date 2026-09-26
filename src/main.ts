@@ -1823,6 +1823,7 @@ class Pane {
     if (!this.waiting) return;
     this.waiting = false;
     this.paint();
+    if (dashboardOpen) renderDashboard();
   }
 
   paint(index = this.th.panes.indexOf(this)) {
@@ -1904,7 +1905,7 @@ class Pane {
   }
 
   focus() {
-    if (!dashboardPreview.open || dashboardPreviewPane !== this) this.seen(); // Inspecting a preview stays unread until input is sent.
+    this.seen(); // Opening a preview skips this method; explicitly focusing its pane acknowledges it.
     this.term.focus();
   }
 

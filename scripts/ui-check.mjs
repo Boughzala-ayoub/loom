@@ -268,6 +268,25 @@ try {
     assert.equal(await page.locator('#waiting').textContent(), '2 waiting', 'Overview must not mark the selected terminal as seen');
     assert.deepEqual(await page.locator('.dashboard-row').evaluateAll(rows => rows.map(r => r.dataset.state)), ['waiting', 'waiting', 'busy', 'dead']);
     await audit('dashboard-all');
+    await page.evaluate(() => window.qa.dashboardPanes[1].onOut.onmessage('\x1b[2J\x1b[HDone.\x1b]9;ready\x07'));
+    await page.waitForFunction(() => document.querySelector('#waiting').textContent === '3 waiting');
+    await page.locator('.dashboard-row').filter({ hasText: 'search-polish / codex' }).click();
+    assert.equal(await page.locator('#waiting').textContent(), '3 waiting', 'Opening a Codex preview leaves it unread');
+    await page.evaluate(() => { window.qa.ackStart = window.qa.calls.length; });
+    for (let click = 0; click < 2; click++) {
+      if (click) {
+        await page.evaluate(() => window.qa.dashboardPanes[1].onOut.onmessage('\x1b]9;ready\x07'));
+        await page.waitForFunction(() => document.querySelector('#waiting').textContent === '3 waiting');
+      }
+      await page.locator('#dashboard-preview-output .xterm-screen').click();
+      assert.equal(await page.locator('#waiting').textContent(), '2 waiting', 'Clicking Codex acknowledges it, including when already focused');
+      assert.equal(await page.locator('#dashboard-preview-status').getAttribute('data-state'), '', 'Preview status updates immediately on acknowledgement');
+    }
+    assert.equal(await page.evaluate(() => window.qa.calls.slice(window.qa.ackStart).some(c => c.cmd === 'pty_write')), false, 'Acknowledging a preview needs no terminal input');
+    await audit('dashboard-codex-acknowledged');
+    await page.click('#dashboard-preview-close');
+    await page.evaluate(() => window.qa.dashboardPanes[1].onOut.onmessage('\x1b[2J\x1b[HImplementing thread navigation\r\nWorking (3s, esc to interrupt)'));
+    await page.waitForFunction(() => [...document.querySelectorAll('.dashboard-row')].some(r => r.textContent.includes('search-polish / codex') && r.dataset.state === 'busy'));
     assert.equal(await page.locator('#dashboard-counts').evaluate(bar => [...bar.children].every(button => button.getBoundingClientRect().right <= bar.getBoundingClientRect().right + 1)), true, 'Status filters stay aligned with the session list');
     assert.equal(await page.locator('.dashboard-group').count(), 3);
     const previewClaude = () => page.locator('.dashboard-row').filter({ hasText: 'search-polish / claude' }).click();
@@ -308,7 +327,9 @@ try {
     await previewClaude();
     assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'pty_spawn').length), await page.evaluate(() => window.qa.previewSpawnCount), 'Preview never starts a duplicate process');
     await page.locator('#dashboard-preview-output .xterm-screen').click();
-    assert.equal(await page.locator('#waiting').textContent(), '2 waiting', 'Focusing the live terminal keeps its attention signal');
+    assert.equal(await page.locator('#waiting').textContent(), '1 waiting', 'Clicking the Claude preview acknowledges only that pane');
+    await page.evaluate(() => window.qa.dashboardPanes[0].onOut.onmessage('\x1b]9;ready\x07'));
+    await page.waitForFunction(() => document.querySelector('#waiting').textContent === '2 waiting');
     await page.evaluate(() => { window.qa.failWrite = true; });
     await page.keyboard.type('x');
     await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('Test terminal write failed'));
