@@ -89,7 +89,9 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
     }
     case "codex": {
       const select = resume && !own ? ` resume${sessionId ? " " + sessionId : ""}` : "";
-      return cmdHost(`codex${select} ${CODEX_FLAGS} ${CODEX_NOTIFY}${rest ? " " + rest : ""}`);
+      // Our -c overrides require embedded mode; choose it explicitly to avoid the fallback warning.
+      const standalone = args.includes("--no-daemon") ? "" : " --no-daemon";
+      return cmdHost(`codex${select}${standalone} ${CODEX_FLAGS} ${CODEX_NOTIFY}${rest ? " " + rest : ""}`);
     }
     case "opencode": {
       const select = resume && sessionId && !own ? ` --session ${sessionId}` : "";
