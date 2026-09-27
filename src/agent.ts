@@ -8,7 +8,10 @@
  * shell-init.ps1 dot-sourced (OSC 133 command marks, the busy dot). */
 export type Agent = "claude" | "codex" | "opencode" | "shell";
 
+export const opencodeCommand = (cmd: string) => /^(opencode[12]?)(?=\s|$)/.exec(cmd.trim())?.[1];
+
 export function agentOf(cmd: string): Agent {
+  if (opencodeCommand(cmd)) return "opencode";
   const m = /^(claude|codex|opencode)(\s|$)/.exec(cmd.trim());
   return (m?.[1] as Agent) ?? "shell";
 }
@@ -43,7 +46,7 @@ export const validSessionId = (id: string) => /^[a-zA-Z0-9_-]{1,128}$/.test(id);
 export function ownSession(cmd: string): boolean {
   const c = cmd.trim();
   const agent = agentOf(c);
-  const rest = c.slice(agent.length).trim();
+  const rest = c.slice((opencodeCommand(c) || agent).length).trim();
   switch (agent) {
     case "claude":
       return /(^|\s)(-r|--resume|-c|--continue|--session-id)(\s|$)/.test(c);
@@ -76,7 +79,7 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
   if (sessionId && !validSessionId(sessionId)) throw new Error("Invalid agent session ID");
   const c = cmd.trim();
   const agent = agentOf(c);
-  const rest = c.slice(agent.length).trim();
+  const rest = c.slice((opencodeCommand(c) || agent).length).trim();
   const args = rest ? rest.split(/\s+/) : []; // ponytail: no quoted args in startups
   const own = ownSession(c);
   switch (agent) {
@@ -95,7 +98,7 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
     }
     case "opencode": {
       const select = resume && sessionId && !own ? ` --session ${sessionId}` : "";
-      return cmdHost(`opencode${select}${rest ? " " + rest : ""}`);
+      return cmdHost(`${opencodeCommand(c)}${select}${rest ? " " + rest : ""}`);
     }
     default:
       // -NoExit so the pane survives the startup command exiting (like aa: the

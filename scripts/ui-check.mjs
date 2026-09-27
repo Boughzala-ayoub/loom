@@ -28,6 +28,7 @@ try {
       if (location.search.includes('resume')) state.threads[0].panes = [{ cmd: 'codex' }, { cmd: 'codex' }];
       if (location.search.includes('close-race')) state.threads[0].zoomed = 0;
       if (location.search.includes('legacy')) state.threads[0].panes = [{ cmd: 'opencode', sid: 'old-placeholder-a' }, { cmd: 'opencode', sid: 'old-placeholder-b' }];
+      if (location.search.includes('legacy-opencode2')) state.threads[0].panes.forEach(p => p.cmd = 'opencode2');
       if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
       const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [] };
@@ -1529,6 +1530,17 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 3);
     assert.ok(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'pty_kill')));
     assert.equal(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'plugin:dialog|confirm')), false);
+    await page.goto(base + '?legacy-opencode2');
+    await page.waitForSelector('.resume-notice');
+    await page.locator('.resume-notice button').filter({ hasText: 'Choose session' }).first().click();
+    await page.waitForSelector('#session-list button');
+    assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'opencode_sessions').at(-1).args.command), 'opencode2');
+    await audit('opencode2-session-picker');
+    await page.locator('#session-list button').first().click();
+    await page.waitForFunction(() => window.qa.panes.some(p => p.argv.at(-1) === 'opencode2 --session ses_first'));
+    await page.click('#dashboard-btn');
+    await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'last_messages' && c.args.panes.some(p => p[1] === 'opencode2' && p[3] === 'ses_first')));
+    await audit('opencode2-overview');
     await page.goto(base + '?memory');
     await page.waitForFunction(() => window.qa.saved?.threads[2].panes.length === 2);
     if (width <= 760) await page.click('#side-toggle');

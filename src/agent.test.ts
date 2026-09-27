@@ -18,6 +18,12 @@ check("agentOf claude", agentOf("claude --effort max"), "claude");
 check("agentOf claudette is a shell", agentOf("claudette"), "shell");
 check("agentOf codex", agentOf("codex"), "codex");
 check("agentOf opencode", agentOf(" opencode "), "opencode");
+for (const cmd of ['opencode1', 'opencode2']) {
+  check(`${cmd} is an OpenCode agent`, agentOf(cmd), 'opencode');
+  check(`${cmd} keeps its executable on resume`, launch(`${cmd} --auto`, S, true, undefined, 'ses_saved')[4], `${cmd} --session ses_saved --auto`);
+  check(`${cmd} explicit session`, ownSession(`${cmd} --session=ses_own`), true);
+  check(`${cmd} does not replace an explicit session`, launch(`${cmd} -s ses_own`, S, true, undefined, 'ses_saved')[4], `${cmd} -s ses_own`);
+}
 check("agentOf cmd", agentOf("cmd"), "shell");
 
 check("new claude pane pins an id", launch("claude", S, false), ["claude", "--session-id", S, ...H]);

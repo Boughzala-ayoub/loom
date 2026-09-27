@@ -13,6 +13,7 @@ mod helper;
 mod codex_state;
 mod output;
 mod cache;
+mod opencode;
 mod usage;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
@@ -21,8 +22,8 @@ const SHELL_INIT: &str = include_str!("shell-init.ps1");
 /// __LOOM_EXE__ at spawn.
 const CLAUDE_HOOKS: &str = include_str!("claude-hooks.json");
 /// opencode plugin: turns session.idle and question/permission prompts into
-/// the same wake marker claude's Stop hook drops. Installed globally (opencode
-/// loads local plugins from nowhere else); inert outside a Loom pane.
+/// the same wake marker claude's Stop hook drops. Installed in OpenCode's
+/// global config directory; inert outside a Loom pane.
 const OPENCODE_PLUGIN: &str = include_str!("loom-opencode.js");
 
 struct Session {
@@ -185,16 +186,14 @@ fn pty_spawn(
     // eats unquoted backslashes; forward slashes also need no JSON escaping.
     let hooks_json = CLAUDE_HOOKS.replace("__LOOM_EXE__", &exe.display().to_string().replace('\\', "/"));
     ensure_file(&hooks, &hooks_json)?;
-    if argv.iter().any(|a| a.contains("opencode")) {
-        if let Ok(home) = app.path().home_dir() {
-            let _ = ensure_file(&home.join(".config/opencode/plugins/loom.js"), OPENCODE_PLUGIN);
-        }
-    }
-
     let hooks_arg = hooks.display().to_string();
-    let cmd_line = (argv.len() == 5 && argv[0].eq_ignore_ascii_case("cmd.exe") && argv[3] == "/c")
+    let mut cmd_line = (argv.len() == 5 && argv[0].eq_ignore_ascii_case("cmd.exe") && argv[3] == "/c")
         // Codex's notify program goes in by path (agent.ts: CODEX_NOTIFY).
         .then(|| argv[4].replace("$LOOM_EXE", &exe.display().to_string()));
+    if let Some(line) = cmd_line.as_mut().filter(|line| opencode::command(line).is_some()) {
+        *line = opencode::launch(line, cwd.as_deref().unwrap_or("."))?;
+        opencode::install(&app.path().home_dir().map_err(|e| e.to_string())?)?;
+    }
     let pane_dir = cwd.as_deref().map(std::path::Path::new).filter(|d| d.is_dir());
     let direct = cmd_line.as_deref().and_then(|line| helper::codex_direct(line, pane_dir));
     let mut cmd = match &direct {
@@ -671,20 +670,8 @@ fn take_sessions(app: AppHandle, ids: Vec<String>) -> Vec<(String, String)> {
 }
 
 #[tauri::command(async)]
-fn opencode_sessions(dir: String) -> Result<Vec<serde_json::Value>, String> {
-    use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("cmd.exe")
-        .args(["/d", "/s", "/c", "opencode session list --format json"])
-        .current_dir(&dir)
-        .stdin(std::process::Stdio::null())
-        .creation_flags(0x0800_0000)
-        .output().map_err(|e| e.to_string())?;
-    if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).into_owned()); }
-    let raw = String::from_utf8_lossy(&out.stdout);
-    if raw.trim().is_empty() { return Ok(Vec::new()); }
-    let rows: Vec<serde_json::Value> = serde_json::from_str(raw.trim()).map_err(|e| e.to_string())?;
-    let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
-    Ok(rows.into_iter().filter(|row| row["directory"].as_str().is_some_and(|d| norm(d) == norm(&dir))).collect())
+fn opencode_sessions(dir: String, command: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+    opencode::sessions(&dir, command.as_deref().unwrap_or("opencode"))
 }
 
 /// Codex conversations started in `dir`, newest first, as `{id, title}`. Codex
@@ -809,6 +796,8 @@ fn collect_message(last: &mut LastMessages, provider: &str, v: &serde_json::Valu
             if role == "assistant" && v["payload"]["phase"] == "analysis" { return; }
             (role, &v["payload"]["content"], if role == "user" { "input_text" } else { "output_text" })
         }
+        "opencode" if v["type"] == "user" => ("user", &v["text"], "text"),
+        "opencode" if v["type"] == "assistant" => ("assistant", &v["content"], "text"),
         "opencode" => (v["info"]["role"].as_str().unwrap_or(""), &v["parts"], "text"),
         _ => return,
     };
@@ -846,17 +835,6 @@ fn recent_messages(path: &std::path::Path, provider: &str) -> LastMessages {
         if let Ok(v) = serde_json::from_slice(&reversed) { collect_message(&mut last, provider, &v); }
     }
     last
-}
-
-fn opencode_messages(dir: &str, sid: &str) -> Option<LastMessages> {
-    use std::os::windows::process::CommandExt;
-    let mut command = std::process::Command::new("cmd.exe");
-    command.args(["/d", "/s", "/c", &format!("opencode export {sid} --pure")])
-        .current_dir(dir)
-        .creation_flags(0x0800_0000);
-    let out = export_output(&mut command, std::time::Duration::from_secs(5))?;
-    let v = serde_json::from_slice::<serde_json::Value>(&out).ok()?;
-    Some(opencode_export_messages(&v))
 }
 
 /// A stuck export must not occupy a worker forever or collect unlimited output.
@@ -923,7 +901,7 @@ fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -
             "claude" => recent_messages(&usage::transcript(&marks, &home, &id, &dir, &sid), "claude"),
             "codex" => codex_files.iter().find(|(_, path)| rollout_is(path, &sid))
                 .map(|(_, path)| recent_messages(path, "codex")).unwrap_or_default(),
-            "opencode" => opencode_messages(&dir, &sid).ok_or("OpenCode export failed or timed out")?,
+            "opencode" | "opencode1" | "opencode2" => opencode::messages(&dir, &sid, &agent).ok_or("OpenCode export failed or timed out")?,
             _ => continue,
         };
         messages.insert(id, last);
@@ -1261,6 +1239,16 @@ mod tests {
         ]});
         assert_eq!(super::opencode_export_messages(&export), super::LastMessages {
             user: "Review this".into(), agent: "Reviewed".into(),
+        });
+        let export = serde_json::json!({"messages":[
+            {"type":"user","text":"Review v2"},
+            {"type":"assistant","content":[{"type":"reasoning","text":"Private"},{"type":"text","text":"Reviewed v2"}]},
+            {"type":"assistant","content":[{"type":"tool","content":"Tool output"}]},
+            {"type":"synthetic","text":"Internal message"},
+            {"type":"idle","outcome":"succeeded"},
+        ]});
+        assert_eq!(super::opencode_export_messages(&export), super::LastMessages {
+            user: "Review v2".into(), agent: "Reviewed v2".into(),
         });
         std::fs::remove_dir_all(root).unwrap();
     }

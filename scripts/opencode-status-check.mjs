@@ -4,7 +4,8 @@ import { readFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
-import { Loom } from '../src-tauri/src/loom-opencode.js';
+import definition, { Loom } from '../src-tauri/src/loom-opencode.js';
+const command = process.env.OPENCODE_COMMAND || 'opencode';
 const base = process.env.RESP_BASE || 'http://127.0.0.1:4173';
 assert.equal((await fetch(base)).status, 200);
 const mocks = readFileSync('node_modules/@tauri-apps/api/mocks.js', 'utf8').replace(/^export \{.*$/m, '');
@@ -12,6 +13,7 @@ const browser = await chromium.launch({ channel: 'chrome', headless: true });
 const output = 'node_modules/.cache/opencode-status-check';
 mkdirSync(output, { recursive: true });
 let marker;
+let dispose;
 try {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   await context.exposeFunction('takeOpenCodeMarker', () => {
@@ -20,11 +22,11 @@ try {
     unlinkSync(marker);
     return [[process.env.LOOM_PANE, value]];
   });
-  await context.addInitScript({ content: mocks + `\n(${(() => {
+  await context.addInitScript({ content: mocks + `\n(${((command) => {
     mockWindows('main');
     window.qa = {};
     mockIPC((call, args = {}) => {
-      if (call === 'load_state') return JSON.stringify({ threads: [{ repo: 'C:\\test', dir: 'C:\\test', name: 'OpenCode status', panes: [{ cmd: 'opencode' }] }] });
+      if (call === 'load_state') return JSON.stringify({ threads: [{ repo: 'C:\\test', dir: 'C:\\test', name: 'OpenCode status', panes: [{ cmd: command }] }] });
       if (call === 'pty_spawn') window.qa.pane = args;
       if (call === 'take_wakes') return window.takeOpenCodeMarker();
       if (['take_sessions', 'model_options'].includes(call)) return [];
@@ -32,7 +34,7 @@ try {
       if (call === 'git_run') return '';
       if (call === 'pane_booted') return true;
     }, { shouldMockEvents: true });
-  }).toString()})();` });
+  }).toString()})(${JSON.stringify(command)});` });
   const page = await context.newPage();
   await page.goto(base);
   await page.waitForFunction(() => window.qa.pane);
@@ -40,7 +42,20 @@ try {
   delete process.env.LOOM_SESSION_FILE;
   marker = join(tmpdir(), 'loom-wait', process.env.LOOM_PANE);
   const plugin = await Loom({ client: { session: { get: async ({ path }) => ({ data: { id: path.id, ...(path.id === 'ses_child' ? { parentID: 'ses_main' } : {}) } }) } } });
-  const event = (type, properties = {}) => plugin.event({ event: { type, properties } });
+  let event = (type, properties = {}) => plugin.event({ event: { type, properties } });
+  if (command === 'opencode2') {
+    const stream = new TransformStream();
+    const writer = stream.writable.getWriter();
+    dispose = await definition.setup({ session: {
+      get: async ({ sessionID }) => ({ id: sessionID, ...(sessionID === 'ses_child' ? { parentID: 'ses_main' } : {}) }),
+      hook: async () => {},
+    }, event: { subscribe: ({ signal }) => { signal.addEventListener('abort', () => void writer.close()); return stream.readable; } } });
+    event = (type, data = {}) => {
+      if (type === 'session.status') type = data.status.type === 'busy' ? 'session.execution.started' : data.status.type === 'retry' ? 'session.retry.scheduled' : 'session.execution.succeeded';
+      if (type === 'session.idle') type = 'session.execution.succeeded';
+      return writer.write({ type, data });
+    };
+  }
   const status = (type, sessionID = 'ses_main') => event('session.status', { sessionID, status: { type } });
   const expect = async (state, message) => {
     await page.waitForTimeout(400);
@@ -90,8 +105,9 @@ try {
     assert.ok(await page.locator('.pane-state').isVisible());
     await page.screenshot({ path: `${output}/${width}.png` });
   }
-  console.log('PASS OpenCode busy, truncated footer, child idle, approval reply, retry, completion, next turn and concurrent events');
+  console.log(`PASS ${command} busy, truncated footer, child idle, approval reply, retry, completion, next turn and concurrent events`);
 } finally {
+  dispose?.();
   await browser.close();
   if (marker && existsSync(marker)) unlinkSync(marker);
 }

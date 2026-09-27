@@ -1,27 +1,32 @@
-// Loom's opencode plugin. Installed to ~/.config/opencode/plugins/loom.js the
-// first time a Loom pane starts opencode; a no-op anywhere else (no LOOM_PANE).
-// opencode has no per-launch hook file the way claude has --settings, and the
-// config "plugin" list takes npm packages only, so the global plugins folder
-// is the one place a local file is picked up from.
-//
-// Status events survive hidden/truncated TUI footers. A question or permission
-// prompt blocks mid-turn, so its reply restores busy even without a new status.
-// Use the same marker transport as claude's Stop hook:
-// %TEMP%\loom-wait\<pane id>, which Loom polls and turns into the pane's
-// Working/Waiting state.
+// One local plugin for OpenCode 1.18.29+ and 2.x. V1 calls server(); V2 calls
+// setup(). The named export also supports testing the V1 hooks directly.
+// Each Loom pane runs its own OpenCode server and supplies these marker paths.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const WAKES = new Set(["question.asked", "permission.asked"]);
-const REPLIES = new Set(["question.replied", "question.rejected", "permission.replied"]);
+const validID = (id) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+const WAKES = new Set(["question.asked", "form.created", "permission.asked"]);
+const REPLIES = new Set(["question.replied", "question.rejected", "form.replied", "form.cancelled", "permission.replied"]);
+const BUSY = new Set(["session.execution.started", "session.retry.scheduled"]);
+const IDLE = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.error"]);
 
-export const Loom = async ({ client }) => {
-  let selected, state;
-  let events = Promise.resolve();
-  const select = (id) => { selected = id; remember(id); };
+function loomPane(lookup) {
+  let selected, state, stopped = false, queue = Promise.resolve();
+  const pending = new Set();
+  const select = (id) => {
+    if (stopped || !validID(id)) return;
+    if (id !== selected) { state = undefined; pending.clear(); }
+    selected = id;
+    const file = process.env.LOOM_SESSION_FILE;
+    if (!file) return;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, id);
+    } catch {}
+  };
   const signal = (next) => {
-    if (next === state) return;
+    if (stopped || next === state) return;
     try {
       const dir = path.join(os.tmpdir(), "loom-wait");
       fs.mkdirSync(dir, { recursive: true });
@@ -29,48 +34,82 @@ export const Loom = async ({ client }) => {
       state = next;
     } catch {}
   };
+  // Hooks and events use the same queue: asynchronous lookups must preserve order.
+  const enqueue = (fn) => queue = queue.then(() => {
+    if (!stopped && validID(process.env.LOOM_PANE)) return fn();
+  }).catch(() => {});
+  const selectedSession = async (id, descendants = false) => {
+    const seen = new Set();
+    while (validID(id) && !seen.has(id)) {
+      if (id === selected) return true;
+      seen.add(id);
+      const session = await lookup(id);
+      if (!session || stopped) return false;
+      if (!selected && !session.parentID) { select(id); return true; }
+      if (!descendants || !session.parentID) return false;
+      id = session.parentID;
+    }
+    return false;
+  };
   return {
-    "chat.message": async ({ sessionID }) => {
-      // A user message identifies the selected session, including /sessions.
-      if (!process.env.LOOM_PANE) return;
-      try {
-        const session = await client.session.get({ path: { id: sessionID } });
-        if (session.data && !session.data.parentID) select(sessionID);
-      } catch {}
-    },
-    // OpenCode does not await event hooks. Preserve order across session.get.
-    event: ({ event }) => events = events.then(async () => {
-      if (!process.env.LOOM_PANE) return;
-      if (event.type === "session.created" && !event.properties?.info?.parentID) {
-        select(event.properties?.info?.id);
-      }
-      if (event.type === "session.status" || event.type === "session.idle") {
-        const id = event.properties?.sessionID;
-        if (!id) return;
-        // A resumed session has no session.created event. Resolve it once; a
-        // subagent completing must never mark its still-running parent idle.
-        if (!selected) {
-          try {
-            const session = await client.session.get({ path: { id } });
-            if (!session.data || session.data.parentID) return;
-            if (!selected) select(id);
-          } catch { return; }
-        }
-        if (id !== selected) return;
-        const status = event.type === "session.idle" ? "idle" : event.properties?.status?.type;
-        if (status === "busy" || status === "retry") signal("busy");
-        else if (status === "idle") signal("waiting");
-      } else if (WAKES.has(event.type)) signal("waiting");
-      else if (REPLIES.has(event.type)) signal("busy");
+    stop: () => { stopped = true; },
+    message: (id) => enqueue(async () => {
+      if (!validID(id)) return;
+      const session = await lookup(id);
+      if (session && !session.parentID) select(id);
     }),
+    event: (type, data) => enqueue(async () => {
+      if (type === "session.created") {
+        if (!data.parentID) select(data.sessionID);
+        return;
+      }
+      const form = type === "form.created" ? data.form : data;
+      const id = form?.sessionID;
+      if (WAKES.has(type) || REPLIES.has(type)) {
+        if (!await selectedSession(id, true)) return;
+        const key = `${id}:${form.id || form.requestID || type.split('.')[0]}`;
+        if (WAKES.has(type)) pending.add(key); else pending.delete(key);
+        signal(pending.size ? "waiting" : "busy");
+        return;
+      }
+      const status = BUSY.has(type) ? "busy" : IDLE.has(type) || type === "session.idle" ? "idle"
+        : type === "session.status" ? data.status?.type : undefined;
+      if (!status || !await selectedSession(data.sessionID)) return;
+      if (status === "idle") { pending.clear(); signal("waiting"); }
+      else if (status === "busy" || status === "retry") signal(pending.size ? "waiting" : "busy");
+    }),
+  };
+}
+
+export const Loom = async ({ client }) => {
+  const pane = loomPane(async (id) => (await client.session.get({ path: { id } })).data);
+  return {
+    "chat.message": ({ sessionID }) => pane.message(sessionID),
+    event: ({ event }) => {
+      const data = event.properties || {};
+      return pane.event(event.type, event.type === "session.created"
+        ? { sessionID: data.info?.id, parentID: data.info?.parentID } : data);
+    },
+    dispose: () => pane.stop(),
   };
 };
 
-function remember(sessionID) {
-  const file = process.env.LOOM_SESSION_FILE;
-  if (!file || !/^[a-zA-Z0-9_-]{1,128}$/.test(sessionID ?? "")) return;
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, sessionID);
-  } catch {}
-}
+export default {
+  id: "loom",
+  server: Loom,
+  async setup(ctx) {
+    if (!validID(process.env.LOOM_PANE)) return;
+    const pane = loomPane((id) => ctx.session.get({ sessionID: id }));
+    const controller = new AbortController();
+    const stream = ctx.event.subscribe({ signal: controller.signal });
+    void (async () => {
+      try {
+        for await (const event of stream) await pane.event(event.type, event.data || {});
+      } catch { /* Aborting the subscription during disposal is expected. */ }
+    })();
+    try {
+      await ctx.session.hook("prompt", ({ sessionID }) => pane.message(sessionID));
+    } catch (error) { pane.stop(); controller.abort(); throw error; }
+    return () => { pane.stop(); controller.abort(); };
+  },
+};

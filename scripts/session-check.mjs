@@ -49,6 +49,7 @@ try {
   // A question or permission prompt blocks mid-turn: it must ring like session.idle.
   const wake = join(tmpdir(), 'loom-wait', process.env.LOOM_PANE);
   for (const type of ['session.idle', 'question.asked', 'permission.asked']) {
+    await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_selected' } } });
     await plugin.event({ event: { type: 'session.status', properties: { sessionID: 'ses_selected', status: { type: 'busy' } } } });
     assert.equal(readFileSync(wake, 'utf8'), 'opencode:busy');
     unlinkSync(wake);
@@ -57,7 +58,7 @@ try {
     assert.equal(readFileSync(wake, 'utf8'), 'opencode:waiting');
     unlinkSync(wake);
   }
-  await plugin.event({ event: { type: 'question.replied', properties: { sessionID: 'ses_selected' } } });
+  await plugin.event({ event: { type: 'permission.replied', properties: { sessionID: 'ses_selected' } } });
   assert.equal(readFileSync(wake, 'utf8'), 'opencode:busy', 'an answer restores Working rather than ringing');
   unlinkSync(wake);
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_child' } } });

@@ -11,7 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
-import { agentOf, codexThread, launch, ownSession, validSessionId, type Agent } from "./agent";
+import { agentOf, codexThread, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
 import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { LINES, wheelInit } from "./scroll";
@@ -961,6 +961,7 @@ const DEFAULT_STARTUPS: Startup[] = [
   { label: "claude", cmd: "claude" },
   { label: "codex", cmd: "codex" },
   { label: "opencode", cmd: "opencode" },
+  { label: "opencode2", cmd: "opencode2" },
   { label: "powershell", cmd: "" },
   { label: "cmd", cmd: "cmd" },
   { label: "git bash", cmd: '& "$env:ProgramFiles\\Git\\bin\\bash.exe" -i -l' },
@@ -1801,7 +1802,7 @@ class Pane {
     $("#session-title").textContent = `Resume ${this.agent === "codex" ? "Codex" : "OpenCode"}`;
     dialog.showModal();
     try {
-      const rows = await invoke<{ id: string; title: string }[]>(`${this.agent}_sessions`, { dir: this.th.dir });
+      const rows = await invoke<{ id: string; title: string }[]>(`${this.agent}_sessions`, { dir: this.th.dir, command: opencodeCommand(this.startup) });
       if (!dialog.open || dialog.dataset.request !== request) return;
       list.replaceChildren();
       for (const row of rows.filter(r => validSessionId(r.id))) {
@@ -2666,7 +2667,7 @@ async function refreshDashboardMessages(force = false) {
   await Promise.all(batches.filter(b => b.length).map(async batch => {
     try {
       const got = await invoke<Record<string, DashboardMessages>>("last_messages", {
-        panes: batch.map(({ p, session }) => [p.id, p.agent, p.th.dir, session]),
+        panes: batch.map(({ p, session }) => [p.id, opencodeCommand(p.startup) || p.agent, p.th.dir, session]),
       });
       for (const { p, session, input, busy, waiting, dead } of batch) {
         if (dashboardSession(p) !== session) continue;

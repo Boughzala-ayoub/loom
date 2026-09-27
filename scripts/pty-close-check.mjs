@@ -10,7 +10,7 @@ import { chromium } from 'playwright';
 const dir = mkdtempSync(join(tmpdir(), 'loom-close-check-'));
 const profile = join(dir, 'workspace.json');
 writeFileSync(profile, '{}');
-writeFileSync(join(dir, 'opencode.cmd'), `@"${process.execPath}" -e "require('fs').writeFileSync('export-pid.txt',String(process.pid));setInterval(()=>{},1000)"\r\n`);
+writeFileSync(join(dir, 'opencode.cmd'), `@echo off\r\nif "%~1"=="--version" (echo 1.18.32 & exit /b 0)\r\n"${process.execPath}" -e "require('fs').writeFileSync('export-pid.txt',String(process.pid));setInterval(()=>{},1000)"\r\n`);
 // Make slow Windows process cleanup deterministic, then run the real taskkill.
 const helper = join(dir, 'taskkill.rs');
 writeFileSync(helper, `use std::os::windows::process::CommandExt;
@@ -48,6 +48,12 @@ try {
   await page.waitForFunction(() => window.__TAURI__?.core);
   const bundle = readFileSync('dist/index.html', 'utf8').match(/src="([^"]*\/main-[^"]+\.js)"/)[1];
   assert.equal(await page.locator('script[type="module"][src]').first().getAttribute('src'), bundle, 'The native app must embed the current frontend bundle');
+  // A debug build has its own console. Count only consoles created by the PTYs.
+  const initialHosts = new Set();
+  const hosts = () => [].concat(JSON.parse(spawnSync('powershell.exe', ['-NoProfile', '-Command',
+    `@((Get-CimInstance Win32_Process -Filter "ParentProcessId = ${child.pid}") | Where-Object { $_.Name -in @('OpenConsole.exe', 'conhost.exe') } | ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if ($p) { @{ id = $p.Id; cpu = $p.CPU } } }) | ConvertTo-Json -Compress`],
+    { windowsHide: true, encoding: 'utf8' }).stdout.trim() || '[]')).filter(p => !initialHosts.has(p.id));
+  for (const p of hosts()) initialHosts.add(p.id);
   await page.evaluate(async ({ node, cwd }) => {
     const { invoke, Channel } = window.__TAURI__.core;
     await window.__TAURI__.event.listen('pty-exit:exited-test', () => window.testPtyExited = true);
@@ -66,9 +72,6 @@ try {
   await page.waitForFunction(() => window.testPtyExited);
   await page.waitForFunction(() => window.exitedOutput?.includes('EXIT-DRAIN-MARKER'));
   await pause(2000);
-  const hosts = () => JSON.parse(spawnSync('powershell.exe', ['-NoProfile', '-Command',
-    `@((Get-CimInstance Win32_Process -Filter "ParentProcessId = ${child.pid}") | Where-Object { $_.Name -in @('OpenConsole.exe', 'conhost.exe') } | ForEach-Object { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if ($p) { @{ id = $p.Id; cpu = $p.CPU } } }) | ConvertTo-Json -Compress`],
-    { windowsHide: true, encoding: 'utf8' }).stdout.trim() || '[]');
   const before = [].concat(hosts());
   await pause(2000);
   const after = [].concat(hosts());

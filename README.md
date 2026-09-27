@@ -380,6 +380,41 @@ stay either way.
 The pane config panel's model list is fetched live too, so a model Anthropic
 adds shows up without a Loom release.
 
+## OpenCode versions
+
+Loom supports OpenCode 1.18.29+ and 2.x. `opencode`, `opencode1`, and `opencode2`
+startup commands share the OpenCode integration while keeping the executable
+you selected for launch, resume, session listing, and Overview messages. An
+alias must be installed on PATH; Loom does not install the CLIs. The default
+`opencode` command may point to either version, so Loom reads its actual version.
+
+OpenCode 2 panes use `--standalone`. Its normal background service cannot carry
+a separate Loom pane identity for each terminal. External `--server` connections
+are rejected for these panes. V2 session reads also use a private server, have a
+20-second deadline, and may take several seconds. V1 reads keep a five-second
+deadline. Failed reads keep the previous Overview text and retry later.
+
+The plugin is inert in session-list/export helpers and outside Loom. A new Loom
+build installs its plugin when an OpenCode pane starts; an already-running v1
+process may need a relaunch to load a changed plugin.
+
+Compatibility checks, without model calls:
+
+```powershell
+node src/agent.test.ts
+node scripts/opencode-plugin-check.mjs
+node scripts/opencode-cli-check.mjs
+# Against npm run preview:
+node scripts/opencode-status-check.mjs
+$env:OPENCODE_COMMAND = 'opencode2'
+node scripts/opencode-status-check.mjs
+```
+
+The CLI check uses isolated config/data directories and tests the installed npm
+packages. Set `OPENCODE_V1_EXE` and `OPENCODE_V2_EXE` for other install locations.
+The V1 object-entrypoint requirement is documented in the
+[OpenCode plugin migration guide](https://opencode.ai/v2/docs/build/plugins/migrate-v1).
+
 ## Turn-finished notifications
 
 When an agent finishes a turn or wants your input, the pane **border turns yellow**
@@ -391,17 +426,20 @@ Each agent says "done" its own way, and Loom listens to all of them:
 - **codex** is launched with `-c tui.notifications=true`, `notification_method=osc9`
   and `notification_condition=always`, so it writes an OSC 9 sequence into the
   pane when a turn ends or it wants an approval. No files, no hooks.
-- **opencode** loads local plugins from `~\.config\opencode\plugins\` and from
-  nowhere else, so the first opencode pane installs `loom.js` there. It writes
-  the wake marker below on `session.idle`, `question.asked` and
-  `permission.asked` (a question or permission prompt blocks mid-turn and never
-  goes idle), and does nothing outside a Loom pane.
+- **opencode** gets Loom's plugin in its global config directory,
+  `~\.config\opencode\plugins\loom.js`, or `$XDG_CONFIG_HOME/opencode/plugins/loom.js`.
+  It writes
+  the wake marker below when a turn ends (`session.idle` on 1.x, the
+  `session.execution.*` pair on 2.x) and on a question, form or permission
+  prompt (any of those blocks mid-turn and never goes idle), and does nothing
+  outside a Loom pane.
 - **claude** uses hooks, below. Terminal BEL and OSC 99 (kitty notifications)
   count too, for anything else that rings.
 
-While an agent is drawing output the pane and its thread show as running. There
-is no protocol for "working", so this is output that keeps coming, ended by
-1.5 s of quiet; the echo right after a keystroke does not count.
+OpenCode's plugin reports Working and Waiting directly. Pending questions and
+permissions stay Waiting until answered. Child-session completion cannot mark
+the parent done. Other agents use terminal notifications and activity detection;
+the echo right after a keystroke does not count as work.
 
 Loom sets `LOOM_PANE` in every pane, and Claude's hooks drop a marker file named
 after it, which Loom drains every 250ms. A hook can't signal the pane directly —
