@@ -168,6 +168,9 @@ try {
     }
     // The skill's scrollWidth invariant, plus visible control bounds to catch clipping.
     async function audit(name) {
+      // Layout changes are fitted after xterm's next render. Inspect the painted
+      // result, rather than the old canvas in the same turn as the UI action.
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       const result = await page.evaluate(() => {
         const root = document.documentElement;
         const offenders = [...document.querySelectorAll('button, input:not([type=hidden]), select, textarea, dialog[open]')].filter(el => {

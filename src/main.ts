@@ -1370,6 +1370,7 @@ class Pane {
   readonly search = new SearchAddon();
 
   private fit = new FitAddon();
+  private observer = new ResizeObserver(() => this.resize());
   private gl?: WebglAddon;
   private host = document.createElement("div");
   private title = document.createElement("span");
@@ -1379,6 +1380,7 @@ class Pane {
   private unlisten: UnlistenFn[] = [];
   private out = new Channel<string>();
   private idle = 0;
+  private disposed = false;
   private interruptHint = false; // codex and opencode: their "esc … interrupt" hint was on screen
   private resumeNotice?: HTMLElement;
   /** This pane's own row under its thread in the sidebar — Orca lists each
@@ -1594,15 +1596,15 @@ class Pane {
     this.term.onBell(() => this.wake());
     this.fit.fit();
 
-    this.unlisten.push(
-      await listen<number>(`pty-exit:${this.id}`, (e) => {
-        this.dead = true;
-        this.busy = false;
-        this.waiting = false;
-        this.term.write(`\r\n\x1b[90m[exited ${e.payload}] — Enter relaunches\x1b[0m\r\n`);
-        this.paint();
-      }),
-    );
+    const unlisten = await listen<number>(`pty-exit:${this.id}`, (e) => {
+      this.dead = true;
+      this.busy = false;
+      this.waiting = false;
+      this.term.write(`\r\n\x1b[90m[exited ${e.payload}] — Enter relaunches\x1b[0m\r\n`);
+      this.paint();
+    });
+    if (this.disposed) { unlisten(); return; }
+    this.unlisten.push(unlisten);
     // Channel, not an event: stdout is the hot path and channels skip the
     // event bus' JSON round-trip through every other listener.
     this.out.onmessage = (d) => {
@@ -1612,7 +1614,7 @@ class Pane {
       if (!readsScreen) this.activity();
     };
     await this.spawn(!!sid);
-    new ResizeObserver(() => this.resize()).observe(this.host);
+    if (!this.disposed) this.observer.observe(this.host);
   }
 
   /** Start (or restart) the pane's process. `resume` = pick the session up
@@ -1622,16 +1624,19 @@ class Pane {
    * opencode pane with no reported session yet (made before Loom captured one)
    * asks once instead of guessing. */
   async spawn(resume: boolean) {
+    if (this.disposed) return;
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
       try {
         if (!(await invoke<boolean>("has_codex_session", { sid: this.sessionId }))) this.sessionId = undefined;
       } catch (e) {
+        if (this.disposed) return;
         this.dead = true;
         this.term.write(`\r\nCould not check saved session: ${String(e)} — Enter retries\r\n`);
         this.paint();
         return;
       }
     }
+    if (this.disposed) return;
     if (resume && !this.sessionId && (this.agent === "codex" || this.agent === "opencode") && !ownSession(this.startup)) {
       this.dead = true;
       if (!this.resumeNotice) {
@@ -1658,6 +1663,7 @@ class Pane {
       (this.agent !== "claude" ||
         (await invoke<boolean>("has_session", { dir: this.th.dir, sid: this.sid }).catch(() => false)));
     const release = restoring && this.agent === "claude" ? await bootSlot() : undefined;
+    if (this.disposed) { release?.(); return; }
     const ok = await invoke("pty_spawn", {
       id: this.id,
       cwd: this.th.dir,
@@ -1667,10 +1673,16 @@ class Pane {
       rows: this.term.rows,
       onOut: this.out,
     }).then(() => true, (e) => {
+      if (this.disposed) return false;
       this.dead = true;
       this.term.write(`\r\n\x1b[31m${e}\x1b[0m — Enter retries\r\n`);
       return false;
     });
+    if (this.disposed) {
+      release?.();
+      await invoke("pty_kill", { id: this.id }).catch(() => {});
+      return;
+    }
     if (release) void (ok ? booted(this.id) : Promise.resolve()).then(release);
     this.paint();
   }
@@ -1762,20 +1774,37 @@ class Pane {
   }
 
   private raf = 0;
+  private resizeRender?: { dispose(): void };
   /** rAF-coalesced: splitter drags fire ResizeObserver per pointermove per pane —
    * one fit per frame, and IPC only when the cell grid actually changed. */
   resize() {
     cancelAnimationFrame(this.raf);
     this.raf = requestAnimationFrame(() => {
       if (!this.host.clientWidth || !this.host.clientHeight) return;
-      const { cols, rows } = this.term;
-      this.fit.fit();
-      if (this.term.cols === cols && this.term.rows === rows) return;
-      invoke("pty_resize", {
-        id: this.id,
-        cols: this.term.cols,
-        rows: this.term.rows,
-      }).catch(() => {});
+      this.resizeRender?.dispose();
+      // Wait until xterm resumes its renderer after a hidden pane is reparented.
+      // Fitting while paused leaves scrollbar geometry at the old row count.
+      this.resizeRender = this.term.onRender(() => {
+        this.resizeRender?.dispose();
+        this.resizeRender = undefined;
+        const { cols, rows } = this.term;
+        const buffer = this.term.buffer.active;
+        const following = buffer.viewportY === buffer.baseY;
+        this.fit.fit();
+        if (this.term.cols === cols && this.term.rows === rows) return;
+        // A prior drag can leave xterm's cached scrollbar position unchanged
+        // after fitting. Reconcile it after the new dimensions are rendered.
+        if (following) this.raf = requestAnimationFrame(() => {
+          if (!this.disposed && this.host.clientWidth && this.term.buffer.active === buffer)
+            this.term.scrollLines(buffer.length);
+        });
+        invoke("pty_resize", {
+          id: this.id,
+          cols: this.term.cols,
+          rows: this.term.rows,
+        }).catch(() => {});
+      });
+      this.term.refresh(0, this.term.rows - 1);
     });
   }
 
@@ -1922,6 +1951,7 @@ class Pane {
   }
 
   async dispose() {
+    this.disposed = true;
     // Closing the pane mid-sentence: drop the recording, there's nowhere to put it.
     if (recording?.pane === this) {
       recording = null;
@@ -1929,7 +1959,9 @@ class Pane {
       mic(() => invoke("dictate_stop").then(() => {}, () => {}));
     }
     clearTimeout(this.idle);
+    this.observer.disconnect();
     cancelAnimationFrame(this.raf);
+    this.resizeRender?.dispose();
     this.unlisten.forEach((u) => u());
     this.out.onmessage = () => {};
     this.gpu(false);
@@ -1959,6 +1991,7 @@ class Thread {
   readonly grid = document.createElement("section");
   readonly row = document.createElement("div");
   readonly panes: Pane[] = [];
+  private observer = new ResizeObserver(() => { if (this.grid.clientWidth) this.relayout(); });
   active: Pane | null = null;
   zoomed: Pane | null = null;
   layout: LayoutMode = "cols";
@@ -1990,7 +2023,7 @@ class Thread {
     public name: string,
   ) {
     this.grid.className = "grid";
-    new ResizeObserver(() => { if (this.grid.clientWidth) this.relayout(); }).observe(this.grid);
+    this.observer.observe(this.grid);
     this.row.className = "thread";
     this.row.dataset.id = this.id;
     // Group metadata below collapsed names; expanded headers keep it inline.
@@ -2106,6 +2139,7 @@ class Thread {
     });
     this.relayout();
     await p.start(st.cmd, st.sid);
+    if (!this.panes.includes(p)) return;
     this.focusPane(p);
     return p;
   }
@@ -2297,6 +2331,7 @@ class Thread {
   }
 
   async dispose() {
+    this.observer.disconnect();
     const cleanup = Promise.all(this.panes.splice(0).map((p) => p.dispose()));
     this.grid.remove();
     this.row.remove();
@@ -3343,6 +3378,7 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
   // Parallel: a spawn is up to ~1s. addPane pushes its pane before the first
   // await, so mapping in order still lands them in order.
   await Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st)));
+  if (!threads.includes(th)) return th; // Closed while its processes were starting.
   if (!th.panes.length) await th.addPane();
   th.colW = st.colW?.filter(w => Number.isFinite(w) && w > 0) ?? [];
   th.rowH = st.rowH?.filter(w => Number.isFinite(w) && w > 0) ?? [];
@@ -4366,16 +4402,22 @@ async function createPR() {
  * (`all`): a hidden thread's `+N −M` needs no more, and each call is a git.exe
  * launch that stats the whole worktree. The open Changes panel reads the
  * current thread's numbers itself, so that one is skipped while it is up. */
+const statPolls = new Map<string, Promise<{ add: number; del: number; files: number } | null>>();
 async function pollStats(all = false) {
   const targets = all ? threads : current ? [current] : [];
   await Promise.all(
     targets.filter((th) => !(changesOpen && panel === "changes" && th === current)).map(async (th) => {
-      const [numstat, status] = await Promise.all([
-        git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => null),
-        git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(parseStatus, () => null),
-      ]);
-      if (!numstat || !status) return;
-      th.setStat({ ...sumStat(numstat.values()), files: status.length });
+      let pending = statPolls.get(th.dir);
+      if (!pending) {
+        pending = Promise.all([
+          git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => null),
+          git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(parseStatus, () => null),
+        ]).then(([numstat, status]) => numstat && status ? { ...sumStat(numstat.values()), files: status.length } : null)
+          .finally(() => statPolls.delete(th.dir));
+        statPolls.set(th.dir, pending);
+      }
+      const stats = await pending;
+      if (stats) th.setStat(stats);
     }),
   );
   if (changesOpen) void refreshChanges();
@@ -5745,8 +5787,12 @@ async function main() {
 
   // Claude's Stop/Notification hooks drop $TEMP\loom-wait\$env:LOOM_PANE; drain
   // it into pane.wake(). ponytail: a 250ms poll of one temp dir, no file watcher.
+  let wakePoll = false;
   setInterval(async () => {
-    const wakes = await invoke<[string, string][]>("take_wakes", { ids: threads.flatMap((t) => t.panes).map((p) => p.id) }).catch(() => []);
+    if (wakePoll) return;
+    wakePoll = true;
+    const wakes = await invoke<[string, string][]>("take_wakes", { ids: threads.flatMap((t) => t.panes).map((p) => p.id) }).catch(() => [])
+      .finally(() => { wakePoll = false; });
     if (!wakes.length) return;
     const effortById = new Map(wakes);
     for (const p of threads.flatMap((t) => t.panes)) {
@@ -5774,7 +5820,8 @@ async function main() {
   // Context and token totals, read from Claude Code's own transcripts.
   // ponytail: a 4s poll beside the wake one — the Rust side reads only what was
   // appended since last time, so an idle pane costs a metadata() call.
-  const pollUsage = async () => {
+  let usagePoll: Promise<void> | undefined;
+  const pollUsage = () => usagePoll ??= (async () => {
     const panes = threads.flatMap((t) => t.panes).filter((p) => p.isClaude);
     if (!panes.length) return;
     const got = await invoke<Record<string, Usage>>("session_usage", {
@@ -5796,7 +5843,7 @@ async function main() {
     // A turn that finished during this poll changes what the config panel should
     // say, and it may well be open in front of you.
     if (!menu.classList.contains("hidden")) cfgPaint?.();
-  };
+  })().finally(() => { usagePoll = undefined; });
   // Nothing reads git or transcripts while Loom is minimised or covered —
   // WebView2 reports that as document.hidden — and it all catches up the
   // moment the window is back. Session marks are the exception: a pane whose

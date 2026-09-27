@@ -35,6 +35,11 @@ openai_base_url = "http://127.0.0.1:1/v1"
 trust_level = "trusted"
 `);
 const lock = spawn('python', ['-u', '-c', `import sqlite3, sys
+c = sqlite3.connect(sys.argv[2])
+c.execute('CREATE TABLE loom_seed_probe (value INTEGER)')
+c.execute('INSERT INTO loom_seed_probe VALUES (42)')
+c.commit()
+c.close()
 c = sqlite3.connect(sys.argv[1])
 c.execute('PRAGMA journal_mode=WAL')
 c.execute('CREATE TABLE IF NOT EXISTS lock_probe (id INTEGER)')
@@ -42,7 +47,7 @@ c.commit()
 c.execute('BEGIN IMMEDIATE')
 print('locked', flush=True)
 sys.stdin.read()
-`, join(home, 'logs_2.sqlite')], { windowsHide: true });
+`, join(home, 'logs_2.sqlite'), join(home, 'state_5.sqlite')], { windowsHide: true });
 await new Promise((ok, fail) => {
   lock.once('error', fail);
   lock.stdout.once('data', ok);
@@ -69,8 +74,8 @@ try {
   }
   assert.ok(ready, 'Native webview must start');
   browser = await chromium.connectOverCDP(endpoint);
-  const page = browser.contexts()[0].pages()[0];
-  await page.waitForSelector('#quick-settings');
+  const page = browser.contexts()[0].pages().find(p => !p.url().includes('overlay'));
+  await page.waitForFunction(() => !!window.__TAURI__?.core);
   stateRoot = join(await page.evaluate(() => window.__TAURI__.path.appDataDir()), 'codex-sqlite');
   await page.evaluate(async ({ cwd, panes }) => {
     const { invoke, Channel } = window.__TAURI__.core;
@@ -82,6 +87,10 @@ try {
       out.onmessage = data => {
         result.output += data;
         if (data.includes('\x1b[6n')) void invoke('pty_write', { id, data: '\x1b[1;1R' }).catch(() => {});
+        if (!result.promotionHandled && /Use\s*existing\s*model/.test(result.output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''))) {
+          result.promotionHandled = true;
+          setTimeout(() => void invoke('pty_write', { id, data: '\x1b[B\r' }), 100);
+        }
       };
       await invoke('pty_spawn', { id, cwd, argv, codexStateId: id, cols: 120, rows: 35, onOut: out });
       await invoke('pty_write', { id, data: '\x1b[1;1R' });
@@ -95,11 +104,13 @@ try {
     assert.doesNotMatch(output, /database is locked|couldn't start because another Codex process/,
       'Codex must start even while the shared logs database has a writer lock');
     assert.equal(result.code, null, `Codex must remain running: ${output.slice(-3000)}`);
-    assert.match(output, /gpt-5.6-terra/, `Codex must finish loading its model: ${output.slice(-3000)}`);
+    assert.match(output, /gpt-5\.6-terra/i, `Codex must finish loading its model: ${output.slice(-3000)}`);
     assert.ok(existsSync(join(stateRoot, id, 'logs_2.sqlite')), 'Each pane must have its own log database');
+    const seeded = spawnSync('python', ['-c', 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); assert c.execute("SELECT value FROM loom_seed_probe").fetchone() == (42,)', join(stateRoot, id, 'state_5.sqlite')], { windowsHide: true, encoding: 'utf8' });
+    assert.equal(seeded.status, 0, `A new pane must reuse the session index without sharing its database: ${seeded.stderr}`);
   }
   assert.match(results[stateIds[1]].output, /Resume marker preserved/, 'Resume must read the existing CODEX_HOME transcript');
-  console.log('PASS concurrent fresh/resumed Codex panes start while shared logs_2.sqlite is locked; saved conversation preserved');
+  console.log('PASS fresh/resumed Codex panes seed private indexes while shared logs_2.sqlite is locked; saved conversation preserved');
 } finally {
   lock.stdin.end();
   if (browser) await browser.contexts()[0].pages()[0].evaluate(() => window.__TAURI__.core.invoke('pty_shutdown')).catch(() => {});

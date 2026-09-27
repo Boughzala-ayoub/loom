@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -10,6 +10,7 @@ use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 mod dictate;
 mod awake;
 mod helper;
+mod codex_state;
 mod usage;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
@@ -24,7 +25,7 @@ const OPENCODE_PLUGIN: &str = include_str!("loom-opencode.js");
 
 struct Session {
     // Close the input pipe before ClosePseudoConsole runs in master's Drop.
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
@@ -211,6 +212,10 @@ fn pty_spawn(
         // use CODEX_HOME. An explicit sqlite_home in Codex config still wins.
         let sqlite = data_dir(&app).join("codex-sqlite").join(sid);
         std::fs::create_dir_all(&sqlite).map_err(|e| e.to_string())?;
+        if let Some(home) = std::env::var_os("CODEX_HOME").map(PathBuf::from)
+            .or_else(|| app.path().home_dir().ok().map(|h| h.join(".codex"))) {
+            codex_state::seed(&home, &sqlite);
+        }
         cmd.env("CODEX_SQLITE_HOME", sqlite);
     }
     if direct.is_some() {
@@ -304,34 +309,43 @@ fn pty_spawn(
         }
     });
 
-    let exit_ev = format!("pty-exit:{id}");
-    let handle = app.clone();
-    std::thread::spawn(move || {
-        let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
-        let _ = handle.emit(&exit_ev, code);
-    });
-
     let previous = ptys.0.lock().unwrap().insert(
-        id,
+        id.clone(),
         Session {
             master: pair.master,
-            writer,
+            writer: Arc::new(Mutex::new(writer)),
             killer,
             pid,
         },
     );
+    std::thread::spawn(move || {
+        let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
+        let ptys = app.state::<Ptys>();
+        let session = {
+            let mut map = ptys.0.lock().unwrap();
+            // A replaced process must not remove or mark its replacement dead.
+            if map.get(&id).is_some_and(|s| s.pid == pid) { map.remove(&id) } else { None }
+        };
+        if session.is_some() {
+            let _ = app.emit(&format!("pty-exit:{id}"), code);
+        }
+        // Release the input pipe and console even if the exited pane stays open.
+        // ClosePseudoConsole may drain output, so keep it outside the map lock.
+        drop(session);
+    });
     // Dropping a ConPTY can wait for its output to drain. Never do that while
     // holding the map lock that other panes' writes and resizes need.
     if let Some(mut previous) = previous { previous.kill(); }
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn pty_write(ptys: State<Ptys>, id: String, data: String) -> Result<(), String> {
-    let mut map = ptys.0.lock().unwrap();
-    let s = map.get_mut(&id).ok_or("no such pty")?;
-    s.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-    s.writer.flush().map_err(|e| e.to_string())
+    let writer = ptys.0.lock().unwrap().get(&id).ok_or("no such pty")?.writer.clone();
+    // A full input pipe must not hold the window thread or other panes' map lock.
+    let mut writer = writer.lock().unwrap();
+    writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

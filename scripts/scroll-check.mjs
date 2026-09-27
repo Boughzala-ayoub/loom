@@ -35,7 +35,7 @@ try {
     const slider = page.locator('.xterm .scrollbar.vertical .slider');
     const top = () => slider.evaluate(el => parseFloat(el.style.top));
     const bottom = await top();
-    const screen = await page.locator('.xterm-screen').boundingBox();
+    let screen = await page.locator('.xterm-screen').boundingBox();
     await page.mouse.move(screen.x + 80, screen.y + 80);
     await page.mouse.wheel(0, -500);
     await page.waitForTimeout(100);
@@ -57,6 +57,29 @@ try {
     await page.keyboard.press('Alt+Shift+ArrowUp');
     await page.waitForTimeout(100);
     assert.ok(await top() < bottom, `${cmd}: keyboard scroll must reach history`);
+    const historyThumb = await slider.boundingBox();
+    await page.mouse.move(historyThumb.x + historyThumb.width / 2, historyThumb.y + historyThumb.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(historyThumb.x + historyThumb.width / 2, screen.y + screen.height - 1, { steps: 5 });
+    await page.mouse.up();
+    for (let i = 0; i < 2; i++) {
+      await page.locator('#dashboard-btn').click();
+      await page.locator('.dashboard-row').first().click();
+      await page.waitForTimeout(150);
+      if (i) {
+        const preview = await page.locator('#dashboard-preview-output .xterm-screen').boundingBox();
+        await page.mouse.move(preview.x + 40, preview.y + 40);
+        await page.mouse.wheel(0, 120);
+        await page.waitForTimeout(100);
+      }
+      await page.locator('#dashboard-preview-close').click();
+      await page.locator('#dashboard-btn').click();
+      await page.waitForTimeout(150);
+    }
+    await page.evaluate(() => window.qa.spawn.onOut.onmessage('New output\r\n'.repeat(5500)));
+    await page.waitForTimeout(200);
+    assert.ok(await slider.evaluate(el => parseFloat(el.style.top) > el.parentElement.clientHeight / 2), `${cmd}@${width}: Overview must preserve follow-output`);
+    screen = await page.locator('.xterm-screen').boundingBox();
     await page.evaluate(() => {
       window.qa.spawn.onOut.onmessage('\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[2J\x1b[HFull-screen transcript');
       window.qa.writes = [];
@@ -79,7 +102,7 @@ try {
     for (const pattern of [/^\x1b\[<0;.*M$/, /^\x1b\[<32;.*M$/, /^\x1b\[<0;.*m$/]) {
       assert.ok(reports.some(s => pattern.test(s)), `${cmd}: agent-owned scrollbar must receive mouse down, drag, and release`);
     }
-    console.log(`PASS ${cmd}@${width}: wheel, scrollbar drag, keyboard history, full-screen mouse reports`);
+    console.log(`PASS ${cmd}@${width}: wheel, scrollbar drag, keyboard history, Overview follow-output, full-screen mouse reports`);
     await context.close();
   }
 } finally { await browser.close(); }
