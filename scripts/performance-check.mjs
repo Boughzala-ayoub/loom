@@ -31,7 +31,8 @@ try {
         return new Promise(resolve => setTimeout(() => { qa.inFlight[key]--; resolve(call === 'git_run' ? '' : call === 'session_usage' ? {} : []); }, 1000));
       }
       if (call === 'load_state') return JSON.stringify({ threads: Array.from({ length: 24 }, (_, i) => ({
-        repo: 'C:\\test', dir: 'C:\\test', name: 'Session ' + i, panes: [{ cmd: ['codex', 'claude', 'opencode', 'powershell'][i % 4] }],
+        repo: 'C:\\test', dir: 'C:\\test', name: 'Session ' + i, panes: [{ cmd: ['codex', 'claude', 'opencode', 'powershell'][i % 4],
+          ...(i % 4 === 2 ? { sid: 'opencode-state-' + i, sessionId: 'ses_test' } : {}) }],
       })) });
       if (call === 'pty_spawn') {
         window.qa.panes.push(args);
@@ -45,6 +46,10 @@ try {
       if (call === 'pane_booted') return true;
       if (['take_wakes', 'take_sessions', 'model_options'].includes(call)) return [];
       if (call === 'session_usage') return {};
+      if (call === 'last_messages') {
+        (window.qa.messageProviders ??= []).push(args.panes.map(p => p[1]));
+        return window.qa.stallOpenCode && args.panes.some(p => p[1] === 'opencode') ? new Promise(() => {}) : {};
+      }
     }, { shouldMockEvents: true });
   }).toString()})();` });
   const page = await context.newPage();
@@ -192,4 +197,44 @@ try {
   assert.equal(await page.evaluate(() => [...window.qa.observed].filter(el => !el.isConnected && el.matches('.pane-term, .grid')).length), 0,
     'Closed threads must disconnect their own observer');
   console.log('PASS 24-pane output, GPU eviction, thread switching and preview scroll history');
+  await page.locator('.thread-name').first().click();
+  await page.locator('#changes-btn').click();
+  await page.waitForTimeout(250);
+  await page.evaluate(() => { window.qa.slowPolls = true; window.qa.maxInFlight = {}; });
+  const gitBefore = await page.evaluate(() => window.qa.calls.git_run);
+  await page.locator('#changes-refresh').click();
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(n => window.qa.calls.git_run - n, gitBefore), 10, 'One Changes refresh must launch one set of Git reads');
+  for (let i = 0; i < 3; i++) await page.locator('#changes-refresh').click();
+  await page.waitForTimeout(2200);
+  assert.ok(Object.values(await page.evaluate(() => window.qa.maxInFlight)).every(n => n === 1), 'Rapid Changes refreshes must serialize identical reads');
+  await page.evaluate(() => { window.qa.slowPolls = false; window.qa.stallOpenCode = true; });
+  await page.locator('#changes-btn').click();
+  await page.locator('#dashboard-btn').click();
+  await page.waitForTimeout(300);
+  const readsBefore = await page.evaluate(() => window.qa.calls.last_messages);
+  await page.evaluate(() => window.qa.panes.find(p => p.argv[0] === 'claude').onOut.onmessage('Completed work\x07'));
+  await page.waitForTimeout(5000);
+  assert.ok(await page.evaluate(n => window.qa.calls.last_messages > n, readsBefore), 'A stalled OpenCode export must not prevent other Overview rows refreshing');
+  await page.locator('#dashboard-btn').click();
+  await page.evaluate(() => { window.qa.holdStarts = false; });
+  await page.locator('#add-pane').click();
+  await page.locator('.menu-item').filter({ hasText: /^codex/ }).click();
+  await page.waitForFunction(() => window.qa.panes.at(-1).argv.join(' ').includes('codex'));
+  const codex = await page.evaluate(() => window.qa.panes.at(-1).id);
+  const failStartup = () => page.evaluate(async id => {
+    const pane = window.qa.panes.filter(p => p.id === id).at(-1);
+    // Exit can arrive before the final channel message.
+    await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'pty-exit:' + id, payload: 1 });
+    pane.onOut.onmessage('Error: account/read failed during TUI bootstrap: account/read failed: workspace routing discovery timed ');
+    pane.onOut.onmessage('out (code -32603)');
+  }, codex);
+  const starts = await page.evaluate(id => window.qa.panes.filter(p => p.id === id).length, codex);
+  await failStartup();
+  await page.waitForFunction(({ id, starts }) => window.qa.panes.filter(p => p.id === id).length === starts + 1, { id: codex, starts });
+  await failStartup();
+  await page.waitForTimeout(1500);
+  assert.equal(await page.evaluate(id => window.qa.panes.filter(p => p.id === id).length, codex), starts + 1, 'Codex startup recovery must retry at most once');
+  assert.ok(await page.evaluate(() => window.qa.calls.pty_ack > 0), 'Terminal parsing must acknowledge native output');
+  console.log('PASS Changes coalescing, independent Overview refresh, bounded Codex bootstrap recovery and parser acknowledgements');
 } finally { await browser.close(); }

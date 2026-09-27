@@ -10,6 +10,7 @@ import { chromium } from 'playwright';
 const dir = mkdtempSync(join(tmpdir(), 'loom-close-check-'));
 const profile = join(dir, 'workspace.json');
 writeFileSync(profile, '{}');
+writeFileSync(join(dir, 'opencode.cmd'), `@"${process.execPath}" -e "require('fs').writeFileSync('export-pid.txt',String(process.pid));setInterval(()=>{},1000)"\r\n`);
 // Make slow Windows process cleanup deterministic, then run the real taskkill.
 const helper = join(dir, 'taskkill.rs');
 writeFileSync(helper, `use std::os::windows::process::CommandExt;
@@ -54,6 +55,7 @@ try {
       const out = new Channel();
       // ConPTY requests the inherited cursor position, including at shutdown.
       out.onmessage = data => {
+        void invoke('pty_ack', { channel: out.id });
         if (id === 'exited-test') window.exitedOutput = (window.exitedOutput || '') + data;
         if (data.includes('\x1b[6n')) void invoke('pty_write', { id, data: '\x1b[1;1R' }).catch(() => {});
       };
@@ -72,6 +74,61 @@ try {
   const after = [].concat(hosts());
   console.log('Native console hosts:', JSON.stringify(after.map(p => ({ id: p.id, cpuSeconds: p.cpu - (before.find(b => b.id === p.id)?.cpu ?? p.cpu) }))));
   assert.equal(after.length, 2, 'Natural process exit must release its console host without closing the pane');
+  assert.ok(after.every(p => p.cpu - (before.find(b => b.id === p.id)?.cpu ?? p.cpu) < 0.2), 'Idle console hosts must not spin');
+  const dlls = spawnSync('powershell.exe', ['-NoProfile', '-Command', `(Get-Process -Id ${child.pid}).Modules | Where-Object ModuleName -eq 'conpty.dll' | Select-Object -ExpandProperty FileName`], { windowsHide: true, encoding: 'utf8' });
+  assert.equal(dlls.status, 0);
+  assert.equal(dlls.stdout.trim(), '', 'Loom must use Windows ConPTY, not another terminal DLL from PATH');
+  const exportStart = Date.now();
+  await assert.rejects(page.evaluate(dir => window.__TAURI__.core.invoke('last_messages', {
+    panes: [['export-test', 'opencode', dir, 'ses_test']],
+  }), dir), /OpenCode export failed or timed out/);
+  assert.ok(Date.now() - exportStart < 9000, 'A hung export must time out and finish process-tree cleanup');
+  const exportPid = Number(readFileSync(join(dir, 'export-pid.txt'), 'utf8'));
+  assert.throws(() => process.kill(exportPid, 0), { code: 'ESRCH' }, 'The hung export child must be terminated');
+  console.log('PASS hung OpenCode export rejects within its deadline and releases its child');
+  await page.evaluate(async ({ node, cwd }) => {
+    const { invoke, Channel } = window.__TAURI__.core;
+    const out = new Channel();
+    window.pressure = { out, messages: 0, bytes: 0, pending: 0, resume: false, tail: '' };
+    out.onmessage = data => {
+      const p = window.pressure;
+      if (data.includes('\x1b[6n')) void invoke('pty_write', { id: 'pressure-test', data: '\x1b[1;1R' }).catch(() => {});
+      p.messages++; p.pending++; p.bytes += data.length;
+      p.tail = (p.tail + data).slice(-100);
+      if (p.resume) { p.pending--; void invoke('pty_ack', { channel: out.id }); }
+    };
+    await invoke('pty_spawn', { id: 'pressure-test', cwd, argv: [node, '-e', 'process.stdout.write(("output".repeat(20)+"\\n").repeat(10000)+"OUTPUT-DRAINED");setInterval(()=>{},1000)'], cols: 80, rows: 24, onOut: out });
+    await invoke('pty_write', { id: 'pressure-test', data: '\x1b[1;1R' });
+  }, { node: process.execPath, cwd: dir });
+  await page.waitForFunction(() => window.pressure.messages === 4);
+  await pause(1000);
+  assert.equal(await page.evaluate(() => window.pressure.messages), 4, 'A stalled renderer must have at most four unparsed output batches');
+  assert.ok(await page.evaluate(() => window.pressure.bytes <= 4 * 72 * 1024), 'Output waiting for the renderer must be bounded');
+  await page.evaluate(() => {
+    const p = window.pressure;
+    p.resume = true;
+    while (p.pending > 0) { p.pending--; void window.__TAURI__.core.invoke('pty_ack', { channel: p.out.id }); }
+  });
+  await page.waitForFunction(() => window.pressure.tail.includes('OUTPUT-DRAINED'), { timeout: 30000 });
+  await page.evaluate(() => window.__TAURI__.core.invoke('pty_kill', { id: 'pressure-test' }));
+  console.log('PASS native output pauses at four batches and drains completely after renderer acknowledgements');
+  await page.evaluate(async ({ node, cwd }) => {
+    const { invoke, Channel } = window.__TAURI__.core;
+    const out = new Channel();
+    window.exitedPressure = false;
+    await window.__TAURI__.event.listen('pty-exit:exited-pressure', () => window.exitedPressure = true);
+    out.onmessage = data => {
+      if (data.includes('\x1b[6n')) void invoke('pty_write', { id: 'exited-pressure', data: '\x1b[1;1R' }).catch(() => {});
+      // Deliberately never acknowledge, including after the child exits.
+    };
+    await invoke('pty_spawn', { id: 'exited-pressure', cwd, argv: [node, '-e', 'let n=0;let t=setInterval(()=>{process.stdout.write("x".repeat(8192));if(++n===8)clearInterval(t)},30)'], cols: 80, rows: 24, onOut: out });
+    await invoke('pty_write', { id: 'exited-pressure', data: '\x1b[1;1R' });
+  }, { node: process.execPath, cwd: dir });
+  await page.waitForFunction(() => window.exitedPressure);
+  await page.evaluate(() => window.__TAURI__.core.invoke('pty_kill', { id: 'exited-pressure' }));
+  await pause(500);
+  assert.equal([].concat(hosts()).length, 2, 'Closing an exited pane with unacknowledged output must release its console');
+  console.log('PASS closing an exited pane also releases stalled output');
   const result = await Promise.race([page.evaluate(async () => {
     const { invoke } = window.__TAURI__.core;
     const results = [];
@@ -96,7 +153,7 @@ try {
     const unlisten = await window.__TAURI__.event.listen('pty-exit:replacement-test', () => window.replacedExited = true);
     for (let i = 0; i < 2; i++) {
       const out = new Channel();
-      out.onmessage = data => { if (data.includes('\x1b[6n')) void invoke('pty_write', { id: 'replacement-test', data: '\x1b[1;1R' }).catch(() => {}); };
+      out.onmessage = data => { void invoke('pty_ack', { channel: out.id }); if (data.includes('\x1b[6n')) void invoke('pty_write', { id: 'replacement-test', data: '\x1b[1;1R' }).catch(() => {}); };
       await invoke('pty_spawn', { id: 'replacement-test', cwd, argv: [node, '-e', 'setInterval(() => {}, 1000)'], cols: 80, rows: 24, onOut: out });
       await invoke('pty_write', { id: 'replacement-test', data: '\x1b[1;1R' });
     }

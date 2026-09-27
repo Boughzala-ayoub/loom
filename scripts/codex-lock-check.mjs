@@ -85,6 +85,7 @@ try {
       await window.__TAURI__.event.listen(`pty-exit:${id}`, e => result.code = e.payload);
       const out = new Channel();
       out.onmessage = data => {
+        void invoke('pty_ack', { channel: out.id });
         result.output += data;
         if (data.includes('\x1b[6n')) void invoke('pty_write', { id, data: '\x1b[1;1R' }).catch(() => {});
         if (!result.promotionHandled && /Use\s*existing\s*model/.test(result.output.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''))) {

@@ -1383,6 +1383,11 @@ class Pane {
   private disposed = false;
   private interruptHint = false; // codex and opencode: their "esc … interrupt" hint was on screen
   private resumeNotice?: HTMLElement;
+  private startupOutput = "";
+  private startupRetry = false;
+  private spawnResume = false;
+  private exitCode?: number;
+  private startupStarted = 0;
   /** This pane's own row under its thread in the sidebar — Orca lists each
    * agent session under its worktree, and a thread with a claude and a codex
    * in it wants both visible at a glance. */
@@ -1598,21 +1603,17 @@ class Pane {
 
     const unlisten = await listen<number>(`pty-exit:${this.id}`, (e) => {
       this.dead = true;
+      this.exitCode = e.payload;
       this.busy = false;
       this.waiting = false;
       this.term.write(`\r\n\x1b[90m[exited ${e.payload}] — Enter relaunches\x1b[0m\r\n`);
       this.paint();
+      this.retryCodexStartup();
     });
     if (this.disposed) { unlisten(); return; }
     this.unlisten.push(unlisten);
     // Channel, not an event: stdout is the hot path and channels skip the
     // event bus' JSON round-trip through every other listener.
-    this.out.onmessage = (d) => {
-      this.lastOut = Date.now(); // settle() waits on this
-      const readsScreen = this.agent === "codex" || this.agent === "opencode";
-      this.term.write(d, () => { if (readsScreen) this.activity(); });
-      if (!readsScreen) this.activity();
-    };
     await this.spawn(!!sid);
     if (!this.disposed) this.observer.observe(this.host);
   }
@@ -1623,8 +1624,13 @@ class Pane {
    * is checked first and a fresh `--session-id` boot takes over. A codex or
    * opencode pane with no reported session yet (made before Loom captured one)
    * asks once instead of guessing. */
-  async spawn(resume: boolean) {
+  async spawn(resume: boolean, retry = false) {
     if (this.disposed) return;
+    this.startupOutput = "";
+    this.startupRetry = retry;
+    this.spawnResume = resume;
+    this.exitCode = undefined;
+    this.startupStarted = Date.now();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
       try {
         if (!(await invoke<boolean>("has_codex_session", { sid: this.sessionId }))) this.sessionId = undefined;
@@ -1664,6 +1670,22 @@ class Pane {
         (await invoke<boolean>("has_session", { dir: this.th.dir, sid: this.sid }).catch(() => false)));
     const release = restoring && this.agent === "claude" ? await bootSlot() : undefined;
     if (this.disposed) { release?.(); return; }
+    const out = this.out = new Channel<string>();
+    out.onmessage = (d) => {
+      const ack = () => void invoke("pty_ack", { channel: out.id }).catch(() => {});
+      if (this.disposed || this.out !== out) { ack(); return; }
+      this.lastOut = Date.now();
+      if (this.agent === "codex") {
+        this.startupOutput = (this.startupOutput + d).slice(-4096);
+        this.retryCodexStartup();
+      }
+      const readsScreen = this.agent === "codex" || this.agent === "opencode";
+      this.term.write(d, () => {
+        ack();
+        if (!this.disposed && readsScreen) this.activity();
+      });
+      if (!readsScreen) this.activity();
+    };
     const ok = await invoke("pty_spawn", {
       id: this.id,
       cwd: this.th.dir,
@@ -1685,6 +1707,19 @@ class Pane {
     }
     if (release) void (ok ? booted(this.id) : Promise.resolve()).then(release);
     this.paint();
+  }
+
+  private retryCodexStartup() {
+    if (this.agent !== "codex" || !this.dead || this.exitCode !== 1 || this.startupRetry || this.disposed) return;
+    if (Date.now() - this.startupStarted > 60000 || this.lastIn >= this.startupStarted) return;
+    const text = this.startupOutput.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+    if (!text.includes("account/read failed during TUI bootstrap") || !text.includes("workspace routing discovery timed out")) return;
+    this.startupRetry = true;
+    const out = this.out;
+    this.term.write("\r\nCodex account discovery timed out. Retrying once...\r\n");
+    setTimeout(() => {
+      if (!this.disposed && this.dead && this.out === out) void this.spawn(this.spawnResume || !!this.sessionId, true);
+    }, 1000);
   }
 
   async chooseSession() {
@@ -1963,7 +1998,6 @@ class Pane {
     cancelAnimationFrame(this.raf);
     this.resizeRender?.dispose();
     this.unlisten.forEach((u) => u());
-    this.out.onmessage = () => {};
     this.gpu(false);
     this.term.dispose();
     this.el.remove();
@@ -2515,7 +2549,7 @@ let dashboardSignature = "";
 let dashboardCompact = false;
 type DashboardMessages = { user: string; agent: string };
 const dashboardMessages = new Map<string, DashboardMessages & { session: string; input: number; busy: number; waiting: number; dead: boolean }>();
-let dashboardMessagesBusy = false;
+const dashboardMessagesBusy = new Set<string>();
 let dashboardMessagesPolled = 0;
 let dashboardNext: Pane | undefined;
 let dashboardRows: Pane[] = []; // The listed order, which the preview's previous/next follow.
@@ -2531,9 +2565,9 @@ const dashboardProject = $<HTMLSelectElement>("#dashboard-project");
 const dashboardSession = (p: Pane) => p.agent === "claude" ? p.sid : p.codexThread || p.sessionId || "";
 
 async function refreshDashboardMessages(force = false) {
-  if (!dashboardOpen || dashboardCompact || dashboardMessagesBusy || !force && Date.now() - dashboardMessagesPolled < 4000) return;
+  if (!dashboardOpen || dashboardCompact || !force && Date.now() - dashboardMessagesPolled < 4000) return;
   dashboardMessagesPolled = Date.now();
-  const requests = threads.flatMap(t => t.panes).filter(p => p.agent !== "shell" && dashboardSession(p))
+  const requests = threads.flatMap(t => t.panes).filter(p => p.agent !== "shell" && dashboardSession(p) && !dashboardMessagesBusy.has(p.id))
     // busy: a read in the moment after Enter can miss the new prompt; once the
     // agent is working, it is written. A reply sent from a card is no keystroke.
     .map(p => ({ p, session: dashboardSession(p), input: p.lastIn, busy: p.busySince, waiting: p.waitingSince, dead: p.dead }))
@@ -2542,7 +2576,7 @@ async function refreshDashboardMessages(force = false) {
       return force || !old || old.session !== session || old.input !== input || old.busy !== busy || old.waiting !== waiting || old.dead !== dead;
     });
   if (!requests.length) return;
-  dashboardMessagesBusy = true;
+  requests.forEach(({ p }) => dashboardMessagesBusy.add(p.id));
   // Each opencode pane gets its own call: its export takes seconds, and the
   // others should not wait on it. Each batch shows as soon as it's in.
   const batches = [requests.filter(r => r.p.agent !== "opencode"), ...requests.filter(r => r.p.agent === "opencode").map(r => [r])];
@@ -2558,8 +2592,8 @@ async function refreshDashboardMessages(force = false) {
       dashboardSignature = "";
       if (dashboardOpen) renderDashboard();
     } catch { /* Keep the last messages and retry on the next poll. */ }
+    finally { batch.forEach(({ p }) => dashboardMessagesBusy.delete(p.id)); }
   }));
-  dashboardMessagesBusy = false;
 }
 
 function toggleDashboard(on = !dashboardOpen) {
@@ -4123,7 +4157,20 @@ function midwayBar(state: string) {
   return bar;
 }
 
-async function refreshChanges() {
+let changesRefresh: Promise<void> | undefined;
+let changesRefreshAgain = false;
+function refreshChanges(): Promise<void> {
+  changesRefreshAgain = true;
+  return changesRefresh ??= (async () => {
+    // Keep one follow-up for changes made while Git was answering.
+    while (changesRefreshAgain) {
+      changesRefreshAgain = false;
+      await readChanges();
+    }
+  })().finally(() => { changesRefresh = undefined; });
+}
+
+async function readChanges() {
   const th = current;
   if (!th || !changesOpen) return;
   const body = $("#changes-body");
@@ -5609,7 +5656,7 @@ async function main() {
   };
   $("#commit-more").onclick = () => showMenu($("#commit-more"), commitMenu);
   $("#pr-btn").onclick = () => void createPR();
-  $("#changes-refresh").onclick = () => void (pollStats(), refreshChanges());
+  $("#changes-refresh").onclick = () => void pollStats();
   $("#changes-more").onclick = () => showMenu($("#changes-more"), repoMenu);
   $("#wsmore").onclick = () => current && showMenu($("#wsmore"), threadMenu(current));
   $("#waiting").onclick = () => openPicker();

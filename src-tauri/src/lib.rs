@@ -11,6 +11,8 @@ mod dictate;
 mod awake;
 mod helper;
 mod codex_state;
+mod output;
+mod cache;
 mod usage;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
@@ -29,6 +31,8 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
+    flow: Arc<output::Flow>,
+    _cache_lease: Option<std::fs::File>,
 }
 
 impl Session {
@@ -37,6 +41,7 @@ impl Session {
     /// process whose cwd is the worktree makes `git worktree remove` fail
     /// with "Permission denied" on Windows.
     fn kill(&mut self) {
+        self.flow.close();
         use std::os::windows::process::CommandExt;
         if let Some(pid) = self.pid {
             let _ = std::process::Command::new("taskkill")
@@ -206,12 +211,14 @@ fn pty_spawn(
         }
         None => CommandBuilder::new(&argv[0]),
     };
+    let mut cache_lease = None;
     if let Some(sid) = codex_state_id {
         // Codex's shared log DB can lock out concurrent startups. Keep each
         // pane's SQLite state across relaunches; auth/config/rollouts still
         // use CODEX_HOME. An explicit sqlite_home in Codex config still wins.
-        let sqlite = data_dir(&app).join("codex-sqlite").join(sid);
-        std::fs::create_dir_all(&sqlite).map_err(|e| e.to_string())?;
+        let root = data_dir(&app).join("codex-sqlite");
+        cache_lease = Some(cache::acquire(&root, &sid, &state_file(&app)).map_err(|e| e.to_string())?);
+        let sqlite = root.join(sid);
         if let Some(home) = std::env::var_os("CODEX_HOME").map(PathBuf::from)
             .or_else(|| app.path().home_dir().ok().map(|h| h.join(".codex"))) {
             codex_state::seed(&home, &sqlite);
@@ -281,7 +288,10 @@ fn pty_spawn(
     // Reader → channel → emitter: the emitter drains whatever queued up while the
     // last send was in flight, so fast output becomes a few big IPC messages instead
     // of one per 8 KiB read. Adds no latency — try_recv never waits.
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(16);
+    let flow = Arc::new(output::Flow::default());
+    let channel = on_out.id();
+    app.state::<output::Flows>().0.lock().unwrap().insert(channel, (id.clone(), flow.clone()));
     std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         let mut pending = Vec::new();
@@ -296,17 +306,21 @@ fn pty_spawn(
             }
         }
     });
+    let output_flow = flow.clone();
+    let output_app = app.clone();
     std::thread::spawn(move || {
         while let Ok(mut text) = rx.recv() {
-            // ponytail: 1 MiB cap per emit so a firehose can't build giant strings
-            while text.len() < 1 << 20 {
+            // Four unacknowledged chunks at most. Invalid UTF-8 can expand
+            // an 8 KiB read to 24 KiB, so a chunk stays below 88 KiB.
+            while text.len() < 64 << 10 {
                 match rx.try_recv() {
                     Ok(more) => text.push_str(&more),
                     Err(_) => break,
                 }
             }
-            let _ = on_out.send(text);
+            if !output_flow.acquire() || on_out.send(text).is_err() { break; }
         }
+        output_app.state::<output::Flows>().0.lock().unwrap().remove(&channel);
     });
 
     let previous = ptys.0.lock().unwrap().insert(
@@ -316,6 +330,8 @@ fn pty_spawn(
             writer: Arc::new(Mutex::new(writer)),
             killer,
             pid,
+            flow,
+            _cache_lease: cache_lease,
         },
     );
     std::thread::spawn(move || {
@@ -349,6 +365,11 @@ fn pty_write(ptys: State<Ptys>, id: String, data: String) -> Result<(), String> 
 }
 
 #[tauri::command]
+fn pty_ack(flows: State<output::Flows>, channel: u32) {
+    if let Some((_, flow)) = flows.0.lock().unwrap().get(&channel) { flow.ack(); }
+}
+
+#[tauri::command]
 fn pty_resize(ptys: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(), String> {
     let map = ptys.0.lock().unwrap();
     let s = map.get(&id).ok_or("no such pty")?;
@@ -363,7 +384,12 @@ fn pty_resize(ptys: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(),
 }
 
 #[tauri::command(async)]
-fn pty_kill(ptys: State<Ptys>, id: String) -> Result<(), String> {
+fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String) -> Result<(), String> {
+    // A child can exit before its final output is parsed. Closing that pane
+    // must also release its emitter when no Session remains in the map.
+    for (pane, flow) in flows.0.lock().unwrap().values() {
+        if pane == &id { flow.close(); }
+    }
     let session = ptys.0.lock().unwrap().remove(&id);
     if let Some(mut s) = session {
         s.kill();
@@ -372,7 +398,8 @@ fn pty_kill(ptys: State<Ptys>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command(async)]
-fn pty_shutdown(ptys: State<Ptys>) {
+fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
+    for (_, flow) in flows.0.lock().unwrap().values() { flow.close(); }
     let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
     for (_, mut session) in sessions { session.kill(); }
 }
@@ -821,17 +848,47 @@ fn recent_messages(path: &std::path::Path, provider: &str) -> LastMessages {
     last
 }
 
-fn opencode_messages(dir: &str, sid: &str) -> LastMessages {
+fn opencode_messages(dir: &str, sid: &str) -> Option<LastMessages> {
     use std::os::windows::process::CommandExt;
-    let Ok(out) = std::process::Command::new("cmd.exe")
-        .args(["/d", "/s", "/c", &format!("opencode export {sid} --pure")])
+    let mut command = std::process::Command::new("cmd.exe");
+    command.args(["/d", "/s", "/c", &format!("opencode export {sid} --pure")])
         .current_dir(dir)
-        .stdin(std::process::Stdio::null())
-        .creation_flags(0x0800_0000)
-        .output() else { return LastMessages::default() };
-    if !out.status.success() { return LastMessages::default(); }
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return LastMessages::default() };
-    opencode_export_messages(&v)
+        .creation_flags(0x0800_0000);
+    let out = export_output(&mut command, std::time::Duration::from_secs(5))?;
+    let v = serde_json::from_slice::<serde_json::Value>(&out).ok()?;
+    Some(opencode_export_messages(&v))
+}
+
+/// A stuck export must not occupy a worker forever or collect unlimited output.
+fn export_output(command: &mut std::process::Command, timeout: std::time::Duration) -> Option<Vec<u8>> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?.take(32 * 1024 * 1024 + 1);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.read_to_end(&mut bytes).ok().map(|_| bytes);
+        let _ = tx.send(result);
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    if let Ok(Some(bytes)) = rx.recv_timeout(timeout) {
+        if bytes.len() <= 32 * 1024 * 1024 {
+            while std::time::Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(status)) => return status.success().then_some(bytes),
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &child.id().to_string(), "/T", "/F"])
+        .creation_flags(0x0800_0000).output();
+    let _ = child.kill();
+    let _ = child.wait();
+    None
 }
 
 fn opencode_export_messages(v: &serde_json::Value) -> LastMessages {
@@ -852,24 +909,26 @@ fn rollout_is(path: &std::path::Path, sid: &str) -> bool {
 }
 
 #[tauri::command(async)]
-fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> HashMap<String, LastMessages> {
+fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> Result<HashMap<String, LastMessages>, String> {
     let mut codex_files = Vec::new();
     if panes.iter().any(|(_, agent, _, _)| agent == "codex") {
         if let Ok(home) = codex_home(&app) { codex_rollouts(&home.join("sessions"), &mut codex_files); }
     }
     let home = app.path().home_dir().unwrap_or_default();
     let marks = std::env::temp_dir().join("loom-tx");
-    panes.into_iter().filter_map(|(id, agent, dir, sid)| {
-        if sid.is_empty() || sid.len() > 128 || !sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return None; }
+    let mut messages = HashMap::new();
+    for (id, agent, dir, sid) in panes {
+        if sid.is_empty() || sid.len() > 128 || !sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { continue; }
         let last = match agent.as_str() {
             "claude" => recent_messages(&usage::transcript(&marks, &home, &id, &dir, &sid), "claude"),
             "codex" => codex_files.iter().find(|(_, path)| rollout_is(path, &sid))
                 .map(|(_, path)| recent_messages(path, "codex")).unwrap_or_default(),
-            "opencode" => opencode_messages(&dir, &sid),
-            _ => return None,
+            "opencode" => opencode_messages(&dir, &sid).ok_or("OpenCode export failed or timed out")?,
+            _ => continue,
         };
-        Some((id, last))
-    }).collect()
+        messages.insert(id, last);
+    }
+    Ok(messages)
 }
 
 /// (pane id, effort level) pairs; effort is the marker's content — empty when
@@ -1003,6 +1062,11 @@ Options:
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // portable-pty probes for conpty.dll. Allow deliberate app-local DLLs,
+    // but never silently borrow another terminal's implementation from PATH.
+    #[link(name = "kernel32")]
+    extern "system" { fn SetDefaultDllDirectories(flags: u32) -> i32; }
+    unsafe { SetDefaultDllDirectories(0x1000); } // LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
     // `loom --help` from a terminal. Release is a GUI-subsystem exe whose
     // stdout only exists when redirected; AttachConsole grabs the launching
     // terminal's console for the direct case (and fails harmlessly when there
@@ -1052,6 +1116,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Ptys::default())
+        .manage(output::Flows::default())
         .manage(WindowStateReady::default())
         .manage(dictate::Dictation::default())
         .manage(usage::Scanned::default())
@@ -1098,14 +1163,14 @@ pub fn run() {
             // app running without it.
             if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
                 let _ = awake::apply(false);
-                pty_shutdown(window.state::<Ptys>());
+                pty_shutdown(window.state::<Ptys>(), window.state::<output::Flows>());
                 if let Some(o) = window.app_handle().get_webview_window("overlay") {
                     let _ = o.destroy();
                 }
             }
         })
         .invoke_handler(tauri::generate_handler![
-            pty_spawn, pty_write, pty_resize, pty_kill, pty_shutdown, load_state, save_state, open_vscode,
+            pty_spawn, pty_write, pty_ack, pty_resize, pty_kill, pty_shutdown, load_state, save_state, open_vscode,
             git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, has_codex_session, usage::session_usage, usage::has_session, usage::pane_booted, usage::plan_usage, usage::codex_plan_usage,
             usage::model_options, usage::context_profile, last_messages, overlay, awake::set_keep_awake,
             dictate::dictate_start,
@@ -1118,6 +1183,19 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn export_has_a_deadline_and_preserves_successful_output() {
+        use std::time::{Duration, Instant};
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd.exe");
+        command.args(["/d", "/c", "echo ready"]).creation_flags(0x0800_0000);
+        assert_eq!(super::export_output(&mut command, Duration::from_secs(2)).unwrap(), b"ready\r\n");
+        let mut command = std::process::Command::new("cmd.exe");
+        command.args(["/d", "/c", "ping -n 20 127.0.0.1 >nul"]).creation_flags(0x0800_0000);
+        let start = Instant::now();
+        assert!(super::export_output(&mut command, Duration::from_millis(100)).is_none());
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
     use super::{drain_wakes, sweep_stale_profiles, take_utf8};
 
     #[test]

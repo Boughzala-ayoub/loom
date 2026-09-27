@@ -370,6 +370,12 @@ try {
     await audit('dashboard-stopped');
     await page.click('#dashboard-process');
     await page.waitForFunction(() => document.querySelector('#dashboard-process').textContent === 'Stop process');
+    // Each launch has its own output channel; delayed output from the old
+    // process must never reach the replacement terminal.
+    await page.evaluate(() => {
+      const id = window.qa.dashboardPanes[0].id;
+      window.qa.dashboardPanes[0] = window.qa.panes.findLast(p => p.id === id);
+    });
     assert.equal(await page.locator('#dashboard-preview').isVisible(), true);
     assert.equal(await page.locator('.pane').count(), 4, 'Relaunch keeps the existing pane');
     await audit('dashboard-relaunched');
@@ -1015,6 +1021,7 @@ try {
     assert.equal(await page.locator('.agent-title').filter({ hasText: /[◐⠙✳]/ }).count(), 0, 'Provider titles do not duplicate the spinner');
     // Folded threads show their agents as pips; every pip carries the working state.
     assert.equal(await page.locator('.pip[data-state=busy]').count(), 6, 'Every folded agent shows as working on its pip');
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const frames = await page.locator('.agent-title:visible').evaluateAll(labels => [0, 100].map(time => labels.map(label => {
       const animation = label.getAnimations({ subtree: true }).find(a => a.animationName === 'agent-spin');
       if (!animation) return null;
@@ -1022,7 +1029,7 @@ try {
       animation.currentTime = time;
       return getComputedStyle(label, '::before').content;
     })));
-    assert.ok(frames[0].every(frame => frame?.includes('⠋')) && frames[1].every(frame => frame?.includes('⠙')), 'Every listed agent and CLI animates the braille spinner before its session title');
+    assert.ok(frames[0].every(frame => frame?.includes('⠋')) && frames[1].every(frame => frame?.includes('⠙')), `Every listed agent and CLI animates the braille spinner before its session title: ${JSON.stringify(frames)}`);
     await audit('all-agents-working');
     await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').animationName === 'none')), 'Reduced motion stops the spinner');
