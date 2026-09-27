@@ -1,6 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
+import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, UserAttentionType } from "@tauri-apps/api/window";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
@@ -22,6 +22,65 @@ import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
 const MAX_PANES = 16;
+let desktopWindow: { size: PhysicalSize; position: PhysicalPosition; maximized: boolean; fullscreen: boolean; sideOpen: boolean } | undefined;
+
+async function phoneWindow() {
+  const button = $<HTMLButtonElement>("#phone-window");
+  if (button.disabled) return;
+  button.disabled = true;
+  const win = getCurrentWindow();
+  const restore = async () => {
+    if (!desktopWindow) return;
+    await win.setFullscreen(false);
+    await win.unmaximize();
+    await win.setSize(desktopWindow.size);
+    await win.setPosition(desktopWindow.position);
+    if (desktopWindow.maximized) await win.maximize();
+    if (desktopWindow.fullscreen) await win.setFullscreen(true);
+    toggleSide(desktopWindow.sideOpen);
+    desktopWindow = undefined;
+  };
+  try {
+    if (desktopWindow) {
+      await restore();
+    } else {
+      const monitor = await currentMonitor();
+      if (!monitor) throw new Error("Could not find the current monitor");
+      const maximized = await win.isMaximized();
+      const fullscreen = await win.isFullscreen();
+      if (fullscreen) await win.setFullscreen(false);
+      if (maximized) await win.unmaximize();
+      const size = await win.innerSize();
+      const position = await win.outerPosition();
+      desktopWindow = { size, position, maximized, fullscreen, sideOpen };
+      const outer = await win.outerSize();
+      const frameWidth = outer.width - size.width, frameHeight = outer.height - size.height;
+      const work = monitor.workArea;
+      // A26: 1080 x 2340. Use a readable desktop scale, including the window
+      // frame, and leave taskbars outside the phone-shaped window.
+      const factor = Math.min(390 * monitor.scaleFactor / 1080, work.size.width / 1080, work.size.height / 2340);
+      const width = Math.min(work.size.width, Math.max(Math.round(1080 * factor), 320 * monitor.scaleFactor + frameWidth));
+      const height = Math.round(2340 * factor);
+      await win.setSize(new PhysicalSize(Math.max(1, width - frameWidth), Math.max(1, height - frameHeight)));
+      await win.setPosition(new PhysicalPosition(
+        Math.round(work.position.x + (work.size.width - width) / 2),
+        Math.round(work.position.y + (work.size.height - height) / 2),
+      ));
+      toggleSide(false);
+    }
+  } catch (e) {
+    // Retain the saved bounds if restoration itself fails, so the next click
+    // can retry instead of forgetting the user's desktop window.
+    await restore().catch(() => {});
+    toast(`Could not resize the window: ${String(e)}`);
+  } finally {
+    const active = !!desktopWindow;
+    button.disabled = false;
+    button.setAttribute("aria-pressed", String(active));
+    button.setAttribute("aria-label", active ? "Restore desktop window" : "Fit window for Galaxy A26");
+    button.title = active ? "Restore previous window size and position" : "Fit window for Galaxy A26 (portrait)";
+  }
+}
 /** Provider title spinners ("✻ Thinking…"): stripped before a title is shown or compared. */
 const SPIN = /^[✳✻✽✶✢·◐◓◑◒⠁-⣿]+\s*/u;
 
@@ -5605,6 +5664,7 @@ async function main() {
 
   for (const id of ["#new-thread", "#open-first"]) $(id).onclick = () => newThread();
   $("#preferences-btn").onclick = () => togglePreferences();
+  $("#phone-window").onclick = () => void phoneWindow();
   $("#preferences-close").onclick = () => (togglePreferences(false), $("#preferences-btn").focus());
   $("#shortcuts").onclick = () => {
     togglePreferences(false);

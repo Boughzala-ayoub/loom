@@ -95,4 +95,14 @@ The UI fixture now follows the replacement output channel after relaunch. Its sp
 
 `npm run tauri -- build` produced `src-tauri/target/release/bundle/nsis/Loom_3.0.0_x64-setup.exe`, 1,893,951 bytes, SHA-256 `54827C36A7647A3AE65651966C155ABF6B8EAB84C0D6A54C43565E3846D67DA2`. The packaged executable embeds the tested frontend asset `main-BYgSA4vE.js`. The installer was prepared but not installed; existing sessions continue on their current version.
 
-Address the console spin first, then the two confirmed scheduling defects. Keep the Codex account failure tracked separately. Broad renderer rewrites or dependency additions are not justified by these measurements.
+## Live console cleanup at 15:29
+
+The two reported busy hosts were the same WezTerm `OpenConsole.exe` processes, 50116 and 39352. Both original parent processes, 62056 and 67060, were now gone. Each host still consumed about one CPU core. No association with either host was found among queryable console clients; protected processes could not be queried.
+
+The installed Loom instance, PID 62596, had started at 14:41 and was already using Windows `conhost.exe`. It had no loaded `conpty.dll`. Its 22 console hosts used about 0.5% of one CPU core combined in the initial sample. The DLL-selection correction was therefore active, while the old hosts had survived the previous instances.
+
+After rechecking the two hosts' executable paths, headless command lines, and missing parents, only PIDs 50116 and 39352 were terminated. The current Loom and all 45 of its direct child processes remained present. A subsequent 5.24-second sample found zero OpenConsole processes and approximately 1.49% of one CPU core used by the 22 current console hosts combined.
+
+This resolved the reported live CPU consumption without restarting Loom or its agents. No further application change was needed for these leftovers. The exact internal function spinning in the old WezTerm hosts was not established; the confirmed finding is that abandoned hosts from the earlier implementation persisted after their parents exited.
+
+The read-only association probe used the `ProcessConsoleHostProcess` information class and PID mask defined by [System Informer](https://github.com/winsiderss/systeminformer/blob/master/phnt/include/ntpsapi.h). Diagnostic scripts and snapshots are under the ignored `node_modules/.cache/console-diagnostic` directory.

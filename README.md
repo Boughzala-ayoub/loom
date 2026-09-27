@@ -223,6 +223,13 @@ and pane layout controls. Layout options are columns, rows, and grid.
 The grid reduces its column count in narrower windows. At phone
 widths, panes stack vertically and the project sidebar becomes a drawer.
 
+When controlling the PC from a phone, click the phone icon beside Preferences
+to fit Loom to Galaxy A26 portrait proportions within the current monitor's
+usable area. Click it again to restore the previous window size, position,
+and maximized or fullscreen state. The sidebar closes in phone mode and returns
+to its previous state afterward. Running panes stay open. On short monitors,
+the window keeps enough width for the controls instead of preserving the exact ratio.
+
 ### Changes
 
 `⎇` in the thread bar (or `Ctrl+Shift+G`) opens the changes panel on the
