@@ -758,9 +758,14 @@ try {
     await page.keyboard.press('Alt+ArrowDown');
     assert.deepEqual(await page.evaluate(() => window.qa.calls.slice(window.qa.keyStart).filter(c => c.cmd === 'pty_write').map(c => c.args.data)), ['\x1b[1;3A', '\x1b[1;3B'], 'Plain Alt+arrows must reach Codex unchanged');
     assert.equal(await page.evaluate(() => window.qa.keyboardWheels.length), 0, 'Codex shortcuts must not scroll Loom');
+    // Normal history uses xterm's scroll API. Agent-owned full-screen views
+    // need wheel reports with the shortcut modifiers removed.
+    await page.evaluate(() => window.qa.panes.find(p => p.argv.join(' ').includes('codex')).onOut.onmessage('\x1b[?1049h\x1b[?1000h\x1b[?1006h'));
+    await page.waitForTimeout(100);
     await page.keyboard.press('Alt+Shift+ArrowUp');
     await page.keyboard.press('Alt+Shift+ArrowDown');
     assert.deepEqual(await page.evaluate(() => window.qa.keyboardWheels), [[-3, false, false], [3, false, false]], 'Alt+Shift+arrows must scroll without forwarding modifiers');
+    await page.evaluate(() => window.qa.panes.find(p => p.argv.join(' ').includes('codex')).onOut.onmessage('\x1b[?1000l\x1b[?1006l\x1b[?1049l'));
     for (const zoomed of [false, true]) {
       if (zoomed) await page.keyboard.press('F2');
       for (const entry of ['toolbar', 'sidebar']) {

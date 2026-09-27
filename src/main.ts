@@ -14,7 +14,7 @@ import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, codexThread, launch, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
 import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
-import { wheelInit } from "./scroll";
+import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, echoes, type Menu as AgentMenu } from "./prompt";
@@ -1441,6 +1441,7 @@ class Pane {
   private idle = 0;
   private disposed = false;
   private interruptHint = false; // codex and opencode: their "esc … interrupt" hint was on screen
+  private opencodeStatus = false; // Plugin events take precedence over the TUI footer.
   private resumeNotice?: HTMLElement;
   private startupOutput = "";
   private startupRetry = false;
@@ -1518,6 +1519,14 @@ class Pane {
     this.el.append(head, this.host);
     this.el.addEventListener("mousedown", () => this.th.focusPane(this));
     this.term.attachCustomKeyEventHandler((e) => {
+      // Codex runs inline: its history belongs to xterm, so page keys must
+      // move that buffer. Full-screen views and modified keys stay agent input.
+      if (e.type === "keydown" && this.agent === "codex" && this.term.buffer.active.type === "normal" &&
+          !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey && (e.key === "PageUp" || e.key === "PageDown")) {
+        e.preventDefault();
+        this.term.scrollPages(e.key === "PageUp" ? -1 : 1);
+        return false;
+      }
       if (e.type !== "keydown" || !e.ctrlKey || e.altKey || e.key.toLowerCase() !== "c" || !this.term.hasSelection()) return true;
       e.preventDefault();
       void this.copySelection();
@@ -1723,6 +1732,7 @@ class Pane {
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
     this.interruptHint = false;
+    this.opencodeStatus = false;
     const can =
       resume &&
       (this.agent !== "claude" ||
@@ -1818,6 +1828,7 @@ class Pane {
    * is the echo, not the agent — a real answer keeps drawing well past that. */
   private activity() {
     if (this.agent === "shell") return;
+    if (this.opencodeStatus) return;
     if (this.agent === "codex" || this.agent === "opencode") {
       // ponytail: both keep drawing while idle (codex's star field, opencode's
       // TUI), so output alone says nothing. Their interrupt hint is the tell:
@@ -1907,10 +1918,11 @@ class Pane {
     this.th.focusPane(this);
   }
 
-  /** Alt+Shift+Arrow scrolling: hand xterm a wheel event on the element it already
-   * listens on and let it encode one for whatever the app negotiated. See
-   * scroll.ts for why this isn't a hand-written escape sequence. */
+  /** Scroll terminal history directly; agent-owned transcripts receive wheel
+   * input encoded by xterm for their negotiated mouse protocol. */
   scroll(up: boolean) {
+    if (this.term.buffer.active.type === "normal" && this.term.modes.mouseTrackingMode === "none")
+      return this.term.scrollLines(up ? -LINES : LINES);
     this.term.element?.dispatchEvent(
       new WheelEvent("wheel", wheelInit(up, this.host.getBoundingClientRect())),
     );
@@ -1920,6 +1932,18 @@ class Pane {
    * The marker carries the session's effort level — keep the last-known one
    * (letters only: it lands on a command line at next boot). */
   wake(effort?: string) {
+    if (this.agent === "opencode" && (effort === "opencode:busy" || effort === "opencode:waiting")) {
+      this.opencodeStatus = true;
+      if (this.dead) return;
+      if (effort === "opencode:busy") {
+        this.waiting = false;
+        this.busy = true;
+        this.paint();
+        if (dashboardOpen) renderDashboard();
+        return;
+      }
+      effort = undefined;
+    }
     if (effort && /^[a-z]+$/.test(effort) && effort !== this.effort) {
       this.effort = effort;
       save();

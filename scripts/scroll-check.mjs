@@ -10,7 +10,7 @@ const out = 'node_modules/.cache/scroll-check';
 mkdirSync(out, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true, ignoreDefaultArgs: ['--hide-scrollbars'] });
 try {
-  for (const width of [320, 375, 768, 1024, 1280]) for (const cmd of ['codex', 'claude', 'opencode', 'powershell']) {
+  for (const width of (process.env.SCROLL_WIDTHS || '320,375,768,1024,1280').split(',').map(Number)) for (const cmd of (process.env.SCROLL_AGENTS || 'codex,claude,opencode,powershell').split(',')) {
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.addInitScript({ content: mocks + `\n(${(cmd => {
       window.qa = { writes: [], spawn: null, size: null };
@@ -54,9 +54,32 @@ try {
     await page.mouse.wheel(0, 100000);
     await page.waitForTimeout(100);
     await page.locator('.xterm-helper-textarea').focus();
+    const checkPageKeys = async () => {
+      // Start at the bottom so Page Up cannot clamp near the oldest line.
+      for (let i = 0; i < 20; i++) await page.keyboard.press('PageDown');
+      await page.waitForTimeout(100);
+      const before = await top();
+      await page.evaluate(() => { window.qa.writes = []; });
+      await page.keyboard.press('PageUp');
+      await page.waitForTimeout(100);
+      assert.ok(await top() < before, `${cmd}@${width}: Page Up must scroll Codex history; PTY received ${JSON.stringify(await page.evaluate(() => window.qa.writes))}`);
+      await page.keyboard.press('PageDown');
+      await page.waitForTimeout(100);
+      assert.ok(Math.abs(await top() - before) < 1, `${cmd}@${width}: Page Down must return to the original position (${before} -> ${await top()}); PTY received ${JSON.stringify(await page.evaluate(() => window.qa.writes))}`);
+      assert.deepEqual(await page.evaluate(() => window.qa.writes), [], 'Codex history keys must not be sent as agent input');
+    };
+    if (cmd === 'codex') {
+      await checkPageKeys();
+    }
+    await page.waitForTimeout(100);
+    const beforeKeyboard = await top();
     await page.keyboard.press('Alt+Shift+ArrowUp');
     await page.waitForTimeout(100);
-    assert.ok(await top() < bottom, `${cmd}: keyboard scroll must reach history`);
+    assert.ok(await top() < beforeKeyboard, `${cmd}: keyboard scroll must reach history (${beforeKeyboard} -> ${await top()})`);
+    if (cmd === 'codex') {
+      await page.keyboard.press('Control+PageUp');
+      assert.ok(await page.evaluate(() => window.qa.writes.includes('\x1b[5;5~')), 'Modified Page Up remains available to Codex');
+    }
     const historyThumb = await slider.boundingBox();
     await page.mouse.move(historyThumb.x + historyThumb.width / 2, historyThumb.y + historyThumb.height / 2);
     await page.mouse.down();
@@ -66,6 +89,10 @@ try {
       await page.locator('#dashboard-btn').click();
       await page.locator('.dashboard-row').first().click();
       await page.waitForTimeout(150);
+      if (cmd === 'codex') {
+        await page.locator('#dashboard-preview-output .xterm-helper-textarea').focus();
+        await checkPageKeys();
+      }
       if (i) {
         const preview = await page.locator('#dashboard-preview-output .xterm-screen').boundingBox();
         await page.mouse.move(preview.x + 40, preview.y + 40);
@@ -85,6 +112,10 @@ try {
       window.qa.writes = [];
     });
     await page.waitForTimeout(100);
+    await page.locator('.xterm-helper-textarea').focus();
+    await page.keyboard.press('PageUp');
+    await page.keyboard.press('PageDown');
+    assert.ok(await page.evaluate(() => window.qa.writes.includes('\x1b[5~') && window.qa.writes.includes('\x1b[6~')), `${cmd}: full-screen applications must receive both page keys`);
     await page.mouse.move(screen.x + 80, screen.y + 80);
     await page.mouse.wheel(0, -100);
     await page.waitForTimeout(100);
@@ -102,7 +133,7 @@ try {
     for (const pattern of [/^\x1b\[<0;.*M$/, /^\x1b\[<32;.*M$/, /^\x1b\[<0;.*m$/]) {
       assert.ok(reports.some(s => pattern.test(s)), `${cmd}: agent-owned scrollbar must receive mouse down, drag, and release`);
     }
-    console.log(`PASS ${cmd}@${width}: wheel, scrollbar drag, keyboard history, Overview follow-output, full-screen mouse reports`);
+    console.log(`PASS ${cmd}@${width}: wheel, scrollbar drag, page keys, keyboard history, Overview follow-output, full-screen mouse reports`);
     await context.close();
   }
 } finally { await browser.close(); }

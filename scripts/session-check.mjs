@@ -49,12 +49,19 @@ try {
   // A question or permission prompt blocks mid-turn: it must ring like session.idle.
   const wake = join(tmpdir(), 'loom-wait', process.env.LOOM_PANE);
   for (const type of ['session.idle', 'question.asked', 'permission.asked']) {
-    await plugin.event({ event: { type, properties: {} } });
+    await plugin.event({ event: { type: 'session.status', properties: { sessionID: 'ses_selected', status: { type: 'busy' } } } });
+    assert.equal(readFileSync(wake, 'utf8'), 'opencode:busy');
+    unlinkSync(wake);
+    await plugin.event({ event: { type, properties: { sessionID: 'ses_selected' } } });
     assert.ok(existsSync(wake), `${type} must drop the wake marker`);
+    assert.equal(readFileSync(wake, 'utf8'), 'opencode:waiting');
     unlinkSync(wake);
   }
-  await plugin.event({ event: { type: 'question.replied', properties: {} } });
-  assert.ok(!existsSync(wake), 'an answer must not ring');
+  await plugin.event({ event: { type: 'question.replied', properties: { sessionID: 'ses_selected' } } });
+  assert.equal(readFileSync(wake, 'utf8'), 'opencode:busy', 'an answer restores Working rather than ringing');
+  unlinkSync(wake);
+  await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_child' } } });
+  assert.ok(!existsSync(wake), 'a child finishing must not change the parent state');
   console.log('PASS per-pane Codex markers, exact resume, ephemeral/guardian rejection, OpenCode selection, subagent isolation and OpenCode wakes');
 } finally {
   for (const suffix of ['0', '1', 'oc']) if (existsSync(marker(pane + suffix))) unlinkSync(marker(pane + suffix));
