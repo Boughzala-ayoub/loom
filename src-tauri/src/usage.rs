@@ -273,7 +273,6 @@ fn live_status(dir: &Path, pane: &str) -> Live {
 /// is answered from the moment it comes up, at zero; one that isn't — no
 /// statusline marker, no transcript — is left out, which is what hides the gauge
 /// on a plain shell.
-#[tauri::command(async)]
 pub fn session_usage(
     state: State<Scanned>,
     panes: Vec<(String, String, String)>,
@@ -517,7 +516,6 @@ fn profile_of(path: &Path) -> std::io::Result<Profile> {
 /// What one pane's context is made of. Read on demand — the panel opening is the
 /// only thing that asks — because unlike `session_usage` this parses the whole
 /// transcript, every line of it.
-#[tauri::command(async)]
 pub fn context_profile(pane: String, dir: String, sid: String) -> Option<Profile> {
     let home: PathBuf = std::env::var_os("USERPROFILE")
         .map(Into::into)
@@ -624,7 +622,6 @@ struct ApiModel {
 
 /// Every model this account can actually use, newest first. `/model` takes a
 /// full id, so the ids come back as-is and nothing here needs a name table.
-#[tauri::command(async)]
 pub fn model_options() -> Result<Vec<ModelOpt>, String> {
     let body = get(
         "https://api.anthropic.com/v1/models?limit=100",
@@ -812,7 +809,6 @@ fn codex_local(homes: &[PathBuf]) -> Option<CodexPlan> {
     None
 }
 
-#[tauri::command(async)]
 pub fn codex_plan_usage() -> Result<CodexPlan, String> {
     let homes = codex_homes();
     let auth = homes.iter().find_map(|home| {
@@ -849,7 +845,6 @@ pub fn codex_plan_usage() -> Result<CodexPlan, String> {
 
 /// Plan usage for the signed-in account. The caller polls this — the endpoint
 /// rate-limits, and these numbers don't move fast enough to ask often.
-#[tauri::command(async)]
 pub fn plan_usage() -> Result<Plan, String> {
     let (tier, err) = match creds() {
         // The plan name is in the credentials file already — no second request.

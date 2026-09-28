@@ -46,7 +46,6 @@ struct Rec {
 
 /// Start capturing. The model loads on a second thread meanwhile, so the first
 /// click's download waits out your sentence instead of following it.
-#[tauri::command(async)]
 pub fn dictate_start(app: AppHandle, state: State<Dictation>) -> Result<(), String> {
     let mut slot = state.rec.lock().unwrap();
     if slot.is_some() {
@@ -91,7 +90,6 @@ pub fn dictate_level(state: State<Dictation>) -> f32 {
 }
 
 /// Stop, transcribe, hand back the text. `""` = nothing worth pasting.
-#[tauri::command(async)]
 pub fn dictate_stop(
     app: AppHandle,
     state: State<Dictation>,

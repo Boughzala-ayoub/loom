@@ -78,6 +78,7 @@ try {
   console.log('Native console hosts:', JSON.stringify(after.map(p => ({ id: p.id, cpuSeconds: p.cpu - (before.find(b => b.id === p.id)?.cpu ?? p.cpu) }))));
   assert.equal(after.length, 2, 'Natural process exit must release its console host without closing the pane');
   assert.ok(after.every(p => p.cpu - (before.find(b => b.id === p.id)?.cpu ?? p.cpu) < 0.2), 'Idle console hosts must not spin');
+  await assert.rejects(page.evaluate(() => window.__TAURI__.core.invoke('pty_write', { id: 'exited-test', data: 'x' })), /no such pty/, 'A write to an exited pane must reject');
   const dlls = spawnSync('powershell.exe', ['-NoProfile', '-Command', `(Get-Process -Id ${child.pid}).Modules | Where-Object ModuleName -eq 'conpty.dll' | Select-Object -ExpandProperty FileName`], { windowsHide: true, encoding: 'utf8' });
   assert.equal(dlls.status, 0);
   assert.equal(dlls.stdout.trim(), '', 'Loom must use Windows ConPTY, not another terminal DLL from PATH');
@@ -174,7 +175,21 @@ try {
     pause(2000).then(() => false),
   ]);
   assert.ok(windowResponse, 'A blocked terminal input write must not block the window event loop');
-  console.log('PASS window responds while a 2 MB input write is blocked');
+  // Nor another pane's keystrokes, nor a Git call.
+  const others = await page.evaluate(async ({ node, cwd }) => {
+    const { invoke, Channel } = window.__TAURI__.core;
+    const out = new Channel();
+    out.onmessage = data => { void invoke('pty_ack', { channel: out.id }); if (data.includes('\x1b[6n')) void invoke('pty_write', { id: 'typing-test', data: '\x1b[1;1R' }).catch(() => {}); };
+    await invoke('pty_spawn', { id: 'typing-test', cwd, argv: [node, '-e', 'process.stdin.resume()'], cols: 80, rows: 24, onOut: out });
+    let start = performance.now();
+    await invoke('pty_write', { id: 'typing-test', data: 'k' });
+    const key = performance.now() - start;
+    start = performance.now();
+    await invoke('git_run', { dir: cwd, args: ['--version'] });
+    return { key, git: performance.now() - start };
+  }, { node: process.execPath, cwd: dir });
+  assert.ok(others.key < 250 && others.git < 5000, `Another pane's keystroke and a Git call must not wait on the blocked write: ${JSON.stringify(others)}`);
+  console.log(`PASS window, another pane's keystroke (${others.key.toFixed(0)} ms) and git (${others.git.toFixed(0)} ms) respond while a 2 MB input write is blocked`);
   await page.evaluate(() => window.__TAURI__.event.emitTo('main', 'tauri://close-requested'));
   await pause(100);
   const responsive = await page.evaluate(async () => {

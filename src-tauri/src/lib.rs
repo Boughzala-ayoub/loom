@@ -26,9 +26,14 @@ const CLAUDE_HOOKS: &str = include_str!("claude-hooks.json");
 /// global config directory; inert outside a Loom pane.
 const OPENCODE_PLUGIN: &str = include_str!("loom-opencode.js");
 
+/// One `pty_write`: the bytes, and where the pane's writer thread reports the result.
+type Input = (String, tauri::async_runtime::Sender<Result<(), String>>);
+
 struct Session {
     // Close the input pipe before ClosePseudoConsole runs in master's Drop.
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    // The writer thread holds it weakly, so only a write in progress keeps it open.
+    _writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    input: std::sync::mpsc::Sender<Input>,
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
@@ -150,7 +155,6 @@ fn ensure_file(path: &std::path::Path, text: &str) -> Result<(), String> {
 // spawner quotes each argument MSVC-style, so a path with spaces reaches a
 // real executable intact — which is why `$LOOM_HOOKS` is substituted here as
 // one argument rather than expanded by a shell.
-#[tauri::command(async)]
 fn pty_spawn(
     app: AppHandle,
     ptys: State<Ptys>,
@@ -282,7 +286,24 @@ fn pty_spawn(
     let killer = child.clone_killer();
     let pid = child.process_id();
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
+    // Keystrokes reach the pane through its own thread, in order. A child that
+    // stops reading fills its input pipe, and that wait must hold neither an
+    // async worker nor the map lock.
+    let (input, inputs) = std::sync::mpsc::channel::<Input>();
+    let pipe = Arc::downgrade(&writer);
+    std::thread::spawn(move || {
+        for (data, reply) in inputs {
+            let result = match pipe.upgrade() {
+                Some(writer) => {
+                    let mut writer = writer.lock().unwrap();
+                    writer.write_all(data.as_bytes()).and_then(|_| writer.flush()).map_err(|e| e.to_string())
+                }
+                None => Err("no such pty".to_string()),
+            };
+            let _ = reply.blocking_send(result);
+        }
+    });
 
     // Reader → channel → emitter: the emitter drains whatever queued up while the
     // last send was in flight, so fast output becomes a few big IPC messages instead
@@ -326,7 +347,8 @@ fn pty_spawn(
         id.clone(),
         Session {
             master: pair.master,
-            writer: Arc::new(Mutex::new(writer)),
+            _writer: writer,
+            input,
             killer,
             pid,
             flow,
@@ -354,13 +376,13 @@ fn pty_spawn(
     Ok(())
 }
 
-#[tauri::command(async)]
-fn pty_write(ptys: State<Ptys>, id: String, data: String) -> Result<(), String> {
-    let writer = ptys.0.lock().unwrap().get(&id).ok_or("no such pty")?.writer.clone();
-    // A full input pipe must not hold the window thread or other panes' map lock.
-    let mut writer = writer.lock().unwrap();
-    writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
+/// Hands the bytes to the pane's writer thread and waits for its result, so a
+/// failed write still rejects. A full input pipe holds no worker while it waits.
+#[tauri::command]
+async fn pty_write(ptys: State<'_, Ptys>, id: String, data: String) -> Result<(), String> {
+    let (reply, mut result) = tauri::async_runtime::channel(1);
+    ptys.0.lock().unwrap().get(&id).ok_or("no such pty")?.input.send((data, reply)).map_err(|_| "no such pty")?;
+    result.recv().await.unwrap_or_else(|| Err("no such pty".into()))
 }
 
 #[tauri::command]
@@ -382,7 +404,6 @@ fn pty_resize(ptys: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(),
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command(async)]
 fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String) -> Result<(), String> {
     // A child can exit before its final output is parsed. Closing that pane
     // must also release its emitter when no Session remains in the map.
@@ -396,7 +417,6 @@ fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String) -> Resul
     Ok(())
 }
 
-#[tauri::command(async)]
 fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
     for (_, flow) in flows.0.lock().unwrap().values() { flow.close(); }
     let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
@@ -408,7 +428,6 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
 /// porcelain lives in the frontend, so this stays one function.
 /// `ok`: extra exit codes to treat as success — `git diff --no-index` answers 1
 /// when the files differ, which is the whole point of asking.
-#[tauri::command(async)]
 fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("git")
@@ -443,7 +462,6 @@ fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<Strin
 /// would not track are skipped, so a `node_modules` never lands in the panel.
 /// ponytail: no .gitignore parsing — `git ls-files` covers git checkouts and
 /// this is the fallback for plain folders; caps at 20k entries.
-#[tauri::command(async)]
 fn list_files(dir: String) -> Vec<String> {
     let root = std::path::PathBuf::from(&dir);
     let mut out = Vec::new();
@@ -470,7 +488,6 @@ fn list_files(dir: String) -> Vec<String> {
 
 /// One file's text for the viewer tab. Binary bytes come back lossy; anything
 /// past 4 MB is cut, which is past what a diff view is for anyway.
-#[tauri::command(async)]
 fn read_file(dir: String, path: String) -> Result<String, String> {
     let mut bytes = std::fs::read(std::path::Path::new(&dir).join(&path)).map_err(|e| e.to_string())?;
     let cut = bytes.len() > 4 << 20;
@@ -482,7 +499,6 @@ fn read_file(dir: String, path: String) -> Result<String, String> {
     Ok(text)
 }
 
-#[tauri::command(async)]
 fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, serde_json::Value> {
     let requested = std::path::Path::new(&path);
     let mut path = std::path::Path::new(&dir).join(requested);
@@ -545,7 +561,6 @@ fn find_image(root: &std::path::Path, name: &std::path::Path) -> Result<PathBuf,
 /// `git_run` with the patch on stdin, which is the only way to hand `git apply`
 /// one hunk: staging part of a file writes a patch nobody should have to keep
 /// in a temp file.
-#[tauri::command(async)]
 fn git_stdin(dir: String, args: Vec<String>, patch: String) -> Result<String, String> {
     use std::io::Write;
     use std::os::windows::process::CommandExt;
@@ -598,7 +613,6 @@ fn code_shim() -> Option<PathBuf> {
 /// handle for its whole life and drip `update#setState checking for updates`
 /// into the pane an hour later, on top of whatever TUI is drawing there. stdout
 /// and stderr are captured below for the same reason.
-#[tauri::command(async)]
 fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
@@ -669,7 +683,6 @@ fn take_sessions(app: AppHandle, ids: Vec<String>) -> Vec<(String, String)> {
     out
 }
 
-#[tauri::command(async)]
 fn opencode_sessions(dir: String, command: Option<String>) -> Result<Vec<serde_json::Value>, String> {
     opencode::sessions(&dir, command.as_deref().unwrap_or("opencode"))
 }
@@ -679,7 +692,6 @@ fn opencode_sessions(dir: String, command: Option<String>) -> Result<Vec<serde_j
 /// the `session_meta` first line of every rollout under $CODEX_HOME/sessions,
 /// titled from session_index.jsonl (Codex's auto-name) or the first prompt.
 // ponytail: one full walk per open of the picker, 20 newest matches.
-#[tauri::command(async)]
 fn codex_sessions(app: AppHandle, dir: String) -> Result<Vec<serde_json::Value>, String> {
     codex_session_rows(&codex_home(&app)?, &dir, None)
 }
@@ -690,7 +702,6 @@ fn codex_home(app: &AppHandle) -> Result<PathBuf, String> {
         .ok_or_else(|| "no home dir".to_string())
 }
 
-#[tauri::command(async)]
 fn has_codex_session(app: AppHandle, sid: String) -> Result<bool, String> {
     Ok(!codex_session_rows(&codex_home(&app)?, "", Some(&sid))?.is_empty())
 }
@@ -886,7 +897,6 @@ fn rollout_is(path: &std::path::Path, sid: &str) -> bool {
         .is_some_and(|id| id.starts_with(sid))
 }
 
-#[tauri::command(async)]
 fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> Result<HashMap<String, LastMessages>, String> {
     let mut codex_files = Vec::new();
     if panes.iter().any(|(_, agent, _, _)| agent == "codex") {
@@ -1013,7 +1023,6 @@ fn load_state(app: AppHandle) -> String {
     std::fs::read_to_string(state_file(&app)).unwrap_or_default()
 }
 
-#[tauri::command]
 fn save_state(app: AppHandle, json: String) -> Result<(), String> {
     // Write beside the destination, then replace it, so an interrupted save
     // leaves either the old snapshot or the new one, never half a JSON file.
@@ -1021,6 +1030,107 @@ fn save_state(app: AppHandle, json: String) -> Result<(), String> {
     let pending = path.with_extension("json.pending");
     std::fs::write(&pending, json).map_err(|e| e.to_string())?;
     std::fs::rename(pending, path).map_err(|e| e.to_string())
+}
+
+/// The commands that wait on a process or the disk. Tauri runs async commands
+/// on one Tokio worker per CPU, and every other command, keystrokes included,
+/// queues behind a worker held by a slow Git call or an OpenCode read. These run
+/// the same functions on the blocking pool instead, under the same names and
+/// arguments, so the frontend doesn't change.
+mod commands {
+    use super::*;
+
+    async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        tauri::async_runtime::spawn_blocking(f).await.expect("blocking command panicked")
+    }
+
+    #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn pty_spawn(app: AppHandle, id: String, cwd: Option<String>, argv: Vec<String>, codex_state_id: Option<String>,
+        cols: u16, rows: u16, on_out: tauri::ipc::Channel<String>) -> Result<(), String> {
+        blocking(move || super::pty_spawn(app.clone(), app.state(), id, cwd, argv, codex_state_id, cols, rows, on_out)).await
+    }
+    #[tauri::command]
+    pub async fn pty_kill(app: AppHandle, id: String) -> Result<(), String> {
+        blocking(move || super::pty_kill(app.state(), app.state(), id)).await
+    }
+    #[tauri::command]
+    pub async fn pty_shutdown(app: AppHandle) {
+        blocking(move || super::pty_shutdown(app.state(), app.state())).await
+    }
+    #[tauri::command]
+    pub async fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
+        blocking(move || super::git_run(dir, args, ok)).await
+    }
+    #[tauri::command]
+    pub async fn git_stdin(dir: String, args: Vec<String>, patch: String) -> Result<String, String> {
+        blocking(move || super::git_stdin(dir, args, patch)).await
+    }
+    #[tauri::command]
+    pub async fn list_files(dir: String) -> Vec<String> {
+        blocking(move || super::list_files(dir)).await
+    }
+    #[tauri::command]
+    pub async fn read_file(dir: String, path: String) -> Result<String, String> {
+        blocking(move || super::read_file(dir, path)).await
+    }
+    #[tauri::command]
+    pub async fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, serde_json::Value> {
+        blocking(move || super::read_image(dir, path)).await
+    }
+    #[tauri::command]
+    pub async fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
+        blocking(move || super::open_vscode(dir, goto)).await
+    }
+    #[tauri::command]
+    pub async fn opencode_sessions(dir: String, command: Option<String>) -> Result<Vec<serde_json::Value>, String> {
+        blocking(move || super::opencode_sessions(dir, command)).await
+    }
+    #[tauri::command]
+    pub async fn codex_sessions(app: AppHandle, dir: String) -> Result<Vec<serde_json::Value>, String> {
+        blocking(move || super::codex_sessions(app, dir)).await
+    }
+    #[tauri::command]
+    pub async fn has_codex_session(app: AppHandle, sid: String) -> Result<bool, String> {
+        blocking(move || super::has_codex_session(app, sid)).await
+    }
+    #[tauri::command]
+    pub async fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> Result<HashMap<String, LastMessages>, String> {
+        blocking(move || super::last_messages(app, panes)).await
+    }
+    /// Off the main thread too; the frontend's saveQueue keeps saves in order.
+    #[tauri::command]
+    pub async fn save_state(app: AppHandle, json: String) -> Result<(), String> {
+        blocking(move || super::save_state(app, json)).await
+    }
+    #[tauri::command]
+    pub async fn session_usage(app: AppHandle, panes: Vec<(String, String, String)>) -> HashMap<String, usage::Usage> {
+        blocking(move || usage::session_usage(app.state(), panes)).await
+    }
+    #[tauri::command]
+    pub async fn context_profile(pane: String, dir: String, sid: String) -> Option<usage::Profile> {
+        blocking(move || usage::context_profile(pane, dir, sid)).await
+    }
+    #[tauri::command]
+    pub async fn model_options() -> Result<Vec<usage::ModelOpt>, String> {
+        blocking(usage::model_options).await
+    }
+    #[tauri::command]
+    pub async fn plan_usage() -> Result<usage::Plan, String> {
+        blocking(usage::plan_usage).await
+    }
+    #[tauri::command]
+    pub async fn codex_plan_usage() -> Result<usage::CodexPlan, String> {
+        blocking(usage::codex_plan_usage).await
+    }
+    #[tauri::command]
+    pub async fn dictate_start(app: AppHandle) -> Result<(), String> {
+        blocking(move || dictate::dictate_start(app.clone(), app.state())).await
+    }
+    #[tauri::command]
+    pub async fn dictate_stop(app: AppHandle, lang: Option<String>) -> Result<String, String> {
+        blocking(move || dictate::dictate_stop(app.clone(), app.state(), lang)).await
+    }
 }
 
 // ASCII only: legacy consoles read stdout in the OEM codepage.
@@ -1148,11 +1258,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            pty_spawn, pty_write, pty_ack, pty_resize, pty_kill, pty_shutdown, load_state, save_state, open_vscode,
-            git_run, git_stdin, list_files, read_file, read_image, take_wakes, take_sessions, opencode_sessions, codex_sessions, has_codex_session, usage::session_usage, usage::has_session, usage::pane_booted, usage::plan_usage, usage::codex_plan_usage,
-            usage::model_options, usage::context_profile, last_messages, overlay, awake::set_keep_awake,
-            dictate::dictate_start,
-            dictate::dictate_stop,
+            commands::pty_spawn, pty_write, pty_ack, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
+            commands::git_run, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_wakes, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
+            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
+            commands::dictate_start,
+            commands::dictate_stop,
             dictate::dictate_level
         ])
         .run(tauri::generate_context!())
