@@ -1,7 +1,7 @@
 // Native cost probe for docs/performance-plan.md. Needs src-tauri/target/release/loom.exe built with
 // --features tauri/custom-protocol (or LOOM_TEST_EXE). Temporary profile and test PTYs only.
-// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown] [agents] | app
-// (default: all but agents and app)
+// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown] [agents] | app | restore
+// (default: all but agents, app and restore)
 //   ipc       CPU per output message: 1 quiet pane, then 12 and 24 panes redrawing at 10 Hz
 //   keys      keystroke round trip idle and with 8 and 18 slow Git calls in flight
 //   opencode  keystroke round trip with 5 stalled OpenCode 2 reads, alone and with a Git burst
@@ -16,8 +16,11 @@
 //             through the real frontend. Invokes a second and CPU, then the window minimized for
 //             60 s: each child logs its longest wait between redraws, which grows when its output
 //             pipe fills because Loom stopped reading.
+//   restore   alone: a workspace of 8 claude panes in CLAUDE_DIR, restored as Loom starts. Loom starts
+//             claude two at a time and frees a slot when a pane's SessionStart marker lands, so this
+//             times each marker from launch. Opt-in: starts your installed claude, no prompts sent.
 // Numbers only, no pass/fail. Restores the shared files a test Loom rewrites. Kills only its own tree.
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
 import { join, resolve, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -25,12 +28,12 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app'];
-const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => m !== 'agents' && m !== 'app');
+const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app', 'restore'];
+const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => !['agents', 'app', 'restore'].includes(m));
 for (const m of modes) if (!ALL.includes(m)) throw new Error(`Unknown mode ${m}. Modes: ${ALL.join(', ')}`);
 const run = m => modes.includes(m);
 if (run('shutdown') && run('agents')) throw new Error('shutdown and agents each end every pane; run them separately');
-if (run('app') && modes.length > 1) throw new Error('app starts its own workspace; run it alone');
+for (const m of ['app', 'restore']) if (run(m) && modes.length > 1) throw new Error(`${m} starts its own workspace; run it alone`);
 const out = resolve('node_modules/.cache/perf-native-check');
 mkdirSync(out, { recursive: true });
 const procJson = fileURLToPath(new URL('proc-json.ps1', import.meta.url));
@@ -58,6 +61,10 @@ setInterval(() => { require('fs').appendFileSync(log, Date.now() + ' ' + n + ' '
     repo: dir, dir, name: `perf-${t}`, panes: [0, 1, 2].map(j => ({ cmd: `node ${join(dir, 'app-child.js')} ${appLogs[t * 3 + j]}` })),
   })) }));
 }
+const claudeDir = process.env.CLAUDE_DIR || process.cwd();
+if (run('restore')) writeFileSync(profile, JSON.stringify({ ui: { thread: 0 }, threads: [
+  { repo: claudeDir, dir: claudeDir, name: 'perf-restore', panes: Array.from({ length: 8 }, () => ({ cmd: 'claude' })) },
+] }));
 // A TUI-like child: redraws a status line at a fixed rate, echoes input back.
 writeFileSync(join(dir, 'tui.js'), `let n = 0; const hz = +process.argv[2];
 process.stdin.setRawMode?.(true); process.stdin.on('data', d => process.stdout.write('\\x1b[5;1H\\x1b[2Kin:' + d.toString('hex')));
@@ -75,6 +82,7 @@ const server = createServer();
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
 await new Promise(r => server.close(r));
+const launched = Date.now();
 const child = spawn(resolve(process.env.LOOM_TEST_EXE || 'src-tauri/target/release/loom.exe'), [profile], {
   windowsHide: true, stdio: 'ignore', env: { ...process.env, [pathKey]: ocDir + ';' + process.env[pathKey], WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
 });
@@ -254,6 +262,21 @@ try {
     const r = { ms, before: count(before), left: count(alive(before)) };
     console.log('pty_shutdown, real agents'.padEnd(34), JSON.stringify(r));
     report['pty_shutdown, real claude and opencode2'] = r;
+  }
+  if (run('restore')) {
+    // This workspace's markers name a transcript under its folder's Claude project (usage.rs slug).
+    const marks = join(tmpdir(), 'loom-tx');
+    const project = join('projects', claudeDir.replace(/[^a-zA-Z0-9]/g, '-'), '');
+    let landed = [];
+    for (let i = 0; i < 1800 && landed.length < 8; i++) {
+      await pause(100);
+      landed = (existsSync(marks) ? readdirSync(marks) : []).map(name => ({ name, at: statSync(join(marks, name)).birthtimeMs }))
+        .filter(m => m.at >= launched - 1000 && readFileSync(join(marks, m.name), 'utf8').includes(project));
+    }
+    const r = { panes: landed.length, markersMs: landed.map(m => Math.round(m.at - launched)).sort((a, b) => a - b) };
+    for (const m of landed) rmSync(join(marks, m.name), { force: true });
+    console.log('restore 8 claude panes'.padEnd(34), JSON.stringify(r));
+    report['restore 8 claude panes'] = r;
   }
   if (run('app')) {
     for (let i = 0; i < 600 && !appLogs.every(f => existsSync(f)); i++) await pause(100);

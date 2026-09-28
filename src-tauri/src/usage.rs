@@ -7,7 +7,7 @@
 //! since the last one; an idle pane costs one metadata() call.
 
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -155,10 +155,22 @@ fn scan(path: &Path, off: &mut u64, u: &mut Usage) -> std::io::Result<()> {
         return Ok(());
     }
     f.seek(SeekFrom::Start(*off))?;
-    let mut buf = String::new();
-    f.read_to_string(&mut buf)?; // offsets always land after a newline, so this stays valid UTF-8
-    let end = buf.rfind('\n').map_or(0, |i| i + 1);
-    for line in buf[..end].lines() {
+    // Streamed: a first scan reads a whole transcript, tens of MB. Folded into a
+    // copy, so bytes that aren't UTF-8, even in a line still being written,
+    // change nothing, as when the rest of the file was read into one string.
+    // Offsets always land after a newline.
+    let mut next = u.clone();
+    let mut end = 0u64;
+    let mut reader = std::io::BufReader::new(f);
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        let n = reader.read_until(b'\n', &mut bytes)?;
+        let text = std::str::from_utf8(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let Some(line) = text.strip_suffix('\n') else { break }; // the end, or a record still being written
+        end += n as u64;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let u = &mut next;
         // Cheap gate first: most bytes in a transcript are tool output.
         if !line.contains("\"usage\"") {
             continue;
@@ -200,7 +212,8 @@ fn scan(path: &Path, off: &mut u64, u: &mut Usage) -> std::io::Result<()> {
             }
         }
     }
-    *off += end as u64;
+    *u = next;
+    *off += end;
     Ok(())
 }
 
@@ -1001,6 +1014,33 @@ mod tests {
         assert!(super::get_headers("https://example.invalid", &[("Authorization", "bad\nheader")]).is_err());
         drop(file);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The first scan streams the file: records across many reads of its buffer,
+    /// a line longer than the buffer, and a record still being written, which
+    /// waits for its newline and then counts once.
+    #[test]
+    fn scan_streams_large_transcripts_and_waits_for_a_partial_line() {
+        let path = std::env::temp_dir().join(format!("loom-scan-test-{}.jsonl", std::process::id()));
+        let turn = |n: u64| format!("{{\"message\":{{\"model\":\"claude-test\",\"usage\":{{\"input_tokens\":{n},\"output_tokens\":1}}}}}}\n");
+        let mut text: String = (1..=3000).map(turn).collect();
+        text.push_str(&format!("{{\"tool\":\"{}\"}}\n", "x".repeat(100_000)));
+        text.push_str(&turn(7));
+        let last = turn(1000);
+        let (head, tail) = last.split_at(20);
+        std::fs::write(&path, format!("{text}{head}")).unwrap();
+        let (mut off, mut u) = (0, Usage::default());
+        scan(&path, &mut off, &mut u).unwrap();
+        assert_eq!((u.turns, u.input, off), (3001, 3000 * 3001 / 2 + 7, text.len() as u64));
+        let append = |bytes: &[u8]| std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(bytes).unwrap();
+        append(tail.as_bytes());
+        scan(&path, &mut off, &mut u).unwrap();
+        assert_eq!((u.turns, u.input, off), (3002, 3000 * 3001 / 2 + 1007, (text.len() + last.len()) as u64));
+        // Bytes that aren't UTF-8 change nothing, even in a line still being written.
+        append(&[b'{', 0xE2, 0x82]);
+        assert!(scan(&path, &mut off, &mut u).is_err());
+        assert_eq!((u.turns, off), (3002, (text.len() + last.len()) as u64));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

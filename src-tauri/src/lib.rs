@@ -74,6 +74,8 @@ fn taskkill(pids: &[u32]) {
 struct Ptys(Mutex<HashMap<String, Session>>);
 #[derive(Default)]
 struct WindowStateReady(std::sync::atomic::AtomicBool);
+/// Tells the window-state saver the main window moved or resized (`run` setup).
+struct WindowMoved(std::sync::mpsc::Sender<()>);
 /// The main window's WebView2 folder, reused by the overlay: webviews on one
 /// folder share a browser process, a second folder would start another.
 struct ProfileDir(PathBuf);
@@ -811,7 +813,9 @@ fn has_codex_session(app: AppHandle, sid: String) -> Result<bool, String> {
 fn codex_session_rows(home: &std::path::Path, dir: &str, sid: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
     use std::io::BufRead;
     let mut names = std::collections::HashMap::new();
-    for line in std::fs::read_to_string(home.join("session_index.jsonl")).unwrap_or_default().lines() {
+    // Only a listing shows titles; a lookup by id never reads them.
+    let index = if sid.is_none() { std::fs::read_to_string(home.join("session_index.jsonl")).unwrap_or_default() } else { String::new() };
+    for line in index.lines() {
         if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
             if let (Some(id), Some(name)) = (row["id"].as_str(), row["thread_name"].as_str()) {
                 names.insert(id.to_string(), name.to_string());
@@ -867,7 +871,10 @@ fn codex_session_rows(home: &std::path::Path, dir: &str, sid: Option<&str>) -> R
 fn codex_rollouts(dir: &std::path::Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let p = e.path();
-        if p.is_dir() {
+        // The listing already says what each entry is. Only a link (a symlink or
+        // junction) needs a look at its target, so linked folders are still walked.
+        let folder = e.file_type().map_or_else(|_| p.is_dir(), |t| if t.is_symlink() { p.is_dir() } else { t.is_dir() });
+        if folder {
             codex_rollouts(&p, out);
         } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
             out.push((e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p));
@@ -1269,6 +1276,7 @@ pub fn run() {
     // Helper modes the agents run (helper.rs): gone before any window exists.
     match args.first().map(String::as_str) {
         Some("--statusline") => std::process::exit(helper::statusline()),
+        Some("--session-start") => std::process::exit(helper::session_start()),
         Some("--codex-notify") => std::process::exit(helper::codex_notify(args.get(1).map(String::as_str))),
         _ => {}
     }
@@ -1342,15 +1350,35 @@ pub fn run() {
                 .data_directory(profile)
                 .enable_clipboard_access()
                 .build()?;
+            // A drag or resize fires dozens of events a second: save once it has
+            // been still for 500 ms. On the main thread, as before: the plugin's own
+            // event handler takes the lock a save holds while it reads the window.
+            let (moved, moves) = std::sync::mpsc::channel::<()>();
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                while moves.recv().is_ok() {
+                    while moves.recv_timeout(std::time::Duration::from_millis(500)).is_ok() {}
+                    let app = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        let _ = app.save_window_state(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS);
+                    });
+                }
+            });
+            app.manage(WindowMoved(moved));
             app.state::<WindowStateReady>().0.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })
         // ConPTY children are not reaped when the app exits — kill them explicitly.
         .on_window_event(|window, event| {
-            if window.state::<WindowStateReady>().0.load(std::sync::atomic::Ordering::Relaxed)
-                && matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) | tauri::WindowEvent::CloseRequested { .. }) {
-                // Persist while running too: stopping `tauri dev` need not send CloseRequested.
-                let _ = window.app_handle().save_window_state(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS);
+            if window.state::<WindowStateReady>().0.load(std::sync::atomic::Ordering::Relaxed) {
+                match event {
+                    // Persist while running too: stopping `tauri dev` need not send CloseRequested.
+                    tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => { let _ = window.state::<WindowMoved>().0.send(()); }
+                    tauri::WindowEvent::CloseRequested { .. } => {
+                        let _ = window.app_handle().save_window_state(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS);
+                    }
+                    _ => {}
+                }
             }
             // The frontend may cancel close if its final save fails. Only the
             // main window owns the terminals, and the overlay must not keep the
@@ -1408,6 +1436,26 @@ mod tests {
         assert_eq!(super::codex_session_rows(&root, "", Some("root")).unwrap().len(), 1);
         assert!(super::codex_session_rows(&root, "", Some("child")).unwrap().is_empty());
         assert!(super::codex_session_rows(&root, "", Some("ephemeral")).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder joined into sessions/ by a junction is walked like a real one.
+    #[test]
+    fn codex_rollouts_follow_junctions() {
+        let root = std::env::temp_dir().join(format!("loom-junction-test-{}", std::process::id()));
+        let (day, elsewhere, link) = (root.join("sessions").join("2026"), root.join("archive"), root.join("sessions").join("linked"));
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(day.join("rollout-a.jsonl"), "").unwrap();
+        std::fs::write(elsewhere.join("rollout-b.jsonl"), "").unwrap();
+        let made = std::process::Command::new("cmd").args(["/d", "/c", "mklink", "/J"]).arg(&link).arg(&elsewhere).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let mut found = Vec::new();
+        super::codex_rollouts(&root.join("sessions"), &mut found);
+        let mut names: Vec<_> = found.iter().map(|(_, p)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["rollout-a.jsonl", "rollout-b.jsonl"]);
+        std::fs::remove_dir(&link).unwrap(); // the junction, before anything could follow it
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -64,7 +64,27 @@ try {
   await plugin.event({ event: { type: 'session.idle', properties: { sessionID: 'ses_child' } } });
   assert.ok(!existsSync(wake), 'a child finishing must not change the parent state');
   console.log('PASS per-pane Codex markers, exact resume, ephemeral/guardian rejection, OpenCode selection, subagent isolation and OpenCode wakes');
+  // Claude's SessionStart hook (claude-hooks.json): which transcript the pane is on, the exact path
+  // with no newline. Nothing outside a Loom pane, for bad JSON, or without a path; always exit 0.
+  const tx = name => join(tmpdir(), 'loom-tx', name);
+  const start = (name, input) => {
+    const env = { ...process.env, LOOM_PANE: name };
+    if (!name) delete env.LOOM_PANE;
+    const run = spawnSync(loomExe, ['--session-start'], { env, input, windowsHide: true, encoding: 'utf8', timeout: 10000 });
+    assert.equal(run.status, 0, String(run.error || run.stderr));
+  };
+  for (const path of ['C:\\Users\\a b\\.claude\\projects\\p\\s.jsonl', 'C:\\Users\\Zoé\\.claude\\projects\\p\\s.jsonl']) {
+    start(pane + 'tx', JSON.stringify({ session_id: 's', transcript_path: path, hook_event_name: 'SessionStart' }));
+    assert.equal(readFileSync(tx(pane + 'tx'), 'utf8'), path);
+  }
+  for (const [i, input] of ['{not json', '{"session_id":"s"}', '{"transcript_path":""}'].entries()) {
+    start(pane + 'tx' + i, input);
+    assert.ok(!existsSync(tx(pane + 'tx' + i)), `No marker for ${input}`);
+  }
+  start('', JSON.stringify({ transcript_path: 'C:\\x.jsonl' }));
+  console.log('PASS Claude SessionStart marker, including a non-ASCII path, and nothing for a bad payload');
 } finally {
   for (const suffix of ['0', '1', 'oc']) if (existsSync(marker(pane + suffix))) unlinkSync(marker(pane + suffix));
+  for (const name of ['tx', 'tx0', 'tx1', 'tx2']) rmSync(join(tmpdir(), 'loom-tx', pane + name), { force: true });
   rmSync(codexHome, { recursive: true, force: true });
 }

@@ -1,8 +1,9 @@
 //! loom.exe's helper modes, run by the agents as child processes: Claude Code's
-//! statusline on every session state change, Codex's `notify` after every
-//! turn. They were PowerShell scripts, ~800 ms and ~60 MB per run, and with
-//! eleven claude panes the statusline alone started one a second. loom.exe
-//! starts in ~50 ms and leaves before Tauri is touched (lib.rs `run`).
+//! statusline on every session state change and its SessionStart hook,
+//! Codex's `notify` after every turn. They were PowerShell scripts, ~800 ms
+//! and ~60 MB per run, and with eleven claude panes the statusline alone
+//! started one a second. loom.exe starts in ~50 ms and leaves before Tauri is
+//! touched (lib.rs `run`).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -35,6 +36,23 @@ pub fn statusline() -> i32 {
         Some(cmd) => chain(&cmd, &input),
         None => 0,
     }
+}
+
+/// `loom.exe --session-start`, Claude Code's SessionStart hook (claude-hooks.json).
+/// It fires on startup, resume, /clear and compaction, the moments a pane's
+/// transcript can change, and records the new one for `usage::transcript`.
+/// Restores wait on that marker (`pane_booted`). Nothing outside a Loom pane
+/// or for a payload without a transcript path; always exits 0.
+pub fn session_start() -> i32 {
+    let Some(pane) = std::env::var("LOOM_PANE").ok().filter(|p| pane_id(p)) else { return 0 };
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(input.trim_start_matches('\u{feff}')) else { return 0 };
+    let Some(path) = payload["transcript_path"].as_str().filter(|p| !p.is_empty()) else { return 0 };
+    let dir = std::env::temp_dir().join("loom-tx");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join(pane), path);
+    0
 }
 
 /// The statusline command the user configured. Project settings beat user
