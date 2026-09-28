@@ -1,6 +1,7 @@
 // Run: node src/links.test.ts
 import type { IBuffer } from '@xterm/xterm';
-import { fileLinks, imageMime } from './links.ts';
+import { fileLinks as parseLinks, imageMime } from './links.ts';
+const fileLinks = (buffer: IBuffer, y: number, cols = buffer.getLine(0)!.length) => parseLinks(buffer, y, cols);
 const eq = (got: unknown, want: unknown) => {
   if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(`${JSON.stringify(got)} != ${JSON.stringify(want)}`);
 };
@@ -53,6 +54,14 @@ for (const y of [1, 2, 3]) eq(fileLinks(result, y), [{ text: deep, range: { star
 const prose = screen(['Edited the file at src/main.ts', '  and ran the tests again'], 30);
 eq(fileLinks(prose, 1).map(l => l.text), ['src/main.ts']);
 eq(fileLinks(prose, 2), []);
+// After a terminal shrinks, xterm can retain cells beyond the visible columns.
+const screenshotPath = 'C:\\Users\\ayoub\\AppData\\Local\\Temp\\claude\\C--Users-ayoub-Videos-claude-fun-game-website\\f26b5a3e-41bf-40bf-822a-e80df8a49ddb\\scratchpad\\shots\\nat_big_spirit.png';
+const split = screenshotPath.indexOf('scratchpad') + 3;
+const firstRow = '● Read(' + screenshotPath.slice(0, split);
+const resized = screen([firstRow, screenshotPath.slice(split) + ')'], firstRow.length + 15);
+const getLine = resized.getLine;
+resized.getLine = y => { const line = getLine(y); return line && { ...line, isWrapped: y > 0 }; };
+for (const y of [1, 2]) eq(fileLinks(resized, y, firstRow.length)[0].text, screenshotPath);
 eq(imageMime('C:\\Photos\\Screen.PNG'), 'image/png');
 eq(imageMime('src/main.ts'), undefined);
 eq(imageMime('image.png.exe'), undefined);

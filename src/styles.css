@@ -1175,7 +1175,10 @@ select option {
 .dashboard-head h1 { margin: 0; font: 600 26px/1.25 var(--ui-display); letter-spacing: -.7px; }
 .dashboard-actions { display: flex; flex: none; align-items: center; gap: 8px; }
 .dashboard-actions button { min-height: 34px; }
-#dashboard-counts { display: flex; gap: 6px; padding-bottom: 14px; margin-top: 30px; margin-bottom: 18px; border-bottom: 1px solid var(--edge); }
+#dashboard-counts { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 14px; margin-top: 30px; margin-bottom: 18px; border-bottom: 1px solid var(--edge); }
+#dashboard-counts button[data-group] { max-width: 100%; min-width: 0; white-space: normal; text-align: left; }
+#dashboard-counts button[data-group] span { min-width: 0; overflow-wrap: anywhere; }
+#dashboard-counts button[data-group] b { flex: none; }
 #dashboard-counts button { min-height: 34px; padding: 6px 10px; gap: 6px; border: 1px solid transparent; border-radius: 7px; font-size: 12px; }
 #dashboard-counts b { order: 1; min-width: 20px; padding: 1px 5px; border-radius: 4px; background: var(--hover); color: var(--muted); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; }
 #dashboard-counts button[aria-pressed="true"] { border-color: var(--edge-hi); background: var(--raise); color: var(--text); }
@@ -1200,10 +1203,24 @@ select option {
 #dashboard-list { position: relative; display: flex; flex-direction: column; gap: 6px; padding-left: 26px; }
 #dashboard-list::before { content: ""; position: absolute; left: 7px; top: 0; bottom: 0; width: 1px; background: var(--edge-hi); }
 #dashboard-list:empty { display: none; }
-.dashboard-group { display: flex; align-items: center; gap: 12px; margin: 22px 0 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
-.dashboard-group::after { content: ""; flex: 1; height: 1px; background: var(--edge); }
-.dashboard-group[data-state="waiting"] { color: var(--warn); }
-.dashboard-group[data-state="busy"] { color: var(--accent); }
+.dashboard-group { display: flex; align-items: center; gap: 6px; margin: 22px 0 6px; color: var(--muted); }
+.dashboard-group h2 { flex: 1; min-width: 0; margin: 0; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.dashboard-group button { flex: none; font-size: 12px; }
+#dashboard-new-group { margin-top: 14px; border: 1px solid var(--edge-hi); }
+#agent-group { width: 560px; overflow: hidden; }
+#agent-group-form { display: flex; flex-direction: column; min-height: 0; }
+#agent-group-form > :not(#agent-group-members) { flex: none; }
+#agent-group[open] { display: flex; flex-direction: column; }
+#agent-group-name { width: 100%; margin-top: 8px; }
+#agent-group-members { min-height: 0; overflow-y: auto; margin-bottom: 16px; }
+#agent-group-members-label { margin-bottom: 8px; color: var(--muted); }
+#agent-group-members label { display: flex; align-items: start; gap: 10px; padding: 10px 0; border-top: 1px solid var(--edge); cursor: pointer; }
+#agent-group-members input { flex: none; width: 16px; height: 16px; margin-top: 3px; accent-color: var(--accent); }
+#agent-group-members span { min-width: 0; overflow-wrap: anywhere; }
+#agent-group-members strong, #agent-group-members small { display: block; }
+#agent-group-members strong { font-size: 12px; font-weight: 500; }
+#agent-group-members small { color: var(--muted); margin-top: 4px; }
+#agent-group .new-actions { flex: none; }
 .dashboard-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 46px; align-items: center; min-width: 0; border: 1px solid var(--edge); border-radius: 10px; background: var(--panel); }
 .dashboard-card:has(.dashboard-row:hover), .dashboard-card:focus-within { border-color: var(--edge-hi); background: color-mix(in srgb, var(--panel) 90%, var(--text)); }
 .dashboard-card::before { content: ""; position: absolute; left: -24px; top: 21px; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--faint); background: var(--bg); }
@@ -1297,7 +1314,8 @@ select option {
   .dashboard-head h1 { font-size: 24px; }
   #dashboard-counts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; margin-top: 22px; }
   #dashboard-counts button { grid-column: span 2; justify-content: space-between; padding: 6px 8px; gap: 4px; }
-  #dashboard-counts button:nth-last-child(-n+2) { grid-column: span 3; }
+  #dashboard-counts button:nth-child(4), #dashboard-counts button:nth-child(5) { grid-column: span 3; }
+  #dashboard-counts button[data-group] { grid-column: 1 / -1; }
   .dashboard-filters { grid-template-columns: 1fr; gap: 8px; }
   .dashboard-filters select { min-height: 36px; }
   .dashboard-actions { width: 100%; justify-content: space-between; }

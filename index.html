@@ -46,12 +46,13 @@
             <h1 id="dashboard-title">Overview</h1>
             <div class="dashboard-actions"><button id="dashboard-back">Back to thread</button><button id="dashboard-next" class="primary">Next waiting <kbd>F3</kbd></button></div>
           </div>
-          <div id="dashboard-counts" role="group" aria-label="Filter by status"></div>
+          <div id="dashboard-counts" role="group" aria-label="Filter by status or group"></div>
           <div class="dashboard-filters">
             <label class="filter"><i class="i i-search"></i><input id="dashboard-query" type="search" aria-label="Search threads, agents, branches or output" placeholder="Search sessions or output" spellcheck="false" /></label>
             <select id="dashboard-project" aria-label="Filter by project"><option value="">All projects</option></select>
           </div>
           <div class="dashboard-results"><span id="dashboard-results" role="status"></span><button id="dashboard-reset" class="hidden">Clear filters</button><span class="spacer"></span><button id="dashboard-compact" aria-pressed="false"><i class="i i-layout-rows" aria-hidden="true"></i>Compact view</button></div>
+          <button id="dashboard-new-group" aria-haspopup="dialog">Create group</button>
           <div id="dashboard-list" aria-label="Agent sessions"></div>
           <p id="dashboard-empty" class="hidden" role="status"></p>
           <details class="dashboard-help muted"><summary>How statuses work</summary><p>Waiting means an agent signaled for attention. Working follows terminal activity; quiet agents may still be thinking. Previewing a session keeps its waiting alert. Opening its thread or sending input clears it.</p></details>
@@ -159,6 +160,18 @@
       <p id="keep-awake-help" class="muted">Keep the PC and screen on while Loom is running, even when minimized.</p>
       <div class="preference-actions"><button id="vscode" title="Open this thread in VS Code (F5)">Open in VS Code</button><button id="shortcuts">Keyboard shortcuts <kbd>F1</kbd></button></div>
     </section>
+
+    <dialog id="agent-group" aria-labelledby="agent-group-title" aria-describedby="agent-group-help">
+      <form id="agent-group-form">
+        <h2 id="agent-group-title">Create group</h2>
+        <label for="agent-group-name">Group name</label>
+        <input id="agent-group-name" required maxlength="80" autocomplete="off" />
+        <p id="agent-group-help" class="form-help">Select agents from any project or status. Agents can belong to multiple groups. Unchecking removes an agent from this group only.</p>
+        <div id="agent-group-members-label">Agents</div>
+        <div id="agent-group-members" role="group" aria-labelledby="agent-group-members-label"></div>
+        <div class="new-actions"><button id="agent-group-cancel" type="button">Cancel</button><button class="primary" type="submit">Save group</button></div>
+      </form>
+    </dialog>
 
     <dialog id="dashboard-preview" aria-labelledby="dashboard-preview-title">
       <div class="panel-heading"><h2 id="dashboard-preview-title"></h2><div class="dashboard-preview-nav"><button id="dashboard-preview-prev" class="icon" aria-label="Previous session" title="Previous session (←)"><i class="i i-chevron"></i></button><span id="dashboard-preview-position"></span><button id="dashboard-preview-next" class="icon" aria-label="Next session" title="Next session (→)"><i class="i i-chevron"></i></button><button id="dashboard-preview-close" class="icon" aria-label="Close preview"><i class="i i-x"></i></button></div></div>

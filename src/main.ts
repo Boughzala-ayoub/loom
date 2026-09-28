@@ -973,7 +973,7 @@ function applyTheme(t: Theme) {
 
 /** A pane as saved: the command it booted with, the claude session it owns,
  * and the session's last-known effort level (hook-reported; resume re-pins it). */
-type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string };
+type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string; groupIds?: string[] };
 
 type Startup = { label: string; cmd: string };
 const DEFAULT_STARTUPS: Startup[] = [
@@ -1400,6 +1400,7 @@ async function booted(pane: string) {
 
 class Pane {
   readonly id = uid();
+  groupIds: string[] = [];
   readonly el = document.createElement("div");
   readonly term = new Terminal({
     fontFamily: '"Cascadia Mono", Consolas, "Courier New", monospace',
@@ -1589,7 +1590,7 @@ class Pane {
     this.term.registerLinkProvider({
       provideLinks: (y, cb) => {
         cb(
-          fileLinks(this.term.buffer.active, y).filter(link => imageMime(link.text.replace(/:\d+(?::\d+)?$/, ""))).map((link) => ({
+          fileLinks(this.term.buffer.active, y, this.term.cols).filter(link => imageMime(link.text.replace(/:\d+(?::\d+)?$/, ""))).map((link) => ({
             ...link,
             activate: async () => {
               try {
@@ -2269,6 +2270,7 @@ class Thread {
   async addPane(st: PaneState = { cmd: startups[0]?.cmd ?? "" }) {
     if (this.panes.length >= MAX_PANES) return;
     const p = new Pane(this);
+    p.groupIds = Array.isArray(st.groupIds) ? [...new Set(st.groupIds.filter(id => agentGroups.some(g => g.id === id)))] : [];
     if (st.sessionId && validSessionId(st.sessionId)) p.sessionId = st.sessionId;
     if (st.effort) p.effort = st.effort;
     this.panes.push(p);
@@ -2529,7 +2531,7 @@ const flushSave = (): Promise<unknown> => {
         branch: t.branch,
         name: t.name,
         open: t.open,
-        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined })),
+        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds })),
         layout: t.layout,
         active: t.panes.indexOf(t.active!),
         zoomed: t.panes.indexOf(t.zoomed!),
@@ -2540,6 +2542,7 @@ const flushSave = (): Promise<unknown> => {
         commitDraft: t.commitDraft,
       })),
       repos,
+      agentGroups,
       reposFolded: [...reposFolded],
       startups,
       prefixes,
@@ -2655,6 +2658,72 @@ let dashboardFilter = "all";
 let dashboardTimer = 0;
 let dashboardSignature = "";
 let dashboardCompact = false;
+type AgentGroup = { id: string; name: string };
+let agentGroups: AgentGroup[] = [];
+const groupDialog = $<HTMLDialogElement>("#agent-group");
+const groupName = $<HTMLInputElement>("#agent-group-name");
+let editingGroup: AgentGroup | undefined;
+
+function editAgentGroup(group?: AgentGroup) {
+  editingGroup = group;
+  $("#agent-group-title").textContent = group ? "Edit group" : "Create group";
+  groupName.value = group?.name ?? "";
+  groupName.setCustomValidity("");
+  const list = $("#agent-group-members");
+  list.replaceChildren();
+  for (const th of threads) for (const p of th.panes) {
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = p.id;
+    checkbox.checked = !!group && p.groupIds.includes(group.id);
+    const text = document.createElement("span");
+    const name = document.createElement("strong");
+    name.textContent = `${th.name} / ${p.agent} / Pane ${th.panes.indexOf(p) + 1}`;
+    const detail = document.createElement("small");
+    const existing = agentGroups.filter(g => p.groupIds.includes(g.id)).map(g => g.name);
+    detail.textContent = `${th.repo} · ${STATUS[paneState(p)]}${existing.length ? ` · ${existing.join(", ")}` : ""}`;
+    text.append(name, detail);
+    label.append(checkbox, text);
+    list.append(label);
+  }
+  if (!list.childElementCount) list.textContent = "No agents yet. You can add them later.";
+  groupDialog.showModal();
+  groupName.focus();
+}
+
+$("#dashboard-new-group").onclick = () => editAgentGroup();
+$("#agent-group-cancel").onclick = () => groupDialog.close();
+groupName.oninput = () => groupName.setCustomValidity("");
+$("#agent-group-form").onsubmit = e => {
+  e.preventDefault();
+  const name = groupName.value.trim();
+  if (!name || agentGroups.some(g => g !== editingGroup && g.name.toLowerCase() === name.toLowerCase())) {
+    groupName.setCustomValidity(name ? "A group with this name already exists." : "Enter a group name.");
+    groupName.reportValidity();
+    return;
+  }
+  const group = editingGroup ?? { id: uid(), name };
+  group.name = name;
+  if (!editingGroup) agentGroups.push(group);
+  const selected = new Set([...$("#agent-group-members").querySelectorAll<HTMLInputElement>("input:checked")].map(input => input.value));
+  for (const p of threads.flatMap(t => t.panes)) {
+    p.groupIds = p.groupIds.filter(id => id !== group.id);
+    if (selected.has(p.id)) p.groupIds.push(group.id);
+  }
+  groupDialog.close();
+  renderDashboard();
+  save();
+};
+
+async function deleteAgentGroup(group: AgentGroup) {
+  if (!await confirm(`Delete group "${group.name}"?`, { title: "Delete group", action: "Delete group", detail: "Only this group will be deleted. Its agents and their other group memberships will be kept." })) return;
+  agentGroups = agentGroups.filter(g => g !== group);
+  if (dashboardFilter === `group:${group.id}`) dashboardFilter = "all";
+  for (const p of threads.flatMap(t => t.panes)) p.groupIds = p.groupIds.filter(id => id !== group.id);
+  renderDashboard();
+  save();
+}
 type DashboardMessages = { user: string; agent: string };
 const dashboardMessages = new Map<string, DashboardMessages & { session: string; input: number; busy: number; waiting: number; dead: boolean }>();
 const dashboardMessagesBusy = new Set<string>();
@@ -2662,6 +2731,7 @@ let dashboardMessagesPolled = 0;
 let dashboardNext: Pane | undefined;
 let dashboardRows: Pane[] = []; // The listed order, which the preview's previous/next follow.
 const dashboardDrafts = new Map<string, string>(); // Quick replies survive the list's rebuilds.
+const dashboardAnswers = new Set<string>();
 let dashboardPreviewPane: Pane | null = null;
 let dashboardPreviewSlot: Comment | null = null;
 const dashboardPreview = $<HTMLDialogElement>("#dashboard-preview");
@@ -2769,26 +2839,37 @@ function renderDashboard() {
   const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
     && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
   const counts = $("#dashboard-counts");
-  const labels: Record<string, string> = { all: "All sessions", waiting: "Waiting for you", busy: "Working", "": "Idle", dead: "Exited" };
-  if (!counts.childElementCount) {
-    for (const state of ["all", "waiting", "busy", "", "dead"]) {
+  const selectedGroup = agentGroups.find(g => dashboardFilter === `group:${g.id}`);
+  const filters = [
+    ...["all", "waiting", "busy", "", "dead"].map(state => ({ key: state, label: state === "all" ? "All" : STATUS[state], group: false })),
+    ...agentGroups.map(g => ({ key: `group:${g.id}`, label: g.name, group: true })),
+  ];
+  const filterSignature = JSON.stringify(filters);
+  if (counts.dataset.signature !== filterSignature) {
+    const focused = counts.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.filter : undefined;
+    counts.dataset.signature = filterSignature;
+    counts.replaceChildren();
+    for (const { key, label, group } of filters) {
       const button = document.createElement("button");
-      button.dataset.state = state;
+      button.dataset.filter = key;
+      if (group) button.dataset.group = key.slice(6);
+      else button.dataset.state = key;
       button.append(document.createElement("b"), document.createElement("span"));
-      button.querySelector("span")!.textContent = state === "all" ? "All" : STATUS[state];
-      button.onclick = () => { dashboardFilter = state; renderDashboard(); };
+      button.querySelector("span")!.textContent = label;
+      button.onclick = () => { dashboardFilter = key; renderDashboard(); };
       counts.append(button);
     }
+    if (focused !== undefined) ([...counts.querySelectorAll("button")].find(b => b.dataset.filter === focused) ?? counts.querySelector("button"))?.focus();
   }
   for (const button of counts.querySelectorAll("button")) {
-    const state = button.dataset.state!;
-    const n = state === "all" ? scoped.length : scoped.filter(r => r.state === state).length;
+    const key = button.dataset.filter!;
+    const n = key === "all" ? scoped.length : scoped.filter(r => button.dataset.group ? r.p.groupIds.includes(button.dataset.group) : r.state === key).length;
     button.querySelector("b")!.textContent = String(n);
-    button.setAttribute("aria-pressed", String(dashboardFilter === state));
-    button.disabled = !n && state !== "all" && dashboardFilter !== state; // An active filter stays clickable after it empties.
+    button.setAttribute("aria-pressed", String(dashboardFilter === key));
+    button.disabled = !n && !button.dataset.group && key !== "all" && dashboardFilter !== key; // Empty groups stay editable.
   }
   $<HTMLButtonElement>("#dashboard-back").disabled = !current;
-  const rows = scoped.filter(r => dashboardFilter === "all" || r.state === dashboardFilter)
+  const rows = scoped.filter(r => selectedGroup ? r.p.groupIds.includes(selectedGroup.id) : dashboardFilter === "all" || r.state === dashboardFilter)
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || (a.state === "waiting" ? a.p.waitingSince - b.p.waitingSince : 0));
   dashboardRows = rows.map(r => r.p);
   dashboardNext = rows.find(r => r.state === "waiting")?.p;
@@ -2803,26 +2884,42 @@ function renderDashboard() {
   const list = $("#dashboard-list");
   // Keep the DOM and keyboard focus stable between unchanged refreshes. Only shell cards show the
   // screen preview; an agent redrawing its status line must not rebuild every card.
-  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age, messages, menu }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, p.agent === "shell" && preview, age, messages?.user, messages?.agent, menu,
+  const signature = JSON.stringify([dashboardCompact, dashboardFilter, agentGroups, rows.map(({ th, p, state, preview, age, messages, menu }) => [p.id, p.groupIds, th.name, th.repo, th.branch, p.agent, p.label, state, p.agent === "shell" && preview, age, messages?.user, messages?.agent, menu,
     p.usage && [p.usage.liveModel || p.usage.model, p.usage.ctx, p.usage.window, p.usage.turns]])]);
   if (signature !== dashboardSignature) {
     dashboardSignature = signature;
     const active = list.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
     const focused = active?.dataset.key;
+    const focusedGroup = active?.closest<HTMLElement>(".dashboard-card")?.dataset.group;
     const caret = active instanceof HTMLInputElement ? [active.selectionStart, active.selectionEnd] as const : undefined;
     const fragment = document.createDocumentFragment();
-    let group: string | undefined;
-    for (const { th, p, state, preview, age, messages, menu } of rows) {
-      if (state !== group) {
-        group = state;
-        const heading = document.createElement("h2");
-        heading.className = "dashboard-group";
-        heading.dataset.state = state;
-        heading.textContent = `${labels[state]} (${rows.filter(r => r.state === state).length})`;
-        fragment.append(heading);
+    if (selectedGroup) {
+      const heading = document.createElement("div");
+      heading.className = "dashboard-group";
+      const title = document.createElement("h2");
+      title.textContent = `${selectedGroup.name} (${rows.length})`;
+      heading.append(title);
+      for (const action of ["Edit", "Delete"]) {
+        const button = document.createElement("button");
+        button.textContent = action;
+        button.dataset.key = `${action}-${selectedGroup.id}`;
+        button.setAttribute("aria-label", `${action} group ${selectedGroup.name}`);
+        button.onclick = () => action === "Edit" ? editAgentGroup(selectedGroup) : void deleteAgentGroup(selectedGroup);
+        heading.append(button);
       }
+      fragment.append(heading);
+      if (!rows.length) {
+        const empty = document.createElement("p");
+        empty.className = "muted";
+        empty.textContent = all.some(r => r.p.groupIds.includes(selectedGroup.id)) ? "No agents match the current filters." : "No agents in this group. Use Edit to add agents.";
+        fragment.append(empty);
+      }
+    }
+    for (const { th, p, state, preview, age, messages, menu } of rows) {
       const card = document.createElement("div");
       card.className = "dashboard-card";
+      card.dataset.group = selectedGroup?.id ?? "";
+      card.dataset.pane = p.id;
       const row = document.createElement("button");
       row.className = "dashboard-row";
       row.dataset.key = p.id;
@@ -2893,14 +2990,15 @@ function renderDashboard() {
       open.onclick = dashboardCompact ? previewPane : () => revealPane(p);
       card.append(row, open);
       if (!dashboardCompact && state === "waiting" && p.agent !== "shell") card.append(menu ? choiceRow(p, th, menu) : replyForm(p, th));
+      if (dashboardAnswers.has(p.id)) card.querySelectorAll<HTMLInputElement | HTMLButtonElement>(".dashboard-reply input, .dashboard-reply button").forEach(el => (el.disabled = true));
       fragment.append(card);
     }
     list.replaceChildren(fragment);
-    const restored = focused ? [...list.querySelectorAll<HTMLElement>("[data-key]")].find(el => el.dataset.key === focused) : undefined;
+    const restored = focused ? [...list.querySelectorAll<HTMLElement>("[data-key]")].find(el => el.dataset.key === focused && el.closest<HTMLElement>(".dashboard-card")?.dataset.group === focusedGroup) : undefined;
     if (focused) (restored ?? dashboardQuery).focus({ preventScroll: true });
     if (caret && restored instanceof HTMLInputElement) restored.setSelectionRange(caret[0], caret[1]);
   }
-  $("#dashboard-empty").classList.toggle("hidden", rows.length > 0);
+  $("#dashboard-empty").classList.toggle("hidden", rows.length > 0 || !!selectedGroup);
   $("#dashboard-empty").textContent = !all.length ? "No sessions yet. Create a thread to start an agent."
     : q || dashboardProject.value ? "No sessions match. Try another search or project."
     : dashboardFilter === "waiting" ? "Nothing waiting for you. Other sessions will appear here when they need attention."
@@ -2966,7 +3064,7 @@ function stepDashboardPreview(step: 1 | -1 | "waiting") {
   if (!p || dashboardControlBusy) return;
   renderDashboard(); // Replying moves sessions between groups; follow the current order.
   const rows = dashboardRows, i = rows.indexOf(p);
-  const next = step === "waiting" ? rows.find(r => r !== p && r.waiting)
+  const next = step === "waiting" ? rows.filter(r => r !== p && r.waiting).sort((a, b) => a.waitingSince - b.waitingSince)[0]
     : i < 0 ? rows[step > 0 ? 0 : rows.length - 1] : rows[(i + step + rows.length) % rows.length];
   if (next && next !== p) openDashboardPreview(next);
 }
@@ -3009,17 +3107,18 @@ async function choose(p: Pane, menu: AgentMenu, i: number) {
   throw new Error(`Loom couldn't move ${p.agent}'s highlight to that option. Open the session to answer.`);
 }
 
-/** Run one answer from a card: lock its controls, report a failure, then move
- * on to the next waiting agent, since an answered card leaves the group. */
-async function answer(p: Pane, box: HTMLElement, send: () => Promise<void>) {
-  const controls = [...box.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input, button")];
-  if (controls.some(c => c.disabled)) return;
+/** Lock every copy of an agent while sending, including cards in other groups. */
+async function answer(p: Pane, send: () => Promise<void>) {
+  if (dashboardAnswers.has(p.id)) return;
+  dashboardAnswers.add(p.id);
+  const controls = [...$("#dashboard-list").querySelectorAll<HTMLInputElement | HTMLButtonElement>(`[data-pane="${p.id}"] .dashboard-reply :is(input, button)`)];
   controls.forEach(c => (c.disabled = true));
   try {
     await send();
   } catch (error) {
     toast(error instanceof Error ? error.message : `Could not answer ${p.agent}: ${String(error)}`); // Write failures arrive as strings.
   } finally {
+    dashboardAnswers.delete(p.id);
     controls.forEach(c => (c.disabled = false));
     dashboardSignature = "";
     renderDashboard();
@@ -3037,7 +3136,10 @@ function replyForm(p: Pane, th: Thread) {
   input.setAttribute("aria-label", `Reply to ${p.agent} in ${th.name}`);
   input.spellcheck = false;
   input.value = dashboardDrafts.get(p.id) ?? "";
-  input.oninput = () => dashboardDrafts.set(p.id, input.value);
+  input.oninput = () => {
+    dashboardDrafts.set(p.id, input.value);
+    $("#dashboard-list").querySelectorAll<HTMLInputElement>(`[data-key="reply-${p.id}"]`).forEach(copy => { if (copy !== input) copy.value = input.value; });
+  };
   const send = document.createElement("button");
   send.type = "submit";
   send.textContent = "Send";
@@ -3046,7 +3148,7 @@ function replyForm(p: Pane, th: Thread) {
   form.onsubmit = e => {
     e.preventDefault();
     const text = input.value.trim();
-    if (text) void answer(p, form, async () => {
+    if (text) void answer(p, async () => {
       await sendReply(p, text);
       dashboardDrafts.delete(p.id);
     });
@@ -3072,7 +3174,7 @@ function choiceRow(p: Pane, th: Thread, menu: AgentMenu) {
     b.dataset.key = `choice-${p.id}-${i}`;
     b.textContent = label;
     b.title = `Choose "${label}" in ${p.agent}`;
-    b.onclick = () => void answer(p, row, () => choose(p, menu, i));
+    b.onclick = () => void answer(p, () => choose(p, menu, i));
     row.append(b);
   });
   return row;
@@ -5629,6 +5731,7 @@ async function main() {
     threads?: (Saved & ThreadState)[];
     spaces?: (Saved & { dir: string })[];
     repos?: string[];
+    agentGroups?: AgentGroup[];
     reposFolded?: string[];
     startups?: Startup[];
     startup?: string;
@@ -5674,6 +5777,7 @@ async function main() {
   overlayMode = saved.overlay === true ? "background" : OVERLAY_MODES.find(m => m === saved.overlay) ?? "off";
   overlayCap = saved.overlayCap ?? overlayCap;
   repos = saved.repos ?? [];
+  agentGroups = Array.isArray(saved.agentGroups) ? saved.agentGroups.filter(g => g && typeof g.id === "string" && g.id && typeof g.name === "string" && g.name.trim()) : [];
   reposFolded = new Set(saved.reposFolded ?? []);
   sideQuery = saved.ui?.sideQuery ?? "";
   dashboardCompact = saved.ui?.dashboardCompact === true;

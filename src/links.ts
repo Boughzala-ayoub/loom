@@ -12,18 +12,19 @@ const PATH_RE = /["'`]([^"'`\r\n]+\.[A-Za-z]\w{0,7}(?::\d+(?::\d+)?)?)["'`]|(?:[
 type Row = { text: string; cells: { x: number; y: number }[]; wrapped: boolean; cols: number };
 
 /** One buffer row, one cell per UTF-16 unit of its text, wide characters included. */
-function row(buffer: IBuffer, y: number): Row {
+function row(buffer: IBuffer, y: number, cols: number): Row {
   const line = buffer.getLine(y)!;
   let text = '';
   const cells: Row['cells'] = [];
-  for (let col = 0; col < line.length; col++) {
+  // xterm retains extra cells after some resizes; they are not part of the path.
+  for (let col = 0; col < Math.min(line.length, cols); col++) {
     const cell = line.getCell(col)!;
     if (!cell.getWidth()) continue;
     const chars = cell.getChars() || ' ';
     text += chars;
     for (let i = 0; i < chars.length; i++) cells.push({ x: col + 1, y: y + 1 });
   }
-  return { text, cells, wrapped: line.isWrapped, cols: line.length };
+  return { text, cells, wrapped: line.isWrapped, cols };
 }
 
 /** Claude Code breaks a word too long for its box (a deep path) onto the next
@@ -41,17 +42,17 @@ function hardWrap(a: Row, b: Row) {
 }
 
 /** Join terminal wraps, xterm's and Claude Code's own, and keep cell coordinates. */
-export function fileLinks(buffer: IBuffer, y: number) {
+export function fileLinks(buffer: IBuffer, y: number, cols: number) {
   let first = y - 1;
-  for (let cur = row(buffer, first); first > 0; first--) {
-    const prev = row(buffer, first - 1);
+  for (let cur = row(buffer, first, cols); first > 0; first--) {
+    const prev = row(buffer, first - 1, cols);
     if (!cur.wrapped && !hardWrap(prev, cur)) break;
     cur = prev;
   }
   let text = '';
   const cells: Row['cells'] = [];
   for (let i = first, prev: Row | null = null; i < buffer.length; i++) {
-    const r = row(buffer, i);
+    const r = row(buffer, i, cols);
     const skip = prev && !r.wrapped ? hardWrap(prev, r) : 0;
     if (prev && !r.wrapped && !skip) break;
     if (skip) cells.length = (text = text.trimEnd()).length;
