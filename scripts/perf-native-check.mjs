@@ -1,31 +1,40 @@
 // Native cost probe for docs/performance-plan.md. Needs src-tauri/target/release/loom.exe built with
 // --features tauri/custom-protocol (or LOOM_TEST_EXE). Temporary profile and test PTYs only.
-// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown]   (default: all)
+// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown] [agents]
+// (default: all but agents)
 //   ipc       CPU per output message: 1 quiet pane, then 12 and 24 panes redrawing at 10 Hz
 //   keys      keystroke round trip idle and with 8 and 18 slow Git calls in flight
 //   opencode  keystroke round trip with 5 stalled OpenCode 2 reads, alone and with a Git burst
 //             that fills the rest of Tauri's async pool; also how long the reads take and their errors
 //   ack       CPU of pty_ack alone at 310 calls a second, no output
 //   shutdown  pty_shutdown time with 24 quiet panes (kills every pane, so it runs last)
+//   agents    a real claude pane and a real opencode2 pane, no prompts sent: their process trees,
+//             then what is still alive after pty_shutdown. Opt-in, since it starts your installed
+//             CLIs. claude runs in CLAUDE_DIR (default: this checkout), which Claude Code must
+//             already trust.
 // Numbers only, no pass/fail. Restores the shared files a test Loom rewrites. Kills only its own tree.
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync } from 'node:fs';
-import { tmpdir, availableParallelism } from 'node:os';
-import { join, resolve } from 'node:path';
+import { tmpdir, homedir, availableParallelism } from 'node:os';
+import { join, resolve, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown'];
-const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL;
+const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents'];
+const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => m !== 'agents');
 for (const m of modes) if (!ALL.includes(m)) throw new Error(`Unknown mode ${m}. Modes: ${ALL.join(', ')}`);
 const run = m => modes.includes(m);
+if (run('shutdown') && run('agents')) throw new Error('shutdown and agents each end every pane; run them separately');
 const out = resolve('node_modules/.cache/perf-native-check');
 mkdirSync(out, { recursive: true });
 const procJson = fileURLToPath(new URL('proc-json.ps1', import.meta.url));
-// A test Loom rewrites these for the installed app too, on every pane spawn.
+// A test Loom rewrites these for the installed app too: on every pane spawn, and the plugin on an
+// OpenCode spawn.
 const data = join(process.env.APPDATA, 'dev.ayoub.loom');
-const shared = ['claude-hooks.json', 'shell-init.ps1'].map(name => ({ file: join(data, name), backup: join(out, name + '.backup'), had: existsSync(join(data, name)) }));
+const plugin = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'opencode/plugins/loom.js');
+const shared = [join(data, 'claude-hooks.json'), join(data, 'shell-init.ps1'), plugin]
+  .map((file, i) => ({ file, backup: join(out, `${i}-${basename(file)}.backup`), had: existsSync(file) }));
 for (const s of shared) if (s.had) copyFileSync(s.file, s.backup);
 const dir = mkdtempSync(join(tmpdir(), 'loom-perf-native-'));
 const profile = join(dir, 'workspace.json');
@@ -52,6 +61,21 @@ const child = spawn(resolve(process.env.LOOM_TEST_EXE || 'src-tauri/target/relea
 });
 const pause = ms => new Promise(r => setTimeout(r, ms));
 const sampleCpu = secs => JSON.parse(spawnSync('powershell', ['-NoProfile', '-File', procJson, '-Root', String(child.pid), '-Seconds', String(secs)], { encoding: 'utf8' }).stdout.trim());
+// Everything under Loom but WebView2, with start times so a reused PID doesn't count as alive.
+const powershell = command => JSON.parse(spawnSync('powershell', ['-NoProfile', '-Command', command], { encoding: 'utf8' }).stdout.trim() || '[]');
+const paneTree = () => [].concat(powershell(`
+  $all = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate
+  $queue = @(${child.pid}); $found = @()
+  while ($queue.Count) {
+    $id = $queue[0]; $queue = @($queue | Select-Object -Skip 1)
+    $parent = ($all | Where-Object ProcessId -eq $id).Name
+    foreach ($p in $all | Where-Object ParentProcessId -eq $id) { if ($p.Name -ne 'msedgewebview2.exe') { $found += $p | Add-Member parent $parent -PassThru; $queue += $p.ProcessId } }
+  }
+  @($found | ForEach-Object { @{ pid = $_.ProcessId; name = $_.parent + ' > ' + $_.Name; start = $_.CreationDate.ToString('o') } }) | ConvertTo-Json -Compress`));
+const alive = procs => {
+  const now = new Set([].concat(powershell(`@(Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)|$($_.CreationDate.ToString('o'))" }) | ConvertTo-Json -Compress`)));
+  return procs.filter(p => now.has(`${p.pid}|${p.start}`));
+};
 let browser;
 const report = {};
 try {
@@ -184,6 +208,33 @@ try {
     });
     console.log('pty_shutdown'.padEnd(34), JSON.stringify(r));
     report['pty_shutdown, quiet panes'] = r;
+  }
+  if (run('agents')) {
+    // claude where Claude Code already trusts the folder, so startup isn't parked on the trust
+    // prompt and its children come up. An idle stdio MCP server gives it a node child, the way
+    // npx-launched servers do. opencode2 the way agent.ts launches it, through cmd.exe.
+    const mcp = join(dir, 'mcp.json');
+    writeFileSync(mcp, JSON.stringify({ mcpServers: { 'perf-probe': { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] } } }));
+    await page.evaluate(async ({ repo, dir, mcp }) => {
+      const { invoke, Channel } = window.__TAURI__.core;
+      for (const [id, cwd, argv] of [['perf-claude', repo, ['claude', '--mcp-config', mcp]], ['perf-opencode2', dir, ['cmd.exe', '/d', '/s', '/c', 'opencode2']]]) {
+        const out = new Channel();
+        out.onmessage = d => { void invoke('pty_ack', { channel: out.id }); if (d.includes('\x1b[6n')) void invoke('pty_write', { id, data: '\x1b[1;1R' }).catch(() => {}); };
+        await invoke('pty_spawn', { id, cwd, argv, cols: 120, rows: 30, onOut: out });
+      }
+    }, { repo: process.env.CLAUDE_DIR || process.cwd(), dir, mcp });
+    await pause(15000);
+    const before = paneTree();
+    const ms = await page.evaluate(async () => {
+      const t0 = performance.now();
+      await window.__TAURI__.core.invoke('pty_shutdown');
+      return Math.round(performance.now() - t0);
+    });
+    await pause(1000);
+    const count = procs => procs.reduce((n, p) => ({ ...n, [p.name]: (n[p.name] || 0) + 1 }), {});
+    const r = { ms, before: count(before), left: count(alive(before)) };
+    console.log('pty_shutdown, real agents'.padEnd(34), JSON.stringify(r));
+    report['pty_shutdown, real claude and opencode2'] = r;
   }
 } finally {
   await browser?.close().catch(() => {});

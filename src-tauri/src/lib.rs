@@ -48,14 +48,25 @@ impl Session {
     /// with "Permission denied" on Windows.
     fn kill(&mut self) {
         self.flow.close();
-        use std::os::windows::process::CommandExt;
         if let Some(pid) = self.pid {
-            let _ = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                .output();
+            taskkill(&[pid]);
         }
         let _ = self.killer.kill();
+    }
+}
+
+/// `taskkill /T /F` on these process trees, one spawn per 32 of them: a spawn
+/// costs about 0.45 s. A PID that is already gone only makes it exit nonzero;
+/// the others still die.
+fn taskkill(pids: &[u32]) {
+    use std::os::windows::process::CommandExt;
+    for chunk in pids.chunks(32) {
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/T", "/F"]);
+        for pid in chunk {
+            cmd.args(["/PID", &pid.to_string()]);
+        }
+        let _ = cmd.creation_flags(0x0800_0000).output(); // CREATE_NO_WINDOW
     }
 }
 
@@ -420,7 +431,17 @@ fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String) -> Resul
 fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
     for (_, flow) in flows.0.lock().unwrap().values() { flow.close(); }
     let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
-    for (_, mut session) in sessions { session.kill(); }
+    taskkill(&sessions.values().filter_map(|s| s.pid).collect::<Vec<_>>());
+    // Dropping a session runs ClosePseudoConsole, which can wait for its output
+    // to drain, so drop them side by side. Returns once all are gone.
+    std::thread::scope(|scope| {
+        for (_, mut session) in sessions {
+            scope.spawn(move || {
+                session.flow.close();
+                let _ = session.killer.kill();
+            });
+        }
+    });
 }
 
 /// One git invocation in `dir`, stdout back, stderr as the error. The thread
