@@ -1,0 +1,199 @@
+// Native cost probe for docs/performance-plan.md. Needs src-tauri/target/release/loom.exe built with
+// --features tauri/custom-protocol (or LOOM_TEST_EXE). Temporary profile and test PTYs only.
+// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown]   (default: all)
+//   ipc       CPU per output message: 1 quiet pane, then 12 and 24 panes redrawing at 10 Hz
+//   keys      keystroke round trip idle and with 8 and 18 slow Git calls in flight
+//   opencode  keystroke round trip with 5 stalled OpenCode 2 reads, alone and with a Git burst
+//             that fills the rest of Tauri's async pool; also how long the reads take and their errors
+//   ack       CPU of pty_ack alone at 310 calls a second, no output
+//   shutdown  pty_shutdown time with 24 quiet panes (kills every pane, so it runs last)
+// Numbers only, no pass/fail. Restores the shared files a test Loom rewrites. Kills only its own tree.
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync } from 'node:fs';
+import { tmpdir, availableParallelism } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+
+const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown'];
+const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL;
+for (const m of modes) if (!ALL.includes(m)) throw new Error(`Unknown mode ${m}. Modes: ${ALL.join(', ')}`);
+const run = m => modes.includes(m);
+const out = resolve('node_modules/.cache/perf-native-check');
+mkdirSync(out, { recursive: true });
+const procJson = fileURLToPath(new URL('proc-json.ps1', import.meta.url));
+// A test Loom rewrites these for the installed app too, on every pane spawn.
+const data = join(process.env.APPDATA, 'dev.ayoub.loom');
+const shared = ['claude-hooks.json', 'shell-init.ps1'].map(name => ({ file: join(data, name), backup: join(out, name + '.backup'), had: existsSync(join(data, name)) }));
+for (const s of shared) if (s.had) copyFileSync(s.file, s.backup);
+const dir = mkdtempSync(join(tmpdir(), 'loom-perf-native-'));
+const profile = join(dir, 'workspace.json');
+writeFileSync(profile, '{}');
+// A TUI-like child: redraws a status line at a fixed rate, echoes input back.
+writeFileSync(join(dir, 'tui.js'), `let n = 0; const hz = +process.argv[2];
+process.stdin.setRawMode?.(true); process.stdin.on('data', d => process.stdout.write('\\x1b[5;1H\\x1b[2Kin:' + d.toString('hex')));
+if (hz) setInterval(() => process.stdout.write('\\x1b[?25l\\x1b[3;1H\\x1b[2K\\x1b[38;5;208m*\\x1b[0m Working (' + (n++) + ' esc to interrupt) ' + '-'.repeat(60) + '\\x1b[?25h'), 1000 / hz);
+else setInterval(() => {}, 1000);`);
+// An OpenCode 2 that answers --version and then hangs, the way opencode.rs's routing test fakes the CLI.
+// It goes first on Loom's Path too: with NoDefaultCurrentDirectoryInExePath set (Claude Code sets it),
+// cmd.exe skips the read's working folder and would run the real opencode.
+const ocDir = join(dir, 'opencode');
+mkdirSync(ocDir);
+writeFileSync(join(ocDir, 'opencode.cmd'), `@echo off\r\nif "%~1"=="--version" (echo opencode v2.0.18 & exit /b 0)\r\n"${process.execPath}" -e "setInterval(()=>{},1000)"\r\n`);
+// PATH from Git Bash, Path from PowerShell. Node keeps only one of two spellings.
+const pathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH');
+const server = createServer();
+await new Promise(r => server.listen(0, '127.0.0.1', r));
+const port = server.address().port;
+await new Promise(r => server.close(r));
+const child = spawn(resolve(process.env.LOOM_TEST_EXE || 'src-tauri/target/release/loom.exe'), [profile], {
+  windowsHide: true, stdio: 'ignore', env: { ...process.env, [pathKey]: ocDir + ';' + process.env[pathKey], WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
+});
+const pause = ms => new Promise(r => setTimeout(r, ms));
+const sampleCpu = secs => JSON.parse(spawnSync('powershell', ['-NoProfile', '-File', procJson, '-Root', String(child.pid), '-Seconds', String(secs)], { encoding: 'utf8' }).stdout.trim());
+let browser;
+const report = {};
+try {
+  let ready = false;
+  for (let i = 0; i < 200 && !ready; i++) { ready = await fetch(`http://127.0.0.1:${port}/json/version`).then(r => r.ok).catch(() => false); if (!ready) await pause(100); }
+  if (!ready) throw new Error('webview did not start');
+  browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  const page = browser.contexts()[0].pages().find(p => !p.url().includes('overlay'));
+  await page.waitForFunction(() => window.__TAURI__?.core);
+  await pause(3000);
+  const spawnPanes = (n, hz) => page.evaluate(async ({ n, hz, node, dir }) => {
+    const { invoke, Channel } = window.__TAURI__.core;
+    window.perf ??= { msgs: 0, bytes: 0, ids: [], channels: [] };
+    for (let i = 0; i < n; i++) {
+      const id = `perf-${hz}-${i}-${Date.now()}`;
+      const out = new Channel();
+      out.onmessage = d => { window.perf.msgs++; window.perf.bytes += d.length; void invoke('pty_ack', { channel: out.id }); if (d.includes('\x1b[6n')) void invoke('pty_write', { id, data: '\x1b[1;1R' }).catch(() => {}); if (window.perf.echo && d.includes('in:')) window.perf.echo(); };
+      await invoke('pty_spawn', { id, cwd: dir, argv: [node, dir + '\\tui.js', String(hz)], cols: 120, rows: 30, onOut: out });
+      window.perf.ids.push(id);
+      window.perf.channels.push(out.id);
+    }
+  }, { n, hz, node: process.execPath, dir });
+  // Rates use the page's clock: the CPU sample also spans PowerShell's startup, and CDP events queued
+  // while spawnSync blocks delay the next reply by a second or more.
+  const count = () => page.evaluate(() => ({ msgs: window.perf?.msgs || 0, bytes: window.perf?.bytes || 0, t: performance.now() }));
+  const measure = async (name, secs = 8) => {
+    const a = await count();
+    const cpu = sampleCpu(secs);
+    const b = await count();
+    const r = { msgsPerSec: +((b.msgs - a.msgs) / ((b.t - a.t) / 1000)).toFixed(1), avgBytes: b.msgs > a.msgs ? Math.round((b.bytes - a.bytes) / (b.msgs - a.msgs)) : 0, cpu };
+    console.log(name.padEnd(34), JSON.stringify(r));
+    report[name] = r;
+  };
+  if (run('ipc')) await measure('baseline, no panes', 6);
+  // Pane 0 stays quiet: the keystroke target and the ack channel.
+  await spawnPanes(1, 0);
+  await pause(1500);
+  if (run('ipc')) {
+    await measure('1 quiet pane', 6);
+    await spawnPanes(12, 10);
+    await pause(2000);
+    await measure('+12 panes at 10 Hz', 8);
+    await spawnPanes(12, 10);
+    await pause(2000);
+    await measure('+24 panes at 10 Hz', 8);
+    // Stop the chatty panes before the latency tests.
+    await page.evaluate(async () => { const { invoke } = window.__TAURI__.core; for (const id of window.perf.ids.splice(1)) await invoke('pty_kill', { id }).catch(() => {}); window.perf.channels.splice(1); });
+    await pause(2000);
+  }
+  // Keystroke round trip: pty_write resolve time, and echo arrival time, while `git` slow Git calls
+  // and `opencode` stalled OpenCode reads are in flight.
+  const keyLatency = async (label, git, opencode = 0) => {
+    const r = await page.evaluate(async ({ git, opencode, dir, ocDir }) => {
+      const { invoke } = window.__TAURI__.core;
+      const id = window.perf.ids[0];
+      const blockers = Array.from({ length: git }, () => invoke('git_run', { dir, args: ['-c', 'alias.zz=!sleep 2', 'zz'] }).catch(e => String(e)));
+      const reads = Array.from({ length: opencode }, (_, i) => {
+        const t0 = performance.now();
+        return invoke('last_messages', { panes: [[`perf-oc-${i}`, 'opencode', ocDir, 'ses_perf']] })
+          .then(() => 'resolved', e => String(e)).then(result => ({ ms: Math.round(performance.now() - t0), result }));
+      });
+      await new Promise(r => setTimeout(r, 100));
+      const writes = [], echoes = [];
+      for (let i = 0; i < 5; i++) {
+        const t0 = performance.now();
+        const echoed = new Promise(r => (window.perf.echo = r));
+        await invoke('pty_write', { id, data: 'k' });
+        writes.push(Math.round(performance.now() - t0));
+        await Promise.race([echoed, new Promise(r => setTimeout(r, 5000))]);
+        echoes.push(Math.round(performance.now() - t0));
+        await new Promise(r => setTimeout(r, 50));
+      }
+      const gitResults = await Promise.all(blockers);
+      const r = { writeMs: writes, echoMs: echoes, gitErrors: gitResults.filter(x => typeof x === 'string' && x.startsWith('git')).length };
+      if (opencode) {
+        const done = await Promise.all(reads);
+        r.opencodeReadMs = done.map(d => d.ms);
+        r.opencodeResults = [...new Set(done.map(d => d.result))];
+      }
+      return r;
+    }, { git, opencode, dir, ocDir });
+    console.log('keystroke', label.padEnd(44), JSON.stringify(r));
+    report['keystroke ' + label] = r;
+    await pause(2500);
+  };
+  if (run('keys')) {
+    await keyLatency('idle', 0);
+    await keyLatency('during 8 slow git calls', 8);
+    await keyLatency('during 18 slow git calls', 18);
+  }
+  if (run('opencode')) {
+    // Tauri runs `async` commands on a Tokio pool of one worker per logical CPU.
+    const burst = availableParallelism() - 5;
+    await keyLatency(`during ${burst} slow git calls`, burst);
+    await keyLatency('during 5 stalled OpenCode reads', 0, 5);
+    await keyLatency(`during 5 stalled OpenCode reads + ${burst} slow git calls`, burst, 5);
+  }
+  if (run('ack')) {
+    // Acks without output at the plan's 310 a second, spread over 10 ms ticks. (24 panes at 10 Hz send
+    // about 240: the review's 311 msg/s divided by the CPU window, not the counting window.)
+    await page.evaluate(() => {
+      const { invoke } = window.__TAURI__.core;
+      const channel = window.perf.channels[0];
+      const start = performance.now();
+      let sent = 0;
+      window.perf.acks = setInterval(() => {
+        const due = Math.floor((performance.now() - start) * 0.31);
+        for (; sent < due; sent++) void invoke('pty_ack', { channel });
+      }, 10);
+      window.perf.ackCount = () => ({ sent, t: performance.now() });
+    });
+    await pause(1000);
+    const a = await page.evaluate(() => window.perf.ackCount());
+    const cpu = sampleCpu(8);
+    const b = await page.evaluate(() => window.perf.ackCount());
+    await page.evaluate(() => clearInterval(window.perf.acks));
+    const r = { acksPerSec: +((b.sent - a.sent) / ((b.t - a.t) / 1000)).toFixed(1), cpu };
+    console.log('pty_ack only'.padEnd(34), JSON.stringify(r));
+    report['pty_ack only, 310/s'] = r;
+    await pause(1000);
+  }
+  if (run('shutdown')) {
+    await spawnPanes(23, 0);
+    await pause(3000);
+    const r = await page.evaluate(async () => {
+      const panes = window.perf.ids.length;
+      const t0 = performance.now();
+      await window.__TAURI__.core.invoke('pty_shutdown');
+      return { panes, ms: Math.round(performance.now() - t0) };
+    });
+    console.log('pty_shutdown'.padEnd(34), JSON.stringify(r));
+    report['pty_shutdown, quiet panes'] = r;
+  }
+} finally {
+  await browser?.close().catch(() => {});
+  spawnSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore' });
+  for (const s of shared) {
+    if (s.had) copyFileSync(s.backup, s.file);
+    else rmSync(s.file, { force: true });
+  }
+  console.log('restored shared files:', shared.every(s => !s.had || readFileSync(s.file, 'utf8') === readFileSync(s.backup, 'utf8')));
+  writeFileSync(join(out, 'results.json'), JSON.stringify(report, null, 2));
+  console.log('Wrote', join(out, 'results.json'));
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10 });
+}
