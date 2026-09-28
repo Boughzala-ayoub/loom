@@ -112,5 +112,28 @@ check("wide trees reuse folders and retain input order and file indexes",
   [wide.count, wide.dirs.length, wide.dirs[0].count, wide.dirs[0].dirs[0].files, wide.dirs[1999].name],
   [2001, 2000, 2, [{ name: "file.ts", i: 0 }, { name: "second.ts", i: 2000 }], "dir1999"]);
 
+import { parseBranch, upstreamLabel } from "./gitparse.ts";
+// What `rev-parse --abbrev-ref @{upstream}` and `rev-list --left-right --count @{upstream}...HEAD`
+// printed for each `## ` line; "" where they failed.
+const branches: [string, { upstream: string; span: string; ask: boolean }][] = [
+  ["## main", { upstream: "", span: "", ask: false }],
+  ["## main...origin/main", { upstream: "origin/main", span: "0\t0", ask: false }],
+  ["## main...origin/main [ahead 2]", { upstream: "origin/main", span: "0\t2", ask: false }],
+  ["## main...origin/main [behind 3]", { upstream: "origin/main", span: "3\t0", ask: false }],
+  ["## main...origin/main [ahead 1, behind 12]", { upstream: "origin/main", span: "12\t1", ask: false }],
+  ["## loom/x...origin/loom/x [gone]", { upstream: "", span: "", ask: false }],
+  ["## feature...main [ahead 1]", { upstream: "main", span: "0\t1", ask: false }],
+  ["## HEAD (no branch)", { upstream: "", span: "", ask: false }],
+  ["## No commits yet on main", { upstream: "", span: "", ask: false }],
+  // With no commits, status calls any upstream gone; rev-parse has to say.
+  ["## No commits yet on main...origin/main [gone]", { upstream: "", span: "", ask: true }],
+  ["", { upstream: "", span: "", ask: false }],
+];
+for (const [line, want] of branches) check(`branch: ${line || "(no line)"}`, parseBranch(line + NUL + " M a.ts" + NUL), want);
+check("status skips the branch line", parseStatus("## main...origin/main [ahead 1]" + NUL + " M a.ts" + NUL + "## odd.ts" + NUL),
+  [{ path: "a.ts", x: " ", y: "M" }, { path: "odd.ts", x: "#", y: "#" }]);
+check("upstream labels", [["origin/main", "2\t1"], ["origin/main", "0\t0"], ["main", "0\t3"], ["", ""]].map(([u, s]) => upstreamLabel(u, s)),
+  ["→ origin/main  ↓2 ↑1", "→ origin/main", "→ main   ↑3", "→ not pushed yet"]);
+
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

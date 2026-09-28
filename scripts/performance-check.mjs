@@ -204,7 +204,7 @@ try {
   const gitBefore = await page.evaluate(() => window.qa.calls.git_run);
   await page.locator('#changes-refresh').click();
   await page.waitForTimeout(50);
-  assert.equal(await page.evaluate(n => window.qa.calls.git_run - n, gitBefore), 10, 'One Changes refresh must launch one set of Git reads');
+  assert.equal(await page.evaluate(n => window.qa.calls.git_run - n, gitBefore), 5, 'One Changes refresh must launch one set of Git reads');
   for (let i = 0; i < 3; i++) await page.locator('#changes-refresh').click();
   await page.waitForTimeout(2200);
   assert.ok(Object.values(await page.evaluate(() => window.qa.maxInFlight)).every(n => n === 1), 'Rapid Changes refreshes must serialize identical reads');

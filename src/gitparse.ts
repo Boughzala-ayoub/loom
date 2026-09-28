@@ -11,19 +11,49 @@ export type Change = {
 
 /** `git status --porcelain=v1 -z`: `XY path` entries NUL-separated; a rename
  * or copy is followed by one more NUL-terminated entry, the original path,
- * which is dropped — the panel shows where the file is now. */
+ * which is dropped — the panel shows where the file is now. With `--branch`
+ * the first entry is the `## ` branch line, which parseBranch reads. */
 export function parseStatus(z: string): Change[] {
   const out: Change[] = [];
   const parts = z.split("\0");
   for (let i = 0; i < parts.length; i++) {
     const e = parts[i];
-    if (e.length < 4) continue;
+    if (e.length < 4 || (i === 0 && e.startsWith("## "))) continue;
     const x = e[0];
     const y = e[1];
     out.push({ path: e.slice(3), x, y });
     if (x === "R" || x === "C" || y === "R" || y === "C") i++;
   }
   return out;
+}
+
+/** The `## ` line `git status --porcelain=v1 -z --branch` starts with, as the
+ * two answers it replaces: `upstream` is what `rev-parse --abbrev-ref
+ * @{upstream}` printed and `span` what `rev-list --left-right --count
+ * @{upstream}...HEAD` printed ("behind\tahead"). Both are "" when that command
+ * failed: no upstream, a gone one, a detached HEAD, or no commits yet.
+ * `ask`: a branch with no commits names an upstream, which status calls gone
+ * whether it exists or not. Only rev-parse can tell, so the caller runs it. */
+export function parseBranch(z: string): { upstream: string; span: string; ask: boolean } {
+  const none = { upstream: "", span: "", ask: false };
+  let line = z.split("\0")[0];
+  if (!line.startsWith("## ")) return none;
+  let track = "";
+  const open = line.lastIndexOf(" [");
+  if (open >= 0 && line.endsWith("]")) (track = line.slice(open + 2, -1)), (line = line.slice(0, open));
+  const dots = line.indexOf("...");
+  if (dots < 0) return none;
+  if (/^## (No commits yet|Initial commit) on /.test(line)) return { ...none, ask: true };
+  if (track === "gone") return none;
+  const count = (word: string) => +(new RegExp(`\\b${word} (\\d+)`).exec(track)?.[1] ?? 0);
+  return { upstream: line.slice(dots + 3), span: `${count("behind")}\t${count("ahead")}`, ask: false };
+}
+
+/** What the Changes panel says about the upstream: "→ origin/main  ↓2 ↑1". */
+export function upstreamLabel(upstream: string, span: string): string {
+  const [behind, ahead] = span.split("\t");
+  const gap = +behind || +ahead ? `  ${+behind ? `↓${behind}` : ""}${+ahead ? ` ↑${ahead}` : ""}`.trimEnd() : "";
+  return upstream ? `→ ${upstream}${gap}` : "→ not pushed yet";
 }
 
 export type Stat = { add: number; del: number };

@@ -460,7 +460,10 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
 /// when the files differ, which is the whole point of asking.
 fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("git")
+    // The polls skip the cmd\git.exe wrapper's own process. Anything that may
+    // commit, push or ask for credentials keeps it.
+    let read = matches!(args.first().map(String::as_str), Some("status" | "diff" | "log" | "rev-parse" | "rev-list"));
+    let out = read.then(git_direct).flatten().unwrap_or_else(|| std::process::Command::new("git"))
         .arg("-C")
         .arg(&dir)
         .args(&args)
@@ -486,6 +489,75 @@ fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<Strin
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if err.is_empty() { format!("git exited {:?}", out.status.code()) } else { err })
     }
+}
+
+/// Git for Windows' real git.exe, with the environment its cmd\git.exe wrapper
+/// would have set: MINGW64, its bin folders and ~\bin first on PATH, HOME and
+/// PLINK_PROTOCOL when unset. scripts/git-direct-check.mjs compares the two,
+/// environment and output, in every saved thread folder. None when Git isn't
+/// laid out that way, and callers use the wrapper.
+fn git_direct() -> Option<std::process::Command> {
+    use std::ffi::OsString;
+    use std::os::windows::process::CommandExt;
+    static REAL: std::sync::OnceLock<Option<(PathBuf, Vec<(&str, OsString)>)>> = std::sync::OnceLock::new();
+    let (exe, env) = REAL.get_or_init(|| {
+        let out = std::process::Command::new("git").arg("--exec-path").creation_flags(0x0800_0000).output().ok()?;
+        // <root>/mingw64/libexec/git-core
+        let exec = PathBuf::from(String::from_utf8(out.stdout).ok()?.trim().replace('/', "\\"));
+        let root = exec.parent()?.parent()?.parent()?;
+        let (exe, mingw, usr) = (exec.join("git.exe"), root.join("mingw64\\bin"), root.join("usr\\bin"));
+        if !exe.is_file() || !mingw.is_dir() || !usr.is_dir() { return None; }
+        let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+        let home = var("HOME").map(PathBuf::from)
+            .or_else(|| {
+                let mut drive = var("HOMEDRIVE")?;
+                drive.push(var("HOMEPATH")?);
+                Some(PathBuf::from(drive)).filter(|p| p.is_dir())
+            })
+            .or_else(|| var("USERPROFILE").map(PathBuf::from))?;
+        let mut path = std::env::join_paths([mingw, usr, home.join("bin")]).ok()?;
+        if let Some(rest) = var("PATH") { path.push(";"); path.push(rest); }
+        let mut env = vec![("MSYSTEM", OsString::from("MINGW64")), ("PATH", path)];
+        if var("PLINK_PROTOCOL").is_none() { env.push(("PLINK_PROTOCOL", "ssh".into())); }
+        if var("HOME").is_none() { env.push(("HOME", home.into())); }
+        Some((exe, env))
+    }).as_ref()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.envs(env.iter().map(|(k, v)| (k, v)));
+    Some(cmd)
+}
+
+/// What the checkout at `dir` stopped in the middle of: "merge", "revert",
+/// "rebase" or "", first match in that order. Each leaves a marker in the
+/// checkout's own git dir, so the usual answer starts no process. A marker is
+/// confirmed with the command the Changes panel used to run on every refresh:
+/// `rebase-apply` is also `git am`'s, and a rebase paused at `break` has no
+/// current patch, and neither shows a rebase bar.
+fn git_midway(dir: String) -> String {
+    let Some(gd) = git_dir(std::path::Path::new(&dir)) else { return String::new() };
+    let ok = |args: &[&str]| git_run(dir.clone(), args.iter().map(|a| a.to_string()).collect(), None).is_ok();
+    if gd.join("MERGE_HEAD").exists() && ok(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]) {
+        return "merge".into();
+    }
+    if gd.join("REVERT_HEAD").exists() && ok(&["rev-parse", "-q", "--verify", "REVERT_HEAD"]) {
+        return "revert".into();
+    }
+    if (gd.join("rebase-merge").exists() || gd.join("rebase-apply").exists()) && ok(&["rebase", "--show-current-patch"]) {
+        return "rebase".into();
+    }
+    String::new()
+}
+
+/// The git dir of the checkout holding `dir`: its `.git` folder, or where a
+/// linked worktree's `.git` file points.
+fn git_dir(dir: &std::path::Path) -> Option<PathBuf> {
+    let root = dir.ancestors().find(|d| d.join(".git").exists())?;
+    let dot = root.join(".git");
+    if dot.is_dir() {
+        return Some(dot);
+    }
+    let text = std::fs::read_to_string(&dot).ok()?;
+    Some(root.join(text.strip_prefix("gitdir:")?.trim()))
 }
 
 /// Every file under `dir`, relative with `/`, for the Files tree. Folders git
@@ -1093,6 +1165,10 @@ mod commands {
         blocking(move || super::git_run(dir, args, ok)).await
     }
     #[tauri::command]
+    pub async fn git_midway(dir: String) -> String {
+        blocking(move || super::git_midway(dir)).await
+    }
+    #[tauri::command]
     pub async fn git_stdin(dir: String, args: Vec<String>, patch: String) -> Result<String, String> {
         blocking(move || super::git_stdin(dir, args, patch)).await
     }
@@ -1289,7 +1365,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::pty_spawn, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
-            commands::git_run, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_wakes, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
+            commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_wakes, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::dictate_start,
             commands::dictate_stop,

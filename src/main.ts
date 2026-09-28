@@ -13,7 +13,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, codexThread, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
-import { parseStatus, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
+import { parseStatus, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
@@ -4293,23 +4293,21 @@ async function readChanges() {
   let midway = "";
   let head: Map<string, Stat>; // against HEAD: the thread bar and sidebar numbers
   try {
-    [status, unstaged, staged, upstream, log, span, midway, head] = await Promise.all([
-      git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(parseStatus),
+    let branch: string;
+    [branch, unstaged, staged, log, midway, head] = await Promise.all([
+      // --branch: the upstream and how far apart, in the same process.
+      git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch"),
       git(th.dir, "diff", "--numstat").then(parseNumstat),
       git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
-      git(th.dir, "rev-parse", "--abbrev-ref", "@{upstream}").then((s) => s.trim(), () => ""),
       git(th.dir, "log", "--oneline", "-10").catch(() => ""),
-      git(th.dir, "rev-list", "--left-right", "--count", "@{upstream}...HEAD").then((s) => s.trim(), () => ""),
-      // What git stopped in the middle of. MERGE_HEAD and REVERT_HEAD are
-      // cleared by the commit that ends them; REBASE_HEAD is not, so a rebase
-      // has to be asked about directly.
-      Promise.all([
-        git(th.dir, "rev-parse", "-q", "--verify", "MERGE_HEAD").then(() => "merge", () => ""),
-        git(th.dir, "rev-parse", "-q", "--verify", "REVERT_HEAD").then(() => "revert", () => ""),
-        git(th.dir, "rebase", "--show-current-patch").then(() => "rebase", () => ""),
-      ]).then((r) => r.find(Boolean) ?? ""),
+      // What git stopped in the middle of: "merge", "revert", "rebase" or "".
+      invoke<string>("git_midway", { dir: th.dir }).catch(() => ""),
       git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => new Map<string, Stat>()),
     ]);
+    status = parseStatus(branch);
+    const tracking = parseBranch(branch);
+    ({ upstream, span } = tracking);
+    if (tracking.ask) upstream = await git(th.dir, "rev-parse", "--abbrev-ref", "@{upstream}").then((s) => s.trim(), () => "");
   } catch (e) {
     panelSig = "";
     body.textContent = "";
@@ -4321,9 +4319,7 @@ async function readChanges() {
   const total = sumStat([...unstaged.values(), ...staged.values()]);
   $("#changes-branch").textContent = th.branch || "(no branch)";
   $("#changes-stat").innerHTML = statHtml(total);
-  const [behind, ahead] = span.split("\t");
-  const gap = +behind || +ahead ? `  ${+behind ? `↓${behind}` : ""}${+ahead ? ` ↑${ahead}` : ""}`.trimEnd() : "";
-  $("#changes-base").textContent = upstream ? `→ ${upstream}${gap}` : "→ not pushed yet";
+  $("#changes-base").textContent = upstreamLabel(upstream, span);
 
   const tracked = status.filter((c) => c.x !== "?");
   const secRows: Record<Sec, Change[]> = {

@@ -105,11 +105,11 @@ try {
         if (cmd === 'plugin:dialog|confirm') return false;
         if (cmd === 'plugin:path|resolve_directory') return 'C:\\Users\\test';
         if (cmd === 'plugin:path|join') return args.paths.join('\\');
+        if (cmd === 'git_midway') return '';
         if (cmd === 'git_run') {
           const a = args.args;
-          if (a.includes('MERGE_HEAD') || a.includes('REVERT_HEAD') || a[0] === 'rebase') throw new Error('No operation in progress');
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
-          if (a[0] === 'status') return qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0';
+          if (a[0] === 'status') return (a.includes('--branch') ? '## main...origin/main [ahead 2]\0' : '') + (qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0');
           if (a.includes('--numstat')) return '18\t4\tsrc/main.ts\n7\t2\tsrc/styles.css\n';
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
           if ((a[0] === 'diff' || a[0] === 'show') && qa.longDiff) return 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1,601 @@\n context line one\n' + '+added line\n'.repeat(600);
@@ -118,9 +118,7 @@ try {
           if (a[0] === 'branch') return 'main\nloom/search-polish\n';
           if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\tOn main: workspace polish\n';
           if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
-          if (a[0] === 'rev-list') return '0\t2';
           if (a.includes('--show-toplevel')) return args.dir;
-          if (a.includes('@{upstream}')) return 'origin/main';
           if (a[0] === 'rev-parse') return 'main';
           return '';
         }
