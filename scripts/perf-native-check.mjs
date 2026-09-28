@@ -1,7 +1,7 @@
 // Native cost probe for docs/performance-plan.md. Needs src-tauri/target/release/loom.exe built with
 // --features tauri/custom-protocol (or LOOM_TEST_EXE). Temporary profile and test PTYs only.
-// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown] [agents] | app | restore
-// (default: all but agents, app and restore)
+// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown] [agents] | app | restore | blur
+// (default: all but agents, app, restore and blur)
 //   ipc       CPU per output message: 1 quiet pane, then 12 and 24 panes redrawing at 10 Hz
 //   keys      keystroke round trip idle and with 8 and 18 slow Git calls in flight
 //   opencode  keystroke round trip with 5 stalled OpenCode 2 reads, alone and with a Git burst
@@ -19,6 +19,8 @@
 //   restore   alone: a workspace of 8 claude panes in CLAUDE_DIR, restored as Loom starts. Loom starts
 //             claude two at a time and frees a slot when a pane's SessionStart marker lands, so this
 //             times each marker from launch. Opt-in: starts your installed claude, no prompts sent.
+//   blur      alone: the app workspace at 1000 px, where the Changes panel is a blurred drawer over
+//             the redrawing terminals. CPU with its blur on and off, alternating five times, and closed.
 // Numbers only, no pass/fail. Restores the shared files a test Loom rewrites. Kills only its own tree.
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
@@ -28,12 +30,12 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app', 'restore'];
-const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => !['agents', 'app', 'restore'].includes(m));
+const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app', 'restore', 'blur'];
+const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => !['agents', 'app', 'restore', 'blur'].includes(m));
 for (const m of modes) if (!ALL.includes(m)) throw new Error(`Unknown mode ${m}. Modes: ${ALL.join(', ')}`);
 const run = m => modes.includes(m);
 if (run('shutdown') && run('agents')) throw new Error('shutdown and agents each end every pane; run them separately');
-for (const m of ['app', 'restore']) if (run(m) && modes.length > 1) throw new Error(`${m} starts its own workspace; run it alone`);
+for (const m of ['app', 'restore', 'blur']) if (run(m) && modes.length > 1) throw new Error(`${m} starts its own workspace; run it alone`);
 const out = resolve('node_modules/.cache/perf-native-check');
 mkdirSync(out, { recursive: true });
 const procJson = fileURLToPath(new URL('proc-json.ps1', import.meta.url));
@@ -50,7 +52,7 @@ writeFileSync(profile, '{}');
 // app: the redraw child logs, once a second, its time, redraw count and longest wait between redraws.
 const APP_PANES = 24;
 const appLogs = [...Array(APP_PANES).keys()].map(i => join(dir, 'stats', `${i}.log`));
-if (run('app')) {
+if (run('app') || run('blur')) {
   mkdirSync(join(dir, 'stats'));
   writeFileSync(join(dir, 'app-child.js'), `const log = process.argv[2]; let n = 0, last = Date.now(), worst = 0;
 setInterval(() => { const now = Date.now(); worst = Math.max(worst, now - last); last = now; process.stdout.write('\\x1b[?25l\\x1b[3;1H\\x1b[2K\\x1b[38;5;208m*\\x1b[0m Working (' + (n++) + ' esc to interrupt) ' + '-'.repeat(60) + '\\x1b[?25h'); }, 100);
@@ -277,6 +279,31 @@ try {
     for (const m of landed) rmSync(join(marks, m.name), { force: true });
     console.log('restore 8 claude panes'.padEnd(34), JSON.stringify(r));
     report['restore 8 claude panes'] = r;
+  }
+  if (run('blur')) {
+    for (let i = 0; i < 600 && !appLogs.every(f => existsSync(f)); i++) await pause(100);
+    await pause(3000);
+    // 1000 CSS px wide, set through Win32 since the page may not resize its window.
+    const dpr = await page.evaluate(() => devicePixelRatio);
+    spawnSync('powershell', ['-NoProfile', '-Command', `Add-Type -Name W -Namespace U -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetWindowPos(System.IntPtr h, System.IntPtr a, int x, int y, int cx, int cy, uint f);'; [void][U.W]::SetWindowPos((Get-Process -Id ${child.pid}).MainWindowHandle, [System.IntPtr]::Zero, 0, 0, ${Math.round(1016 * dpr)}, ${Math.round(820 * dpr)}, 0x16)`]);
+    await page.waitForFunction(() => innerWidth <= 1100);
+    await page.locator('#changes-btn').click();
+    await pause(1500);
+    const drawer = await page.evaluate(() => { const s = getComputedStyle(document.querySelector('#changes')); return { width: innerWidth, position: s.position, backdropFilter: s.backdropFilter }; });
+    const blur = on => page.evaluate(on => {
+      document.getElementById('perf-no-blur')?.remove();
+      if (!on) document.head.append(Object.assign(document.createElement('style'), { id: 'perf-no-blur', textContent: '#changes { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' }));
+    }, on);
+    const samples = { on: [], off: [] };
+    for (let i = 0; i < 5; i++) for (const on of [true, false]) { await blur(on); await pause(1000); samples[on ? 'on' : 'off'].push(sampleCpu(12)); }
+    await blur(true);
+    await page.locator('#changes-btn').click();
+    await pause(1000);
+    const closed = sampleCpu(8);
+    const r = { drawer, dpr, samples, closed };
+    for (const [k, v] of Object.entries(samples)) console.log(`drawer open, blur ${k}`.padEnd(34), JSON.stringify(v.map(c => ({ gpu: c['wv-gpu-process'], renderer: c['wv-renderer'], browser: c['wv-browser'] }))));
+    console.log('drawer closed'.padEnd(34), JSON.stringify({ gpu: closed['wv-gpu-process'], renderer: closed['wv-renderer'], browser: closed['wv-browser'] }), JSON.stringify(drawer));
+    report['changes drawer blur at 1000 px'] = r;
   }
   if (run('app')) {
     for (let i = 0; i < 600 && !appLogs.every(f => existsSync(f)); i++) await pause(100);
