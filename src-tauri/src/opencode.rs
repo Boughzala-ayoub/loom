@@ -1,5 +1,5 @@
 //! Keep the CLI used to launch a pane for session reads too. `opencode` can be v1 or v2.
-use std::{os::windows::process::CommandExt, path::Path, process::Command, time::Duration};
+use std::{os::windows::process::CommandExt, path::Path, process::Command, sync::Mutex, time::{Duration, Instant}};
 
 pub fn command(line: &str) -> Option<&str> {
     let name = line.split_whitespace().next()?;
@@ -17,7 +17,23 @@ fn cli(name: &str, dir: &str, args: &str) -> Command {
 
 fn major(name: &str, dir: &str) -> Result<u32, String> {
     if command(name) != Some(name) { return Err("Invalid OpenCode command".into()); }
-    let bytes = super::export_output(&mut cli(name, dir, "--version"), Duration::from_secs(3))
+    // OpenCode 2 startup serializes on its data files: five checks at once took 12 s each.
+    // So one check runs at a time, and callers that queued behind it take its answer.
+    static LAST: Mutex<Vec<(String, String, Instant, Result<u32, String>)>> = Mutex::new(Vec::new());
+    let asked = Instant::now();
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((.., at, result)) = last.iter().find(|(n, d, ..)| n == name && d == dir) {
+        if *at > asked { return result.clone(); }
+    }
+    let result = check_major(name, dir);
+    last.retain(|(n, d, ..)| n != name || d != dir);
+    last.push((name.into(), dir.into(), Instant::now(), result.clone()));
+    result
+}
+
+fn check_major(name: &str, dir: &str) -> Result<u32, String> {
+    // A lone check has taken 2.7 s here.
+    let bytes = super::export_output(&mut cli(name, dir, "--version"), Duration::from_secs(10))
         .ok_or_else(|| format!("Could not read {name} version. Check that it is installed."))?;
     let version = String::from_utf8_lossy(&bytes);
     match parse_major(&version) {
@@ -80,6 +96,22 @@ mod tests {
         }
         assert_eq!(super::command("opencode-evil"), None);
         assert_eq!(super::command("opencode&calc"), None);
+    }
+
+    #[test]
+    fn queued_version_checks_share_one_call() {
+        let root = std::env::temp_dir().join(format!("loom-opencode-queue-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("opencode.cmd"), "@echo off\r\necho x>>calls.txt\r\nping -n 2 127.0.0.1 >nul\r\necho opencode v2.0.18\r\n").unwrap();
+        let dir = root.to_str().unwrap().to_string();
+        let calls = || std::fs::read_to_string(root.join("calls.txt")).unwrap().lines().count();
+        let threads: Vec<_> = (0..4).map(|_| { let dir = dir.clone(); std::thread::spawn(move || super::major("opencode", &dir)) }).collect();
+        for t in threads { assert_eq!(t.join().unwrap(), Ok(2)); }
+        assert_eq!(calls(), 1);
+        // A check asked after the last one finished runs again.
+        assert_eq!(super::major("opencode", &dir), Ok(2));
+        assert_eq!(calls(), 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
