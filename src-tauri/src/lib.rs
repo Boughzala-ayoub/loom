@@ -277,6 +277,11 @@ fn pty_spawn(
             cmd.env_remove(&k);
         }
     }
+    // Claude Code 2.1.284 turns its fullscreen renderer on by default: the
+    // alternate screen with mouse tracking, so xterm keeps no scrollback (no
+    // scrollbar) and every wheel tick is a redraw through ConPTY. Keep it
+    // inline, as Codex is kept (agent.ts: tui.alternate_screen=never).
+    cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
     // Shell panes dot-source this (agent.ts: `. $env:LOOM_INIT`) — a variable,
     // not a literal path, so a data dir with spaces needs no quoting.
     cmd.env("LOOM_INIT", &init);
