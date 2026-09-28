@@ -1,7 +1,7 @@
 // Native cost probe for docs/performance-plan.md. Needs src-tauri/target/release/loom.exe built with
 // --features tauri/custom-protocol (or LOOM_TEST_EXE). Temporary profile and test PTYs only.
-// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown] [agents]
-// (default: all but agents)
+// Usage: node scripts/perf-native-check.mjs [ipc] [keys] [opencode] [ack] [shutdown] [agents] | app
+// (default: all but agents and app)
 //   ipc       CPU per output message: 1 quiet pane, then 12 and 24 panes redrawing at 10 Hz
 //   keys      keystroke round trip idle and with 8 and 18 slow Git calls in flight
 //   opencode  keystroke round trip with 5 stalled OpenCode 2 reads, alone and with a Git burst
@@ -12,6 +12,10 @@
 //             then what is still alive after pty_shutdown. Opt-in, since it starts your installed
 //             CLIs. claude runs in CLAUDE_DIR (default: this checkout), which Claude Code must
 //             already trust.
+//   app       alone: 24 app panes (8 threads of 3) whose children redraw at 10 Hz, so output goes
+//             through the real frontend. Invokes a second and CPU, then the window minimized for
+//             60 s: each child logs its longest wait between redraws, which grows when its output
+//             pipe fills because Loom stopped reading.
 // Numbers only, no pass/fail. Restores the shared files a test Loom rewrites. Kills only its own tree.
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
@@ -21,11 +25,12 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents'];
-const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => m !== 'agents');
+const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app'];
+const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => m !== 'agents' && m !== 'app');
 for (const m of modes) if (!ALL.includes(m)) throw new Error(`Unknown mode ${m}. Modes: ${ALL.join(', ')}`);
 const run = m => modes.includes(m);
 if (run('shutdown') && run('agents')) throw new Error('shutdown and agents each end every pane; run them separately');
+if (run('app') && modes.length > 1) throw new Error('app starts its own workspace; run it alone');
 const out = resolve('node_modules/.cache/perf-native-check');
 mkdirSync(out, { recursive: true });
 const procJson = fileURLToPath(new URL('proc-json.ps1', import.meta.url));
@@ -39,6 +44,20 @@ for (const s of shared) if (s.had) copyFileSync(s.file, s.backup);
 const dir = mkdtempSync(join(tmpdir(), 'loom-perf-native-'));
 const profile = join(dir, 'workspace.json');
 writeFileSync(profile, '{}');
+// app: the redraw child logs, once a second, its time, redraw count and longest wait between redraws.
+const APP_PANES = 24;
+const appLogs = [...Array(APP_PANES).keys()].map(i => join(dir, 'stats', `${i}.log`));
+if (run('app')) {
+  mkdirSync(join(dir, 'stats'));
+  writeFileSync(join(dir, 'app-child.js'), `const log = process.argv[2]; let n = 0, last = Date.now(), worst = 0;
+setInterval(() => { const now = Date.now(); worst = Math.max(worst, now - last); last = now; process.stdout.write('\\x1b[?25l\\x1b[3;1H\\x1b[2K\\x1b[38;5;208m*\\x1b[0m Working (' + (n++) + ' esc to interrupt) ' + '-'.repeat(60) + '\\x1b[?25h'); }, 100);
+setInterval(() => { require('fs').appendFileSync(log, Date.now() + ' ' + n + ' ' + worst + '\\n'); worst = 0; }, 1000);`);
+  // A restored thread needs a Git folder.
+  spawnSync('git', ['init', '-q', dir]);
+  writeFileSync(profile, JSON.stringify({ ui: { thread: 0 }, threads: Array.from({ length: APP_PANES / 3 }, (_, t) => ({
+    repo: dir, dir, name: `perf-${t}`, panes: [0, 1, 2].map(j => ({ cmd: `node ${join(dir, 'app-child.js')} ${appLogs[t * 3 + j]}` })),
+  })) }));
+}
 // A TUI-like child: redraws a status line at a fixed rate, echoes input back.
 writeFileSync(join(dir, 'tui.js'), `let n = 0; const hz = +process.argv[2];
 process.stdin.setRawMode?.(true); process.stdin.on('data', d => process.stdout.write('\\x1b[5;1H\\x1b[2Kin:' + d.toString('hex')));
@@ -236,6 +255,43 @@ try {
     console.log('pty_shutdown, real agents'.padEnd(34), JSON.stringify(r));
     report['pty_shutdown, real claude and opencode2'] = r;
   }
+  if (run('app')) {
+    for (let i = 0; i < 600 && !appLogs.every(f => existsSync(f)); i++) await pause(100);
+    if (!appLogs.every(f => existsSync(f))) throw new Error('app panes did not start');
+    await pause(3000);
+    // Invokes are fetches to ipc.localhost. The page round trip in calls() first delivers the
+    // request events queued while spawnSync blocked.
+    const counts = {};
+    page.on('request', req => { const u = new URL(req.url()); if (u.hostname === 'ipc.localhost') counts[u.pathname.slice(1)] = (counts[u.pathname.slice(1)] || 0) + 1; });
+    const calls = async () => { const t = await page.evaluate(() => performance.now()); return { calls: { ...counts }, t }; };
+    const a = await calls();
+    const cpu = sampleCpu(8);
+    const b = await calls();
+    const perSec = Object.fromEntries(Object.entries(b.calls).map(([k, v]) => [k, +((v - (a.calls[k] || 0)) / ((b.t - a.t) / 1000)).toFixed(1)]));
+    const r = { invokesPerSec: perSec, cpu };
+    console.log('24 app panes at 10 Hz'.padEnd(34), JSON.stringify(r));
+    report['24 app panes at 10 Hz'] = r;
+    // Minimized for 60 s. A child that waited more than its 100 ms interval was blocked writing.
+    // The app may not minimize itself (capabilities), so this goes through Win32.
+    const show = how => spawnSync('powershell', ['-NoProfile', '-Command', `Add-Type -Name W -Namespace U -MemberDefinition '[DllImport("user32.dll")] public static extern bool ShowWindowAsync(System.IntPtr h, int c); [DllImport("user32.dll")] public static extern bool IsIconic(System.IntPtr h);'
+      $h = (Get-Process -Id ${child.pid}).MainWindowHandle; [void][U.W]::ShowWindowAsync($h, ${how}); Start-Sleep -Milliseconds 500; [U.W]::IsIconic($h)`], { encoding: 'utf8' }).stdout.trim() === 'True';
+    const t0 = Date.now();
+    const minimized = show(6); // SW_MINIMIZE
+    await pause(5000);
+    const visibility = await page.evaluate(() => document.visibilityState);
+    await pause(55000);
+    const t1 = Date.now();
+    show(9); // SW_RESTORE
+    const lines = appLogs.map(f => readFileSync(f, 'utf8').trim().split('\n').map(l => l.split(' ').map(Number)).filter(([t]) => t > t0 + 1000 && t <= t1));
+    const m = {
+      minimized, visibility,
+      longestStallMs: Math.max(...lines.flatMap(l => l.map(([, , worst]) => worst - 100))),
+      fewestRedraws: Math.min(...lines.map(l => l.at(-1)[1] - l[0][1])),
+      seconds: Math.round((t1 - t0 - 1000) / 1000),
+    };
+    console.log('minimized 60 s'.padEnd(34), JSON.stringify(m));
+    report['24 app panes, minimized 60 s'] = m;
+  }
 } finally {
   await browser?.close().catch(() => {});
   spawnSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore' });
@@ -246,5 +302,11 @@ try {
   console.log('restored shared files:', shared.every(s => !s.had || readFileSync(s.file, 'utf8') === readFileSync(s.backup, 'utf8')));
   writeFileSync(join(out, 'results.json'), JSON.stringify(report, null, 2));
   console.log('Wrote', join(out, 'results.json'));
-  rmSync(dir, { recursive: true, force: true, maxRetries: 10 });
+  // Killed panes' shells can hold it as their working folder for a few seconds.
+  for (let i = 0; ; i++) {
+    try { rmSync(dir, { recursive: true, force: true }); break; } catch (e) {
+      if (i === 10) { console.log('Could not remove', dir, e.code); break; }
+      await pause(1000);
+    }
+  }
 }

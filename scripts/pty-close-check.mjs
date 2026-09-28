@@ -111,7 +111,9 @@ try {
   await page.evaluate(() => {
     const p = window.pressure;
     p.resume = true;
-    while (p.pending > 0) { p.pending--; void window.__TAURI__.core.invoke('pty_ack', { channel: p.out.id }); }
+    // All four in one call, the way the frontend batches them.
+    void window.__TAURI__.core.invoke('pty_acks', { acks: [[p.out.id, p.pending]] });
+    p.pending = 0;
   });
   await page.waitForFunction(() => window.pressure.tail.includes('OUTPUT-DRAINED'), { timeout: 30000 });
   await page.evaluate(() => window.__TAURI__.core.invoke('pty_kill', { id: 'pressure-test' }));

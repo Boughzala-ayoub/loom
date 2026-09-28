@@ -83,6 +83,25 @@ async function phoneWindow() {
 }
 /** Provider title spinners ("✻ Thinking…"): stripped before a title is shown or compared. */
 const SPIN = /^[✳✻✽✶✢·◐◓◑◒⠁-⣿]+\s*/u;
+/** Output xterm has parsed, acknowledged for every pane in one invoke. Rust lets a pane run
+ * four batches ahead (output.rs), so a pane with two pending flushes them all at once and a
+ * lone one waits at most 100 ms. A timer, never requestAnimationFrame: that stops while the
+ * window is minimized, and agents would block on a full output pipe. */
+const acks = new Map<number, number>();
+let ackTimer = 0;
+function flushAcks() {
+  clearTimeout(ackTimer);
+  ackTimer = 0;
+  if (!acks.size) return;
+  void invoke("pty_acks", { acks: [...acks] }).catch(() => {});
+  acks.clear();
+}
+function ackOutput(channel: number) {
+  const pending = (acks.get(channel) ?? 0) + 1;
+  acks.set(channel, pending);
+  if (pending >= 2) flushAcks();
+  else ackTimer ||= window.setTimeout(flushAcks, 100);
+}
 
 /** Keep destructive confirmations in the app; Escape and initial focus cancel. */
 function confirm(message: string, options: { title: string; kind?: string; action?: string; detail?: string }): Promise<boolean> {
@@ -1747,7 +1766,7 @@ class Pane {
     if (this.disposed) { release?.(); return; }
     const out = this.out = new Channel<string>();
     out.onmessage = (d) => {
-      const ack = () => void invoke("pty_ack", { channel: out.id }).catch(() => {});
+      const ack = () => ackOutput(out.id);
       if (this.disposed || this.out !== out) { ack(); return; }
       this.lastOut = Date.now();
       if (this.agent === "codex") {

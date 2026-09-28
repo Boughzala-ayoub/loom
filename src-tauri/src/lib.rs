@@ -401,6 +401,15 @@ fn pty_ack(flows: State<output::Flows>, channel: u32) {
     if let Some((_, flow)) = flows.0.lock().unwrap().get(&channel) { flow.ack(); }
 }
 
+/// `pty_ack` for several panes and batches at once: `(channel, batches parsed)`.
+#[tauri::command]
+fn pty_acks(flows: State<output::Flows>, acks: Vec<(u32, usize)>) {
+    let flows = flows.0.lock().unwrap();
+    for (channel, n) in acks {
+        if let Some((_, flow)) = flows.get(&channel) { flow.ack_n(n); }
+    }
+}
+
 #[tauri::command]
 fn pty_resize(ptys: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(), String> {
     let map = ptys.0.lock().unwrap();
@@ -1279,7 +1288,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::pty_spawn, pty_write, pty_ack, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
+            commands::pty_spawn, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::git_run, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_wakes, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::dictate_start,

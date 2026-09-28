@@ -235,6 +235,6 @@ try {
   await failStartup();
   await page.waitForTimeout(1500);
   assert.equal(await page.evaluate(id => window.qa.panes.filter(p => p.id === id).length, codex), starts + 1, 'Codex startup recovery must retry at most once');
-  assert.ok(await page.evaluate(() => window.qa.calls.pty_ack > 0), 'Terminal parsing must acknowledge native output');
+  assert.ok(await page.evaluate(() => window.qa.calls.pty_acks > 0), 'Terminal parsing must acknowledge native output');
   console.log('PASS Changes coalescing, independent Overview refresh, bounded Codex bootstrap recovery and parser acknowledgements');
 } finally { await browser.close(); }

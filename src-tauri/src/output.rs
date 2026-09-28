@@ -21,8 +21,12 @@ impl Flow {
     }
 
     pub fn ack(&self) {
+        self.ack_n(1);
+    }
+
+    pub fn ack_n(&self, n: usize) {
         let mut state = self.state.lock().unwrap();
-        state.0 = state.0.saturating_sub(1);
+        state.0 = state.0.saturating_sub(n);
         self.ready.notify_one();
     }
 
