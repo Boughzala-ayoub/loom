@@ -1028,17 +1028,20 @@ try {
     // Folded threads show their agents as pips; every pip carries the working state.
     assert.equal(await page.locator('.pip[data-state=busy]').count(), 6, 'Every folded agent shows as working on its pip');
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    // The spinner is a strip of frames, one per line; its transform brings one line into view.
     const frames = await page.locator('.agent-title:visible').evaluateAll(labels => [0, 100].map(time => labels.map(label => {
-      const animation = label.getAnimations({ subtree: true }).find(a => a.animationName === 'agent-spin');
+      const strip = label.parentElement.querySelector('.agent-spin > span');
+      const animation = strip.getAnimations().find(a => a.animationName === 'agent-spin');
       if (!animation) return null;
       animation.pause();
       animation.currentTime = time;
-      return getComputedStyle(label, '::before').content;
+      const line = Math.round(-new DOMMatrix(getComputedStyle(strip).transform).m42 / (strip.offsetHeight / 10));
+      return strip.textContent.split('\n')[line];
     })));
-    assert.ok(frames[0].every(frame => frame?.includes('⠋')) && frames[1].every(frame => frame?.includes('⠙')), `Every listed agent and CLI animates the braille spinner before its session title: ${JSON.stringify(frames)}`);
+    assert.ok(frames[0].length && frames[0].every(frame => frame === '⠋') && frames[1].every(frame => frame === '⠙'), `Every listed agent and CLI animates the braille spinner before its session title: ${JSON.stringify(frames)}`);
     await audit('all-agents-working');
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').animationName === 'none')), 'Reduced motion stops the spinner');
+    assert.ok(await page.locator('.agent-spin > span').evaluateAll(strips => strips.every(strip => getComputedStyle(strip).animationName === 'none')), 'Reduced motion stops the spinner');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x1b]133;D\x07')));
     await page.waitForFunction(() => !document.querySelector('.agent[data-state=busy]'));
@@ -1046,7 +1049,8 @@ try {
     await page.evaluate(() => window.qa.panes.filter(p => p.argv.join(' ').includes('codex')).forEach(p => { p.onOut.onmessage('\x1b[2;3H·\x1b[4;9H✦'); p.onOut.onmessage('\x1b[2;3H \x1b[5;1H·'); }));
     await page.waitForTimeout(100);
     assert.equal(await page.locator('.agent[data-state=busy]').count(), 0, 'Idle codex redraws must not show as working');
-    assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').animationName === 'none')), 'Ready agents stop animating');
+    assert.ok(await page.locator('.agent-spin > span').evaluateAll(strips => strips.every(strip => getComputedStyle(strip).animationName === 'none')), 'Ready agents stop animating');
+    assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').content === '"· "')), 'Ready agents show the plain separator');
     await audit('all-agents-ready');
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x07')));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 6);

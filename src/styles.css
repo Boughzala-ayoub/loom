@@ -879,23 +879,34 @@ select option {
 .agent-title::before {
   content: "· ";
 }
-/* The working spinner before the session title, shared by every provider. */
+/* A busy title keeps the first frame, invisible, so it lays out exactly as before. */
 .agent[data-state="busy"] .agent-title::before {
   content: "⠋ ";
+  color: transparent;
+}
+/* The working spinner before the session title, shared by every provider. The ten frames sit
+   one per line in a strip that a transform steps through, which the compositor runs: animating
+   `content` restyled the page every frame. The box takes no room in the row, and its first line
+   shares the row's baseline, so the visible frame lands on the title's placeholder. */
+.agent-spin {
+  display: none;
+}
+.agent[data-state="busy"] .agent-spin {
+  display: block;
+  flex: none;
+  width: 0;
+  height: 1lh;
+  margin: 0 -4px -1lh 0; /* cancels its size and its gap in .agent-copy */
+  overflow: visible clip;
   color: var(--accent);
-  animation: agent-spin 0.8s step-end infinite;
+  white-space: pre;
+}
+.agent[data-state="busy"] .agent-spin > span {
+  display: block;
+  animation: agent-spin 0.8s steps(10) infinite;
 }
 @keyframes agent-spin {
-  0%, 100% { content: "⠋ "; }
-  10% { content: "⠙ "; }
-  20% { content: "⠹ "; }
-  30% { content: "⠸ "; }
-  40% { content: "⠼ "; }
-  50% { content: "⠴ "; }
-  60% { content: "⠦ "; }
-  70% { content: "⠧ "; }
-  80% { content: "⠇ "; }
-  90% { content: "⠏ "; }
+  to { transform: translateY(-100%); }
 }
 .agent-state {
   display: none;

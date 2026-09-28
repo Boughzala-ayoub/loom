@@ -94,7 +94,8 @@ try {
   await sample('B3 codex+opencode, no interrupt hint 10Hz', 5, driver(['codex', 'opencode'], 10, false));
   await page.waitForTimeout(2000);
   // C: sidebar spinner. Every thread is listed (open: true), so each busy claude pane is a spinning row.
-  // 3 Hz output keeps them busy. Off = the same load with the spinner's animation removed.
+  // 3 Hz output keeps them busy. Off = the same load with the spinner's animation removed (the title's
+  // ::before before phase 1, .agent-spin's strip after).
   const spinner = async (label, limit) => {
     let rows = 0;
     const r = await sample(label, 5, async () => { const stop = await driver(['claude'], 3, true, limit)(); await page.waitForTimeout(1000); rows = await busyRows(); return stop; });
@@ -104,20 +105,36 @@ try {
   };
   await spinner('C1 1 busy row, spinner on', 1);
   await spinner(`C2 ${panes('claude')} busy rows, spinner on`, Infinity);
-  await page.addStyleTag({ content: '.agent-title::before { animation: none !important; }' });
+  await page.addStyleTag({ content: '.agent-title::before, .agent-spin > span { animation: none !important; }' });
   await page.waitForTimeout(500);
   await spinner('C3 1 busy row, spinner animation off', 1);
   await spinner(`C4 ${panes('claude')} busy rows, spinner animation off`, Infinity);
   // D: Overview open, busy agents with a changing status line (1 Hz like a seconds timer).
   await page.locator('#dashboard-btn').click();
   await page.waitForTimeout(1500);
-  await page.evaluate(() => { window.qa.rebuilds = 0; new MutationObserver(m => { if (m.some(r => r.type === 'childList' && r.target.id === 'dashboard-list')) window.qa.rebuilds++; }).observe(document.querySelector('#dashboard-list'), { childList: true }); });
+  // A rebuild is wasted when the cards' text is the same afterwards.
+  await page.evaluate(() => {
+    const list = document.querySelector('#dashboard-list');
+    let text = list.textContent;
+    window.qa.rebuilds = window.qa.wasted = 0;
+    new MutationObserver(() => { window.qa.rebuilds++; if (list.textContent === text) window.qa.wasted++; text = list.textContent; }).observe(list, { childList: true });
+  });
+  const rebuilds = () => page.evaluate(() => { const r = { all: window.qa.rebuilds, wasted: window.qa.wasted }; window.qa.rebuilds = window.qa.wasted = 0; return r; });
   await sample('D1 overview open, idle', 5);
-  const idleRebuilds = await page.evaluate(() => { const n = window.qa.rebuilds; window.qa.rebuilds = 0; return n; });
+  results.overviewRebuilds5s = { idle: await rebuilds() };
   await sample('D2 overview open, claude+codex 2Hz', 5, driver(['claude', 'codex'], 2));
-  const busyRebuilds = await page.evaluate(() => window.qa.rebuilds);
-  console.log('overview list rebuilds: idle', idleRebuilds, 'busy', busyRebuilds, 'cards', await page.locator('.dashboard-card').count());
-  results.overviewRebuilds = { idle5s: idleRebuilds, busy5s: busyRebuilds };
+  results.overviewRebuilds5s.busy = await rebuilds();
+  // D3: the same, counted once every driven pane is already working. D2 also counts the cards moving
+  // into Working, and the message re-read the next 4 s poll makes for each pane that started working.
+  await page.waitForTimeout(2000);
+  await sample('D3 overview open, claude+codex 2Hz, already working', 5, async () => {
+    const stop = await driver(['claude', 'codex'], 2)();
+    await page.waitForTimeout(6000); // past that poll: its 4 s gate is checked once a second
+    await rebuilds();
+    return stop;
+  });
+  results.overviewRebuilds5s.alreadyWorking = await rebuilds();
+  console.log('overview rebuilds per 5 s, all and wasted:', JSON.stringify(results.overviewRebuilds5s), 'cards', await page.locator('.dashboard-card').count());
   await page.locator('#dashboard-btn').click();
   await page.waitForTimeout(1000);
   // E: CPU profile of the codex/opencode path to attribute time.

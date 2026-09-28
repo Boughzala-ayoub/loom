@@ -1487,7 +1487,12 @@ class Pane {
     this.rowName.className = "agent-name";
     this.rowLabel.className = "agent-title";
     this.rowState.className = "agent-state";
-    copy.append(this.rowName, this.rowLabel);
+    // The working spinner: its ten frames, one per line, stepped by a transform (styles.css).
+    const spin = document.createElement("span");
+    spin.className = "agent-spin";
+    spin.setAttribute("aria-hidden", "true");
+    spin.append(Object.assign(document.createElement("span"), { textContent: "⠋\n⠙\n⠹\n⠸\n⠼\n⠴\n⠦\n⠧\n⠇\n⠏" }));
+    copy.append(this.rowName, spin, this.rowLabel);
     this.row.append(this.rowIco, copy, this.rowState);
     this.host.className = "pane-term";
     this.title.className = "pane-title";
@@ -2777,8 +2782,9 @@ function renderDashboard() {
   $("#dashboard").classList.toggle("compact", dashboardCompact);
   $("#dashboard-compact").setAttribute("aria-pressed", String(dashboardCompact));
   const list = $("#dashboard-list");
-  // Keep the DOM and keyboard focus stable between unchanged refreshes.
-  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age, messages, menu }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, preview, age, messages?.user, messages?.agent, menu,
+  // Keep the DOM and keyboard focus stable between unchanged refreshes. Only shell cards show the
+  // screen preview; an agent redrawing its status line must not rebuild every card.
+  const signature = JSON.stringify([dashboardCompact, rows.map(({ th, p, state, preview, age, messages, menu }) => [p.id, th.name, th.repo, th.branch, p.agent, p.label, state, p.agent === "shell" && preview, age, messages?.user, messages?.agent, menu,
     p.usage && [p.usage.liveModel || p.usage.model, p.usage.ctx, p.usage.window, p.usage.turns]])]);
   if (signature !== dashboardSignature) {
     dashboardSignature = signature;
