@@ -13,7 +13,8 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, codexThread, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
-import { parseStatus, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
+import { parseStatus, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
+import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
@@ -2844,7 +2845,7 @@ function toggleDashboard(on = !dashboardOpen) {
     void refreshDashboardMessages(true);
     dashboardQuery.focus();
     // Only read the existing terminal buffers while the overview is visible.
-    dashboardTimer = window.setInterval(() => { if (!document.hidden) { renderDashboard(); void refreshDashboardMessages(); } }, 1000);
+    dashboardTimer = window.setInterval(() => { if (!backgroundHidden()) { renderDashboard(); void refreshDashboardMessages(); } }, 1000);
   } else {
     closeDashboardPreview();
     setSelecting(false);
@@ -3446,12 +3447,22 @@ $("#dashboard-process").onclick = async () => {
  * true while the window is minimized or behind another app, so this follows
  * the native window instead. */
 let loomFocused = true;
+let loomMinimized = false;
+const backgroundHidden = () => document.hidden || loomMinimized;
+let resumePolls = () => {};
 // Ask on every change rather than trust the event: clicking the overlay
 // activates it, and its focus event reaches this window's listener too.
 const readFocus = () => Promise.all([getCurrentWindow().isFocused(), getCurrentWindow().isMinimized()])
-  .then(([f, m]) => ((loomFocused = f !== false && m !== true), syncOverlay()), () => {});
+  .then(([f, m]) => {
+    const restored = loomMinimized && m !== true;
+    loomMinimized = m === true;
+    loomFocused = f !== false && !loomMinimized;
+    syncOverlay();
+    if (restored) resumePolls();
+  }, () => {});
 void readFocus();
 void getCurrentWindow().onFocusChanged(readFocus);
+void getCurrentWindow().onResized(readFocus);
 let overlayShown = false;
 // Its close button: hidden until Loom next comes to the front or goes behind.
 // Holds the focus state it was closed in.
@@ -3938,8 +3949,9 @@ const diffLoader = (th: Thread, source: DiffSource) => "commit" in source
     : diffOf(th, source.sec, source.paths);
 const tabsEl = $("#tabs");
 const diffView = $("#diff");
-let showGen = 0; // bumped per showTab, so a chunked render stops when its tab is gone
+let showGen = 0; // reject an async load after its tab is gone
 let shownTab: DiffTab | null = null; // whose rows #diff-body holds right now
+let disposeDiffRows = () => {};
 
 function openTab(th: Thread, label: string, source: DiffSource) {
   const load = diffLoader(th, source);
@@ -4033,16 +4045,27 @@ new ResizeObserver(rulerFit).observe($("#diff-body"));
 async function showTab() {
   const th = current;
   const t = th?.tab;
-  if (!th || !t) return void (showGen++, diffView.classList.add("hidden"));
+  if (!th || !t) {
+    disposeDiffRows();
+    disposeDiffRows = () => {};
+    $("#diff-body").replaceChildren();
+    shownTab = null;
+    return void (showGen++, diffView.classList.add("hidden"));
+  }
   $("#diff-name").textContent = t.label;
   const body = $("#diff-body");
   const isFile = "file" in t.source;
   $("#diff-full").classList.toggle("hidden", isFile); // a file is already all of it
   diffView.classList.remove("hidden");
-  const gen = ++showGen; // a later showTab, or a closed tab, stops this one's chunks
+  const gen = ++showGen;
   // A commit can't change: once its rows are up there is nothing to re-read.
   if ("commit" in t.source && shownTab === t && t.rendered !== undefined) return;
-  if (t.rendered === undefined) (body.textContent = "Loading…"), ruler([]); // else keep the old rows up while git answers
+  if (t.rendered === undefined) {
+    disposeDiffRows();
+    disposeDiffRows = () => {};
+    body.textContent = "Loading…";
+    ruler([]);
+  } // else keep the old rows up while git answers
   const imagePath = "file" in t.source && imageMime(t.source.file) ? t.source.file : null;
   body.classList.toggle("image-preview", !!imagePath);
   if (imagePath) {
@@ -4054,6 +4077,8 @@ async function showTab() {
       // rest of the window's life, and raw bytes then arrive as a number array.
       const bytes = await invoke<ArrayBuffer | number[]>("read_image", { dir: th.dir, path: imagePath });
       if (current !== th || th.tab !== t || gen !== showGen) return;
+      disposeDiffRows();
+      disposeDiffRows = () => {};
       const url = URL.createObjectURL(new Blob([bytes instanceof ArrayBuffer ? bytes : new Uint8Array(bytes)], { type: imageMime(imagePath) }));
       img.onload = () => URL.revokeObjectURL(url);
       img.onerror = () => { URL.revokeObjectURL(url); if (body.contains(img)) body.textContent = "Could not display this image."; };
@@ -4062,6 +4087,8 @@ async function showTab() {
       shownTab = t;
     } catch (e) {
       if (current !== th || th.tab !== t || gen !== showGen) return;
+      disposeDiffRows();
+      disposeDiffRows = () => {};
       const matches = e && typeof e === "object" && "matches" in e ? e.matches : null;
       if (Array.isArray(matches) && matches.length > 1 && matches.every(path => typeof path === "string")) {
         const choices = document.createElement("div");
@@ -4086,10 +4113,12 @@ async function showTab() {
   if (text === t.rendered && shownTab === t) return; // else another tab's rows are up
   t.rendered = text;
   shownTab = t;
+  disposeDiffRows();
   body.textContent = "";
-  const rows = isFile
-    ? text.replace(/\n$/, "").split("\n").map((line, i) => ({ kind: "" as const, old: 0, neu: i + 1, text: line }))
-    : diffRows(text);
+  const CAP = 50_000;
+  const parsed = isFile ? fileRows(text, CAP) : undefined;
+  const rows = parsed?.rows ?? diffRows(text);
+  const count = parsed?.count ?? rows.length;
   // Which way a hunk moves depends on the side the tab is showing: an unstaged
   // hunk goes into the index or out of the file, a staged one comes back out.
   const moves: [string, string, string[]][] =
@@ -4101,8 +4130,7 @@ async function showTab() {
       : t.sec === "staged"
         ? [["Unstage", "Take this hunk out of the index", ["apply", "--cached", "--reverse"]]]
         : [];
-  // ponytail: 50k rows keeps the DOM sane; a full-file diff of anything bigger is not for reading.
-  const CAP = 50_000;
+  // ponytail: preview only the first 50k lines; open larger files in an editor.
   const end = Math.min(rows.length, CAP);
   ruler(rows.slice(0, end));
   const line = (r: DiffRow, i: number) => {
@@ -4120,20 +4148,10 @@ async function showTab() {
         d.append(mini(label, title, () => void applyHunk(th, hunkPatch(rows, i), args)));
     return d;
   };
-  // A screenful now, the rest a frame at a time: the panes keep drawing while
-  // a long full-file diff lands, instead of freezing for the whole build.
-  let i = 0;
-  const step = () => {
-    if (gen !== showGen) return;
-    const frag = document.createDocumentFragment();
-    for (const stop = Math.min(end, i + 2000); i < stop; i++) frag.append(line(rows[i], i));
-    body.append(frag);
-    if (i < end) return void requestAnimationFrame(step);
-    rulerFit();
-    if (rows.length > CAP) note(body, `… ${rows.length - CAP} more lines`);
-    if (!rows.length) note(body, "no differences");
-  };
-  step();
+  disposeDiffRows = renderRows(body, body, end, 18, i => line(rows[i], i));
+  if (count > CAP) note(body, `… ${count - CAP} more lines`);
+  if (!rows.length) note(body, "no differences");
+  rulerFit();
 }
 
 /** Every file of a section as one diff, against the base that section is
@@ -4173,6 +4191,7 @@ const foldedDirs = new Set<string>();
 let panel: "changes" | "files" = "changes";
 const openDirs = new Set<string>(); // Files tree folders unfolded; shut by default, the repo is big
 let panelSig = ""; // what the panel body last drew, so an unchanged poll leaves the DOM alone
+let disposeFileRows = () => {};
 
 function toggleChanges(on = !changesOpen) {
   changesOpen = on;
@@ -4204,9 +4223,21 @@ async function refreshFiles(th: Thread, body: HTMLElement) {
   const sig = JSON.stringify([th.dir, paths, [...openDirs]]);
   if (sig === panelSig && body.childElementCount) return;
   panelSig = sig;
+  disposeFileRows();
   body.textContent = "";
+  const entries: { node: Tree | Tree["files"][number]; depth: number }[] = [];
   const walk = (node: Tree, depth: number) => {
     for (const d of node.dirs) {
+      entries.push({ node: d, depth });
+      if (openDirs.has(d.path)) walk(d, depth + 1);
+    }
+    for (const f of node.files) entries.push({ node: f, depth });
+  };
+  walk(tree(paths), 0);
+  const fileRow = (i: number) => {
+    const { node: entry, depth } = entries[i];
+    if ("dirs" in entry) {
+      const d = entry;
       const row = document.createElement("div");
       row.className = `dir${openDirs.has(d.path) ? "" : " folded"}`;
       row.style.setProperty("--depth", String(depth));
@@ -4216,10 +4247,9 @@ async function refreshFiles(th: Thread, body: HTMLElement) {
         save();
         void refreshChanges();
       };
-      body.append(row);
-      if (openDirs.has(d.path)) walk(d, depth + 1);
-    }
-    for (const f of node.files) {
+      return row;
+    } else {
+      const f = entry;
       const path = paths[f.i];
       const row = document.createElement("div");
       row.className = "file";
@@ -4242,7 +4272,7 @@ async function refreshFiles(th: Thread, body: HTMLElement) {
           },
         })
       );
-      body.append(row);
+      return row;
     }
   };
   // The same band the Changes sections wear: the folder's name, how many
@@ -4261,7 +4291,9 @@ async function refreshFiles(th: Thread, body: HTMLElement) {
   fold.onclick = (e) => (e.stopPropagation(), collapse());
   h.append(chev, t, fold);
   body.append(h);
-  walk(tree(paths), 0);
+  const list = document.createElement("div");
+  body.append(list);
+  disposeFileRows = renderRows(list, body, entries.length, 22, fileRow);
   if (!paths.length) note(body, "no files");
   if (th.tab) void showTab();
 }
@@ -4586,6 +4618,8 @@ async function readChanges() {
     if (tracking.ask) upstream = await git(th.dir, "rev-parse", "--abbrev-ref", "@{upstream}").then((s) => s.trim(), () => "");
   } catch (e) {
     panelSig = "";
+    disposeFileRows();
+    disposeFileRows = () => {};
     body.textContent = "";
     note(body, String(e));
     return;
@@ -4623,6 +4657,8 @@ async function readChanges() {
     [...foldedSections], [...foldedDirs], selSec, [...sel]]);
   if (sig === panelSig && body.childElementCount) return void (th.tab && showTab());
   panelSig = sig;
+  disposeFileRows();
+  disposeFileRows = () => {};
   body.textContent = "";
   if (midway) body.append(midwayBar(midway));
   if (selSec) {
@@ -6146,7 +6182,7 @@ async function main() {
   };
   if (overlayMode !== "off") void overlayWindow(false);
   // Also on a timer: a focus change can pass without an event, and the times tick.
-  setInterval(() => overlayMode !== "off" && void readFocus(), 1000);
+  setInterval(() => void readFocus(), 1000);
   micState("");
   paintPrefix();
   paintLang();
@@ -6321,21 +6357,20 @@ async function main() {
     // say, and it may well be open in front of you.
     if (!menu.classList.contains("hidden")) cfgPaint?.();
   })().finally(() => { usagePoll = undefined; });
-  // Nothing reads git or transcripts while Loom is minimised or covered —
-  // WebView2 reports that as document.hidden — and it all catches up the
-  // moment the window is back. Session marks are the exception: a pane whose
-  // agent finished while Loom was hidden must not lose its id to a close.
-  const tick = (fn: () => unknown) => () => void (document.hidden || fn());
+  // WebView2 stays "visible" when minimized. Follow the native window too.
+  // Session marks and output acknowledgements keep running in the background.
+  const tick = (fn: () => unknown) => () => void (backgroundHidden() || fn());
   let statTick = 0;
   setInterval(tick(pollUsage), 4000);
   setInterval(pollSessions, 4000);
   setInterval(tick(() => pollStats(++statTick % 6 === 0)), 10_000);
   setInterval(tick(() => threads.forEach((t) => t.paintAge())), 30_000);
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) return;
+  resumePolls = () => {
+    if (backgroundHidden()) return;
     void pollUsage();
     void pollStats(true);
-  });
+  };
+  document.addEventListener("visibilitychange", resumePolls);
 
   for (const provider of ["claude", "codex"] as const) {
     const planBtn = $(`#${PLAN_PROVIDERS[provider].button}`);

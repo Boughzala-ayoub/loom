@@ -2806,16 +2806,12 @@ dialog h2 {
 #diff-body.image-preview img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
 .image-choices { display: flex; flex-direction: column; gap: 12px; width: 100%; max-width: 640px; margin-block: auto; }
 .image-choices button { height: auto; padding: 12px; white-space: normal; overflow-wrap: anywhere; text-align: left; }
-/* content-visibility: rows off screen are neither laid out nor painted, so a
-   50k-row diff costs what the viewport shows: the virtualised list, from CSS.
-   `auto` sizes remember each row once drawn; the intrinsic size only seeds the
-   scrollbar before that. */
+.row-block { display: flow-root; }
+#changes-body .row-block .file, #changes-body .row-block .dir { content-visibility: visible; contain-intrinsic-size: none; }
 #diff-body .line {
   display: flex;
   min-width: 0;
   white-space: pre-wrap;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 1.5em;
 }
 #diff-body .line > span { min-width: 0; overflow-wrap: anywhere; }
 #changes-body .file, #changes-body .dir { content-visibility: auto; contain-intrinsic-size: auto 22px; }

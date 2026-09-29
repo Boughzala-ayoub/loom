@@ -91,6 +91,16 @@ export function diffClass(line: string, inHunk = false): "add" | "del" | "hunk" 
  * are 0 for a line that exists on one side only, and for headers. */
 export type DiffRow = { kind: ReturnType<typeof diffClass>; old: number; neu: number; text: string };
 
+/** Count the entire file, but only allocate rows the preview can display. */
+export function fileRows(text: string, limit: number): { rows: DiffRow[]; count: number } {
+  let count = 1;
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) count++;
+  if (text.endsWith("\n")) count--;
+  const rows = text.split("\n", Math.min(count, limit))
+    .map((line, i) => ({ kind: "" as const, old: 0, neu: i + 1, text: line }));
+  return { rows, count };
+}
+
 export function diffRows(text: string): DiffRow[] {
   const rows: DiffRow[] = [];
   let o = 0;

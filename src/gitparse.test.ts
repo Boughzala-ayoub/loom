@@ -37,7 +37,13 @@ check("diff classes", ["@@ -1,2 +1,3 @@", "+++ b/x", "--- a/x", "+added", "-remo
   "hunk", "meta", "meta", "add", "del", "meta", "", "meta",
 ]);
 
-import { diffRows, tree } from "./gitparse.ts";
+import { diffRows, fileRows, tree } from "./gitparse.ts";
+for (const text of ["", "one", "one\n", "\n\n", "one\r\ntwo\n", "x\n".repeat(1000)]) {
+  const expected = text.replace(/\n$/, "").split("\n");
+  const { rows, count } = fileRows(text, 2);
+  check("file preview count and cap: " + text.length, [count, rows.map(r => r.text), rows.map(r => r.neu)],
+    [expected.length, expected.slice(0, 2), expected.slice(0, 2).map((_, i) => i + 1)]);
+}
 const rows = diffRows(["diff --git a/x b/x", "@@ -3,2 +3,3 @@", " ctx", "-gone", "+new1", "+new2", ""].join(String.fromCharCode(10)));
 check("diff rows number both sides", rows.map((r) => [r.kind, r.old, r.neu]), [
   ["meta", 0, 0], ["hunk", 0, 0], ["", 3, 3], ["del", 4, 0], ["add", 0, 4], ["add", 0, 5],

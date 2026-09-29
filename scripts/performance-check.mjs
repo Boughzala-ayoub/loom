@@ -42,6 +42,7 @@ try {
       if (call === 'pty_kill') window.qa.activePtys.delete(args.id);
       if (call === 'plugin:path|resolve_directory') return 'C:\\Users\\test';
       if (call === 'plugin:path|join') return args.paths.join('\\');
+      if (call === 'plugin:window|is_minimized') return window.qa.minimized === true;
       if (call === 'git_run') return '';
       if (call === 'pane_booted') return true;
       if (['take_wakes', 'take_sessions', 'model_options'].includes(call)) return [];
@@ -69,6 +70,25 @@ try {
     return result;
   };
   const results = [await sample('24 panes idle', () => page.waitForTimeout(3000))];
+  // WebView2 can stay visible while its native window is minimized.
+  await page.evaluate(async () => {
+    window.qa.minimized = true;
+    await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://resize', payload: { width: 1280, height: 900 } });
+  });
+  await page.waitForTimeout(200);
+  const minimizedBefore = await page.evaluate(() => ({ ...window.qa.calls }));
+  await page.evaluate(() => { for (const p of window.qa.panes) p.onOut.onmessage('Background output\r\n'); });
+  await page.waitForTimeout(11_000);
+  const minimizedAfter = await page.evaluate(() => ({ ...window.qa.calls }));
+  for (const call of ['session_usage', 'git_run']) assert.equal(minimizedAfter[call], minimizedBefore[call], `${call} must pause while native window is minimized`);
+  for (const call of ['take_sessions', 'pty_acks']) assert.ok(minimizedAfter[call] > (minimizedBefore[call] || 0), `${call} must keep running while minimized`);
+  assert.equal(await page.evaluate(() => document.hidden), false, 'Check native minimization even with a visible document');
+  await page.evaluate(async () => {
+    window.qa.minimized = false;
+    await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://resize', payload: { width: 1280, height: 900 } });
+  });
+  await page.waitForFunction(n => window.qa.calls.session_usage > n, minimizedAfter.session_usage);
+  console.log('PASS native minimized polling, output acknowledgements, and immediate restore');
   await page.evaluate(() => {
     window.qa.slowPolls = true;
     for (let i = 0; i < 4; i++) document.dispatchEvent(new Event('visibilitychange'));
