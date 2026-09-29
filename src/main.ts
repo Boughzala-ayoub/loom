@@ -1174,6 +1174,8 @@ const PLAN_PROVIDERS = {
 };
 const plans: Partial<Record<PlanProvider, Plan>> = {};
 const planErrors: Partial<Record<PlanProvider, string>> = {};
+/** When the numbers on screen arrived. A failed refresh leaves it alone. */
+const planFetchedAt: Partial<Record<PlanProvider, number>> = {};
 
 const TIERS: Record<string, string> = {
   default_claude_max_5x: "Max (5x)",
@@ -5576,7 +5578,18 @@ const makePlanMenu = (provider: PlanProvider): Menu => ({
     };
     const heading = document.createElement("div");
     heading.className = "plan-heading";
-    heading.append(icon(provider), `${info.name}${plan?.tier ? ` · ${TIERS[plan.tier] ?? plan.tier}` : ""}`);
+    // A clock time, not "3 min ago": the open panel doesn't repaint on its own.
+    const when = document.createElement("small");
+    when.className = "plan-updated";
+    const at = planFetchedAt[provider];
+    if (planPolls[provider]) when.textContent = "Refreshing…";
+    else if (at) {
+      const d = new Date(at);
+      const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+      when.textContent = `Updated ${d.toDateString() === new Date().toDateString() ? "" : d.toLocaleDateString("en-US", { weekday: "short" }) + " "}${time}`;
+      when.title = d.toLocaleString();
+    }
+    heading.append(icon(provider), `${info.name}${plan?.tier ? ` · ${TIERS[plan.tier] ?? plan.tier}` : ""}`, when);
     list.append(heading);
     const site = document.createElement("a");
     site.className = "plan-site";
@@ -5745,6 +5758,7 @@ async function fetchPlan(provider: PlanProvider) {
       ),
     };
     planErrors[provider] = "";
+    planFetchedAt[provider] = Date.now();
   } catch (e) {
     planErrors[provider] = String(e);
   }

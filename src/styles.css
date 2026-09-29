@@ -1876,6 +1876,7 @@ dialog,
 }
 .plan-heading { display: flex; align-items: center; gap: 7px; padding: 8px 10px 4px; color: var(--text); font-weight: 600; }
 .plan-heading .ico { width: 16px; height: 16px; }
+.plan-updated { margin-left: auto; padding-left: 8px; color: var(--faint); font: 400 10.5px var(--ui-small); white-space: nowrap; }
 .plan-site { display: block; padding: 6px 10px; color: var(--accent); font-size: 11px; }
 .plan-links { display: flex; align-items: center; justify-content: space-between; padding-right: 4px; }
 /* Severities as the API reports them; `normal` keeps the button's own colours. */
