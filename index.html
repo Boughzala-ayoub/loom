@@ -51,10 +51,17 @@
             <label class="filter"><i class="i i-search"></i><input id="dashboard-query" type="search" aria-label="Search threads, agents, branches or output" placeholder="Search sessions or output" spellcheck="false" /></label>
             <select id="dashboard-project" aria-label="Filter by project"><option value="">All projects</option></select>
           </div>
-          <div class="dashboard-results"><span id="dashboard-results" role="status"></span><button id="dashboard-reset" class="hidden">Clear filters</button><span class="spacer"></span><button id="dashboard-compact" aria-pressed="false"><i class="i i-layout-rows" aria-hidden="true"></i>Compact view</button></div>
-          <button id="dashboard-new-group" aria-haspopup="dialog">Create group</button>
+          <div class="dashboard-results"><span id="dashboard-results" role="status"></span><button id="dashboard-reset" class="hidden">Clear filters</button><span class="spacer"></span><button id="dashboard-new-group" aria-haspopup="dialog"><i class="i i-plus" aria-hidden="true"></i>Create group</button><button id="dashboard-select" aria-pressed="false" title="Tick sessions to act on several at once (X on a focused session)"><i class="i i-check" aria-hidden="true"></i>Select</button><button id="dashboard-compact" aria-pressed="false"><i class="i i-layout-rows" aria-hidden="true"></i>Compact view</button></div>
           <div id="dashboard-list" aria-label="Agent sessions"></div>
           <p id="dashboard-empty" class="hidden" role="status"></p>
+          <div id="dashboard-bulk" class="hidden" role="region" aria-label="Selected sessions">
+            <span id="dashboard-bulk-count" role="status"></span>
+            <button id="dashboard-bulk-all"></button>
+            <button id="dashboard-bulk-group" aria-haspopup="menu"><i class="i i-folder-plus" aria-hidden="true"></i>Add to group</button>
+            <form id="dashboard-bulk-reply"><input id="dashboard-bulk-input" aria-label="Message the selected agents that are waiting or idle" spellcheck="false" autocomplete="off" /><button id="dashboard-bulk-send" type="submit" class="primary">Send</button></form>
+            <span id="dashboard-bulk-note" role="status"></span>
+            <button id="dashboard-bulk-done">Done</button>
+          </div>
           <details class="dashboard-help muted"><summary>How statuses work</summary><p>Waiting means an agent signaled for attention. Working follows terminal activity; quiet agents may still be thinking. Previewing a session keeps its waiting alert. Opening its thread or sending input clears it.</p></details>
         </section>
         <!-- The panes and the open diffs as tabs, Orca's bar, with the thread's
@@ -234,6 +241,7 @@
         <tr><td>Ctrl+K</td><td>go to any thread or agent</td></tr>
         <tr><td>Ctrl+Shift+D</td><td>toggle the overview</td></tr>
         <tr><td>↑ / ↓, Enter in the overview</td><td>move between sessions, preview one</td></tr>
+        <tr><td>R, 1–9, X on an overview session</td><td>reply box, pick that menu option, tick it</td></tr>
         <tr><td>← / →, F3 in a preview</td><td>previous / next session, next waiting one</td></tr>
         <tr><td>F1</td><td>this list</td></tr>
         <tr><td>F2</td><td>zoom the focused pane</td></tr>

@@ -2736,12 +2736,52 @@ async function deleteAgentGroup(group: AgentGroup) {
   renderDashboard();
   save();
 }
+
+/** "Add to group", on the shared dropdown, for one card or the whole selection:
+ * a row per group that toggles these agents in or out (lit only when all of
+ * them are in it), and the input starts a group with them. */
+const groupMenu = (ps: Pane[]): Menu => ({
+  placeholder: "new group…",
+  add: (v) => {
+    const name = v.slice(0, 80); // The group dialog's maxlength.
+    let g = agentGroups.find(g => g.name.toLowerCase() === name.toLowerCase());
+    if (!g) agentGroups.push(g = { id: uid(), name });
+    for (const p of ps) if (!p.groupIds.includes(g.id)) p.groupIds.push(g.id);
+    renderDashboard();
+  },
+  rows: (list) => {
+    for (const g of agentGroups) {
+      const on = ps.length > 0 && ps.every(p => p.groupIds.includes(g.id));
+      const row = document.createElement("div");
+      row.className = `menu-item${on ? " on" : ""}`;
+      row.setAttribute("aria-pressed", String(on));
+      const label = document.createElement("span");
+      label.textContent = g.name;
+      label.title = g.name;
+      row.onclick = () => {
+        const at = [...list.children].indexOf(row);
+        for (const p of ps) p.groupIds = on ? p.groupIds.filter(id => id !== g.id) : p.groupIds.includes(g.id) ? p.groupIds : [...p.groupIds, g.id];
+        save();
+        renderMenu();
+        renderDashboard();
+        (list.children[at] as HTMLElement | undefined)?.focus(); // The rows were rebuilt: keep the keyboard where it was.
+      };
+      row.append(label);
+      list.append(row);
+    }
+  },
+});
+
 type DashboardMessages = { user: string; agent: string };
 const dashboardMessages = new Map<string, DashboardMessages & { session: string; input: number; busy: number; waiting: number; dead: boolean }>();
 const dashboardMessagesBusy = new Set<string>();
 let dashboardMessagesPolled = 0;
 let dashboardNext: Pane | undefined;
 let dashboardRows: Pane[] = []; // The listed order, which the preview's previous/next follow.
+let dashboardSelecting = false; // Checkboxes on the cards, and a bar of what to do to the ticked ones.
+const dashboardSelected = new Set<string>(); // Pane ids; only ever the ones in view, so a bulk action never reaches a card you can't see.
+let dashboardView: { p: Pane; state: string; menu: AgentMenu | null }[] = [];
+let dashboardBulkBusy = false;
 const dashboardDrafts = new Map<string, string>(); // Quick replies survive the list's rebuilds.
 const dashboardAnswers = new Set<string>();
 let dashboardPreviewPane: Pane | null = null;
@@ -2805,6 +2845,7 @@ function toggleDashboard(on = !dashboardOpen) {
     dashboardTimer = window.setInterval(() => { if (!document.hidden) { renderDashboard(); void refreshDashboardMessages(); } }, 1000);
   } else {
     closeDashboardPreview();
+    setSelecting(false);
     current?.panes.forEach(p => p.resize());
   }
   micRefresh();
@@ -2849,7 +2890,7 @@ function renderDashboard() {
     return { th, p, state, preview, age, messages, menu };
   }));
   const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
-    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
+    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${agentGroups.filter(g => p.groupIds.includes(g.id)).map(g => g.name).join(" ")} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
   const counts = $("#dashboard-counts");
   const selectedGroup = agentGroups.find(g => dashboardFilter === `group:${g.id}`);
   const filters = [
@@ -2867,6 +2908,7 @@ function renderDashboard() {
       if (group) button.dataset.group = key.slice(6);
       else button.dataset.state = key;
       button.append(document.createElement("b"), document.createElement("span"));
+      if (group) button.prepend(Object.assign(document.createElement("i"), { className: "i i-folder", ariaHidden: "true" }));
       button.querySelector("span")!.textContent = label;
       button.onclick = () => { dashboardFilter = key; renderDashboard(); };
       counts.append(button);
@@ -2884,6 +2926,8 @@ function renderDashboard() {
   const rows = scoped.filter(r => selectedGroup ? r.p.groupIds.includes(selectedGroup.id) : dashboardFilter === "all" || r.state === dashboardFilter)
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || (a.state === "waiting" ? a.p.waitingSince - b.p.waitingSince : 0));
   dashboardRows = rows.map(r => r.p);
+  dashboardView = rows.map(({ p, state, menu }) => ({ p, state, menu }));
+  for (const id of dashboardSelected) if (!dashboardRows.some(p => p.id === id)) dashboardSelected.delete(id);
   dashboardNext = rows.find(r => r.state === "waiting")?.p;
   $<HTMLButtonElement>("#dashboard-next").disabled = !dashboardNext;
   $("#dashboard-next").title = dashboardNext ? `Open the oldest waiting session in this view: ${dashboardNext.th.name} / ${dashboardNext.agent}` : "No waiting sessions match this view";
@@ -2896,7 +2940,7 @@ function renderDashboard() {
   const list = $("#dashboard-list");
   // Keep the DOM and keyboard focus stable between unchanged refreshes. Only shell cards show the
   // screen preview; an agent redrawing its status line must not rebuild every card.
-  const signature = JSON.stringify([dashboardCompact, dashboardFilter, agentGroups, rows.map(({ th, p, state, preview, age, messages, menu }) => [p.id, p.groupIds, th.name, th.repo, th.branch, p.agent, p.label, state, p.agent === "shell" && preview, age, messages?.user, messages?.agent, menu,
+  const signature = JSON.stringify([dashboardCompact, dashboardFilter, agentGroups, rows.map(({ th, p, state, preview, age, messages, menu }) => [p.id, p.groupIds, th.changed, th.name, th.repo, th.branch, p.agent, p.label, state, p.agent === "shell" && preview, age, messages?.user, messages?.agent, menu,
     p.usage && [p.usage.liveModel || p.usage.model, p.usage.ctx, p.usage.window, p.usage.turns]])]);
   if (signature !== dashboardSignature) {
     dashboardSignature = signature;
@@ -2947,6 +2991,13 @@ function renderDashboard() {
       const location = document.createElement("span");
       location.className = "dashboard-location";
       location.textContent = `${basename(th.repo)} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
+      // The thread's uncommitted changes (every pane of a thread shares one worktree), then this agent's groups.
+      if (th.changed.add || th.changed.del) {
+        location.title = `${th.changed.files} changed file${th.changed.files === 1 ? "" : "s"} in this thread`;
+        // A no-break space between the two, or "−6" wraps onto a line of its own.
+        for (const [cls, text] of [["add", `+${th.changed.add}`], ["del", `−${th.changed.del}`]]) location.append(cls === "add" ? " " : " ", Object.assign(document.createElement("span"), { className: `dashboard-stat ${cls}`, textContent: text }));
+      }
+      for (const g of agentGroups) if (p.groupIds.includes(g.id)) location.append(" ", Object.assign(document.createElement("span"), { className: "dashboard-tag", textContent: g.name }));
       const activity = document.createElement("span");
       activity.className = "dashboard-activity";
       if (p.agent === "shell") {
@@ -3000,16 +3051,40 @@ function renderDashboard() {
       open.setAttribute("aria-label", open.title);
       if (dashboardCompact) open.setAttribute("aria-haspopup", "dialog");
       open.onclick = dashboardCompact ? previewPane : () => revealPane(p);
-      card.append(row, open);
+      const joined = agentGroups.filter(g => p.groupIds.includes(g.id));
+      const add = document.createElement("button");
+      add.className = "dashboard-group-add";
+      add.innerHTML = '<i class="i i-folder-plus" aria-hidden="true"></i><span>Group</span>';
+      if (joined.length) add.append(Object.assign(document.createElement("b"), { textContent: String(joined.length) }));
+      add.dataset.key = `group-${p.id}`;
+      add.title = joined.length ? `In ${joined.map(g => g.name).join(", ")}. Change groups for ${p.agent} in ${th.name}` : `Add ${p.agent} in ${th.name} to a group`;
+      add.setAttribute("aria-label", add.title);
+      add.onclick = () => showMenu(add, groupMenu([p]));
+      const actions = document.createElement("div");
+      actions.className = "dashboard-card-actions";
+      actions.append(open, add);
+      const pick = document.createElement("input");
+      pick.type = "checkbox";
+      pick.className = "dashboard-select";
+      pick.dataset.key = `select-${p.id}`;
+      pick.checked = dashboardSelected.has(p.id);
+      pick.setAttribute("aria-label", `Select ${p.agent} in ${th.name}`);
+      pick.onchange = () => { pick.checked ? dashboardSelected.add(p.id) : dashboardSelected.delete(p.id); renderBulk(); };
+      card.append(pick, row, actions);
       if (!dashboardCompact && state === "waiting" && p.agent !== "shell") card.append(menu ? choiceRow(p, th, menu) : replyForm(p, th));
       if (dashboardAnswers.has(p.id)) card.querySelectorAll<HTMLInputElement | HTMLButtonElement>(".dashboard-reply input, .dashboard-reply button").forEach(el => (el.disabled = true));
       fragment.append(card);
     }
     list.replaceChildren(fragment);
+    if (!anchor.isConnected && !menu.classList.contains("hidden")) { // An open group menu belongs to a card that was just rebuilt.
+      const next = list.querySelector<HTMLElement>(`[data-key="${anchor.dataset.key}"]`);
+      if (next) { anchor = next; place(); } else hideMenu();
+    }
     const restored = focused ? [...list.querySelectorAll<HTMLElement>("[data-key]")].find(el => el.dataset.key === focused && el.closest<HTMLElement>(".dashboard-card")?.dataset.group === focusedGroup) : undefined;
     if (focused) (restored ?? dashboardQuery).focus({ preventScroll: true });
     if (caret && restored instanceof HTMLInputElement) restored.setSelectionRange(caret[0], caret[1]);
   }
+  renderBulk();
   $("#dashboard-empty").classList.toggle("hidden", rows.length > 0 || !!selectedGroup);
   $("#dashboard-empty").textContent = !all.length ? "No sessions yet. Create a thread to start an agent."
     : q || dashboardProject.value ? "No sessions match. Try another search or project."
@@ -3184,8 +3259,9 @@ function choiceRow(p: Pane, th: Thread, menu: AgentMenu) {
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.key = `choice-${p.id}-${i}`;
+    b.dataset.n = String(i + 1); // Drawn by CSS: the number key that picks it, the agent's own numbering.
     b.textContent = label;
-    b.title = `Choose "${label}" in ${p.agent}`;
+    b.title = `Choose "${label}" in ${p.agent} (key ${i + 1} on the session)`;
     b.onclick = () => void answer(p, () => choose(p, menu, i));
     row.append(b);
   });
@@ -3201,6 +3277,70 @@ function closeDashboardPreview() {
   if (dashboardOpen) ([...$("#dashboard-list").querySelectorAll<HTMLButtonElement>("button")].find(b => b.dataset.key === key) ?? dashboardQuery).focus({ preventScroll: true });
 }
 
+// --- Selecting: tick cards, then add them to a group or answer them together. ---
+const bulkInput = $<HTMLInputElement>("#dashboard-bulk-input");
+const bulkSend = $<HTMLButtonElement>("#dashboard-bulk-send");
+/** Ticked agents that can take a message: waiting or idle, at a text prompt. A
+ * terminal would run it as a command, and one on a menu would take it as a
+ * choice, so those stay out; a working or exited agent has no prompt to type
+ * into. Idle is a guess ("no activity seen"), so a quiet agent that is still
+ * thinking may queue the message behind its work. */
+const bulkTargets = () => dashboardView.filter(r => dashboardSelected.has(r.p.id) && (r.state === "waiting" || r.state === "") && r.p.agent !== "shell" && !r.menu).map(r => r.p);
+
+function renderBulk() {
+  $("#dashboard").classList.toggle("selecting", dashboardSelecting);
+  $("#dashboard-bulk").classList.toggle("hidden", !dashboardSelecting);
+  $("#dashboard-select").setAttribute("aria-pressed", String(dashboardSelecting));
+  if (!dashboardSelecting) return;
+  const n = dashboardSelected.size, targets = bulkTargets();
+  $("#dashboard-bulk-count").textContent = `${n} selected`;
+  $("#dashboard-bulk-all").textContent = n && n === dashboardView.length ? "Select none" : "Select all in view";
+  $<HTMLButtonElement>("#dashboard-bulk-all").disabled = !dashboardView.length;
+  $<HTMLButtonElement>("#dashboard-bulk-group").disabled = !n;
+  bulkInput.readOnly = dashboardBulkBusy; // Not disabled: a disabled box drops focus, and the agents that just answered are no longer waiting.
+  bulkSend.disabled = dashboardBulkBusy || !targets.length;
+  bulkInput.placeholder = targets.length ? `Message ${targets.length} agent${targets.length === 1 ? "" : "s"}` : n ? "None of these can take a message" : "Tick agents to message them together";
+  bulkSend.textContent = targets.length ? `Send to ${targets.length}` : "Send";
+  // Say who is left out and why: a dimmed Send with typed text otherwise looks broken.
+  const why = new Map<string, number>();
+  for (const { p, state, menu } of dashboardView) if (dashboardSelected.has(p.id) && !targets.includes(p)) {
+    const reason = p.agent === "shell" ? "terminal" : menu ? "asking a menu question" : state === "busy" ? "working" : "exited"; // Anything else is a target.
+    why.set(reason, (why.get(reason) ?? 0) + 1);
+  }
+  $("#dashboard-bulk-note").textContent = why.size ? `Left out: ${[...why].map(([reason, k]) => `${k} ${reason === "terminal" && k > 1 ? "terminals" : reason}`).join(", ")}. A message goes to agents that are waiting or idle.` : "";
+}
+
+function selectCards(ids: Iterable<string>) {
+  dashboardSelected.clear();
+  for (const id of ids) dashboardSelected.add(id);
+  for (const box of $("#dashboard-list").querySelectorAll<HTMLInputElement>(".dashboard-select")) box.checked = dashboardSelected.has(box.closest<HTMLElement>(".dashboard-card")!.dataset.pane!);
+  renderBulk();
+}
+
+function setSelecting(on: boolean) {
+  dashboardSelecting = on;
+  if (on) renderBulk(); else selectCards([]);
+}
+
+$("#dashboard-select").onclick = () => setSelecting(!dashboardSelecting);
+$("#dashboard-bulk-done").onclick = () => (setSelecting(false), $("#dashboard-select").focus());
+$("#dashboard-bulk-all").onclick = () => selectCards(dashboardSelected.size === dashboardView.length ? [] : dashboardView.map(r => r.p.id));
+$("#dashboard-bulk-group").onclick = e => showMenu(e.currentTarget as HTMLElement, groupMenu(dashboardView.filter(r => dashboardSelected.has(r.p.id)).map(r => r.p)));
+$("#dashboard-bulk-reply").onsubmit = async e => {
+  e.preventDefault();
+  const text = bulkInput.value.trim(), targets = bulkTargets();
+  if (!text || !targets.length || dashboardBulkBusy) return;
+  dashboardBulkBusy = true;
+  renderBulk();
+  let sent = 0;
+  await Promise.all(targets.map(p => answer(p, async () => { await sendReply(p, text); sent++; }))); // Each failure toasts for itself.
+  dashboardBulkBusy = false;
+  if (sent === targets.length) bulkInput.value = "";
+  toast(sent === targets.length ? `Sent to ${sent} agent${sent === 1 ? "" : "s"}` : `Sent to ${sent} of ${targets.length} agents. Open the others to finish`);
+  renderBulk();
+  bulkInput.focus();
+};
+
 dashboardQuery.oninput = renderDashboard;
 // ↑/↓ walk the sessions, Home/End jump to the ends; Enter already previews.
 const dashboardRowButtons = () => [...$("#dashboard-list").querySelectorAll<HTMLButtonElement>(".dashboard-row")];
@@ -3208,8 +3348,25 @@ dashboardQuery.onkeydown = e => {
   if (e.key === "ArrowDown" && dashboardRowButtons()[0]) (e.preventDefault(), dashboardRowButtons()[0].focus());
 };
 $("#dashboard-list").onkeydown = e => {
-  const card = (e.target as HTMLElement).closest(".dashboard-card");
-  if (!card || e.target instanceof HTMLInputElement || !["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+  const t = e.target as HTMLElement;
+  const card = t.closest<HTMLElement>(".dashboard-card");
+  if (!card || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (t.matches(".dashboard-reply input")) { // Esc leaves the reply box for its card, so ↓ moves on to the next.
+    if (e.key === "Escape") (e.preventDefault(), card.querySelector<HTMLElement>(".dashboard-row")!.focus());
+    return;
+  }
+  if (e.key === "Escape" && dashboardSelecting) return void (setSelecting(false), card.querySelector<HTMLElement>(".dashboard-row")!.focus());
+  // On a card: R jumps to its reply box or first option, 1–9 pick that option, X ticks it.
+  const key = e.key.toLowerCase();
+  if (key === "r" || /^[1-9]$/.test(key) || key === "x") {
+    const target = key === "r" ? card.querySelector<HTMLElement>(".dashboard-reply :is(input, button)") : key === "x" ? card.querySelector<HTMLElement>(".dashboard-select") : card.querySelectorAll<HTMLElement>(".dashboard-choices button")[+key - 1];
+    if (!target) return;
+    e.preventDefault();
+    if (key === "x") { if (!dashboardSelecting) setSelecting(true); target.click(); } else if (key === "r") target.focus(); else target.click();
+    return;
+  }
+  if (t instanceof HTMLInputElement && t.type !== "checkbox") return;
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
   const rows = dashboardRowButtons(), i = rows.indexOf(card.querySelector(".dashboard-row")!);
   const to = e.key === "Home" ? 0 : e.key === "End" ? rows.length - 1 : i + (e.key === "ArrowDown" ? 1 : -1);
   e.preventDefault();
@@ -4892,6 +5049,7 @@ function renderMenu() {
   }
   addInput.classList.toggle("hidden", !openMenu.add);
   addInput.placeholder = openMenu.placeholder;
+  if (!menu.classList.contains("hidden")) place(); // A row was added or removed: a menu that opened upward has to grow upward.
 }
 
 /** "+ pane" and "+ Folder": pick a startup command, or extend the list. */
@@ -5645,7 +5803,10 @@ function place() {
   // grid, so both edges have to be clamped.
   const right = Math.min(window.innerWidth - r.right, window.innerWidth - menu.offsetWidth - gap);
   menu.style.right = `${Math.max(gap, right)}px`;
-  menu.style.top = `${Math.max(gap, Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - gap))}px`;
+  // Under the anchor, or above it when it sits at the bottom edge (the overview's selection bar) and the menu would cover it.
+  const below = r.bottom + 4, above = r.top - 4 - menu.offsetHeight;
+  const flip = below + menu.offsetHeight > window.innerHeight - gap && above >= gap;
+  menu.style.top = `${Math.max(gap, flip ? above : Math.min(below, window.innerHeight - menu.offsetHeight - gap))}px`;
 }
 
 function showMenu(at: HTMLElement, m: Menu) {

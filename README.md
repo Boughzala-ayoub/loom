@@ -109,9 +109,10 @@ is zoomed, the zoom moves to it, so a zoomed thread reads one agent at a time.
 **Overview** in the top bar lists every agent session. Press `Ctrl+Shift+D` to
 switch between it and your thread. It lists sessions across every open thread,
 with waiting agents first, then working, idle, and exited sessions. Filter by
-status or project, or search thread names, branches, agents, and terminal output.
-Expanded agent rows show your last message and the agent's last message from its
-session. Shell rows still show terminal output. Claude rows also show the model
+status or project, or search thread names, branches, agents, group names, and
+terminal output. Expanded agent rows show your last message and the agent's last
+message from its session. Shell rows still show terminal output. Every card also
+shows the lines added and removed in its thread, and the groups its agent is in. Claude rows also show the model
 and how full the context is, amber from 70% and red from 90%. A waiting agent's
 row has a reply box: type an answer and press Enter to send it without opening
 the terminal. Loom pastes the text and presses Enter only once the text shows up
@@ -124,11 +125,30 @@ first, nothing is chosen. Menus that take several choices have to be answered
 in the terminal. After an answer, focus moves to the next waiting agent.
 Click a row to preview that agent, or use **Next waiting** to open the oldest
 waiting session matching your filters. `Up` and `Down` move between rows and
-`Enter` previews the selected one.
+`Enter` previews the selected one. On a row, `R` jumps to its reply box or first
+option and `Esc` comes back. `1` to `9` pick that option of a menu question, the
+same number the agent shows, and `X` ticks the card.
 `F3` follows those filters while the overview is open. **Compact view** hides
 the inline messages so more sessions fit on screen. In compact view, click a row
 to open its thread or the eye icon to preview the agent. Loom remembers this choice
 and whether the overview was open.
+
+Groups are lists of agents you name yourself, and one agent can be in several.
+**Create group** picks a name and the members. Every card also has a group
+button (a folder icon in compact view) that lists your groups. Click one to add
+the agent or remove it, or type a new name and press Enter to start a group with
+that agent in it. Each group gets its own filter beside the statuses.
+
+**Select** puts a checkbox on every card and opens a bar at the bottom for the
+ticked ones. **Add to group** puts them all in a group. The bar's message box
+sends one message to each ticked agent that is waiting or idle, and the button
+says how many that is. Loom can't tell a quiet agent from one that is still
+thinking, so an idle agent may queue the message behind its work. Terminals are
+left out, because Enter would run the text as a command. So are agents that are
+working or exited, and agents showing a menu, where the text would pick an
+option. Answer a menu from its own card. The bar names whoever it left out. Only
+cards in view stay ticked. Filtering drops the rest, and they don't come back when you
+clear the filter. `Esc` or **Done** leaves selecting.
 
 The preview opens the live terminal in a centered modal. Opening it keeps the
 agent's waiting alert; sending input clears it. Type, paste, select, and scroll

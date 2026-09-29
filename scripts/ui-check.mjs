@@ -406,7 +406,7 @@ try {
     await page.evaluate(() => window.qa.dashboardPanes[2].onOut.onmessage('\x1b]9;ready\x07'));
     await page.waitForFunction(() => document.querySelector('#waiting').textContent === '2 waiting');
     await page.click('#dashboard-preview-close');
-    assert.equal(await compactPreview.evaluate(el => el === document.activeElement), true, 'Preview returns focus to the icon');
+    assert.equal(await compactPreview.evaluate(el => el === document.activeElement), true, `Preview returns focus to the icon @${width}: focus is on ${await page.evaluate(() => { const a = document.activeElement; return `${a?.tagName}#${a?.id}.${a?.className} key=${a?.dataset?.key}`; })}`);
     await page.click('#dashboard-compact');
     assert.equal(await page.locator('.dashboard-preview-button').count(), 0, 'Expanded view restores its existing actions');
     await page.click('#dashboard-compact');
@@ -509,6 +509,25 @@ try {
     await page.keyboard.press('ArrowDown');
     await page.keyboard.press('End');
     assert.equal(await page.evaluate(() => document.activeElement === [...document.querySelectorAll('.dashboard-row')].at(-1)), true, 'Arrow keys walk the rows');
+    // Keys on a card: R goes to its reply box, Esc comes back, a digit picks that menu option.
+    const keyCard = page.locator('.dashboard-card').filter({ hasText: 'search-polish / claude' });
+    await keyCard.locator('.dashboard-row').focus();
+    await page.keyboard.press('r');
+    assert.equal(await page.evaluate(() => document.activeElement?.dataset.key?.startsWith('reply-')), true, 'R jumps to the reply box');
+    await page.keyboard.type('rx1'); // Typing in the box is typing: none of it is a shortcut.
+    assert.equal(await keyCard.locator('.dashboard-reply input').inputValue(), 'rx1');
+    assert.equal(await page.locator('#dashboard-bulk').isVisible(), false, 'X typed in a reply box does not start selecting');
+    await keyCard.locator('.dashboard-reply input').fill('');
+    await page.keyboard.press('Escape');
+    assert.equal(await keyCard.locator('.dashboard-row').evaluate(el => el === document.activeElement), true, 'Esc in the reply box returns to its card');
+    assert.deepEqual(await menuCard.locator('.dashboard-choices button').evaluateAll(bs => bs.map(b => b.dataset.n)), ['1', '2', '3'], 'Each option carries the number key that picks it');
+    await menuCard.locator('.dashboard-row').focus();
+    await page.evaluate(() => { window.qa.digitStart = window.qa.calls.length; });
+    await page.keyboard.press('1');
+    await page.waitForFunction(() => !document.querySelector('.dashboard-choices'));
+    assert.deepEqual(await page.evaluate(() => window.qa.calls.slice(window.qa.digitStart).filter(c => c.cmd === 'pty_write').map(c => [c.args.id === window.qa.menuPane, c.args.data])), [[true, '\r']], 'A digit on a card answers that option: 1 is already highlighted, so only Enter');
+    await page.evaluate(() => { window.qa.menuSel = 0; window.qa.drawMenu(); window.qa.panes.find(p => p.id === window.qa.menuPane).onOut.onmessage('\x1b]9;ready\x07'); });
+    await page.waitForSelector('.dashboard-choices button');
     const reply = page.locator('.dashboard-card').filter({ hasText: 'search-polish / claude' }).locator('.dashboard-reply input');
     await reply.fill('Yes, go ahead');
     await page.waitForTimeout(1200);
@@ -567,6 +586,8 @@ try {
       qa.groupCallStart = qa.calls.length;
     });
     await page.click('#dashboard-btn');
+    assert.equal(await page.locator('.dashboard-results #dashboard-new-group').count(), 1, 'Create group lives in the results row, not on a line of its own');
+    if (width > 600) assert.ok(await page.evaluate(() => Math.abs(document.querySelector('#dashboard-new-group').getBoundingClientRect().top - document.querySelector('#dashboard-compact').getBoundingClientRect().top) < 4), 'Create group shares a line with Compact view');
     await page.click('#dashboard-counts button[data-state=waiting]');
     await page.selectOption('#dashboard-project', 'C:\\projects\\loom');
     await page.click('#dashboard-new-group');
@@ -703,6 +724,140 @@ try {
     assert.equal(await page.locator('#dashboard-counts button[data-group]').count(), 0);
     assert.equal(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'pty_kill')), false);
     await audit('groups-deleted');
+    // A card's own "add to group": start a group from the menu, then toggle it on another card.
+    const addTo = id => page.locator(`.dashboard-group-add[data-key="group-${id}"]`); // By pane: the cards re-sort as agents change state.
+    const [first, , third] = await page.locator('.dashboard-card').evaluateAll(cards => cards.map(c => c.dataset.pane));
+    const groupsOf = () => page.evaluate(() => window.qa.saved.threads.flatMap(t => t.panes.map(p => p.groupIds?.length || 0)));
+    assert.equal(await page.locator('.dashboard-group-add').count(), 4, 'Every card can be added to a group');
+    await addTo(first).click();
+    assert.equal(await page.locator('#menu-list .menu-item').count(), 0, 'The menu starts empty when there are no groups');
+    await page.fill('#menu-add', 'Quick group');
+    await page.press('#menu-add', 'Enter');
+    await page.waitForFunction(() => window.qa.saved.agentGroups.length === 1 && window.qa.saved.agentGroups[0].name === 'Quick group');
+    assert.equal(await page.locator('#menu-list .menu-item.on').count(), 1, 'The new group holds the agent it was made from');
+    assert.equal(await addTo(first).locator('b').textContent(), '1', 'The card counts its groups');
+    assert.equal(await page.locator('#pane-menu').isVisible(), true, 'The menu stays up while cards refresh');
+    await audit('group-add-menu');
+    await page.fill('#menu-add', 'quick GROUP');
+    await page.press('#menu-add', 'Enter');
+    assert.equal(await page.evaluate(() => window.qa.saved.agentGroups.length), 1, 'A name that exists, in any case, reuses the group');
+    await page.locator('#menu-list .menu-item').first().click();
+    await page.waitForFunction(() => window.qa.saved.threads.every(t => t.panes.every(p => !p.groupIds?.length)));
+    assert.equal(await addTo(first).locator('b').count(), 0, 'Leaving the last group clears the count');
+    await escape();
+    assert.equal(await page.locator('#pane-menu').isVisible(), false);
+    assert.equal(await page.evaluate(() => document.activeElement?.dataset.key), `group-${first}`, 'The cards were rebuilt under the open menu; Escape still hands focus to that card\'s button');
+    await addTo(third).click();
+    await page.locator('#menu-list .menu-item').first().click();
+    await page.waitForFunction(() => window.qa.saved.threads.flatMap(t => t.panes).filter(p => p.groupIds?.length).length === 1);
+    assert.equal((await groupsOf()).reduce((a, b) => a + b), 1, 'Only the chosen card joins');
+    await page.click('#dashboard-counts button[data-group]');
+    assert.equal(await page.locator('.dashboard-row').count(), 1, 'The group view lists what was added from the card');
+    await page.click('#dashboard-counts button[data-state=all]');
+    // What a card says about its agent: its groups by name, and its thread's changes.
+    assert.deepEqual(await page.locator('.dashboard-tag').allTextContents(), ['Quick group'], 'A card names the groups its agent is in');
+    assert.equal(await page.locator(`.dashboard-card[data-pane="${third}"] .dashboard-tag`).count(), 1, 'The group name is on the card that joined');
+    await page.waitForSelector('.dashboard-stat.add');
+    assert.deepEqual(await page.locator('.dashboard-card').first().locator('.dashboard-stat').allTextContents(), ['+25', '−6'], 'A card shows the changes in its thread');
+    await page.fill('#dashboard-query', 'quick group');
+    assert.equal(await page.locator('.dashboard-row').count(), 1, 'Search finds an agent by its group name');
+    await page.fill('#dashboard-query', '');
+    // Two buttons per card must not cover the card's text, or make compact cards taller than they were.
+    for (const compact of [false, true]) {
+      if (compact) await page.click('#dashboard-compact');
+      const covered = await page.evaluate(() => [...document.querySelectorAll('.dashboard-card')].filter(card => {
+        const a = card.querySelector('.dashboard-card-actions').getBoundingClientRect(), r = card.querySelector('.dashboard-row').getBoundingClientRect();
+        return a.left < r.right - 1 && a.right > r.left + 1 && a.top < r.bottom - 1 && a.bottom > r.top + 1;
+      }).length);
+      assert.equal(covered, 0, `Card actions stay clear of the card text (${compact ? 'compact' : 'expanded'}) @${width}`);
+      if (compact || width > 600) assert.ok(await page.locator('.dashboard-card').first().evaluate(el => el.getBoundingClientRect().height <= el.querySelector('.dashboard-row').getBoundingClientRect().height + 2), `The card's buttons never make it taller than its text (${compact ? 'compact' : 'expanded'}) @${width}`);
+      await audit(`group-add-${compact ? 'compact' : 'expanded'}`);
+    }
+    await page.click('#dashboard-compact');
+    // Selecting: tick cards, group them together, answer the waiting ones with one message.
+    await page.goto(base + '?dashboard');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    await page.waitForTimeout(1800);
+    await page.evaluate(() => {
+      const qa = window.qa;
+      const a = qa.panes.find(p => p.cwd.endsWith('search-polish') && !p.codexStateId), b = qa.panes.find(p => p.cwd.endsWith('review-keyboard-navigation')), c = qa.panes.find(p => p.codexStateId);
+      qa.bulkIds = [a.id, b.id];
+      qa.onWrite = ({ id, data }) => qa.panes.find(p => p.id === id)?.onOut.onmessage(data); // Every agent echoes what it is sent.
+      a.onOut.onmessage('\x1b]9;ready\x07');
+      b.onOut.onmessage('\x1b]9;ready\x07');
+      c.onOut.onmessage('\x1b[2J\x1b[HWorking (3s, esc to interrupt)');
+    });
+    await page.click('#dashboard-btn');
+    await page.waitForFunction(() => document.querySelectorAll('.dashboard-reply input').length === 2);
+    assert.equal(await page.locator('#dashboard-bulk').isVisible(), false, 'The selection bar stays away until you start selecting');
+    assert.equal(await page.locator('.dashboard-select:visible').count(), 0, 'Cards have no checkboxes until then');
+    await page.click('#dashboard-select');
+    assert.equal(await page.locator('.dashboard-select:visible').count(), 4);
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '0 selected');
+    assert.equal(await page.locator('#dashboard-bulk-send').isDisabled(), true, 'Nothing ticked, nobody to answer');
+    await audit('dashboard-selecting');
+    const tick = text => page.locator('.dashboard-card').filter({ hasText: text }).locator('.dashboard-select');
+    await tick('search-polish / claude').check();
+    await tick('review-keyboard-navigation / claude').check();
+    await tick('search-polish / codex').check();
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '3 selected');
+    assert.equal(await page.locator('#dashboard-bulk-send').textContent(), 'Send to 2', 'The working agent is left out of the count');
+    assert.match(await page.locator('#dashboard-bulk-note').textContent(), /^Left out: 1 working\. A message goes to agents that are waiting or idle\./, 'The bar says who was left out and why, even once text is typed');
+    await audit('dashboard-selected');
+    // Group them in one go. The menu opens on the bar without covering the button that opened it.
+    await page.click('#dashboard-bulk-group');
+    await page.fill('#menu-add', 'Batch');
+    await page.press('#menu-add', 'Enter');
+    await page.waitForFunction(() => window.qa.saved.agentGroups.length === 1 && window.qa.saved.threads.flatMap(t => t.panes).filter(p => p.groupIds?.length === 1).length === 3);
+    assert.equal(await page.locator('#menu-list .menu-item.on').count(), 1, 'The group is lit when all of the selection is in it');
+    const [menuBox, buttonBox] = await Promise.all([page.locator('#pane-menu').boundingBox(), page.locator('#dashboard-bulk-group').boundingBox()]);
+    assert.ok(menuBox.y + menuBox.height <= buttonBox.y + 1 || menuBox.y >= buttonBox.y + buttonBox.height - 1 || menuBox.x + menuBox.width <= buttonBox.x + 1 || menuBox.x >= buttonBox.x + buttonBox.width - 1, `The menu does not cover the button that opened it @${width}: ${JSON.stringify({ menuBox, buttonBox })}`);
+    await audit('dashboard-bulk-group');
+    await escape();
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'dashboard-bulk-group', 'Esc returns to the bar');
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '3 selected', 'Grouping keeps the selection');
+    // Answer the waiting ones with one message.
+    await page.evaluate(() => { window.qa.bulkStart = window.qa.calls.length; });
+    await page.fill('#dashboard-bulk-input', 'Run the tests');
+    await page.press('#dashboard-bulk-input', 'Enter');
+    await page.waitForFunction(() => document.querySelector('#toast:not(.hidden)')?.textContent === 'Sent to 2 agents');
+    const bulkWrites = await page.evaluate(() => window.qa.calls.slice(window.qa.bulkStart).filter(c => c.cmd === 'pty_write').map(c => [c.args.id, c.args.data]));
+    const bulkIds = await page.evaluate(() => window.qa.bulkIds);
+    assert.deepEqual(bulkIds.map(id => bulkWrites.filter(w => w[0] === id).map(w => w[1])), [['Run the tests', '\r'], ['Run the tests', '\r']], 'Each waiting agent gets the text, then Enter');
+    assert.equal(bulkWrites.every(w => bulkIds.includes(w[0])), true, 'The working agent is not written to');
+    assert.equal(await page.locator('#dashboard-bulk-input').inputValue(), '', 'A message that went everywhere is cleared');
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'dashboard-bulk-input', 'Focus stays in the bar');
+    // X unticks the focused card, Esc leaves selecting, and the selection only ever holds what you can see.
+    const cardCodex = page.locator('.dashboard-card').filter({ hasText: 'search-polish / codex' }).locator('.dashboard-row');
+    await cardCodex.focus();
+    await page.keyboard.press('x');
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '2 selected', 'X unticks the focused card');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#dashboard-bulk').isVisible(), false, 'Esc leaves selecting');
+    assert.equal(await page.locator('.dashboard-select:checked').count(), 0, 'and clears the ticks');
+    await page.keyboard.press('x');
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '1 selected', 'X on a card starts selecting');
+    await page.click('#dashboard-bulk-all');
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '4 selected');
+    assert.equal(await page.locator('#dashboard-bulk-all').textContent(), 'Select none');
+    await page.fill('#dashboard-query', 'codex');
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '1 selected', 'Cards filtered out are no longer selected');
+    await page.fill('#dashboard-query', '');
+    assert.equal(await page.locator('#dashboard-bulk-count').textContent(), '1 selected', 'and do not come back');
+    await page.click('#dashboard-bulk-done');
+    assert.equal(await page.locator('#dashboard-bulk').isVisible(), false);
+    // An idle agent takes a bulk message too.
+    await page.click('#dashboard-select');
+    await tick('fix-settings / claude').check();
+    assert.equal(await page.locator('.dashboard-row').filter({ hasText: 'fix-settings / claude' }).getAttribute('data-state'), '', 'The agent ticked here is idle');
+    assert.equal(await page.locator('#dashboard-bulk-send').textContent(), 'Send to 1', 'Idle agents can take the message');
+    assert.equal(await page.locator('#dashboard-bulk-note').textContent(), '', 'Nothing is left out');
+    await page.evaluate(() => { window.qa.idleStart = window.qa.calls.length; });
+    await page.fill('#dashboard-bulk-input', 'Any update?');
+    await page.press('#dashboard-bulk-input', 'Enter');
+    await page.waitForFunction(() => document.querySelector('#toast:not(.hidden)')?.textContent === 'Sent to 1 agent');
+    assert.deepEqual(await page.evaluate(() => { const id = window.qa.panes.find(p => p.cwd.endsWith('tools')).id; return window.qa.calls.slice(window.qa.idleStart).filter(c => c.cmd === 'pty_write').map(c => [c.args.id === id, c.args.data]); }), [[true, 'Any update?'], [true, '\r']], 'The idle agent gets the text, then Enter, and nobody else does');
+    await page.click('#dashboard-bulk-done');
     await page.goto(base + '?dashboard&many');
     await page.waitForFunction(() => window.qa.saved);
     await page.click('#dashboard-btn');
