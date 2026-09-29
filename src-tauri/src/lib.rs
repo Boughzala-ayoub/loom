@@ -579,8 +579,10 @@ fn list_files(dir: String) -> Vec<String> {
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
             let p = e.path();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if p.is_dir() {
+            // Reuse the listing's type; only links need a lookup of their target.
+            let folder = e.file_type().map_or_else(|_| p.is_dir(), |t| if t.is_symlink() { p.is_dir() } else { t.is_dir() });
+            if folder {
+                let name = e.file_name().to_string_lossy().into_owned();
                 if !matches!(name.as_str(), ".git" | "node_modules" | "target" | ".build") {
                     stack.push(p);
                 }
@@ -598,7 +600,9 @@ fn list_files(dir: String) -> Vec<String> {
 /// One file's text for the viewer tab. Binary bytes come back lossy; anything
 /// past 4 MB is cut, which is past what a diff view is for anyway.
 fn read_file(dir: String, path: String) -> Result<String, String> {
-    let mut bytes = std::fs::read(std::path::Path::new(&dir).join(&path)).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(std::path::Path::new(&dir).join(&path)).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.take((4 << 20) + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let cut = bytes.len() > 4 << 20;
     bytes.truncate(4 << 20);
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
@@ -894,18 +898,32 @@ struct LastMessages {
 }
 
 fn message_text(content: &serde_json::Value, kind: &str) -> String {
-    let raw = if let Some(s) = content.as_str() {
-        s.to_string()
-    } else {
+    let texts = content.as_str().into_iter().chain(
         content.as_array().into_iter().flatten()
             .filter(|part| part["type"] == kind)
             .filter_map(|part| part["text"].as_str())
-            .collect::<Vec<_>>().join(" ")
-    };
-    let trimmed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut chars = trimmed.chars();
-    let short: String = chars.by_ref().take(500).collect();
-    if chars.next().is_some() { format!("{short}…") } else { short }
+    );
+    let mut short = String::new();
+    let mut count = 0;
+    let mut space = false;
+    // Normalize only the preview, even when one word or block is megabytes long.
+    // Delay whitespace until the next non-space so trailing whitespace stays trimmed.
+    for c in texts.flat_map(|s| s.chars().chain(std::iter::once(' '))) {
+        if c.is_whitespace() {
+            space = count > 0;
+            continue;
+        }
+        for c in space.then_some(' ').into_iter().chain(std::iter::once(c)) {
+            if count == 500 {
+                short.push('…');
+                return short;
+            }
+            short.push(c);
+            count += 1;
+        }
+        space = false;
+    }
+    short
 }
 
 fn collect_message(last: &mut LastMessages, provider: &str, v: &serde_json::Value) {
@@ -1465,6 +1483,67 @@ mod tests {
     }
 
     #[test]
+    fn message_previews_preserve_whitespace_unicode_and_block_boundaries() {
+        use serde_json::json;
+        for (input, expected) in [
+            (String::new(), String::new()),
+            (" \t\r\n\u{2003}".into(), String::new()),
+            (" \tHello\u{a0}世界\n🙂  ".into(), "Hello 世界 🙂".into()),
+            ("é".repeat(500), "é".repeat(500)),
+            (format!("{} \t\n", "é".repeat(500)), "é".repeat(500)),
+            ("🙂".repeat(501), format!("{}…", "🙂".repeat(500))),
+            (format!("{} x", "a".repeat(499)), format!("{} …", "a".repeat(499))),
+            (format!("{} x", "a".repeat(500)), format!("{}…", "a".repeat(500))),
+            ("x".repeat(8 * 1024 * 1024), format!("{}…", "x".repeat(500))),
+        ] {
+            for kind in ["text", "input_text", "output_text"] {
+                assert_eq!(super::message_text(&json!(input), kind), expected);
+                let blocks = json!([
+                    {"type":"reasoning", "text":"ignored"},
+                    {"type":kind, "text":" \t"},
+                    {"type":kind, "text":input},
+                    {"type":kind, "text":"\n"},
+                    {"type":kind, "text":null},
+                ]);
+                assert_eq!(super::message_text(&blocks, kind), expected);
+            }
+        }
+        for content in [json!(null), json!(42), json!({}), json!([])] {
+            assert_eq!(super::message_text(&content, "text"), "");
+        }
+        for n in [0, 498, 499, 500, 501] {
+            let blocks = json!([{"type":"text", "text":"a".repeat(n)}, {"type":"text", "text":" b "}]);
+            let normalized = format!("{} b", "a".repeat(n)).trim().to_string();
+            let mut expected: String = normalized.chars().take(500).collect();
+            if normalized.chars().count() > 500 { expected.push('…'); }
+            assert_eq!(super::message_text(&blocks, "text"), expected);
+        }
+    }
+
+    #[test]
+    #[ignore = "Manual message preview timing: run with --ignored --nocapture"]
+    fn message_preview_benchmark() {
+        for (label, content) in [
+            ("long word", serde_json::json!("x".repeat(8 * 1024 * 1024))),
+            ("many words", serde_json::json!("word ".repeat(1_600_000))),
+            ("blocks", serde_json::json!([
+                {"type":"text", "text":"word ".repeat(800_000)},
+                {"type":"text", "text":"word ".repeat(800_000)},
+            ])),
+        ] {
+            let mut samples = Vec::new();
+            for _ in 0..11 {
+                let start = std::time::Instant::now();
+                let preview = super::message_text(std::hint::black_box(&content), "text");
+                samples.push(start.elapsed());
+                assert_eq!(preview.chars().count(), 501);
+            }
+            samples.sort();
+            println!("{label}: median {:?}", samples[5]);
+        }
+    }
+
+    #[test]
     fn dashboard_reads_latest_human_and_agent_messages() {
         let root = std::env::temp_dir().join(format!("loom-last-messages-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1519,6 +1598,55 @@ mod tests {
         assert_eq!(super::opencode_export_messages(&export), super::LastMessages {
             user: "Review v2".into(), agent: "Reviewed v2".into(),
         });
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_preview_preserves_limits_lossy_text_and_errors() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("loom-file-preview-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("preview.txt");
+        let read = || super::read_file(dir.to_string_lossy().into_owned(), "preview.txt".into());
+        assert!(read().is_err());
+        for bytes in [b"".as_slice(), b"hello\r\n", &[0xff, b'a']] {
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(read().unwrap(), String::from_utf8_lossy(bytes));
+        }
+        let limit = 4 << 20;
+        let text = "x".repeat(limit);
+        std::fs::write(&path, &text).unwrap();
+        assert_eq!(read().unwrap(), text);
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"!").unwrap();
+        assert_eq!(read().unwrap(), format!("{text}\n… truncated at 4 MB"));
+        // The byte limit may split a UTF-8 character; keep the existing replacement.
+        let text = "x".repeat(limit - 1);
+        std::fs::write(&path, format!("{text}€")).unwrap();
+        assert_eq!(read().unwrap(), format!("{text}�\n… truncated at 4 MB"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_listing_skips_build_folders_and_follows_junctions() {
+        let root = std::env::temp_dir().join(format!("loom-list-files-test-{}", std::process::id()));
+        let tree = root.join("tree");
+        let archive = root.join("archive");
+        for dir in [&tree, &archive] { std::fs::create_dir_all(dir).unwrap(); }
+        std::fs::write(tree.join("main.rs"), "").unwrap();
+        std::fs::write(archive.join("target"), "").unwrap(); // a file with a skipped folder name
+        for name in [".git", "node_modules", "target", ".build"] {
+            let dir = tree.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("hidden.txt"), "").unwrap();
+        }
+        let link = tree.join("linked");
+        let made = std::process::Command::new("cmd").args(["/d", "/c", "mklink", "/J"])
+            .arg(&link).arg(&archive).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let mut files = super::list_files(tree.to_string_lossy().into_owned());
+        files.sort();
+        assert_eq!(files, ["linked/target", "main.rs"]);
+        std::fs::remove_dir(&link).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 

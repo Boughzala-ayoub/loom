@@ -410,7 +410,8 @@ fn weight(v: &serde_json::Value) -> u64 {
 /// things about the window that *are* exact: its size at every turn, and every
 /// compaction that emptied it.
 fn profile_of(path: &Path) -> std::io::Result<Profile> {
-    let raw = std::fs::read_to_string(path)?;
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut line = String::new();
     let mut by: HashMap<String, u64> = HashMap::new();
     // tool_use id -> the tool's name, so a result is charged to the tool that
     // produced it ("Read", not "tool_result"). Never cleared: a result always
@@ -419,7 +420,11 @@ fn profile_of(path: &Path) -> std::io::Result<Profile> {
     let mut series: Vec<u64> = Vec::new();
     let mut drops: Vec<Drop> = Vec::new();
     let mut ctx = 0u64;
-    for line in raw.lines() {
+    // Keep one record in memory instead of loading the whole transcript.
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 { break; }
+        let line = line.strip_suffix('\n').map(|s| s.strip_suffix('\r').unwrap_or(s)).unwrap_or(&line);
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -1049,6 +1054,30 @@ mod tests {
         let plan = super::codex_plan_usage().unwrap();
         assert!(!plan.plan.stale, "Codex usage must come from the live API, not local fallback");
         println!("Codex usage: {} windows, local fallback: {}, banked resets reported: {}", plan.plan.limits.len(), plan.plan.stale, plan.banked_resets.is_some());
+    }
+
+    #[test]
+    fn profile_handles_large_records_line_endings_and_invalid_utf8() {
+        let path = std::env::temp_dir().join(format!("loom-profile-stream-test-{}.jsonl", std::process::id()));
+        let text = "é🙂".repeat(20_000);
+        let record = serde_json::json!({"type":"user","message":{"content":text}}).to_string();
+        let attachment = "{\"attachment\":{\"type\":\"skill_listing\"}}";
+        // Longer than the reader buffer, CRLF, blank/invalid JSON, and a complete
+        // final record without a newline. Attachment estimates count the raw line.
+        std::fs::write(&path, format!("{record}\r\n\r\nnot json\n{attachment}\r\n{record}")).unwrap();
+        let p = profile_of(&path).unwrap();
+        let buckets: Vec<_> = p.buckets.iter().map(|b| (b.label.as_str(), b.tokens)).collect();
+        assert_eq!(buckets, [("you", super::est(&text) * 2), ("skill listing", super::est(attachment))]);
+        assert_eq!(p.est, super::est(&text) * 2 + super::est(attachment));
+        assert!(p.series.is_empty() && p.drops.is_empty());
+        assert_eq!(p.ctx, 0);
+
+        // An incomplete JSON record is ignored; invalid UTF-8 rejects the file.
+        append(&path, "\n{\"type\":");
+        assert_eq!(profile_of(&path).unwrap().est, p.est);
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[0xff]).unwrap();
+        assert_eq!(profile_of(&path).err().unwrap().kind(), std::io::ErrorKind::InvalidData);
+        std::fs::remove_file(path).unwrap();
     }
 
     /// Tokens are charged to the tool that produced them, a subagent's are not
