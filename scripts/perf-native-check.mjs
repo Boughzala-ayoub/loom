@@ -21,6 +21,11 @@
 //             times each marker from launch. Opt-in: starts your installed claude, no prompts sent.
 //   blur      alone: the app workspace at 1000 px, where the Changes panel is a blurred drawer over
 //             the redrawing terminals. CPU with its blur on and off, alternating five times, and closed.
+//   idle      alone: 24 panes that print one screen, ring the bell (waiting) and go quiet. CPU as
+//             the app leaves it, with nothing of ours moving, then with
+//             one 9 px element animated four ways: a smooth infinite CSS animation, a steps()
+//             one, and a JS timer at 10 and at 5 Hz. What a single indicator costs per second.
+//             Then nothing moving with the focused terminal blurred, so its cursor stops blinking.
 // Numbers only, no pass/fail. Restores the shared files a test Loom rewrites. Kills only its own tree.
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
@@ -30,12 +35,12 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app', 'restore', 'blur'];
-const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => !['agents', 'app', 'restore', 'blur'].includes(m));
+const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app', 'restore', 'blur', 'idle'];
+const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => !['agents', 'app', 'restore', 'blur', 'idle'].includes(m));
 for (const m of modes) if (!ALL.includes(m)) throw new Error(`Unknown mode ${m}. Modes: ${ALL.join(', ')}`);
 const run = m => modes.includes(m);
 if (run('shutdown') && run('agents')) throw new Error('shutdown and agents each end every pane; run them separately');
-for (const m of ['app', 'restore', 'blur']) if (run(m) && modes.length > 1) throw new Error(`${m} starts its own workspace; run it alone`);
+for (const m of ['app', 'restore', 'blur', 'idle']) if (run(m) && modes.length > 1) throw new Error(`${m} starts its own workspace; run it alone`);
 const out = resolve('node_modules/.cache/perf-native-check');
 mkdirSync(out, { recursive: true });
 const procJson = fileURLToPath(new URL('proc-json.ps1', import.meta.url));
@@ -61,6 +66,16 @@ setInterval(() => { require('fs').appendFileSync(log, Date.now() + ' ' + n + ' '
   spawnSync('git', ['init', '-q', dir]);
   writeFileSync(profile, JSON.stringify({ ui: { thread: 0 }, threads: Array.from({ length: APP_PANES / 3 }, (_, t) => ({
     repo: dir, dir, name: `perf-${t}`, panes: [0, 1, 2].map(j => ({ cmd: `node ${join(dir, 'app-child.js')} ${appLogs[t * 3 + j]}` })),
+  })) }));
+}
+if (run('idle')) {
+  // The bell makes each pane wait for you, the usual state of a real session. silent: no sound or
+  // taskbar flash for 24 of them.
+  writeFileSync(join(dir, 'idle-child.js'), `process.stdout.write('\\x1b[2J\\x1b[H\\x1b[38;5;208m*\\x1b[0m Done. Waiting for your input\\r\\n\\r\\n> \\x07');
+setInterval(() => {}, 1000);`);
+  spawnSync('git', ['init', '-q', dir]);
+  writeFileSync(profile, JSON.stringify({ silent: true, ui: { thread: 0 }, threads: Array.from({ length: 8 }, (_, t) => ({
+    repo: dir, dir, name: `idle-${t}`, panes: [0, 1, 2].map(() => ({ cmd: `node ${join(dir, 'idle-child.js')}` })),
   })) }));
 }
 const claudeDir = process.env.CLAUDE_DIR || process.cwd();
@@ -304,6 +319,39 @@ try {
     for (const [k, v] of Object.entries(samples)) console.log(`drawer open, blur ${k}`.padEnd(34), JSON.stringify(v.map(c => ({ gpu: c['wv-gpu-process'], renderer: c['wv-renderer'], browser: c['wv-browser'] }))));
     console.log('drawer closed'.padEnd(34), JSON.stringify({ gpu: closed['wv-gpu-process'], renderer: closed['wv-renderer'], browser: closed['wv-browser'] }), JSON.stringify(drawer));
     report['changes drawer blur at 1000 px'] = r;
+  }
+  if (run('idle')) {
+    await page.waitForFunction(() => document.querySelectorAll('.xterm').length >= 3 && !document.querySelector('#waiting.hidden'), null, { timeout: 60000 });
+    await pause(7000); // past any flourish that greets the waiting agents
+    // The app's own animations at rest, so a baseline that is not quiet shows up in the report.
+    const own = await page.evaluate(() => document.getAnimations().map(a => a.animationName || a.constructor.name));
+    const focused = await page.evaluate(async () => ({ page: document.activeElement?.className || document.activeElement?.tagName, window: await window.__TAURI__.window.getCurrentWindow().isFocused() }));
+    const probe = kind => page.evaluate(kind => {
+      clearInterval(window.perfTick);
+      document.getElementById('perf-anim')?.remove();
+      if (kind === 'none') return;
+      if (!document.getElementById('perf-keys')) document.head.append(Object.assign(document.createElement('style'), { id: 'perf-keys',
+        textContent: '@keyframes perf-ring { 0% { transform: scale(0.7); opacity: 0.8 } 70%, 100% { transform: scale(2.2); opacity: 0 } } @keyframes perf-strip { to { transform: translateY(-100%) } }' }));
+      const el = Object.assign(document.createElement('div'), { id: 'perf-anim' });
+      el.style.cssText = 'position:fixed;left:6px;bottom:6px;width:9px;height:9px;border-radius:50%;border:1.5px solid orange;pointer-events:none;z-index:9';
+      if (kind === 'css') el.style.animation = 'perf-ring 1.8s ease-out infinite';
+      if (kind === 'steps') el.style.animation = 'perf-strip 0.8s steps(10) infinite';
+      let n = 0;
+      if (kind.startsWith('js')) window.perfTick = setInterval(() => (el.style.transform = `scale(${1 + (n++ % 10) / 10})`), 1000 / +kind.slice(2));
+      document.body.append(el);
+    }, kind);
+    const kinds = ['none', 'css', 'steps', 'js10', 'js5'];
+    const samples = Object.fromEntries(kinds.map(k => [k, []]));
+    for (let i = 0; i < 2; i++) for (const k of kinds) { await probe(k); await pause(1500); samples[k].push(sampleCpu(10)); }
+    await probe('none');
+    // Last, since it can't be undone from here: the focused terminal's cursor stops blinking.
+    await page.evaluate(() => document.activeElement?.blur());
+    await pause(1500);
+    samples.blurred = [sampleCpu(10), sampleCpu(10)];
+    const pick = c => ({ gpu: c['wv-gpu-process'], renderer: c['wv-renderer'], browser: c['wv-browser'], loom: c['loom.exe'] });
+    for (const k of [...kinds, 'blurred']) console.log(`idle, ${k}`.padEnd(34), JSON.stringify(samples[k].map(pick)));
+    console.log('app animations at rest'.padEnd(34), JSON.stringify(own), 'focus:', JSON.stringify(focused));
+    report['24 quiet panes, one indicator'] = { own, focused, samples };
   }
   if (run('app')) {
     for (let i = 0; i < 600 && !appLogs.every(f => existsSync(f)); i++) await pause(100);

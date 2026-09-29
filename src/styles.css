@@ -362,8 +362,10 @@ select option {
   border-radius: 50%;
   background: var(--warn);
 }
-/* A ring leaving the dot. Transform and opacity only: it runs on the
-   compositor, and somebody is nearly always waiting. */
+/* A ring leaving the dot, three times when another agent starts waiting
+   (paintWaiting adds .ping), then still. Somebody is nearly always waiting, and
+   a running animation redraws the window at the display's rate even on the
+   compositor: one infinite ring cost ~40% of a core with 24 panes. */
 #waiting::after {
   content: "";
   position: absolute;
@@ -375,7 +377,9 @@ select option {
   border: 1.5px solid var(--warn);
   opacity: 0;
   pointer-events: none;
-  animation: beacon 1.8s ease-out infinite;
+}
+#waiting.ping::after {
+  animation: beacon 1.8s ease-out 3;
 }
 @keyframes beacon {
   0% { transform: scale(0.7); opacity: 0.8; }
@@ -677,8 +681,9 @@ select option {
 .thread[data-state="dead"] .fold::before {
   border-color: var(--err);
 }
-/* The shuttle: a light running down this thread's stretch of rail while any of
-   its agents works. Transform and opacity only, so it never repaints the row. */
+/* The shuttle: a light running down this thread's stretch of rail, twice, as
+   its agents start work. The lit knot says it's still working; motion is kept
+   for changes, since every animated frame redraws the whole window. */
 .thread[data-state="busy"]::after {
   content: "";
   position: absolute;
@@ -689,8 +694,9 @@ select option {
   border-radius: 2px;
   background: linear-gradient(to bottom, transparent, var(--accent), transparent);
   box-shadow: 0 0 8px var(--glow);
+  opacity: 0;
   pointer-events: none;
-  animation: shuttle 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  animation: shuttle 1.6s cubic-bezier(0.45, 0, 0.55, 1) 2;
 }
 .thread.listed[data-state="busy"]::after {
   display: none; /* the agents below say which one */
@@ -888,9 +894,9 @@ select option {
   color: transparent;
 }
 /* The working spinner before the session title, shared by every provider. The ten frames sit
-   one per line in a strip that a transform steps through, which the compositor runs: animating
-   `content` restyled the page every frame. The box takes no room in the row, and its first line
-   shares the row's baseline, so the visible frame lands on the title's placeholder. */
+   one per line in a strip that a transform steps through, one frame per tick of main.ts's spin
+   clock (--spin on #threads). The box takes no room in the row, and its first line shares the
+   row's baseline, so the visible frame lands on the title's placeholder. */
 .agent-spin {
   display: none;
 }
@@ -906,10 +912,7 @@ select option {
 }
 .agent[data-state="busy"] .agent-spin > span {
   display: block;
-  animation: agent-spin 0.8s steps(10) infinite;
-}
-@keyframes agent-spin {
-  to { transform: translateY(-100%); }
+  transform: translateY(calc(var(--spin, 0) * -10%));
 }
 .agent-state {
   display: none;
@@ -1230,7 +1233,7 @@ select option {
 .dashboard-card:has([data-state="waiting"]) { border-color: color-mix(in srgb, var(--warn) 30%, var(--edge)); background: color-mix(in srgb, var(--warn) 5%, var(--panel)); }
 .dashboard-card:has([data-state="waiting"])::before { border-color: var(--warn); background: var(--warn); box-shadow: 0 0 0 3px var(--warn-dim), 0 0 10px var(--warn-glow); }
 .dashboard-card:has([data-state="busy"])::before { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim), 0 0 10px var(--glow); }
-.dashboard-card:has([data-state="busy"])::after { content: ""; position: absolute; left: -21px; top: 12px; width: 3px; height: 14px; border-radius: 2px; background: linear-gradient(to bottom, transparent, var(--accent), transparent); box-shadow: 0 0 8px var(--glow); pointer-events: none; animation: shuttle 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+.dashboard-card:has([data-state="busy"])::after { content: ""; position: absolute; left: -21px; top: 12px; width: 3px; height: 14px; border-radius: 2px; background: linear-gradient(to bottom, transparent, var(--accent), transparent); box-shadow: 0 0 8px var(--glow); opacity: 0; pointer-events: none; animation: shuttle 1.6s cubic-bezier(0.45, 0, 0.55, 1) 2; }
 .dashboard-card:has([data-state="dead"])::before { border-color: var(--err); }
 .dashboard-card:has([data-state="dead"]) { background: transparent; }
 .dashboard-card:has([data-state="dead"]) .dashboard-identity { color: var(--muted); }
@@ -1513,7 +1516,7 @@ select option {
   font: 500 12px var(--ui-small);
   pointer-events: none;
 }
-/* The shuttle again, along the bottom edge of a working pane's header. */
+/* The shuttle again, twice along the bottom edge of a pane's header as it starts working. */
 .pane.busy .pane-head::after {
   content: "";
   position: absolute;
@@ -1522,12 +1525,13 @@ select option {
   width: 36%;
   height: 1px;
   background: linear-gradient(to right, transparent, var(--accent), transparent);
+  opacity: 0;
   pointer-events: none;
-  animation: weave 2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+  animation: weave 2s cubic-bezier(0.45, 0, 0.55, 1) 2;
 }
 @keyframes weave {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(280%); }
+  from { transform: translateX(-100%); opacity: 1; }
+  to { transform: translateX(280%); opacity: 1; }
 }
 .pane-actions {
   display: flex;

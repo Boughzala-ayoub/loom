@@ -1391,28 +1391,34 @@ try {
     assert.equal(await page.locator('.agent-title').filter({ hasText: /[◐⠙✳]/ }).count(), 0, 'Provider titles do not duplicate the spinner');
     // Folded threads show their agents as pips; every pip carries the working state.
     assert.equal(await page.locator('.pip[data-state=busy]').count(), 6, 'Every folded agent shows as working on its pip');
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    // The spinner is a strip of frames, one per line; its transform brings one line into view.
-    const frames = await page.locator('.agent-title:visible').evaluateAll(async labels => {
-      // pause() is pending until the next animation frame. Set the sample time
-      // only after it settles, otherwise that frame can advance our sample.
-      await Promise.all(labels.map(async label => {
-        const animation = label.parentElement.querySelector('.agent-spin > span').getAnimations().find(a => a.animationName === 'agent-spin');
-        if (animation) { animation.pause(); await animation.ready; }
-      }));
-      return [0, 100].map(time => labels.map(label => {
-      const strip = label.parentElement.querySelector('.agent-spin > span');
-      const animation = strip.getAnimations().find(a => a.animationName === 'agent-spin');
-      if (!animation) return null;
-      animation.currentTime = time;
-      const line = Math.round(-new DOMMatrix(getComputedStyle(strip).transform).m42 / (strip.offsetHeight / 10));
-      return strip.textContent.split('\n')[line];
-      }));
-    });
-    assert.ok(frames[0].length && frames[0].every(frame => frame === '⠋') && frames[1].every(frame => frame === '⠙'), `Every listed agent and CLI animates the braille spinner before its session title: ${JSON.stringify(frames)}`);
-    await audit('all-agents-working');
+    // The spinner is a strip of frames, one per line; the spin clock's --spin on #threads picks
+    // the line. Set it by hand inside one task, so a clock tick can't land between set and read.
+    const frames = await page.locator('.agent-title:visible').evaluateAll(labels => [0, 1].map(frame => {
+      document.querySelector('#threads').style.setProperty('--spin', String(frame));
+      return labels.map(label => {
+        const strip = label.parentElement.querySelector('.agent-spin > span');
+        const line = Math.round(-new DOMMatrix(getComputedStyle(strip).transform).m42 / (strip.offsetHeight / 10));
+        return strip.textContent.split('\n')[line];
+      });
+    }));
+    assert.ok(frames[0].length && frames[0].every(frame => frame === '⠋') && frames[1].every(frame => frame === '⠙'), `Every listed agent and CLI shows the braille spinner before its session title: ${JSON.stringify(frames)}`);
+    await audit('all-agents-working'); // before the waits below: Claude reads as ready 1.5 s after its output stops
+    // The clock steps while Loom is in front, and stops behind another app and under reduced
+    // motion. No CSS animation runs: one keeps the window redrawing at the display's rate.
+    const spin = () => page.evaluate(() => document.querySelector('#threads').style.getPropertyValue('--spin'));
+    const spinning = async () => { const a = await spin(); await page.waitForTimeout(400); return a !== await spin(); };
+    assert.ok(await spinning(), 'The spin clock steps while agents work');
+    // An infinite animation never finishes, so the wait is capped and the list below names it.
+    await page.evaluate(() => Promise.race([Promise.all(document.getAnimations().map(a => a.finished.catch(() => {}))), new Promise(r => setTimeout(r, 6000))]));
+    assert.deepEqual(await page.evaluate(() => document.getAnimations().map(a => a.animationName)), [], 'Working agents run no CSS animation once the start flourishes end');
+    await page.evaluate(() => (window.qa.focused = false));
+    await page.waitForTimeout(1300); // readFocus polls once a second
+    assert.equal(await spinning(), false, 'The spinner holds still while Loom is behind another app');
+    await page.evaluate(() => (window.qa.focused = true));
+    await page.waitForTimeout(1300);
+    assert.ok(await spinning(), 'The spinner resumes when Loom comes back to the front');
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    assert.ok(await page.locator('.agent-spin > span').evaluateAll(strips => strips.every(strip => getComputedStyle(strip).animationName === 'none')), 'Reduced motion stops the spinner');
+    assert.equal(await spinning(), false, 'Reduced motion stops the spinner');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x1b]133;D\x07')));
     await page.waitForFunction(() => !document.querySelector('.agent[data-state=busy]'));
@@ -1420,11 +1426,12 @@ try {
     await page.evaluate(() => window.qa.panes.filter(p => p.argv.join(' ').includes('codex')).forEach(p => { p.onOut.onmessage('\x1b[2;3H·\x1b[4;9H✦'); p.onOut.onmessage('\x1b[2;3H \x1b[5;1H·'); }));
     await page.waitForTimeout(100);
     assert.equal(await page.locator('.agent[data-state=busy]').count(), 0, 'Idle codex redraws must not show as working');
-    assert.ok(await page.locator('.agent-spin > span').evaluateAll(strips => strips.every(strip => getComputedStyle(strip).animationName === 'none')), 'Ready agents stop animating');
+    assert.equal(await spinning(), false, 'Ready agents stop the spin clock');
     assert.ok(await page.locator('.agent-title').evaluateAll(labels => labels.every(label => getComputedStyle(label, '::before').content === '"· "')), 'Ready agents show the plain separator');
     await audit('all-agents-ready');
     await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x07')));
     await page.waitForFunction(() => document.querySelectorAll('.agent[data-state=waiting]').length === 6);
+    assert.deepEqual(await page.evaluate(() => document.querySelector('#waiting').getAnimations({ subtree: true }).map(a => [a.animationName, a.effect.getTiming().iterations])), [['beacon', 3]], 'The waiting beacon pulses three times, not forever');
     await audit('all-agents-waiting');
     // Sound and taskbar notifications can be enabled independently.
     await page.goto(base);

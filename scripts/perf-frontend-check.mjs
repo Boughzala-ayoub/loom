@@ -94,8 +94,8 @@ try {
   await sample('B3 codex+opencode, no interrupt hint 10Hz', 5, driver(['codex', 'opencode'], 10, false));
   await page.waitForTimeout(2000);
   // C: sidebar spinner. Every thread is listed (open: true), so each busy claude pane is a spinning row.
-  // 3 Hz output keeps them busy. Off = the same load with the spinner's animation removed (the title's
-  // ::before before phase 1, .agent-spin's strip after).
+  // 3 Hz output keeps them busy. Off = the same load with the spinner held on one frame: the spin
+  // clock still writes --spin, but nothing it drives moves.
   const spinner = async (label, limit) => {
     let rows = 0;
     const r = await sample(label, 5, async () => { const stop = await driver(['claude'], 3, true, limit)(); await page.waitForTimeout(1000); rows = await busyRows(); return stop; });
@@ -105,7 +105,7 @@ try {
   };
   await spinner('C1 1 busy row, spinner on', 1);
   await spinner(`C2 ${panes('claude')} busy rows, spinner on`, Infinity);
-  await page.addStyleTag({ content: '.agent-title::before, .agent-spin > span { animation: none !important; }' });
+  await page.addStyleTag({ content: '.agent-spin > span { transform: none !important; }' });
   await page.waitForTimeout(500);
   await spinner('C3 1 busy row, spinner animation off', 1);
   await spinner(`C4 ${panes('claude')} busy rows, spinner animation off`, Infinity);

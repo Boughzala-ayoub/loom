@@ -1410,7 +1410,7 @@ class Pane {
     fontSize,
     lineHeight: 1.25,
     scrollback: 5000,
-    cursorBlink: true,
+    cursorBlink: loomFocused, // readFocus keeps it in step
     allowProposedApi: true, // parser.registerOscHandler
     theme: termTheme(),
   });
@@ -1513,7 +1513,7 @@ class Pane {
     this.rowName.className = "agent-name";
     this.rowLabel.className = "agent-title";
     this.rowState.className = "agent-state";
-    // The working spinner: its ten frames, one per line, stepped by a transform (styles.css).
+    // The working spinner: its ten frames, one per line, stepped by syncSpin's clock (styles.css).
     const spin = document.createElement("span");
     spin.className = "agent-spin";
     spin.setAttribute("aria-hidden", "true");
@@ -2037,6 +2037,7 @@ class Pane {
     this.pip.dataset.state = state;
     this.pip.title = `${this.agent}: ${title} (${word})`;
     this.th.paint(); // the thread row sums its panes
+    syncSpin();
     // Exiting or relaunching changes whether this pane can be dictated into.
     if (this.th === current && this.th.active === this) micRefresh();
   }
@@ -2634,10 +2635,13 @@ function paintWaiting() {
   const n = threads.reduce((s, t) => s + t.panes.filter((p) => p.waiting).length, 0);
   // Every pane repaint lands here; rewriting the same text would still relayout the bar.
   if (n !== waitingShown) {
+    const more = n > waitingShown;
     waitingShown = n;
     const b = $("#waiting");
     b.classList.toggle("hidden", !n);
     b.textContent = `${n} waiting`;
+    // The beacon pulses for a newcomer, then holds still (styles.css #waiting.ping).
+    if (more) (b.classList.remove("ping"), void b.offsetWidth, b.classList.add("ping"));
   }
   // Once per frame however many panes changed: a burst of state flips must not
   // rebuild the open list once per pane.
@@ -3455,11 +3459,32 @@ let resumePolls = () => {};
 const readFocus = () => Promise.all([getCurrentWindow().isFocused(), getCurrentWindow().isMinimized()])
   .then(([f, m]) => {
     const restored = loomMinimized && m !== true;
+    const was = loomFocused;
     loomMinimized = m === true;
     loomFocused = f !== false && !loomMinimized;
+    // The page keeps its focus behind other apps, so xterm would blink a cursor
+    // nobody sees, a redraw each time (~1-2% of a core, perf-native-check.mjs idle).
+    if (loomFocused !== was) for (const t of threads) for (const p of t.panes) p.term.options.cursorBlink = loomFocused;
     syncOverlay();
+    syncSpin();
     if (restored) resumePolls();
   }, () => {});
+/** The clock behind every working spinner. A running animation redraws the
+ * whole window at the display's rate (144 Hz here), on the compositor or not:
+ * one infinite 9 px ring cost ~40% of a core with 24 panes, a steps() spinner
+ * ~20% (perf-native-check.mjs idle). One timer steps them all instead, and only
+ * while Loom is in front and an agent works. ponytail: 8 Hz; slow it if a
+ * focused, working Loom shows up in a profile. */
+let spinTimer = 0;
+let spinFrame = 0;
+const stillMotion = matchMedia("(prefers-reduced-motion: reduce)");
+function syncSpin() {
+  const on = loomFocused && !backgroundHidden() && !stillMotion.matches && threads.some((t) => t.panes.some((p) => p.busy));
+  if (on === !!spinTimer) return;
+  clearInterval(spinTimer);
+  spinTimer = on ? window.setInterval(() => $("#threads").style.setProperty("--spin", String((spinFrame = (spinFrame + 1) % 10))), 125) : 0;
+}
+stillMotion.addEventListener("change", syncSpin);
 void readFocus();
 void getCurrentWindow().onFocusChanged(readFocus);
 void getCurrentWindow().onResized(readFocus);
