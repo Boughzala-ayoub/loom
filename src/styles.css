@@ -1456,6 +1456,24 @@ select option {
   color: var(--err);
   background: var(--err-dim);
 }
+.pane.starting .pane-state {
+  color: var(--muted);
+  background: var(--line);
+}
+/* A restored claude pane can wait its turn for many seconds: say so over the blank terminal. */
+.pane.starting .pane-term {
+  position: relative;
+}
+.pane.starting .pane-term::after {
+  content: "Starting…";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font: 500 12px var(--ui-small);
+  pointer-events: none;
+}
 /* The shuttle again, along the bottom edge of a working pane's header. */
 .pane.busy .pane-head::after {
   content: "";

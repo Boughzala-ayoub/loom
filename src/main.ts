@@ -1379,12 +1379,12 @@ const glLive: Pane[] = [];
 // at once starve each other: a function-hooks plugin gets 10s to load and misses
 // it ("hooks module did not load: not loaded within 10000ms"). A slot frees when
 // the pane's SessionStart marker lands, or after 15s so a stuck boot can't stall
-// the rest.
+// the rest. `first`: the thread on screen, which waits at the front of the queue.
 const BOOTS = 2;
 let booting = 0;
 const bootWaiting: (() => void)[] = [];
-async function bootSlot(): Promise<() => void> {
-  while (booting >= BOOTS) await new Promise<void>((r) => bootWaiting.push(r));
+async function bootSlot(first: boolean): Promise<() => void> {
+  while (booting >= BOOTS) await new Promise<void>((r) => first ? bootWaiting.unshift(r) : bootWaiting.push(r));
   booting++;
   return () => {
     booting--;
@@ -1412,6 +1412,9 @@ class Pane {
     theme: termTheme(),
   });
   private _busy = false;
+  /** From spawn until the process prints something visible. A restored claude
+   * pane can wait its turn for a boot slot this long. */
+  starting = true;
   busySince = 0; // when this stretch of work began, for the overview's "Working · 12m"
   quietSince = Date.now(); // when it last stopped working (or was made), for "Idle · 5m"
   get busy() { return this._busy; }
@@ -1653,6 +1656,7 @@ class Pane {
     }
     this.sid = sid ?? crypto.randomUUID();
     this.cfg.classList.toggle("hidden", !this.isClaude); // nothing to configure in a shell
+    this.paint(); // the sidebar shows restored panes still waiting for a boot slot
     // Bound history per pane. Inline agents such as Codex use this scrollback;
     // alternate-screen agents keep their transcript themselves.
     this.term.options.scrollback = this.agent === "shell" ? 5000 : 1500;
@@ -1720,6 +1724,7 @@ class Pane {
    * asks once instead of guessing. */
   async spawn(resume: boolean, retry = false) {
     if (this.disposed) return;
+    this.starting = true;
     this.startupOutput = "";
     this.startupRetry = retry;
     this.spawnResume = resume;
@@ -1763,13 +1768,18 @@ class Pane {
       resume &&
       (this.agent !== "claude" ||
         (await invoke<boolean>("has_session", { dir: this.th.dir, sid: this.sid }).catch(() => false)));
-    const release = restoring && this.agent === "claude" ? await bootSlot() : undefined;
+    const release = restoring && this.agent === "claude" ? await bootSlot(this.th === current) : undefined;
     if (this.disposed) { release?.(); return; }
     const out = this.out = new Channel<string>();
     out.onmessage = (d) => {
       const ack = () => ackOutput(out.id);
       if (this.disposed || this.out !== out) { ack(); return; }
       this.lastOut = Date.now();
+      // Claude's first bytes are terminal queries and a title: nothing to see yet.
+      if (this.starting && /\S/.test(d.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b./g, ""))) {
+        this.starting = false;
+        this.paint();
+      }
       if (this.agent === "codex") {
         this.startupOutput = (this.startupOutput + d).slice(-4096);
         this.retryCodexStartup();
@@ -2003,10 +2013,12 @@ class Pane {
     const own = this.agent === "shell" ? app : app.replace(SPIN, "");
     const title = (this.label = own && own !== this.agent ? own : this.agent === "shell" ? "Terminal" : "Agent session");
     const state = paneState(this);
-    const word = this.dead ? "Exited" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
+    const starting = this.starting && !this.dead;
+    const word = this.dead ? "Exited" : starting ? "Starting" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
     this.title.textContent = title;
     this.title.title = `${this.agent}, pane ${index + 1}: ${this.appTitle || title}`;
-    this.stateTag.textContent = state ? word : "";
+    this.stateTag.textContent = state || starting ? word : "";
+    this.el.classList.toggle("starting", starting);
     this.el.classList.toggle("busy", this.busy);
     this.el.classList.toggle("waiting", this.waiting);
     this.el.classList.toggle("dead", this.dead);
@@ -2267,7 +2279,7 @@ class Thread {
     return hay.includes(q);
   }
 
-  async addPane(st: PaneState = { cmd: startups[0]?.cmd ?? "" }) {
+  async addPane(st: PaneState = { cmd: startups[0]?.cmd ?? "" }, focus = true) {
     if (this.panes.length >= MAX_PANES) return;
     const p = new Pane(this);
     p.groupIds = Array.isArray(st.groupIds) ? [...new Set(st.groupIds.filter(id => agentGroups.some(g => g.id === id)))] : [];
@@ -2284,7 +2296,7 @@ class Thread {
     this.relayout();
     await p.start(st.cmd, st.sid);
     if (!this.panes.includes(p)) return;
-    this.focusPane(p);
+    if (focus) this.focusPane(p);
     return p;
   }
 
@@ -3621,10 +3633,10 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
   if (restoring) th.grid.classList.add("hidden");
   else (renderSide(), show(th));
   // Parallel: a spawn is up to ~1s. addPane pushes its pane before the first
-  // await, so mapping in order still lands them in order.
-  await Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st)));
-  if (!threads.includes(th)) return th; // Closed while its processes were starting.
-  if (!th.panes.length) await th.addPane();
+  // await, so mapping in order still lands them in order, and the saved layout
+  // goes on now: main() shows this thread while its panes are still starting.
+  // Restored panes don't take focus as they start, or it would jump around.
+  const started = Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st, !restoring)));
   th.colW = st.colW?.filter(w => Number.isFinite(w) && w > 0) ?? [];
   th.rowH = st.rowH?.filter(w => Number.isFinite(w) && w > 0) ?? [];
   th.active = th.panes[st.active ?? 0] ?? th.panes[0];
@@ -3633,6 +3645,9 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
   th.tabs = (st.tabs ?? []).filter(t => t.source).map(t => ({ ...t, load: diffLoader(th, t.source) }));
   th.tab = th.tabs[st.tab ?? -1] ?? null;
   th.relayout();
+  await started;
+  if (!threads.includes(th)) return th; // Closed while its processes were starting.
+  if (!th.panes.length) await th.addPane();
   save();
   void pollStats();
   return th;
@@ -6137,13 +6152,13 @@ async function main() {
     .then((m) => (models = m))
     .catch(() => {});
 
-  show(null);
-  // Parallel too: openThread pushes its thread before awaiting, so sidebar
-  // order stays saved order. Each one show()s itself as it starts, hence the
-  // explicit show() after restores the selection once every pane exists.
+  // Parallel too: openThread pushes its thread and addPane its panes before
+  // either awaits, so sidebar order stays saved order, and the sidebar and the
+  // saved thread show now. Claude panes start two at a time (bootSlot), which
+  // took 26 s to get through 9 of them; each pane says Starting until then.
   const restore =
     saved.threads ?? (saved.spaces ?? []).map((w) => ({ ...w, repo: w.dir, branch: "", name: basename(w.dir) }));
-  await Promise.all(
+  const opened = Promise.all(
     restore.map((w) => {
       const panes: PaneState[] = Array.isArray(w.panes)
         ? w.panes.map((p) => (typeof p === "string" ? { cmd: p } : p))
@@ -6159,6 +6174,7 @@ async function main() {
   toggleChanges(saved.ui?.changesOpen ?? false);
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
+  await opened;
   restoring = false;
   await flushSave();
   pollUsage(); // restored panes shouldn't sit blank for the first interval
