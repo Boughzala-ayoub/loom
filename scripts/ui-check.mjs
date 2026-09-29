@@ -21,6 +21,12 @@ try {
       const toolsRepo = 'C:\\projects\\tools';
       let state = { repos: [repo, toolsRepo], threads: [thread('search-polish', ['claude', 'codex']), thread('review-keyboard-navigation', ['claude']), { ...thread('fix-settings', ['claude']), repo: toolsRepo, dir: toolsRepo }] };
       state.theme = theme;
+      if (location.search.includes('long-location')) {
+        state.threads[0].branch = '';
+        state.threads[0].dir = 'C:\\Users\\ayoub\\Videos\\claude\\personal-portfolio\\personal-portfolio';
+        state.agentGroups = [{ id: 'active', name: 'active' }];
+        state.threads[0].panes.forEach(p => { p.groupIds = ['active']; });
+      }
       if (location.search.includes('dashboard')) Object.assign(state.threads[0].panes[1], { sid: 'dashboard-codex-pane', sessionId: 'valid-session' });
       if (location.search.includes('needs-session')) delete state.threads[0].panes[1].sessionId;
       if (location.search.includes('many')) state.threads = Array.from({ length: 40 }, (_, i) => thread(`thread-${i}-with-a-long-review-description`, ['claude']));
@@ -119,7 +125,7 @@ try {
           if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\tOn main: workspace polish\n';
           if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
           if (a.includes('--show-toplevel')) return args.dir;
-          if (a[0] === 'rev-parse') return 'main';
+          if (a[0] === 'rev-parse') return location.search.includes('long-location') ? '' : 'main';
           return '';
         }
       }, { shouldMockEvents: true });
@@ -213,6 +219,28 @@ try {
       checks++;
     }
     const escape = () => page.keyboard.press('Escape');
+    await page.goto(base + '?long-location');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    await page.click('#dashboard-btn');
+    await page.locator('#dashboard-counts button[data-group="active"]').click();
+    for (const compact of [false, true]) {
+      if (compact) await page.click('#dashboard-compact');
+      for (const selecting of [false, true]) {
+        if (selecting) await page.click('#dashboard-select');
+        const name = `dashboard-long-location-${compact ? 'compact' : 'expanded'}${selecting ? '-selecting' : ''}`;
+        await audit(name);
+        const overflow = await page.locator('.dashboard-location').evaluateAll(locations => locations.filter(el => {
+          const bounds = el.getBoundingClientRect();
+          const row = el.closest('.dashboard-row').getBoundingClientRect();
+          return bounds.right > row.right || bounds.left < row.left;
+        }).map(el => el.textContent));
+        assert.deepEqual(overflow, [], `${name}@${width}: location must fit inside its row, clear of the action buttons`);
+        assert.ok(await page.locator('#dashboard').evaluate(el => el.scrollWidth <= el.clientWidth), `${name}@${width}: dashboard must not scroll sideways`);
+      }
+      await page.click('#dashboard-select');
+    }
+    await page.goto(base);
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');
     assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'false');
     await page.click('#preferences-btn');

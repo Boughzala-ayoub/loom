@@ -1371,7 +1371,7 @@ select option {
   .dashboard-status { grid-column: 1; grid-row: 2; }
   .dashboard-location { grid-row: 3; }
   .dashboard-activity { grid-row: 4; }
-  .dashboard-location, .dashboard-usage { grid-column: 1; justify-self: start; }
+  .dashboard-usage { grid-column: 1; justify-self: start; }
   .dashboard-usage { grid-row: 5; }
   .compact .dashboard-row { padding: 12px 14px; grid-template-columns: minmax(0, 1fr); }
   #dashboard-list { padding-left: 20px; }
