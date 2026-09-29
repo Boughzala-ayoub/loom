@@ -5583,7 +5583,21 @@ const makePlanMenu = (provider: PlanProvider): Menu => ({
     site.textContent = `Open ${info.name} usage page ↗`;
     site.href = info.url;
     site.onclick = (e) => { e.preventDefault(); void openUrl(info.url).catch(e => toast(String(e))); };
-    list.append(site);
+    // After the link, so showMenu still focuses the link first.
+    const busy = !!planPolls[provider];
+    const refresh = mini(glyph("refresh"), busy ? `Refreshing ${info.name} usage…` : `Refresh ${info.name} usage now`, () => {
+      const focused = document.activeElement === refresh; // a mouse click leaves focus where it was
+      void pollPlan(provider).then(() => {
+        if (focused && openMenu === planMenus[provider]) $("#menu-list .plan-refresh")?.focus();
+      });
+      renderMenu();
+    });
+    refresh.classList.add("plan-refresh");
+    refresh.disabled = busy;
+    const links = document.createElement("div");
+    links.className = "plan-links";
+    links.append(site, refresh);
+    list.append(links);
     if (!plan?.limits.length) return note(planErr || "Fetching plan usage…");
 
     let group = "";
@@ -5686,9 +5700,19 @@ function paintPlan(provider: PlanProvider) {
 }
 
 /** Poll: the endpoint rate-limits hard and these numbers move slowly, so five
- * minutes is as often as it's worth asking. A failure keeps the last good
- * numbers and shows why underneath them. */
-async function pollPlan(provider: PlanProvider) {
+ * minutes is as often as it's worth asking, plus the panel's refresh button.
+ * A failure keeps the last good numbers and shows why underneath them. One
+ * request per provider at a time: a click during a poll waits for that one. */
+const planPolls: Partial<Record<PlanProvider, Promise<void>>> = {};
+function pollPlan(provider: PlanProvider): Promise<void> {
+  return planPolls[provider] ??= fetchPlan(provider).finally(() => {
+    delete planPolls[provider];
+    paintPlan(provider);
+    if (!menu.classList.contains("hidden") && openMenu === planMenus[provider]) renderMenu();
+  });
+}
+
+async function fetchPlan(provider: PlanProvider) {
   if (!planUsage) return;
   const plan = plans[provider];
   try {
@@ -5724,8 +5748,6 @@ async function pollPlan(provider: PlanProvider) {
   } catch (e) {
     planErrors[provider] = String(e);
   }
-  paintPlan(provider);
-  if (!menu.classList.contains("hidden") && openMenu === planMenus[provider]) renderMenu();
 }
 
 function paintTheme() {
