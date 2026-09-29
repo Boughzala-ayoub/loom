@@ -5853,6 +5853,14 @@ async function main() {
   window.addEventListener("contextmenu", (e) => {
     if (!(e.target as HTMLElement).closest("input")) e.preventDefault();
   });
+  // Shift+right-click anywhere toggles the overview. Capture on window runs
+  // before a pane's right-click paste and a sidebar row's menu.
+  window.addEventListener("contextmenu", (e) => {
+    if (!e.shiftKey || document.querySelector("dialog[open]")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    $("#dashboard-btn").click();
+  }, true);
   addInput.onkeydown = (e) => {
     if (e.key !== "Enter") return;
     const v = addInput.value.trim();
