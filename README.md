@@ -106,8 +106,8 @@ rail, while an agent works; yellow when one has finished a turn and is waiting
 on you; red when all have exited. Agent marks carry the same colours as a dot. Clicking an agent row focuses that pane; if the thread
 is zoomed, the zoom moves to it, so a zoomed thread reads one agent at a time.
 
-**Overview** in the top bar lists every agent session. Press `Ctrl+Shift+D` to
-switch between it and your thread. It lists sessions across every open thread,
+**Overview** in the top bar lists every agent session. Shift+right-click
+anywhere, or press `Ctrl+Shift+D`, to switch between it and your thread. It lists sessions across every open thread,
 with waiting agents first, then working, idle, and exited sessions. Filter by
 status or project, or search thread names, branches, agents, group names, and
 terminal output. Expanded agent rows show your last message and the agent's last
