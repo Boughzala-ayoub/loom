@@ -23,6 +23,19 @@ try {
         } finally { Pop-Location }
         $Source = Join-Path $root 'src-tauri/target/release/loom.exe'
     }
+    # loomctl.exe (control a running Loom from a terminal) is built beside loom.exe.
+    # Nothing keeps it open for long, so a copy replaces it.
+    $ctlSource = Join-Path (Split-Path -LiteralPath $Source) 'loomctl.exe'
+    $ctlDestination = Join-Path $install 'loomctl.exe'
+    if (Test-Path -LiteralPath $ctlSource -PathType Leaf) {
+        $ctlHash = (Get-FileHash -LiteralPath $ctlSource -Algorithm SHA256).Hash
+        if (-not (Test-Path -LiteralPath $ctlDestination) -or (Get-FileHash -LiteralPath $ctlDestination -Algorithm SHA256).Hash -ne $ctlHash) {
+            Copy-Item -LiteralPath $ctlSource -Destination $ctlDestination -Force
+            Write-Output "Updated: $ctlDestination"
+        }
+    } else {
+        Write-Warning "No loomctl.exe beside $Source. The installed loomctl was not changed."
+    }
     $expected = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
     $previous = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
     if ($expected -eq $previous) {

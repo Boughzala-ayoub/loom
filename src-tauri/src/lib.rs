@@ -15,6 +15,8 @@ mod output;
 mod cache;
 mod opencode;
 mod usage;
+mod pipe;
+mod control;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
 /// Extra Claude Code settings, handed to each pane's `claude` via --settings.
@@ -257,6 +259,17 @@ fn pty_spawn(
     // it back into a pane.
     cmd.env("LOOM_PANE", &id);
     cmd.env("LOOM_SESSION_FILE", data_dir(&app).join("session-marks").join(&id));
+    // loomctl from inside a pane reaches the Loom that owns it (control.rs),
+    // and finds loomctl.exe beside loom.exe without a PATH of its own.
+    cmd.env("LOOM_PIPE", pipe::pipe_name(profile_arg().as_deref()));
+    if let Some(dir) = exe.parent() {
+        let mut path = std::ffi::OsString::from(dir);
+        if let Some(rest) = cmd.get_env("PATH") {
+            path.push(";");
+            path.push(rest);
+        }
+        cmd.env("PATH", path);
+    }
     // What every terminal tells its children. Nothing sets these on Windows
     // unless the terminal does, and Claude Code's Bun build draws in
     // monochrome without them; Orca and Windows Terminal both set them.
@@ -1364,6 +1377,7 @@ pub fn run() {
         .manage(Ptys::default())
         .manage(output::Flows::default())
         .manage(output::Bus::default())
+        .manage(control::Pending::default())
         .manage(WindowStateReady::default())
         .manage(dictate::Dictation::default())
         .manage(usage::Scanned::default())
@@ -1412,6 +1426,7 @@ pub fn run() {
             app.manage(WindowMoved(moved));
             let handle = app.handle().clone();
             std::thread::spawn(move || handle.state::<output::Bus>().run());
+            control::serve(app.handle().clone(), pipe::pipe_name(profile_arg().as_deref()));
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1446,7 +1461,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::pty_spawn, output_bus, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
+            commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::dictate_start,

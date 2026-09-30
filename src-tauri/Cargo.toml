@@ -4,6 +4,9 @@ version = "3.0.0"
 description = "Multi-folder agentic terminal workspace"
 authors = ["you"]
 edition = "2021"
+# Two binaries: loom (the app) and loomctl (src/bin). Tauri builds, patches and
+# bundles this one as the app, and `cargo run` / `tauri dev` start it.
+default-run = "loom"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -44,6 +47,8 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Already in the tree through tauri: loomctl's named pipe (control.rs) and its timeouts.
+tokio = { version = "1", features = ["net", "io-util", "sync", "time"] }
 portable-pty = "0.9"
 whisper-rs = "0.16.0"
 # cpal accepts windows-core ">=0.61, <=0.62" but pairs it with the `windows`
@@ -53,4 +58,4 @@ whisper-rs = "0.16.0"
 #   cargo update -p windows-core@0.62.x --precise 0.61.2
 cpal = "0.18.1"
 # Already in the tree through tao and wry: the overlay shows without taking focus.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }

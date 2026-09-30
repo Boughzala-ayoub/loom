@@ -2147,6 +2147,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
+ "tokio",
  "whisper-rs",
  "windows",
 ]

@@ -19,6 +19,7 @@ import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, echoes, type Menu as AgentMenu } from "./prompt";
+import { flag, keyBytes, num, onOff, paneRef, table, type Args } from "./cli";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
@@ -1738,21 +1739,32 @@ class Pane {
     this.term.onBell(() => this.wake());
     this.fit.fit();
 
-    const unlisten = await listen<number>(`pty-exit:${this.id}`, (e) => {
-      this.dead = true;
-      this.exitCode = e.payload;
-      this.busy = false;
-      this.waiting = false;
-      this.term.write(`\r\n\x1b[90m[exited ${e.payload}] — Enter relaunches\x1b[0m\r\n`);
-      this.paint();
-      this.retryCodexStartup();
-    });
+    const unlisten = await listen<number>(`pty-exit:${this.id}`, (e) => this.exited(e.payload));
     if (this.disposed) { unlisten(); return; }
     this.unlisten.push(unlisten);
     // Channel, not an event: stdout is the hot path and channels skip the
     // event bus' JSON round-trip through every other listener.
     await this.spawn(!!sid);
     if (!this.disposed) this.observer.observe(this.host);
+  }
+
+  /** The process is gone: say so, and let Enter bring it back. Once per launch. */
+  exited(code: number, how = `exited ${code}`) {
+    if (this.dead) return;
+    this.dead = true;
+    this.exitCode = code;
+    this.busy = false;
+    this.waiting = false;
+    this.term.write(`\r\n\x1b[90m[${how}] — Enter relaunches\x1b[0m\r\n`);
+    this.paint();
+    this.retryCodexStartup();
+  }
+
+  /** Ends the process and keeps the pane. pty_kill takes the session out of
+   * the map before killing it, so no pty-exit follows: the exit is marked here. */
+  async stop() {
+    await invoke("pty_kill", { id: this.id });
+    this.exited(1, "stopped");
   }
 
   /** Start (or restart) the pane's process. `resume` = pick the session up
@@ -2356,11 +2368,12 @@ class Thread {
     }));
   }
 
-  async closePane(p: Pane) {
+  /** `force`: loomctl's --yes, which already said so. */
+  async closePane(p: Pane, force = false) {
     const i = this.panes.indexOf(p);
     if (i === -1) return;
     // A misclick on ✕ would otherwise kill a running agent on the spot.
-    if (p.agentUp && !(await confirm(`Close ${p.agent} pane?`, {
+    if (p.agentUp && !force && !(await confirm(`Close ${p.agent} pane?`, {
       title: "Loom", action: "Close pane",
       detail: "This stops the running agent and removes this pane from the workspace. Your project files stay on disk.",
     }))) return;
@@ -3474,7 +3487,7 @@ $("#dashboard-process").onclick = async () => {
   dashboardControlBusy = true;
   renderDashboard();
   try {
-    if (stop) await invoke("pty_kill", { id: p.id });
+    if (stop) await p.stop();
     else await p.spawn(true);
   } catch (error) {
     if (dashboardPreviewPane === p) $("#dashboard-control-result").textContent = String(error);
@@ -3919,15 +3932,15 @@ async function atRisk(th: Thread, branch: boolean): Promise<string> {
  * "close" keeps the worktree on disk, "worktree" removes the folder and keeps
  * the branch, "all" deletes the branch too. Panes go first either way — a
  * folder with a shell still in it cannot be removed. */
-async function removeThread(th: Thread, mode: "close" | "worktree" | "all") {
-  const risk = mode === "close" || !th.isWorktree ? "" : await atRisk(th, mode === "all");
+async function removeThread(th: Thread, mode: "close" | "worktree" | "all", force = false) {
+  const risk = mode === "close" || !th.isWorktree || force ? "" : await atRisk(th, mode === "all");
   const what =
     mode === "close"
       ? `Close ${th.name}?`
       : mode === "worktree"
         ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept.`
         : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost.`;
-  if (th.panes.length || mode !== "close") {
+  if (!force && (th.panes.length || mode !== "close")) {
     if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return;
   }
   const i = threads.indexOf(th);
@@ -6037,6 +6050,530 @@ function countFinds(p: Pane) {
 }
 
 // --- boot -----------------------------------------------------------------
+// --- loomctl: commands from a terminal ----------------------------------------
+// control.rs hands each loomctl request here as a "cli" event and waits for
+// cli_reply. Every command goes through the functions the window's own buttons
+// use, so its effect shows on screen; where a button would ask first, the
+// command wants --yes instead.
+
+type CliResult = { data?: unknown; text?: string; note?: string };
+type CliCommand = { usage: string; help: string; run: (a: Args, seconds: number) => CliResult | Promise<CliResult> };
+/** A wait that ran out: loomctl exits 3 for it rather than 1. */
+class CliTimeout extends Error {}
+
+/** A pane's state in one word, the Overview's words. */
+const cliState = (p: Pane) => (p.dead ? "exited" : p.starting ? "starting" : p.waiting ? "waiting" : p.busy ? "working" : "idle");
+const CLI_STATES = ["waiting", "working", "idle", "exited", "starting"];
+const CLI_ALIASES: Record<string, string> = { busy: "working", dead: "exited", ready: "idle" };
+function cliStates(value: unknown, fallback: string): string[] {
+  const list = String(value ?? fallback).toLowerCase().split(",").map((s) => CLI_ALIASES[s.trim()] ?? s.trim());
+  for (const s of list) if (!CLI_STATES.includes(s)) throw new Error(`--state takes ${CLI_STATES.join(", ")}, not ${s}.`);
+  return list;
+}
+
+/** "<thread>:<n>", the name loomctl prints and takes back. */
+const paneName = (p: Pane) => `${p.th.name}:${p.th.panes.indexOf(p) + 1}`;
+const paneData = (p: Pane) => ({
+  id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
+  title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, dir: p.th.dir, front: current === p.th && p.th.active === p,
+});
+function threadState(th: Thread) {
+  const s = th.panes.map(cliState);
+  return s.includes("waiting") ? "waiting" : s.includes("working") ? "working" : s.length && s.every((x) => x === "exited") ? "exited" : "idle";
+}
+const threadData = (th: Thread) => ({
+  id: th.id, name: th.name, repo: th.repo, dir: th.dir, branch: th.branch, front: th === current, state: threadState(th),
+  layout: th.layout, panes: th.panes.map(paneData),
+});
+const paneRows = (panes: Pane[]) => table(panes.map((p) => [paneName(p), p.id, p.agent, cliState(p), p.label]));
+
+function cliThread(sel: string | undefined): Thread {
+  if (!sel || sel === "current" || sel === ".") {
+    if (current) return current;
+    throw new Error("No thread is open. loomctl threads lists them.");
+  }
+  const byId = threads.find((t) => t.id === sel);
+  if (byId) return byId;
+  const low = sel.toLowerCase();
+  const exact = threads.filter((t) => t.name.toLowerCase() === low);
+  const prefix = threads.filter((t) => t.name.toLowerCase().startsWith(low));
+  const found = exact.length ? exact : prefix;
+  if (found.length === 1) return found[0];
+  if (found.length > 1) throw new Error(`"${sel}" matches ${found.map((t) => `${t.name} (${t.id})`).join(", ")}. Use an id.`);
+  throw new Error(`No thread "${sel}". loomctl threads lists them.`);
+}
+
+function cliPane(sel: string | undefined): Pane {
+  const ref = paneRef(sel);
+  if ("current" in ref) {
+    const p = current?.active ?? current?.panes[0];
+    if (p) return p;
+    throw new Error("No pane is in front. Name one: loomctl panes lists them.");
+  }
+  if ("thread" in ref) {
+    const th = cliThread(ref.thread);
+    const p = th.panes[ref.n - 1];
+    if (p) return p;
+    throw new Error(`${th.name} has ${th.panes.length} pane${th.panes.length === 1 ? "" : "s"}.`);
+  }
+  const p = threads.flatMap((t) => t.panes).find((x) => x.id === ref.id);
+  if (p) return p;
+  // A thread on its own means the pane it has in front.
+  const th = cliThread(ref.id);
+  const front = th.active ?? th.panes[0];
+  if (front) return front;
+  throw new Error(`${th.name} has no panes.`);
+}
+
+/** The nth word, or an error naming what was missing. */
+function cliWord(a: Args, i: number, what: string) {
+  const w = a._[i];
+  if (!w) throw new Error(`Name ${what}.`);
+  return w;
+}
+
+/** The startup command for --agent, or --cmd as given. */
+function cliCommand(a: Args) {
+  if (typeof a.cmd === "string") return a.cmd;
+  if (a.agent === undefined) return startups[0]?.cmd ?? "";
+  const s = startups.find((x) => x.label.toLowerCase() === String(a.agent).toLowerCase());
+  if (!s) throw new Error(`--agent takes ${startups.map((x) => x.label).join(", ")}, not ${String(a.agent)}.`);
+  return s.cmd;
+}
+
+/** Resolves once `ok()` holds. Polled: states change in a dozen places. */
+async function until(ok: () => boolean, seconds: number, what: string) {
+  const end = Date.now() + seconds * 1000;
+  while (!ok()) {
+    if (Date.now() > end) throw new CliTimeout(`Waited ${seconds} s for ${what}.`);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+const gone = (p: Pane) => !p.th.panes.includes(p) || !threads.includes(p.th);
+
+
+function openClose(word: string | undefined, now: boolean, what: string) {
+  if (word === undefined) return !now;
+  if (word === "open") return true;
+  if (word === "close") return false;
+  throw new Error(`${what} takes open or close, not ${word}.`);
+}
+
+const CLI: Record<string, CliCommand> = {
+  help: {
+    usage: "help [command]",
+    help: "List the commands, or show one.",
+    run: (a) => {
+      const name = a._[0];
+      if (name) {
+        const c = CLI[name];
+        if (!c) throw new Error(`Unknown command "${name}". loomctl help lists them.`);
+        return { data: { command: name, usage: c.usage, help: c.help }, text: `loomctl ${c.usage}\n  ${c.help}` };
+      }
+      return {
+        data: Object.entries(CLI).map(([command, c]) => ({ command, usage: c.usage, help: c.help })),
+        text: `${table(Object.values(CLI).map((c) => [c.usage, c.help]))}\n\nA pane is <thread>:<n>, its id, or . for the pane in front. A thread is its name or id.\nAdd --json for machine-readable output.`,
+      };
+    },
+  },
+  status: {
+    usage: "status",
+    help: "Counts by state, the thread in front, and every pane waiting for you.",
+    run: () => {
+      const panes = threads.flatMap((t) => t.panes);
+      const count = Object.fromEntries(CLI_STATES.map((s) => [s, panes.filter((p) => cliState(p) === s).length]));
+      const waiting = panes.filter((p) => cliState(p) === "waiting");
+      const front = current?.active ?? current?.panes[0];
+      return {
+        data: { threads: threads.length, panes: panes.length, ...count, front: front ? paneData(front) : null, overview: dashboardOpen, waitingPanes: waiting.map(paneData) },
+        text: [
+          `${threads.length} thread${threads.length === 1 ? "" : "s"}, ${panes.length} pane${panes.length === 1 ? "" : "s"}: ` +
+            CLI_STATES.filter((s) => count[s]).map((s) => `${count[s]} ${s}`).join(", "),
+          front ? `In front: ${paneName(front)} (${front.agent}, ${cliState(front)})` : "Nothing in front.",
+          ...(waiting.length ? ["", "Waiting for you:", paneRows(waiting)] : []),
+        ].join("\n"),
+      };
+    },
+  },
+  threads: {
+    usage: "threads",
+    help: "Every thread: name, id, state, pane count, branch and folder.",
+    run: () => ({
+      data: threads.map(threadData),
+      text: threads.length
+        ? table(threads.map((t) => [t === current ? "*" : " ", t.name, t.id, threadState(t), `${t.panes.length} pane${t.panes.length === 1 ? "" : "s"}`, t.branch || "-", t.dir]))
+        : "No threads. loomctl new <folder> opens one.",
+    }),
+  },
+  panes: {
+    usage: "panes [--thread T] [--state S]",
+    help: "Every pane: its <thread>:<n>, id, agent, state and title.",
+    run: (a) => {
+      const want = a.state === undefined ? null : cliStates(a.state, "");
+      const panes = (a.thread === undefined ? threads : [cliThread(String(a.thread))])
+        .flatMap((t) => t.panes)
+        .filter((p) => !want || want.includes(cliState(p)));
+      return { data: panes.map(paneData), text: panes.length ? paneRows(panes) : "No panes." };
+    },
+  },
+  read: {
+    usage: "read [pane] [--lines N]",
+    help: "The pane's screen as text, or its last N lines including history.",
+    run: (a) => {
+      const p = cliPane(a._[0]);
+      let raw: string;
+      if (a.lines === undefined) raw = liveScreen(p);
+      else {
+        const buf = p.term.buffer.active;
+        const n = num(a, "lines", 50, 1, 100_000);
+        // Up to the last line with anything on it: below a short prompt the screen is blank rows.
+        let end = buf.length;
+        while (end > 0 && !buf.getLine(end - 1)?.translateToString(true).trim()) end--;
+        const lines: string[] = [];
+        for (let y = Math.max(0, end - n); y < end; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+        raw = lines.join("\n");
+      }
+      const text = raw.split("\n").map((l) => l.trimEnd()).join("\n").replace(/\n+$/, "");
+      return { data: { pane: p.id, ref: paneName(p), text }, text };
+    },
+  },
+  menu: {
+    usage: "menu [pane]",
+    help: "The numbered question on a pane's screen, if it shows one.",
+    run: (a) => {
+      const p = cliPane(a._[0]);
+      const m = readMenu(liveScreen(p, false));
+      if (!m) return { data: null, text: `${paneName(p)} isn't showing a numbered question.` };
+      return { data: m, text: [...m.question, ...m.options.map((o, i) => `${i === m.selected ? "❯" : " "} ${i + 1}. ${o}`)].join("\n") };
+    },
+  },
+  show: {
+    usage: "show <thread|pane>",
+    help: "Bring a thread or a pane to the front.",
+    run: (a) => {
+      const sel = cliWord(a, 0, "a thread or pane");
+      const ref = paneRef(sel);
+      const isPane = "thread" in ref || threads.some((t) => t.panes.some((p) => p.id === sel));
+      if (isPane) {
+        const p = cliPane(sel);
+        revealPane(p);
+        return { data: paneData(p), text: `In front: ${paneName(p)}` };
+      }
+      const th = cliThread(sel);
+      show(th);
+      return { data: threadData(th), text: `In front: ${th.name}` };
+    },
+  },
+  next: {
+    usage: "next",
+    help: "Go to the next agent waiting for you, as F3 does.",
+    run: () => {
+      if (!threads.some((t) => t.panes.some((p) => p.waiting))) return { data: null, text: "Nobody is waiting." };
+      jumpWaiting();
+      const p = current?.active;
+      return { data: p ? paneData(p) : null, text: p ? `In front: ${paneName(p)}` : "" };
+    },
+  },
+  overview: {
+    usage: "overview [open|close]",
+    help: "Open, close or toggle the Overview.",
+    run: (a) => {
+      toggleDashboard(openClose(a._[0], dashboardOpen, "overview"));
+      return { data: { open: dashboardOpen }, text: `Overview ${dashboardOpen ? "open" : "closed"}` };
+    },
+  },
+  changes: {
+    usage: "changes [open|close]",
+    help: "Open, close or toggle the Changes panel.",
+    run: (a) => {
+      toggleChanges(openClose(a._[0], changesOpen, "changes"));
+      return { data: { open: changesOpen }, text: `Changes ${changesOpen ? "open" : "closed"}` };
+    },
+  },
+  layout: {
+    usage: "layout <cols|rows|grid> [--thread T]",
+    help: "How a thread arranges its panes.",
+    run: (a) => {
+      const mode = cliWord(a, 0, "a layout: cols, rows or grid") as LayoutMode;
+      if (!LAYOUTS.includes(mode)) throw new Error(`layout takes cols, rows or grid, not ${mode}.`);
+      const th = cliThread(a.thread === undefined ? undefined : String(a.thread));
+      th.layout = mode;
+      th.relayout();
+      if (th === current) paintLayout(mode);
+      save();
+      return { data: threadData(th), text: `${th.name}: ${mode}` };
+    },
+  },
+  zoom: {
+    usage: "zoom [pane]",
+    help: "Let a pane fill its thread, or put it back.",
+    run: (a) => {
+      const p = cliPane(a._[0]);
+      p.th.toggleZoom(p);
+      const zoomed = p.th.zoomed === p;
+      return { data: { pane: p.id, zoomed }, text: `${paneName(p)} ${zoomed ? "zoomed" : "back in the grid"}` };
+    },
+  },
+  new: {
+    usage: "new <folder> [--agent A | --cmd C] [--name N] [--base B] [--panes N]",
+    help: "Open a Git folder as a thread. --name cuts a new worktree and branch loom/<name> off --base.",
+    run: async (a) => {
+      const folder = cliWord(a, 0, "a folder");
+      for (const k of ["name", "base", "cmd"]) if (a[k] === true) throw new Error(`--${k} needs a value.`);
+      const top = await git(folder, "rev-parse", "--show-toplevel").catch(() => {
+        throw new Error(`${folder} isn't in a Git repository.`);
+      });
+      const repo = top.trim().replace(/\//g, "\\");
+      const cmd = cliCommand(a);
+      const n = num(a, "panes", 1, 1, MAX_PANES);
+      const before = new Set(threads);
+      await createThread(repo, String(a.name ?? ""), cmd, String(a.base ?? ""), n);
+      const th = threads.find((t) => !before.has(t)) ?? threads.find((t) => t.dir.toLowerCase() === repo.toLowerCase());
+      if (!th) throw new Error("Loom didn't open the thread.");
+      return { data: threadData(th), text: `${th.name} (${th.id}) in ${th.dir}`, note: `loomctl opened ${th.name}` };
+    },
+  },
+  add: {
+    usage: "add [thread] [--agent A | --cmd C]",
+    help: "Start another agent or terminal in a thread and bring it to the front.",
+    run: async (a) => {
+      const th = cliThread(a._[0]);
+      if (th.panes.length >= MAX_PANES) throw new Error(`${th.name} already has ${MAX_PANES} panes.`);
+      const cmd = cliCommand(a);
+      if (th.open === false) th.open = undefined; // the pane you add is one you want to see
+      th.tab = null;
+      show(th);
+      const p = await th.addPane({ cmd });
+      if (!p) throw new Error(`Loom didn't start the pane in ${th.name}.`);
+      revealPane(p);
+      save();
+      return { data: paneData(p), text: `${paneName(p)} (${p.id}): ${p.agent}`, note: `loomctl started ${p.agent} in ${th.name}` };
+    },
+  },
+  rename: {
+    usage: "rename <thread> <name>",
+    help: "Rename a thread. Its branch and folder keep their names.",
+    run: (a) => {
+      const th = cliThread(cliWord(a, 0, "a thread"));
+      const name = a._.slice(1).join(" ").trim();
+      if (!name) throw new Error("Give the new name.");
+      th.rename(name);
+      return { data: threadData(th), text: `Renamed to ${name}` };
+    },
+  },
+  send: {
+    usage: "send <pane> <text...> [--no-enter]",
+    help: "Type text into a pane and press Enter once it shows there. - reads the text from standard input.",
+    run: async (a) => {
+      const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
+      const text = a._.slice(1).join(" ");
+      if (!text) throw new Error("Give the text to send.");
+      if (p.dead) throw new Error(`${paneName(p)} has exited. loomctl restart ${paneName(p)} starts it again.`);
+      if (flag(a, "no-enter")) await keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+      else await sendReply(p, text);
+      return { data: { pane: p.id }, text: "" };
+    },
+  },
+  keys: {
+    usage: "keys <pane> <key...>",
+    help: "Press keys in a pane: enter, esc, tab, shift-tab, up, down, left, right, backspace, ctrl-c, or a single character.",
+    run: async (a) => {
+      const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
+      const names = a._.slice(1);
+      if (!names.length) throw new Error("Name the keys to press.");
+      const bytes = names.map((n) => {
+        const b = keyBytes(n, p.term.modes.applicationCursorKeysMode);
+        if (b === null) throw new Error(`Unknown key "${n}". To type text, use loomctl send --no-enter.`);
+        return b;
+      });
+      if (p.dead) throw new Error(`${paneName(p)} has exited.`);
+      for (const b of bytes) {
+        await keys(p, b);
+        await p.settle(60, 500);
+      }
+      return { data: { pane: p.id, keys: names }, text: "" };
+    },
+  },
+  choose: {
+    usage: "choose <pane> <n>",
+    help: "Pick option n of the numbered question on a pane's screen, as the Overview's buttons do.",
+    run: async (a) => {
+      const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
+      const n = Number(cliWord(a, 1, "an option number"));
+      const m = readMenu(liveScreen(p, false));
+      if (!m) throw new Error(`${paneName(p)} isn't showing a numbered question.`);
+      if (!Number.isInteger(n) || n < 1 || n > m.options.length) throw new Error(`Pick 1 to ${m.options.length}.`);
+      await choose(p, m, n - 1);
+      return { data: { pane: p.id, option: n, text: m.options[n - 1] }, text: `Chose ${n}. ${m.options[n - 1]}` };
+    },
+  },
+  wait: {
+    usage: "wait [pane] [--state waiting] [--timeout S]",
+    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting.",
+    run: async (a, seconds) => {
+      const p = cliPane(a._[0]);
+      const want = cliStates(a.state, "waiting");
+      await until(() => gone(p) || want.includes(cliState(p)), seconds, `${paneName(p)} to be ${want.join(" or ")}`);
+      if (gone(p)) throw new Error("The pane was closed.");
+      return { data: paneData(p), text: `${paneName(p)} is ${cliState(p)}` };
+    },
+  },
+  "wait-any": {
+    usage: "wait-any [--state waiting] [--thread T] [--new] [--timeout S]",
+    help: "Block until any pane is in a state; --new skips the ones already in it.",
+    run: async (a, seconds) => {
+      const want = cliStates(a.state, "waiting");
+      const scope = a.thread === undefined ? null : cliThread(String(a.thread));
+      const pool = () => (scope ? scope.panes : threads.flatMap((t) => t.panes));
+      // --new: a pane counts once it has left the state and come back.
+      const skip = new Set(flag(a, "new") ? pool().filter((p) => want.includes(cliState(p))) : []);
+      let hit: Pane | undefined;
+      await until(() => {
+        for (const p of skip) if (!want.includes(cliState(p))) skip.delete(p);
+        return !!(hit = pool().find((p) => !skip.has(p) && want.includes(cliState(p))));
+      }, seconds, `a pane to be ${want.join(" or ")}`);
+      return { data: paneData(hit!), text: `${paneName(hit!)} (${hit!.agent}) is ${cliState(hit!)}` };
+    },
+  },
+  restart: {
+    usage: "restart [pane] [--yes]",
+    help: "Start a pane's process again, resuming its session. A running one needs --yes and is stopped first.",
+    run: async (a) => {
+      const p = cliPane(a._[0]);
+      if (!p.dead) {
+        if (!flag(a, "yes")) throw new Error(`${paneName(p)} is running. Pass --yes to stop it and start it again.`);
+        await p.stop();
+      }
+      if (needsSession(p)) throw new Error(`${paneName(p)} has no session to resume. Pick one in Loom.`);
+      await p.spawn(true);
+      return { data: paneData(p), text: `${paneName(p)} restarted`, note: `loomctl restarted ${paneName(p)}` };
+    },
+  },
+  stop: {
+    usage: "stop [pane] --yes",
+    help: "Stop a pane's process and keep the pane, as the Overview's Stop does.",
+    run: async (a) => {
+      const p = cliPane(a._[0]);
+      if (p.dead) return { data: paneData(p), text: `${paneName(p)} has already exited.` };
+      if (!flag(a, "yes")) throw new Error(`Stopping ${paneName(p)} ends ${p.agent}. Pass --yes.`);
+      await p.stop();
+      return { data: paneData(p), text: `${paneName(p)} stopped`, note: `loomctl stopped ${paneName(p)}` };
+    },
+  },
+  close: {
+    usage: "close [pane] [--yes]",
+    help: "Close a pane. One with a running agent needs --yes.",
+    run: async (a) => {
+      const p = cliPane(a._[0]);
+      const name = paneName(p);
+      if (p.agentUp && !flag(a, "yes")) throw new Error(`${name} is running ${p.agent}. Pass --yes to stop it and close the pane.`);
+      await p.th.closePane(p, true);
+      return { data: { closed: p.id }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
+    },
+  },
+  "close-thread": {
+    usage: "close-thread <thread> --yes [--delete worktree|branch] [--force]",
+    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Work that would be lost needs --force.",
+    run: async (a) => {
+      const th = cliThread(cliWord(a, 0, "a thread"));
+      const del = a.delete === undefined ? "" : String(a.delete);
+      if (del && del !== "worktree" && del !== "branch") throw new Error(`--delete takes worktree or branch, not ${del}.`);
+      if (del && !th.isWorktree) throw new Error(`${th.name} isn't a worktree Loom made, so there is nothing to delete.`);
+      const what = `${th.panes.length} pane${th.panes.length === 1 ? "" : "s"}${del ? ` and deletes ${del === "branch" ? `the worktree and branch ${th.branch}` : "the worktree folder"}` : ""}`;
+      if (!flag(a, "yes")) throw new Error(`Closing ${th.name} stops its ${what}. Pass --yes.`);
+      if (del && !flag(a, "force")) {
+        const risk = (await atRisk(th, del === "branch")).trim();
+        if (risk) throw new Error(`${risk}\nPass --force as well to delete anyway.`);
+      }
+      const name = th.name;
+      await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", true);
+      return { data: { closed: th.id }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
+    },
+  },
+  theme: {
+    usage: "theme [name]",
+    help: "List the themes, or switch to one.",
+    run: (a) => {
+      const name = a._.join(" ").trim();
+      if (!name) {
+        return {
+          data: THEMES.map((t) => ({ name: t.label, scheme: t.scheme ?? "dark", current: t === theme })),
+          text: table(THEMES.map((t) => [t === theme ? "*" : " ", t.label, t.scheme ?? "dark"])),
+        };
+      }
+      const t = THEMES.find((x) => x.label.toLowerCase() === name.toLowerCase());
+      if (!t) throw new Error(`No theme "${name}". loomctl theme lists them.`);
+      applyTheme(t);
+      save();
+      paintTheme();
+      return { data: { theme: t.label }, text: `Theme: ${t.label}` };
+    },
+  },
+  set: {
+    usage: "set [sound|taskbar|overlay|awake|plan-usage] [value]",
+    help: "Show the settings, or change one: on/off, and overlay off/background/always.",
+    run: async (a) => {
+      const settings = () => ({
+        sound: soundEnabled ? "on" : "off", taskbar: taskbarEnabled ? "on" : "off", overlay: overlayMode,
+        awake: keepAwake ? "on" : "off", "plan-usage": planUsage ? "on" : "off",
+      });
+      const key = a._[0];
+      const value = a._[1];
+      // The Preferences buttons themselves, so saving and repainting are theirs.
+      if (key === "sound") {
+        if (onOff(value, key) !== soundEnabled) $("#notification-sound").click();
+      } else if (key === "taskbar") {
+        if (onOff(value, key) !== taskbarEnabled) $("#notification-taskbar").click();
+      } else if (key === "plan-usage") {
+        if (onOff(value, key) !== planUsage) $("#plan-usage").click();
+      } else if (key === "awake") {
+        await setKeepAwake(onOff(value, key));
+      } else if (key === "overlay") {
+        if (!OVERLAY_MODES.some((m) => m === value)) throw new Error(`overlay takes ${OVERLAY_MODES.join(", ")}, not ${value ?? "nothing"}.`);
+        for (let i = 0; i < OVERLAY_MODES.length && overlayMode !== value; i++) $("#overlay-pref").click();
+      } else if (key !== undefined) {
+        throw new Error(`No setting "${key}". loomctl set lists them.`);
+      }
+      const now = settings();
+      return { data: now, text: table(Object.entries(now)) };
+    },
+  },
+  window: {
+    usage: "window <show|minimize|maximize|restore|phone>",
+    help: "Bring Loom's window up, minimize, maximize or restore it, or toggle the phone size.",
+    run: async (a) => {
+      const w = getCurrentWindow();
+      const how = cliWord(a, 0, "show, minimize, maximize, restore or phone");
+      if (how === "show") await w.unminimize().then(() => w.show()).then(() => w.setFocus());
+      else if (how === "minimize") await w.minimize();
+      else if (how === "maximize") await w.maximize();
+      else if (how === "restore") await w.unminimize().then(() => w.unmaximize());
+      else if (how === "phone") await phoneWindow();
+      else throw new Error(`window takes show, minimize, maximize, restore or phone, not ${how}.`);
+      return { data: { window: how }, text: "" };
+    },
+  },
+};
+
+/** Answers loomctl for as long as the window is up. */
+function installCli() {
+  void listen<{ id: number; cmd: string; args: Args | null; timeout: number }>("cli", async ({ payload }) => {
+    const { id, cmd, timeout } = payload;
+    let reply: Record<string, unknown>;
+    try {
+      const command = Object.prototype.hasOwnProperty.call(CLI, cmd) ? CLI[cmd] : undefined;
+      if (!command) throw new Error(`Unknown command "${cmd}". loomctl help lists them.`);
+      const result = await command.run({ ...(payload.args ?? {}), _: payload.args?._ ?? [] }, timeout);
+      if (result.note) toast(result.note);
+      reply = { ok: true, data: result.data ?? null, text: result.text };
+    } catch (e) {
+      reply = { ok: false, error: e instanceof Error ? e.message : String(e), timeout: e instanceof CliTimeout };
+    }
+    await invoke("cli_reply", { id, reply }).catch(() => {});
+  }).then(() => invoke("cli_ready"));
+}
+
 async function main() {
   // panes: PaneState[]; a bare string is the pre-session format, a number the
   // pre-list one before that. `spaces` is the pre-thread format: a folder and
@@ -6475,6 +7012,7 @@ async function main() {
   toggleChanges(saved.ui?.changesOpen ?? false);
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
+  installCli(); // after the threads exist, before their panes finish starting
   await opened;
   restoring = false;
   await flushSave();

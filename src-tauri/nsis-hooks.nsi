@@ -28,12 +28,20 @@
   loom_aside_done:
 !macroend
 
+; loomctl.exe controls a running Loom from a terminal (src/bin/loomctl.rs). The
+; same cargo run builds it beside loom.exe, so it can't be a bundle resource:
+; those must exist before cargo starts. The macro expands after the template
+; defines MAINBINARYSRCPATH, so its folder is known here at compile time.
 !macro NSIS_HOOK_POSTINSTALL
   Delete "$INSTDIR\${MAINBINARYNAME}.exe.*.old"
+  !searchreplace LOOMCTL_SRC "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\loomctl.exe"
+  SetOutPath "$INSTDIR"
+  File "/oname=loomctl.exe" "${LOOMCTL_SRC}"
   nsExec::Exec `powershell -NoProfile -Command "$$c=[Environment]::GetEnvironmentVariable('Path','User'); if(($$c -split ';') -notcontains '$INSTDIR'){ if($$c){$$c=$$c.TrimEnd(';')+';'}; [Environment]::SetEnvironmentVariable('Path',$$c+'$INSTDIR','User') }"`
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
   Delete "$INSTDIR\${MAINBINARYNAME}.exe.*.old"
+  Delete "$INSTDIR\loomctl.exe"
   nsExec::Exec `powershell -NoProfile -Command "$$c=[Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path',(($$c -split ';' | Where-Object {$$_ -ne '$INSTDIR'}) -join ';'),'User')"`
 !macroend

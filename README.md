@@ -482,6 +482,48 @@ pane and re-pins it with `--effort` on the next launch.
 Without the hooks the cue still fires, but only off Claude's own bell — which
 waits for a hardcoded ~60s idle delay (and effort re-pinning has nothing to go on).
 
+## Control Loom from a terminal
+
+`loomctl.exe` sits beside `loom.exe`, so it is on your PATH after installing.
+It drives the running Loom: each command goes through the same code the
+buttons use, and the window shows the result as it happens.
+
+```
+loomctl status                          # counts by state, and who is waiting
+loomctl threads                         # every thread and its folder
+loomctl panes                           # every pane as <thread>:<n>, with its state
+loomctl read api-fix:1                  # what a pane shows, as text
+loomctl read api-fix:1 --lines 200      # its last 200 lines, history included
+loomctl send api-fix:1 run the tests    # type it, then Enter once it shows up
+loomctl wait api-fix:1                  # block until that agent waits for you
+loomctl menu api-fix:1                  # the numbered question on its screen
+loomctl choose api-fix:1 2              # pick option 2, as the Overview does
+loomctl new C:\code\app --name login --agent codex   # a new worktree thread
+loomctl add login --agent claude        # another agent in that thread
+loomctl show login:2                    # bring it to the front
+loomctl close login:2 --yes             # stop it and close the pane
+loomctl --json panes                    # the same answers as JSON
+loomctl help                            # every command the running Loom knows
+```
+
+A pane is `<thread>:<n>`, its id, or `.` for the pane in front. A thread is its
+name, a unique start of it, or its id. Anything a button would ask about first
+needs `--yes`: closing a pane whose agent is running, stopping or restarting a
+running process, and closing a thread. `close-thread --delete worktree|branch` also refuses to lose
+uncommitted files or unmerged commits unless you add `--force`. `send -`
+reads the text from standard input.
+
+Exit codes: 0 done, 1 the command failed, 2 Loom isn't running, 3 a `wait`
+ran out of time (`--timeout`, an hour by default).
+
+Inside a Loom pane, `loomctl` is on the PATH and talks to the Loom that owns the
+pane, so an agent can read other panes, start agents and wait for them. For a
+profile launch (`loom.exe work.json`), pass `--profile work.json`.
+
+Loom listens on a named pipe, `\\.\pipe\loom-<user>`, that only your Windows
+account can open, and it refuses remote connections. A second Loom on the same
+workspace doesn't take over the pipe. `docs/cli-control.md` has the design.
+
 ## State
 
 - Release builds: `%APPDATA%\dev.ayoub.loom\`

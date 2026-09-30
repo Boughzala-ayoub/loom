@@ -15,6 +15,7 @@
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-set-fullscreen",
+    "core:window:allow-minimize",
     "opener:default",
     "dialog:default"
   ]
