@@ -178,6 +178,7 @@ fn pty_spawn(
     cols: u16,
     rows: u16,
     on_out: tauri::ipc::Channel<String>,
+    bus: bool,
 ) -> Result<(), String> {
     if argv.is_empty() {
         return Err("empty argv".into());
@@ -356,7 +357,13 @@ fn pty_spawn(
                     Err(_) => break,
                 }
             }
-            if !output_flow.acquire() || on_out.send(text).is_err() { break; }
+            if !output_flow.acquire() { break; }
+            // Tagged with this launch's channel, so a relaunch's late output is still told apart.
+            let sent = match if bus { output_app.state::<output::Bus>().push(channel, text) } else { Err(text) } {
+                Ok(()) => true,
+                Err(text) => on_out.send(text).is_ok(),
+            };
+            if !sent { break; }
         }
         output_app.state::<output::Flows>().0.lock().unwrap().remove(&channel);
     });
@@ -382,6 +389,8 @@ fn pty_spawn(
             if map.get(&id).is_some_and(|s| s.pid == pid) { map.remove(&id) } else { None }
         };
         if session.is_some() {
+            // Output already read goes first, as it did before the bus batched it.
+            app.state::<output::Bus>().flush();
             let _ = app.emit(&format!("pty-exit:{id}"), code);
         }
         // Release the input pipe and console even if the exited pane stays open.
@@ -406,6 +415,14 @@ async fn pty_write(ptys: State<'_, Ptys>, id: String, data: String) -> Result<()
 #[tauri::command]
 fn pty_ack(flows: State<output::Flows>, channel: u32) {
     if let Some((_, flow)) = flows.0.lock().unwrap().get(&channel) { flow.ack(); }
+}
+
+/// Where panes spawned with `bus` send their output: one message per flush for
+/// all of them, `[channel, text]` entries (output.rs). Scripts that spawn
+/// without it keep reading their own channels.
+#[tauri::command]
+fn output_bus(bus: State<output::Bus>, on_out: tauri::ipc::Channel<Vec<(u32, String)>>) {
+    bus.open(move |batch| { let _ = on_out.send(batch); });
 }
 
 /// `pty_ack` for several panes and batches at once: `(channel, batches parsed)`.
@@ -1179,8 +1196,8 @@ mod commands {
     #[tauri::command]
     #[allow(clippy::too_many_arguments)]
     pub async fn pty_spawn(app: AppHandle, id: String, cwd: Option<String>, argv: Vec<String>, codex_state_id: Option<String>,
-        cols: u16, rows: u16, on_out: tauri::ipc::Channel<String>) -> Result<(), String> {
-        blocking(move || super::pty_spawn(app.clone(), app.state(), id, cwd, argv, codex_state_id, cols, rows, on_out)).await
+        cols: u16, rows: u16, on_out: tauri::ipc::Channel<String>, bus: Option<bool>) -> Result<(), String> {
+        blocking(move || super::pty_spawn(app.clone(), app.state(), id, cwd, argv, codex_state_id, cols, rows, on_out, bus == Some(true))).await
     }
     #[tauri::command]
     pub async fn pty_kill(app: AppHandle, id: String) -> Result<(), String> {
@@ -1342,6 +1359,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Ptys::default())
         .manage(output::Flows::default())
+        .manage(output::Bus::default())
         .manage(WindowStateReady::default())
         .manage(dictate::Dictation::default())
         .manage(usage::Scanned::default())
@@ -1388,6 +1406,8 @@ pub fn run() {
                 }
             });
             app.manage(WindowMoved(moved));
+            let handle = app.handle().clone();
+            std::thread::spawn(move || handle.state::<output::Bus>().run());
             app.state::<WindowStateReady>().0.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })
@@ -1415,7 +1435,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::pty_spawn, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
+            commands::pty_spawn, output_bus, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_wakes, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::dictate_start,

@@ -103,6 +103,20 @@ function ackOutput(channel: number) {
   if (pending >= 2) flushAcks();
   else ackTimer ||= window.setTimeout(flushAcks, 100);
 }
+/** Every pane's output in one message per flush (output.rs Bus), as [channel, text]
+ * entries: a message per chunk cost a script eval on Loom's main thread each. A
+ * launch keeps its own channel, so a relaunch still tells old output apart, and
+ * output for one that is gone is acked anyway, or its process would stall. */
+const outs = new Map<number, Channel<string>>();
+const outBus = new Channel<[number, string][]>();
+outBus.onmessage = (batch) => {
+  for (const [id, text] of batch) {
+    const out = outs.get(id);
+    if (out) out.onmessage(text);
+    else ackOutput(id);
+  }
+};
+void invoke("output_bus", { onOut: outBus }).catch(() => {});
 
 /** Keep destructive confirmations in the app; Escape and initial focus cancel. */
 function confirm(message: string, options: { title: string; kind?: string; action?: string; detail?: string }): Promise<boolean> {
@@ -1773,7 +1787,9 @@ class Pane {
         (await invoke<boolean>("has_session", { dir: this.th.dir, sid: this.sid }).catch(() => false)));
     const release = restoring && this.agent === "claude" ? await bootSlot(this.th === current) : undefined;
     if (this.disposed) { release?.(); return; }
+    outs.delete(this.out.id);
     const out = this.out = new Channel<string>();
+    outs.set(out.id, out);
     out.onmessage = (d) => {
       const ack = () => ackOutput(out.id);
       if (this.disposed || this.out !== out) { ack(); return; }
@@ -1802,6 +1818,7 @@ class Pane {
       cols: this.term.cols,
       rows: this.term.rows,
       onOut: this.out,
+      bus: true,
     }).then(() => true, (e) => {
       if (this.disposed) return false;
       this.dead = true;
@@ -2123,6 +2140,7 @@ class Pane {
     cancelAnimationFrame(this.raf);
     this.resizeRender?.dispose();
     this.unlisten.forEach((u) => u());
+    outs.delete(this.out.id);
     this.gpu(false);
     this.term.dispose();
     this.el.remove();
