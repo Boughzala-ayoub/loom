@@ -29,6 +29,12 @@
       <button id="new-thread" class="primary" title="Cut a new thread: a worktree with an agent in it"><i class="i i-plus"></i><span class="lbl">Thread</span></button>
       <button id="phone-window" class="icon" aria-label="Fit window for Galaxy A26" aria-pressed="false" title="Fit window for Galaxy A26 (portrait)"><i class="i i-phone" aria-hidden="true"></i></button>
       <button id="preferences-btn" class="icon" aria-label="Preferences" aria-expanded="false" aria-controls="preferences" title="Preferences"><i class="i i-sliders"></i></button>
+      <!-- The window's own caption buttons: there is no native frame. caption.rs puts the snap layouts flyout on the middle one. -->
+      <div id="caption">
+        <button id="cap-min" aria-label="Minimize" title="Minimize">&#xE921;</button>
+        <button id="cap-max" aria-label="Maximize" title="Maximize">&#xE922;</button>
+        <button id="cap-close" aria-label="Close" title="Close">&#xE8BB;</button>
+      </div>
     </header>
 
     <div id="body">

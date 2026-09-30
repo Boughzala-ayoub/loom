@@ -17,6 +17,7 @@
         "width": 1400,
         "height": 900,
         "dragDropEnabled": true,
+        "decorations": false,
         "create": false,
         "backgroundColor": "#0a0f1b"
       }
