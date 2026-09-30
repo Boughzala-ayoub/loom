@@ -2657,9 +2657,7 @@ function paintWaiting() {
     waitingShown = n;
     const b = $("#waiting");
     b.classList.toggle("hidden", !n);
-    // The word is its own span: a narrow bar keeps only the count (styles.css).
-    b.replaceChildren(String(n), Object.assign(document.createElement("span"), { className: "lbl", textContent: " waiting" }));
-    b.setAttribute("aria-label", `${n} waiting`);
+    b.textContent = `${n} waiting`;
     // The beacon pulses for a newcomer, then holds still (styles.css #waiting.ping).
     if (more) (b.classList.remove("ping"), void b.offsetWidth, b.classList.add("ping"));
   }
@@ -3508,32 +3506,6 @@ stillMotion.addEventListener("change", syncSpin);
 void readFocus();
 void getCurrentWindow().onFocusChanged(readFocus);
 void getCurrentWindow().onResized(readFocus);
-
-// The window's own caption buttons (index.html #caption). A mouse click on the
-// maximize button lands on caption.rs's snap layouts window instead; this
-// handler serves the keyboard, and wherever that window doesn't exist.
-const capMax = $<HTMLButtonElement>("#cap-max");
-$("#cap-min").onclick = () => void getCurrentWindow().minimize();
-capMax.onclick = () => void getCurrentWindow().toggleMaximize();
-$("#cap-close").onclick = () => void getCurrentWindow().close();
-void listen<string>("caption-max", (e) => (capMax.dataset.native = e.payload));
-const paintMaximized = () => getCurrentWindow().isMaximized().then((max) => {
-  capMax.textContent = max ? "" : "";
-  capMax.title = max ? "Restore down" : "Maximize";
-  capMax.setAttribute("aria-label", capMax.title);
-}, () => {});
-// caption.rs places its window by this rectangle, in device pixels of the client area.
-let capRect = "";
-const placeCapMax = () => {
-  const r = capMax.getBoundingClientRect();
-  const rect = JSON.stringify(r.width ? [r.left, r.top, r.width, r.height].map((v) => Math.round(v * devicePixelRatio)) : null);
-  if (rect === capRect) return;
-  capRect = rect;
-  void invoke("caption_max", { rect: JSON.parse(rect) }).catch(() => {});
-};
-new ResizeObserver(placeCapMax).observe($("#bar"));
-window.addEventListener("resize", () => (placeCapMax(), void paintMaximized()));
-void paintMaximized();
 let overlayShown = false;
 // Its close button: hidden until Loom next comes to the front or goes behind.
 // Holds the focus state it was closed in.

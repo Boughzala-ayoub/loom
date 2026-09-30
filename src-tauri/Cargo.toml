@@ -52,6 +52,5 @@ whisper-rs = "0.16.0"
 # back to 0.61.2; if `cargo update` ever breaks the build here, that's why:
 #   cargo update -p windows-core@0.62.x --precise 0.61.2
 cpal = "0.18.1"
-# Already in the tree through tao and wry: the overlay shows without taking focus, and
-# caption.rs gives the frameless main window its snap layouts flyout.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse"] }
+# Already in the tree through tao and wry: the overlay shows without taking focus.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power"] }

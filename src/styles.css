@@ -265,53 +265,6 @@ select option {
 #bar > button.icon {
   width: 30px;
 }
-/* The bar is the window's title bar: Windows drags, snaps, restores from
-   maximized, maximizes on double-click and opens the system menu from it
-   (WebView2's non-client regions, which wry turns on). What takes a click opts
-   out, and so does the whole bar while a modal's backdrop covers it. */
-#bar {
-  app-region: drag;
-  -webkit-app-region: drag;
-}
-#bar button,
-#bar input,
-body:has(dialog:modal) #bar {
-  app-region: no-drag;
-  -webkit-app-region: no-drag;
-}
-/* The caption buttons, in the corner the way Windows draws its own: Segoe
-   Fluent Icons glyphs, 46 px wide, the full height of the bar, close red on
-   hover. The maximize button's hover and press come from caption.rs, whose
-   snap layouts window sits over it (data-native). */
-#caption {
-  display: flex;
-  align-self: stretch;
-  flex: none;
-  margin: 0 -10px 0 4px;
-}
-#caption button {
-  width: 46px;
-  height: auto;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  color: var(--text);
-  font: 10px "Segoe Fluent Icons", "Segoe MDL2 Assets";
-}
-#cap-max[data-native="enter"] {
-  background: var(--hover);
-}
-#cap-max[data-native="down"] {
-  background: var(--press);
-}
-#cap-close:hover {
-  color: #fff;
-  background: #c42b1c;
-}
-#cap-close:active {
-  color: #fff;
-  background: #b12718;
-}
 .mark {
   width: 20px;
   height: 20px;
@@ -2923,11 +2876,6 @@ dialog h2 {
   #search .lbl, #search kbd { display: none; }
   #layout .lbl { display: none; }
   #layout { width: 28px; padding: 0; }
-  /* Room for the caption buttons at half a 1920 px screen: the new-thread
-     button and the waiting chip keep their icon and count, the logo goes. */
-  #bar .mark, #new-thread .lbl, #waiting .lbl { display: none; }
-  #new-thread { padding: 0 8px; }
-  #caption button { width: 40px; }
   #changes { position: absolute; inset: 0 0 0 auto; z-index: 15; width: min(360px, 100%); box-shadow: -12px 0 40px var(--shadow-c); background: var(--glass-float); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); }
   #changes-resize { display: none; }
   #work { position: relative; }
@@ -2940,11 +2888,11 @@ dialog h2 {
 @media (max-width: 760px) {
   /* Two rows: controls, then where you are. */
   #bar { flex-wrap: wrap; height: 76px; padding: 4px 6px; gap: 2px 4px; align-content: center; }
-  /* Where you are shares the second row with the plan chips; the first keeps the controls and the caption. */
-  #crumbs { order: 1; flex: 1 1 calc(100% - 136px); min-width: 0; padding: 0 6px; }
-  #plan, #codex-plan { order: 1; }
-  #caption { align-self: flex-start; height: 36px; margin: -4px -6px 0 auto; }
+  #crumbs { order: 1; flex-basis: 100%; padding: 0 6px; }
+  #bar .mark { display: none; }
   #bar > button { height: 32px; min-width: 32px; }
+  #new-thread { padding: 0 8px; }
+  #new-thread .lbl { display: none; }
   #waiting { padding: 0 8px; }
   #preferences { top: 82px; max-height: calc(100dvh - 94px); }
   .chip { max-width: 120px; }
@@ -2992,6 +2940,7 @@ dialog h2 {
 @media (max-width: 480px) {
   #search { display: none; }
   #bar #crumbs { flex: 1 1 calc(100% - 112px); min-width: 0; }
+  #plan, #codex-plan { order: 1; }
   /* The prefix keeps its words; the language shrinks to its caret. */
   #lang .lbl { display: none; }
   #lang { padding: 0 7px; }
@@ -2999,11 +2948,6 @@ dialog h2 {
   #wsactions { flex-wrap: wrap; }
   #bar { gap: 2px; }
   .plan-chip { padding: 0 6px; gap: 4px; }
-  /* No caption buttons in the phone layout: the row has no room, and over a
-     phone's remote desktop a stray tap on close would end every agent. The
-     phone button restores the window, and right-clicking the bar still opens
-     Windows' own menu with minimize, maximize and close. */
-  #caption { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

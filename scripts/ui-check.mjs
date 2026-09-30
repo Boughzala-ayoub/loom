@@ -241,27 +241,6 @@ try {
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');
-    // The window's own caption buttons: there is no native frame. The phone layout leaves them to
-    // the system menu. caption.rs lays its snap layouts window over the maximize button's rectangle.
-    const caption = await page.evaluate(() => {
-      const box = document.querySelector('#caption').getBoundingClientRect(), bar = document.querySelector('#bar').getBoundingClientRect();
-      const max = document.querySelector('#cap-max').getBoundingClientRect();
-      return {
-        shown: getComputedStyle(document.querySelector('#caption')).display !== 'none', box: [box.top, box.right, box.bottom], bar: [bar.top, bar.bottom],
-        reported: window.qa.calls.filter(c => c.cmd === 'caption_max').at(-1)?.args.rect,
-        expected: max.width ? [max.left, max.top, max.width, max.height].map(v => Math.round(v * devicePixelRatio)) : null,
-      };
-    });
-    assert.equal(caption.shown, width > 480, `Caption buttons show above the phone layout @${width}`);
-    assert.deepEqual(caption.reported, caption.expected, `The snap layouts window gets the maximize button's rectangle @${width}`);
-    if (caption.shown) {
-      assert.deepEqual(caption.box.slice(0, 2), [caption.bar[0], width], `Caption buttons sit in the window's top right corner @${width}: ${JSON.stringify(caption)}`);
-      assert.ok(caption.box[2] <= caption.bar[1], `Caption buttons fit inside the bar @${width}`);
-      for (const [id, cmd] of [['#cap-min', 'minimize'], ['#cap-max', 'toggle_maximize'], ['#cap-close', 'close']]) {
-        await page.click(id);
-        await page.waitForFunction(cmd => window.qa.calls.some(c => c.cmd === `plugin:window|${cmd}`), cmd);
-      }
-    }
     assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'false');
     await page.click('#preferences-btn');
     await page.click('#keep-awake');

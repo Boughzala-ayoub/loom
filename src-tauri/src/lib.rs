@@ -15,7 +15,6 @@ mod output;
 mod cache;
 mod opencode;
 mod usage;
-mod caption;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
 /// Extra Claude Code settings, handed to each pane's `claude` via --settings.
@@ -1392,14 +1391,10 @@ pub fn run() {
             let cfg = app.config().app.windows.first().expect("window config").clone();
             let profile = webview_profile_dir(app.handle());
             app.manage(ProfileDir(profile.clone()));
-            let main = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+            tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                 .data_directory(profile)
                 .enable_clipboard_access()
                 .build()?;
-            // Without it the maximize button just maximizes: no snap layouts flyout.
-            if let Err(e) = main.hwnd().map_err(|e| e.to_string()).and_then(|h| caption::create(app.handle(), h).map_err(|e| e.to_string())) {
-                eprintln!("snap layouts overlay: {e}");
-            }
             // A drag or resize fires dozens of events a second: save once it has
             // been still for 500 ms. On the main thread, as before: the plugin's own
             // event handler takes the lock a save holds while it reads the window.
@@ -1451,7 +1446,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            commands::pty_spawn, output_bus, caption::caption_max, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
+            commands::pty_spawn, output_bus, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::dictate_start,
