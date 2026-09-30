@@ -261,7 +261,7 @@ fn pty_spawn(
     cmd.env("LOOM_SESSION_FILE", data_dir(&app).join("session-marks").join(&id));
     // loomctl from inside a pane reaches the Loom that owns it (control.rs),
     // and finds loomctl.exe beside loom.exe without a PATH of its own.
-    cmd.env("LOOM_PIPE", pipe::pipe_name(profile_arg().as_deref()));
+    cmd.env("LOOM_PIPE", pipe::instance_pipe());
     if let Some(dir) = exe.parent() {
         let mut path = std::ffi::OsString::from(dir);
         if let Some(rest) = cmd.get_env("PATH") {
@@ -1427,6 +1427,7 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || handle.state::<output::Bus>().run());
             control::serve(app.handle().clone(), pipe::pipe_name(profile_arg().as_deref()));
+            control::serve(app.handle().clone(), pipe::instance_pipe());
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(250));

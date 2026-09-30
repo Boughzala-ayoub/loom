@@ -19,7 +19,7 @@ import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, echoes, type Menu as AgentMenu } from "./prompt";
-import { flag, keyBytes, num, onOff, paneRef, table, type Args } from "./cli";
+import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, str, table, type Args, type Options } from "./cli";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
@@ -1761,8 +1761,10 @@ class Pane {
   }
 
   /** Ends the process and keeps the pane. pty_kill takes the session out of
-   * the map before killing it, so no pty-exit follows: the exit is marked here. */
+   * the map before killing it, so no pty-exit follows: the exit is marked here.
+   * A launch still starting gives up, and kills what it started (see spawn). */
   async stop() {
+    this.launchGen++;
     await invoke("pty_kill", { id: this.id });
     this.exited(1, "stopped");
   }
@@ -1772,9 +1774,33 @@ class Pane {
    * was never written to — a pane opened and never used — so the transcript
    * is checked first and a fresh `--session-id` boot takes over. A codex or
    * opencode pane with no reported session yet (made before Loom captured one)
-   * asks once instead of guessing. */
-  async spawn(resume: boolean, retry = false) {
-    if (this.disposed) return;
+   * asks once instead of guessing.
+   *
+   * True once the process runs, else why it doesn't. Launches take turns, and
+   * each carries a generation that a newer launch or stop() bumps: one that
+   * falls behind while awaiting the session check, a boot slot or pty_spawn
+   * gives up, and kills a process it already started before the next launch
+   * may begin. pty_spawn replaces a pane's session by id, so two in flight
+   * could leave the wrong one running. */
+  async spawn(resume: boolean, retry = false): Promise<true | string> {
+    const gen = ++this.launchGen;
+    const before = this.launching;
+    let done!: () => void;
+    this.launching = new Promise<void>((r) => (done = r));
+    try {
+      await before;
+      return await this.launch(gen, resume, retry);
+    } finally {
+      done();
+    }
+  }
+  private launchGen = 0;
+  private launching: Promise<void> = Promise.resolve();
+
+  private async launch(gen: number, resume: boolean, retry: boolean): Promise<true | string> {
+    const stale = () => this.disposed || gen !== this.launchGen;
+    const gaveUp = () => (this.disposed ? "The pane was closed." : "A stop or another launch came first.");
+    if (stale()) return gaveUp();
     this.starting = true;
     this.startupOutput = "";
     this.startupRetry = retry;
@@ -1785,14 +1811,14 @@ class Pane {
       try {
         if (!(await invoke<boolean>("has_codex_session", { sid: this.sessionId }))) this.sessionId = undefined;
       } catch (e) {
-        if (this.disposed) return;
+        if (stale()) return gaveUp();
         this.dead = true;
         this.term.write(`\r\nCould not check saved session: ${String(e)} — Enter retries\r\n`);
         this.paint();
-        return;
+        return `Could not check the saved session: ${String(e)}`;
       }
     }
-    if (this.disposed) return;
+    if (stale()) return gaveUp();
     if (resume && !this.sessionId && (this.agent === "codex" || this.agent === "opencode") && !ownSession(this.startup)) {
       this.dead = true;
       if (!this.resumeNotice) {
@@ -1806,7 +1832,7 @@ class Pane {
         this.resumeNotice = notice;
       }
       this.paint();
-      return;
+      return `${this.agent} has no session to resume yet. Pick one in Loom, or start a new one.`;
     }
     this.resumeNotice?.remove();
     this.resumeNotice = undefined;
@@ -1819,8 +1845,9 @@ class Pane {
       resume &&
       (this.agent !== "claude" ||
         (await invoke<boolean>("has_session", { dir: this.th.dir, sid: this.sid }).catch(() => false)));
+    if (stale()) return gaveUp();
     const release = restoring && this.agent === "claude" ? await bootSlot(this.th === current) : undefined;
-    if (this.disposed) { release?.(); return; }
+    if (stale()) { release?.(); return gaveUp(); }
     outs.delete(this.out.id);
     const out = this.out = new Channel<string>();
     outs.set(out.id, out);
@@ -1853,19 +1880,20 @@ class Pane {
       rows: this.term.rows,
       onOut: this.out,
       bus: true,
-    }).then(() => true, (e) => {
-      if (this.disposed) return false;
-      this.dead = true;
-      this.term.write(`\r\n\x1b[31m${e}\x1b[0m — Enter retries\r\n`);
-      return false;
-    });
-    if (this.disposed) {
+    }).then(() => true as const, (e) => String(e));
+    if (stale()) {
+      // Stopped, closed or relaunched while this process was starting: it must not stay up.
       release?.();
-      await invoke("pty_kill", { id: this.id }).catch(() => {});
-      return;
+      if (ok === true) await invoke("pty_kill", { id: this.id }).catch(() => {});
+      return gaveUp();
     }
-    if (release) void (ok ? booted(this.id) : Promise.resolve()).then(release);
+    if (ok !== true) {
+      this.dead = true;
+      this.term.write(`\r\n\x1b[31m${ok}\x1b[0m — Enter retries\r\n`);
+    }
+    if (release) void (ok === true ? booted(this.id) : Promise.resolve()).then(release);
     this.paint();
+    return ok;
   }
 
   private retryCodexStartup() {
@@ -2369,14 +2397,16 @@ class Thread {
   }
 
   /** `force`: loomctl's --yes, which already said so. */
-  async closePane(p: Pane, force = false) {
-    const i = this.panes.indexOf(p);
-    if (i === -1) return;
+  async closePane(p: Pane, force = false): Promise<boolean> {
+    if (!this.panes.includes(p)) return false;
     // A misclick on ✕ would otherwise kill a running agent on the spot.
     if (p.agentUp && !force && !(await confirm(`Close ${p.agent} pane?`, {
       title: "Loom", action: "Close pane",
       detail: "This stops the running agent and removes this pane from the workspace. Your project files stay on disk.",
-    }))) return;
+    }))) return false;
+    // Found again after the dialog: another close may have come first.
+    const i = this.panes.indexOf(p);
+    if (i === -1) return false;
     if (this.zoomed === p) this.toggleZoom(p);
     this.panes.splice(i, 1);
     const cleanup = p.dispose();
@@ -2384,6 +2414,7 @@ class Thread {
     this.focusPane(this.panes[Math.min(i, this.panes.length - 1)] ?? null);
     save(); // else the pane is back on the next launch
     await cleanup;
+    return true;
   }
 
   /** Ctrl+Alt+Arrow: the pane whose box lies that way from the focused one,
@@ -3231,29 +3262,46 @@ async function submit(p: Pane) {
   if (p.waitingSince === since) p.seen(); // A new alert raised meanwhile stays.
 }
 
+/** One input sequence per pane at a time. A reply pastes, waits for the echo,
+ * then presses Enter; a second one arriving in between (the Overview and
+ * loomctl, or two loomctl calls) would join both texts into one submission. */
+const inputTurns = new WeakMap<Pane, Promise<unknown>>();
+function inTurn<T>(p: Pane, sequence: () => Promise<T>): Promise<T> {
+  const run = (inputTurns.get(p) ?? Promise.resolve()).catch(() => {}).then(() => {
+    if (p.dead || !p.th.panes.includes(p)) throw new Error(`${p.agent} isn't running, so nothing was typed.`);
+    return sequence();
+  });
+  inputTurns.set(p, run.catch(() => {}));
+  return run;
+}
+
 /** Paste, then press Enter only if the text shows up on screen. On a menu or
  * anything else that doesn't take text, Enter would pick an option instead. */
-async function sendReply(p: Pane, text: string) {
-  const before = echoes(liveScreen(p), text);
-  await keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
-  await p.settle(150, 1000);
-  if (echoes(liveScreen(p), text) <= before) throw new Error(`${p.agent} didn't show your text, so Loom didn't press Enter. Open the session to answer.`);
-  await submit(p);
+function sendReply(p: Pane, text: string) {
+  return inTurn(p, async () => {
+    const before = echoes(liveScreen(p), text);
+    await keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+    await p.settle(150, 1000);
+    if (echoes(liveScreen(p), text) <= before) throw new Error(`${p.agent} didn't show your text, so Loom didn't press Enter. Open the session to answer.`);
+    await submit(p);
+  });
 }
 
 /** Pick option `i` the way a person would: one arrow key at a time, reading the
  * screen after each, and Enter only once `i` is highlighted. If the menu on
  * screen stops matching the one the button came from, nothing is chosen. */
-async function choose(p: Pane, menu: AgentMenu, i: number) {
-  const same = (m: AgentMenu | null) => m?.options.join("\n") === menu.options.join("\n");
-  for (let step = 0; step <= menu.options.length; step++) {
-    const now = readMenu(liveScreen(p, false));
-    if (!now || !same(now)) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
-    if (now.selected === i) return submit(p);
-    await keys(p, (p.term.modes.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + (now.selected > i ? "A" : "B"));
-    await p.settle(80, 800);
-  }
-  throw new Error(`Loom couldn't move ${p.agent}'s highlight to that option. Open the session to answer.`);
+function choose(p: Pane, menu: AgentMenu, i: number) {
+  return inTurn(p, async () => {
+    const same = (m: AgentMenu | null) => m?.options.join("\n") === menu.options.join("\n");
+    for (let step = 0; step <= menu.options.length; step++) {
+      const now = readMenu(liveScreen(p, false));
+      if (!now || !same(now)) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
+      if (now.selected === i) return submit(p);
+      await keys(p, (p.term.modes.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + (now.selected > i ? "A" : "B"));
+      await p.settle(80, 800);
+    }
+    throw new Error(`Loom couldn't move ${p.agent}'s highlight to that option. Open the session to answer.`);
+  });
 }
 
 /** Lock every copy of an agent while sending, including cards in other groups. */
@@ -3932,40 +3980,56 @@ async function atRisk(th: Thread, branch: boolean): Promise<string> {
  * "close" keeps the worktree on disk, "worktree" removes the folder and keeps
  * the branch, "all" deletes the branch too. Panes go first either way — a
  * folder with a shell still in it cannot be removed. */
-async function removeThread(th: Thread, mode: "close" | "worktree" | "all", force = false) {
-  const risk = mode === "close" || !th.isWorktree || force ? "" : await atRisk(th, mode === "all");
-  const what =
-    mode === "close"
-      ? `Close ${th.name}?`
-      : mode === "worktree"
-        ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept.`
-        : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost.`;
-  if (!force && (th.panes.length || mode !== "close")) {
-    if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return;
-  }
-  const i = threads.indexOf(th);
-  threads.splice(i, 1);
-  const cleanup = th.dispose();
-  renderSide();
-  show(threads[Math.min(i, threads.length - 1)] ?? null);
-  save();
-  await cleanup;
-  if (mode === "close" || !th.isWorktree) return;
+/** Threads on their way out. A second close of the same thread (two clicks, two
+ * loomctl calls) stops here: after the awaits below it would find no thread,
+ * and splice(-1) would drop the last, unrelated one. */
+const closingThreads = new WeakSet<Thread>();
+
+/** `removed` once the thread is out of Loom; `error` when the folder or branch
+ * it was asked to delete is still there (the window also shows it). */
+async function removeThread(th: Thread, mode: "close" | "worktree" | "all", force = false): Promise<{ removed: boolean; error?: string }> {
+  if (closingThreads.has(th) || !threads.includes(th)) return { removed: false, error: `${th.name} is already closing or closed.` };
+  closingThreads.add(th);
   try {
-    // The killed panes' processes take a beat to die, and Windows refuses to
-    // delete a folder that is still some process's cwd — retry a few times.
-    for (let n = 0; ; n++) {
-      try {
-        await git(th.repo, "worktree", "remove", "--force", th.dir);
-        break;
-      } catch (e) {
-        if (n === 10) throw e;
-        await new Promise((r) => setTimeout(r, 300));
-      }
+    const risk = mode === "close" || !th.isWorktree || force ? "" : await atRisk(th, mode === "all");
+    const what =
+      mode === "close"
+        ? `Close ${th.name}?`
+        : mode === "worktree"
+          ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept.`
+          : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost.`;
+    if (!force && (th.panes.length || mode !== "close")) {
+      if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return { removed: false };
     }
-    if (mode === "all" && th.branch) await git(th.repo, "branch", "-D", th.branch);
-  } catch (e) {
-    toast(String(e));
+    const i = threads.indexOf(th);
+    if (i === -1) return { removed: false, error: `${th.name} is already closed.` };
+    threads.splice(i, 1);
+    const cleanup = th.dispose();
+    renderSide();
+    show(threads[Math.min(i, threads.length - 1)] ?? null);
+    save();
+    await cleanup;
+    if (mode === "close" || !th.isWorktree) return { removed: true };
+    try {
+      // The killed panes' processes take a beat to die, and Windows refuses to
+      // delete a folder that is still some process's cwd — retry a few times.
+      for (let n = 0; ; n++) {
+        try {
+          await git(th.repo, "worktree", "remove", "--force", th.dir);
+          break;
+        } catch (e) {
+          if (n === 10) throw e;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
+      if (mode === "all" && th.branch) await git(th.repo, "branch", "-D", th.branch);
+      return { removed: true };
+    } catch (e) {
+      toast(String(e));
+      return { removed: true, error: String(e) };
+    }
+  } finally {
+    closingThreads.delete(th);
   }
 }
 
@@ -4985,7 +5049,10 @@ async function refExists(repo: string, ref: string) {
  * suffixed -2, -3… when that name is already a branch or a folder. A `base`
  * that names nothing, locally or on origin, is taken as a NEW branch name: the
  * thread is created on it, off HEAD. */
-async function createThread(repo: string, name: string, cmd: string, base: string, n: number) {
+/** The thread it opened, or the one already open on that folder. */
+async function createThread(repo: string, name: string, cmd: string, base: string, n: number): Promise<Thread> {
+  // Before git touches anything: a bad count must not leave a worktree behind.
+  if (!Number.isInteger(n) || n < 1 || n > MAX_PANES) throw new Error(`A thread takes 1 to ${MAX_PANES} panes, not ${n}.`);
   let dir = repo;
   let branch = "";
   // A base with no name still means "cut me a worktree" — the branch names it.
@@ -5031,10 +5098,13 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     }
   } else {
     const have = threads.find((t) => t.dir === dir);
-    if (have) return show(have);
+    if (have) {
+      show(have);
+      return have;
+    }
     branch = (await git(repo, "rev-parse", "--abbrev-ref", "HEAD").catch(() => "")).trim();
   }
-  await openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd }));
+  return openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd }));
 }
 
 /** "+ Thread": a native <dialog> — repo, name, agent, base branch, pane count.
@@ -6057,7 +6127,10 @@ function countFinds(p: Pane) {
 // command wants --yes instead.
 
 type CliResult = { data?: unknown; text?: string; note?: string };
-type CliCommand = { usage: string; help: string; run: (a: Args, seconds: number) => CliResult | Promise<CliResult> };
+/** How long the caller waits, and the folder its terminal was in. */
+type CliContext = { seconds: number; cwd?: string };
+/** `options`: every --option the command takes (cli.ts parseArgs checks them). */
+type CliCommand = { usage: string; help: string; options?: Options; run: (a: Args, ctx: CliContext) => CliResult | Promise<CliResult> };
 /** A wait that ran out: loomctl exits 3 for it rather than 1. */
 class CliTimeout extends Error {}
 
@@ -6134,10 +6207,13 @@ function cliWord(a: Args, i: number, what: string) {
 
 /** The startup command for --agent, or --cmd as given. */
 function cliCommand(a: Args) {
-  if (typeof a.cmd === "string") return a.cmd;
-  if (a.agent === undefined) return startups[0]?.cmd ?? "";
-  const s = startups.find((x) => x.label.toLowerCase() === String(a.agent).toLowerCase());
-  if (!s) throw new Error(`--agent takes ${startups.map((x) => x.label).join(", ")}, not ${String(a.agent)}.`);
+  const cmd = str(a, "cmd");
+  const agent = str(a, "agent");
+  if (cmd !== undefined && agent !== undefined) throw new Error("Give --agent or --cmd, not both.");
+  if (cmd !== undefined) return cmd;
+  if (agent === undefined) return startups[0]?.cmd ?? "";
+  const s = startups.find((x) => x.label.toLowerCase() === agent.toLowerCase());
+  if (!s) throw new Error(`--agent takes ${startups.map((x) => x.label).join(", ")}, not ${agent}.`);
   return s.cmd;
 }
 
@@ -6209,9 +6285,11 @@ const CLI: Record<string, CliCommand> = {
   panes: {
     usage: "panes [--thread T] [--state S]",
     help: "Every pane: its <thread>:<n>, id, agent, state and title.",
+    options: { thread: "string", state: "string" },
     run: (a) => {
-      const want = a.state === undefined ? null : cliStates(a.state, "");
-      const panes = (a.thread === undefined ? threads : [cliThread(String(a.thread))])
+      const want = a.state === undefined ? null : cliStates(str(a, "state"), "");
+      const thread = str(a, "thread");
+      const panes = (thread === undefined ? threads : [cliThread(thread)])
         .flatMap((t) => t.panes)
         .filter((p) => !want || want.includes(cliState(p)));
       return { data: panes.map(paneData), text: panes.length ? paneRows(panes) : "No panes." };
@@ -6220,6 +6298,7 @@ const CLI: Record<string, CliCommand> = {
   read: {
     usage: "read [pane] [--lines N]",
     help: "The pane's screen as text, or its last N lines including history.",
+    options: { lines: "int" },
     run: (a) => {
       const p = cliPane(a._[0]);
       let raw: string;
@@ -6294,10 +6373,11 @@ const CLI: Record<string, CliCommand> = {
   layout: {
     usage: "layout <cols|rows|grid> [--thread T]",
     help: "How a thread arranges its panes.",
+    options: { thread: "string" },
     run: (a) => {
       const mode = cliWord(a, 0, "a layout: cols, rows or grid") as LayoutMode;
       if (!LAYOUTS.includes(mode)) throw new Error(`layout takes cols, rows or grid, not ${mode}.`);
-      const th = cliThread(a.thread === undefined ? undefined : String(a.thread));
+      const th = cliThread(str(a, "thread"));
       th.layout = mode;
       th.relayout();
       if (th === current) paintLayout(mode);
@@ -6317,26 +6397,27 @@ const CLI: Record<string, CliCommand> = {
   },
   new: {
     usage: "new <folder> [--agent A | --cmd C] [--name N] [--base B] [--panes N]",
-    help: "Open a Git folder as a thread. --name cuts a new worktree and branch loom/<name> off --base.",
-    run: async (a) => {
-      const folder = cliWord(a, 0, "a folder");
-      for (const k of ["name", "base", "cmd"]) if (a[k] === true) throw new Error(`--${k} needs a value.`);
+    help: "Open a Git folder as a thread. --name cuts a new worktree and branch loom/<name> off --base. A relative folder is relative to your terminal.",
+    options: { agent: "string", cmd: "string", name: "string", base: "string", panes: "int" },
+    run: async (a, ctx) => {
+      // Everything checked before git runs: nothing may be left behind by a bad argument.
+      const folder = callerPath(cliWord(a, 0, "a folder"), ctx.cwd);
+      const cmd = cliCommand(a);
+      const n = num(a, "panes", 1, 1, MAX_PANES);
       const top = await git(folder, "rev-parse", "--show-toplevel").catch(() => {
         throw new Error(`${folder} isn't in a Git repository.`);
       });
       const repo = top.trim().replace(/\//g, "\\");
-      const cmd = cliCommand(a);
-      const n = num(a, "panes", 1, 1, MAX_PANES);
-      const before = new Set(threads);
-      await createThread(repo, String(a.name ?? ""), cmd, String(a.base ?? ""), n);
-      const th = threads.find((t) => !before.has(t)) ?? threads.find((t) => t.dir.toLowerCase() === repo.toLowerCase());
-      if (!th) throw new Error("Loom didn't open the thread.");
+      const th = await createThread(repo, str(a, "name") ?? "", cmd, str(a, "base") ?? "", n);
+      const failed = th.panes.filter((p) => p.dead);
+      if (failed.length) throw new Error(`Opened ${th.name}, but ${failed.map(paneName).join(", ")} didn't start. The pane shows why.`);
       return { data: threadData(th), text: `${th.name} (${th.id}) in ${th.dir}`, note: `loomctl opened ${th.name}` };
     },
   },
   add: {
     usage: "add [thread] [--agent A | --cmd C]",
     help: "Start another agent or terminal in a thread and bring it to the front.",
+    options: { agent: "string", cmd: "string" },
     run: async (a) => {
       const th = cliThread(a._[0]);
       if (th.panes.length >= MAX_PANES) throw new Error(`${th.name} already has ${MAX_PANES} panes.`);
@@ -6348,6 +6429,7 @@ const CLI: Record<string, CliCommand> = {
       if (!p) throw new Error(`Loom didn't start the pane in ${th.name}.`);
       revealPane(p);
       save();
+      if (p.dead) throw new Error(`${paneName(p)} (${p.id}) didn't start. The pane shows why.`);
       return { data: paneData(p), text: `${paneName(p)} (${p.id}): ${p.agent}`, note: `loomctl started ${p.agent} in ${th.name}` };
     },
   },
@@ -6365,12 +6447,13 @@ const CLI: Record<string, CliCommand> = {
   send: {
     usage: "send <pane> <text...> [--no-enter]",
     help: "Type text into a pane and press Enter once it shows there. - reads the text from standard input.",
+    options: { "no-enter": "bool" },
     run: async (a) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
       const text = a._.slice(1).join(" ");
       if (!text) throw new Error("Give the text to send.");
       if (p.dead) throw new Error(`${paneName(p)} has exited. loomctl restart ${paneName(p)} starts it again.`);
-      if (flag(a, "no-enter")) await keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+      if (flag(a, "no-enter")) await inTurn(p, () => keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text));
       else await sendReply(p, text);
       return { data: { pane: p.id }, text: "" };
     },
@@ -6388,10 +6471,12 @@ const CLI: Record<string, CliCommand> = {
         return b;
       });
       if (p.dead) throw new Error(`${paneName(p)} has exited.`);
-      for (const b of bytes) {
-        await keys(p, b);
-        await p.settle(60, 500);
-      }
+      await inTurn(p, async () => {
+        for (const b of bytes) {
+          await keys(p, b);
+          await p.settle(60, 500);
+        }
+      });
       return { data: { pane: p.id, keys: names }, text: "" };
     },
   },
@@ -6411,10 +6496,11 @@ const CLI: Record<string, CliCommand> = {
   wait: {
     usage: "wait [pane] [--state waiting] [--timeout S]",
     help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting.",
-    run: async (a, seconds) => {
+    options: { state: "string" },
+    run: async (a, ctx) => {
       const p = cliPane(a._[0]);
-      const want = cliStates(a.state, "waiting");
-      await until(() => gone(p) || want.includes(cliState(p)), seconds, `${paneName(p)} to be ${want.join(" or ")}`);
+      const want = cliStates(str(a, "state"), "waiting");
+      await until(() => gone(p) || want.includes(cliState(p)), ctx.seconds, `${paneName(p)} to be ${want.join(" or ")}`);
       if (gone(p)) throw new Error("The pane was closed.");
       return { data: paneData(p), text: `${paneName(p)} is ${cliState(p)}` };
     },
@@ -6422,9 +6508,11 @@ const CLI: Record<string, CliCommand> = {
   "wait-any": {
     usage: "wait-any [--state waiting] [--thread T] [--new] [--timeout S]",
     help: "Block until any pane is in a state; --new skips the ones already in it.",
-    run: async (a, seconds) => {
-      const want = cliStates(a.state, "waiting");
-      const scope = a.thread === undefined ? null : cliThread(String(a.thread));
+    options: { state: "string", thread: "string", new: "bool" },
+    run: async (a, ctx) => {
+      const want = cliStates(str(a, "state"), "waiting");
+      const thread = str(a, "thread");
+      const scope = thread === undefined ? null : cliThread(thread);
       const pool = () => (scope ? scope.panes : threads.flatMap((t) => t.panes));
       // --new: a pane counts once it has left the state and come back.
       const skip = new Set(flag(a, "new") ? pool().filter((p) => want.includes(cliState(p))) : []);
@@ -6432,13 +6520,14 @@ const CLI: Record<string, CliCommand> = {
       await until(() => {
         for (const p of skip) if (!want.includes(cliState(p))) skip.delete(p);
         return !!(hit = pool().find((p) => !skip.has(p) && want.includes(cliState(p))));
-      }, seconds, `a pane to be ${want.join(" or ")}`);
+      }, ctx.seconds, `a pane to be ${want.join(" or ")}`);
       return { data: paneData(hit!), text: `${paneName(hit!)} (${hit!.agent}) is ${cliState(hit!)}` };
     },
   },
   restart: {
     usage: "restart [pane] [--yes]",
     help: "Start a pane's process again, resuming its session. A running one needs --yes and is stopped first.",
+    options: { yes: "bool" },
     run: async (a) => {
       const p = cliPane(a._[0]);
       if (!p.dead) {
@@ -6446,13 +6535,15 @@ const CLI: Record<string, CliCommand> = {
         await p.stop();
       }
       if (needsSession(p)) throw new Error(`${paneName(p)} has no session to resume. Pick one in Loom.`);
-      await p.spawn(true);
+      const started = await p.spawn(true);
+      if (started !== true) throw new Error(`${paneName(p)} didn't start: ${started}`);
       return { data: paneData(p), text: `${paneName(p)} restarted`, note: `loomctl restarted ${paneName(p)}` };
     },
   },
   stop: {
     usage: "stop [pane] --yes",
-    help: "Stop a pane's process and keep the pane, as the Overview's Stop does.",
+    help: "Stop a pane's process and keep the pane, as the Overview's Stop does. A process still starting is stopped too.",
+    options: { yes: "bool" },
     run: async (a) => {
       const p = cliPane(a._[0]);
       if (p.dead) return { data: paneData(p), text: `${paneName(p)} has already exited.` };
@@ -6464,20 +6555,22 @@ const CLI: Record<string, CliCommand> = {
   close: {
     usage: "close [pane] [--yes]",
     help: "Close a pane. One with a running agent needs --yes.",
+    options: { yes: "bool" },
     run: async (a) => {
       const p = cliPane(a._[0]);
       const name = paneName(p);
       if (p.agentUp && !flag(a, "yes")) throw new Error(`${name} is running ${p.agent}. Pass --yes to stop it and close the pane.`);
-      await p.th.closePane(p, true);
+      if (!(await p.th.closePane(p, true))) throw new Error(`${name} was already closed.`);
       return { data: { closed: p.id }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
     },
   },
   "close-thread": {
     usage: "close-thread <thread> --yes [--delete worktree|branch] [--force]",
     help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Work that would be lost needs --force.",
+    options: { yes: "bool", delete: "string", force: "bool" },
     run: async (a) => {
       const th = cliThread(cliWord(a, 0, "a thread"));
-      const del = a.delete === undefined ? "" : String(a.delete);
+      const del = str(a, "delete") ?? "";
       if (del && del !== "worktree" && del !== "branch") throw new Error(`--delete takes worktree or branch, not ${del}.`);
       if (del && !th.isWorktree) throw new Error(`${th.name} isn't a worktree Loom made, so there is nothing to delete.`);
       const what = `${th.panes.length} pane${th.panes.length === 1 ? "" : "s"}${del ? ` and deletes ${del === "branch" ? `the worktree and branch ${th.branch}` : "the worktree folder"}` : ""}`;
@@ -6487,7 +6580,9 @@ const CLI: Record<string, CliCommand> = {
         if (risk) throw new Error(`${risk}\nPass --force as well to delete anyway.`);
       }
       const name = th.name;
-      await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", true);
+      const result = await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", true);
+      if (!result.removed) throw new Error(result.error ?? `${name} wasn't closed.`);
+      if (result.error) throw new Error(`Closed ${name}, but ${del === "branch" ? "its worktree or branch" : "its worktree"} is still there: ${result.error}`);
       return { data: { closed: th.id }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
     },
   },
@@ -6558,13 +6653,14 @@ const CLI: Record<string, CliCommand> = {
 
 /** Answers loomctl for as long as the window is up. */
 function installCli() {
-  void listen<{ id: number; cmd: string; args: Args | null; timeout: number }>("cli", async ({ payload }) => {
+  void listen<{ id: number; cmd: string; argv: string[] | null; cwd: string | null; timeout: number }>("cli", async ({ payload }) => {
     const { id, cmd, timeout } = payload;
     let reply: Record<string, unknown>;
     try {
       const command = Object.prototype.hasOwnProperty.call(CLI, cmd) ? CLI[cmd] : undefined;
       if (!command) throw new Error(`Unknown command "${cmd}". loomctl help lists them.`);
-      const result = await command.run({ ...(payload.args ?? {}), _: payload.args?._ ?? [] }, timeout);
+      const args = parseArgs(payload.argv ?? [], command.options ?? {}, cmd);
+      const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined });
       if (result.note) toast(result.note);
       reply = { ok: true, data: result.data ?? null, text: result.text };
     } catch (e) {

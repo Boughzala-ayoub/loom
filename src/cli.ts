@@ -17,19 +17,81 @@ export function paneRef(sel: string | undefined): PaneRef {
   return { id: sel };
 }
 
-/** An --option that is on: `--yes`, or `--yes=true|yes|on|1`. */
-export function flag(args: Args, name: string): boolean {
-  const v = args[name];
-  return v === true || (typeof v === "string" && /^(true|yes|on|1)$/i.test(v));
+/** What each --option of a command takes. A bool is on by being there and never
+ * takes the next word; the rest need a value: `--name value` or `--name=value`. */
+export type OptionType = "bool" | "string" | "int";
+export type Options = Record<string, OptionType>;
+
+/** A command's words and --options, checked against what it takes. After a
+ * bare --, every word is a word. */
+export function parseArgs(argv: string[], options: Options, command: string): Args {
+  const a: Args = { _: [] };
+  let rest = false;
+  for (let i = 0; i < argv.length; i++) {
+    const w = argv[i];
+    if (rest || !w.startsWith("--")) {
+      a._.push(w);
+      continue;
+    }
+    if (w === "--") {
+      rest = true;
+      continue;
+    }
+    const eq = w.indexOf("=");
+    const name = eq < 0 ? w.slice(2) : w.slice(2, eq);
+    const type = Object.prototype.hasOwnProperty.call(options, name) ? options[name] : undefined;
+    if (!type) {
+      const known = Object.keys(options).map((k) => `--${k}`);
+      throw new Error(`${command} doesn't take --${name}.${known.length ? ` It takes ${known.join(", ")}.` : ""}`);
+    }
+    let value = eq < 0 ? undefined : w.slice(eq + 1);
+    if (type === "bool") {
+      if (value === undefined || /^(true|yes|on|1)$/i.test(value)) a[name] = true;
+      else if (/^(false|no|off|0)$/i.test(value)) a[name] = false;
+      else throw new Error(`--${name} is on or off, not ${value}.`);
+      continue;
+    }
+    if (value === undefined) {
+      value = argv[i + 1];
+      if (value === undefined || value.startsWith("--")) throw new Error(`--${name} needs a value.`);
+      i++;
+    }
+    if (type === "int") {
+      if (!/^-?\d+$/.test(value.trim())) throw new Error(`--${name} takes a whole number, not ${value}.`);
+      a[name] = Number(value);
+    } else a[name] = value;
+  }
+  return a;
 }
 
-/** A number option, or `fallback` when it's missing; out of range is an error. */
+/** A bool option that is on. */
+export const flag = (args: Args, name: string) => args[name] === true;
+
+/** An int option, or `fallback` when it's missing; out of range is an error. */
 export function num(args: Args, name: string, fallback: number, min: number, max: number): number {
   const v = args[name];
   if (v === undefined) return fallback;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n < min || n > max) throw new Error(`--${name} takes a number from ${min} to ${max}, not ${String(v)}.`);
-  return n;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < min || v > max) throw new Error(`--${name} takes a whole number from ${min} to ${max}, not ${String(v)}.`);
+  return v;
+}
+
+/** A string option, or undefined when it's missing. */
+export const str = (args: Args, name: string) => (typeof args[name] === "string" ? (args[name] as string) : undefined);
+
+/** A folder as the caller meant it: relative to the terminal loomctl ran in,
+ * not to Loom's own working folder. Windows paths only. */
+export function callerPath(path: string, cwd: string | undefined): string {
+  const p = path.replace(/\//g, "\\");
+  if (/^[a-zA-Z]:\\/.test(p) || p.startsWith("\\\\") || !cwd) return p;
+  if (/^[a-zA-Z]:/.test(p)) return p; // drive-relative: left for git to read
+  const parts = (p.startsWith("\\") ? cwd.slice(0, 2) : cwd).replace(/\//g, "\\").replace(/\\+$/, "").split("\\");
+  for (const seg of p.split("\\")) {
+    if (!seg || seg === ".") continue;
+    if (seg === "..") {
+      if (parts.length > 1) parts.pop();
+    } else parts.push(seg);
+  }
+  return parts.join("\\") + (parts.length === 1 ? "\\" : "");
 }
 
 /** On or off, for `loomctl set`. */

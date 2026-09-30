@@ -1,5 +1,5 @@
 // Self-check for loomctl's pure helpers. Run: node src/cli.test.ts
-import { flag, keyBytes, num, onOff, paneRef, table, type Args } from "./cli.ts";
+import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, str, table, type Args } from "./cli.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -25,15 +25,41 @@ eq("a thread name with a colon keeps it", paneRef("a:b:3"), { thread: "a:b", n: 
 eq("anything else is an id", paneRef("mz1k2-4"), { id: "mz1k2-4" });
 eq("pane 0 is not a position", paneRef("t:0"), { id: "t:0" });
 
+// A bool never swallows the next word, wherever it sits.
+const send = { "no-enter": "bool" } as const;
+eq("bool before the words", parseArgs(["--no-enter", "p1", "echo", "hi"], send, "send"), { _: ["p1", "echo", "hi"], "no-enter": true });
+eq("bool between the words", parseArgs(["p1", "--no-enter", "echo", "hi"], send, "send"), { _: ["p1", "echo", "hi"], "no-enter": true });
+eq("bool after the words", parseArgs(["p1", "echo", "--no-enter"], send, "send"), { _: ["p1", "echo"], "no-enter": true });
+const close = { yes: "bool" } as const;
+eq("close --yes target keeps its target", parseArgs(["--yes", "alpha:2"], close, "close"), { _: ["alpha:2"], yes: true });
+eq("--yes=off", parseArgs(["--yes=off", "p"], close, "close"), { _: ["p"], yes: false });
+throws("--yes=target is refused", () => parseArgs(["--yes=alpha:2"], close, "close"));
+throws("an option the command doesn't take", () => parseArgs(["--force", "p"], close, "close"));
+const make = { agent: "string", panes: "int" } as const;
+eq("values, both spellings", parseArgs(["C:\\r", "--agent", "codex", "--panes=2"], make, "new"), { _: ["C:\\r"], agent: "codex", panes: 2 });
+throws("a value is required", () => parseArgs(["C:\\r", "--agent"], make, "new"));
+throws("a value can't be the next option", () => parseArgs(["--agent", "--panes", "2"], make, "new"));
+throws("a count must be whole", () => parseArgs(["C:\\r", "--panes", "1.5"], make, "new"));
+eq("after -- every word is a word", parseArgs(["p1", "--", "--no-enter", "--x"], send, "send"), { _: ["p1", "--no-enter", "--x"] });
+
 const args = (o: Record<string, unknown>): Args => ({ _: [], ...o });
 eq("--yes", flag(args({ yes: true }), "yes"), true);
-eq("--yes=on", flag(args({ yes: "on" }), "yes"), true);
 eq("missing flag", flag(args({}), "yes"), false);
-eq("--yes=no", flag(args({ yes: "no" }), "yes"), false);
-eq("number option", num(args({ lines: "40" }), "lines", 0, 1, 1000), 40);
+eq("a string is not a flag", flag(args({ yes: "alpha" }), "yes"), false);
+eq("int option", num(args({ lines: 40 }), "lines", 0, 1, 1000), 40);
 eq("missing number", num(args({}), "lines", 7, 1, 1000), 7);
-throws("number out of range", () => num(args({ lines: "0" }), "lines", 1, 1, 1000));
-throws("not a number", () => num(args({ lines: "many" }), "lines", 1, 1, 1000));
+throws("number out of range", () => num(args({ lines: 0 }), "lines", 1, 1, 1000));
+throws("not a whole number", () => num(args({ lines: 1.5 }), "lines", 1, 1, 1000));
+eq("string option", str(args({ agent: "codex" }), "agent"), "codex");
+eq("a bare flag is no string", str(args({ agent: true }), "agent"), undefined);
+
+eq("absolute stays", callerPath("C:\\code\\app", "D:\\x"), "C:\\code\\app");
+eq("dot is the caller's folder", callerPath(".", "C:\\my work\\app"), "C:\\my work\\app");
+eq("relative joins the caller's folder", callerPath("sub/dir", "C:\\my work"), "C:\\my work\\sub\\dir");
+eq("parent steps up", callerPath("..\\other", "C:\\my work\\app"), "C:\\my work\\other");
+eq("root-relative keeps the caller's drive", callerPath("\\code", "D:\\x\\y"), "D:\\code");
+eq("up past the root stops at it", callerPath("..\\..\\..", "C:\\a"), "C:\\");
+eq("UNC stays", callerPath("\\\\srv\\share", "C:\\x"), "\\\\srv\\share");
 eq("on", onOff("On", "sound"), true);
 eq("off", onOff("0", "sound"), false);
 throws("neither", () => onOff("loud", "sound"));

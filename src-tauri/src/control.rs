@@ -24,7 +24,7 @@ pub struct Pending {
 
 /// Serves `name` for the app's life. A second Loom on the same workspace
 /// can't take the name (first_pipe_instance), so a command never reaches the
-/// wrong one; it runs without a pipe instead.
+/// wrong one: that Loom answers only on its own process pipe (pipe.rs).
 pub fn serve(app: AppHandle, name: String) {
     tauri::async_runtime::spawn(async move {
         let security = match owner_only() {
@@ -35,6 +35,7 @@ pub fn serve(app: AppHandle, name: String) {
         loop {
             let server = match create(&name, first, security) {
                 Ok(s) => s,
+                Err(e) if first => return eprintln!("control pipe {name} is taken, likely by another Loom on this workspace: {e}"),
                 Err(e) => return eprintln!("control pipe {name}: {e}"),
             };
             first = false;
@@ -120,7 +121,8 @@ async fn ask(app: &AppHandle, request: Value) -> Value {
     let (tx, rx) = oneshot::channel();
     pending.waiting.lock().unwrap().insert(id, tx);
     let secs = request["timeout"].as_f64().unwrap_or(30.0).clamp(1.0, 86_400.0);
-    let event = json!({ "id": id, "cmd": request["cmd"], "args": request["args"], "timeout": secs });
+    // The words go to the page unparsed: only it knows which options each command takes.
+    let event = json!({ "id": id, "cmd": request["cmd"], "argv": request["argv"], "cwd": request["cwd"], "timeout": secs });
     if let Err(e) = app.emit("cli", event) {
         pending.waiting.lock().unwrap().remove(&id);
         return json!({ "ok": false, "error": format!("Loom couldn't pass the command to its window: {e}") });

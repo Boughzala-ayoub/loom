@@ -511,10 +511,16 @@ name, a unique start of it, or its id. Anything a button would ask about first
 needs `--yes`: closing a pane whose agent is running, stopping or restarting a
 running process, and closing a thread. `close-thread --delete worktree|branch` also refuses to lose
 uncommitted files or unmerged commits unless you add `--force`. `send -`
-reads the text from standard input.
+reads the text from standard input. A command's options go after its name, in
+any order around its arguments; after `--`, every word is an argument. A
+relative folder, as in `loomctl new .`, is relative to the terminal you ran
+`loomctl` in. Pane and thread ids last until Loom exits; names and numbers
+change when you rename or reorder.
 
-Exit codes: 0 done, 1 the command failed, 2 Loom isn't running, 3 a `wait`
-ran out of time (`--timeout`, an hour by default).
+Exit codes: 0 done, 1 the command failed, 2 Loom isn't running, 3 no answer
+in time (`--timeout`: 30 seconds, an hour for `wait`). A timeout stops the
+waiting, not the command, so a slow `new` or `close-thread` may still finish
+after it: check with `loomctl threads` before trying again.
 
 Inside a Loom pane, `loomctl` is on the PATH and talks to the Loom that owns the
 pane, so an agent can read other panes, start agents and wait for them. For a
@@ -522,7 +528,10 @@ profile launch (`loom.exe work.json`), pass `--profile work.json`.
 
 Loom listens on a named pipe, `\\.\pipe\loom-<user>`, that only your Windows
 account can open, and it refuses remote connections. A second Loom on the same
-workspace doesn't take over the pipe. `docs/cli-control.md` has the design.
+workspace doesn't take over the pipe, and each Loom's panes talk to it on a
+pipe of its own (`...-pid<pid>`), so they never reach the other window. A
+`tauri dev` build uses `loom-dev-<user>` and leaves the installed Loom alone.
+`docs/cli-control.md` has the design.
 
 ## State
 

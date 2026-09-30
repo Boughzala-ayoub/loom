@@ -33,11 +33,12 @@ try {
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
       if (location.search.includes('resume')) state.threads[0].panes = [{ cmd: 'codex' }, { cmd: 'codex' }];
       if (location.search.includes('close-race')) state.threads[0].zoomed = 0;
+      if (location.search.includes('hold-session')) state.threads[0].panes[0].sid = 'held-claude'; // resumes, so asks has_session
       if (location.search.includes('legacy')) state.threads[0].panes = [{ cmd: 'opencode', sid: 'old-placeholder-a' }, { cmd: 'opencode', sid: 'old-placeholder-b' }];
       if (location.search.includes('legacy-opencode2')) state.threads[0].panes.forEach(p => p.cmd = 'opencode2');
       if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
-      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [] };
+      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [], pendingSessions: [] };
       // Count chimes instead of playing them; only createOscillator matters.
       const node = { connect() { return node; }, start() {}, stop() {}, frequency: { setValueAtTime() {} }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } };
       window.AudioContext = class { state = 'running'; currentTime = 0; destination = node; resume() {} createGain() { return node; } createOscillator() { qa.beeps++; return node; } };
@@ -54,7 +55,9 @@ try {
           const write = () => { qa.saved = JSON.parse(args.json); localStorage.setItem('qa-state', args.json); };
           return location.search.includes('memory') ? new Promise(resolve => setTimeout(() => { write(); resolve(); }, 15)) : write();
         }
+        if (cmd === 'has_session' && location.search.includes('hold-session') && !qa.sessionsReleased) return new Promise(resolve => qa.pendingSessions.push(resolve));
         if (cmd === 'pty_spawn') {
+          if (qa.failSpawn) throw new Error('Test spawn failed');
           qa.panes.push(args);
           args.onOut.onmessage('\x1b]0;Review workspace navigation\x07\x1b[34m❯ loom\x1b[0m\r\n\r\nReady to work on this thread.\r\nChanges stay in its own worktree.\r\n\r\n\x1b[32m+ Ready\x1b[0m  \x1b[33m~ Pending\x1b[0m  \x1b[31m- Removed\x1b[0m\r\n\x1b[34mBlue\x1b[0m  \x1b[35mMagenta\x1b[0m  \x1b[36mCyan\x1b[0m\r\n');
           return location.search.includes('restore') ? new Promise(resolve => setTimeout(resolve, qa.panes.length * 30)) : undefined;
@@ -222,6 +225,38 @@ try {
       checks++;
     }
     const escape = () => page.keyboard.press('Escape');
+    if (width === 1280) {
+      // loomctl's stop against a pane still starting, and a restart that fails (LOOM_CLI_REVIEW F5, F7).
+      await page.goto(base + '?hold-session');
+      await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'cli_ready') && window.qa.pendingSessions.length > 0);
+      const cli = (cmd, ...argv) => page.evaluate(async ([cmd, argv]) => {
+        const id = window.qa.calls.length;
+        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, cwd: null, timeout: 5 } });
+        for (;;) {
+          const reply = window.qa.calls.find(c => c.cmd === 'cli_reply' && c.args.id === id);
+          if (reply) return reply.args.reply;
+          await new Promise(r => setTimeout(r, 20));
+        }
+      }, [cmd, argv]);
+      const stopped = await cli('stop', 'search-polish:1', '--yes');
+      assert.equal(stopped.ok, true, JSON.stringify(stopped));
+      await page.evaluate(() => { window.qa.sessionsReleased = true; window.qa.pendingSessions.splice(0).forEach(r => r(true)); });
+      await page.waitForTimeout(300);
+      const spawns = id => page.evaluate(id => window.qa.calls.filter(c => c.cmd === 'pty_spawn' && c.args.id === id).length, id);
+      assert.equal(await spawns(stopped.data.id), 0, 'A pane stopped while starting never starts');
+      assert.equal((await cli('stop', 'search-polish:1', '--yes')).text, 'search-polish:1 has already exited.');
+      await page.evaluate(() => { window.qa.failSpawn = true; });
+      const failed = await cli('restart', 'search-polish:1');
+      assert.equal(failed.ok, false, JSON.stringify(failed));
+      assert.match(failed.error, /didn't start: .*Test spawn failed/);
+      await page.evaluate(() => { window.qa.failSpawn = false; });
+      const restarted = await cli('restart', 'search-polish:1');
+      assert.equal(restarted.ok, true, JSON.stringify(restarted));
+      assert.equal(await spawns(stopped.data.id), 2, 'The failed start, then the one that worked');
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS loomctl stop while starting, failed restart ${width}px`);
+    }
     await page.goto(base + '?long-location');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await page.click('#dashboard-btn');

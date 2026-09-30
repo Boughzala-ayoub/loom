@@ -13,8 +13,12 @@ loomctl.exe ──named pipe──> loom.exe (control.rs) ──"cli" event─�
             <── one JSON line ──                  <── cli_reply ──
 ```
 
-1. `loomctl <command> [args]` turns its words and `--options` into one JSON
-   request and writes it to Loom's control pipe.
+1. `loomctl <command> [args]` reads only its own options (`--json`,
+   `--profile`, `--timeout`) and sends the command, its other words untouched
+   and the terminal's folder as one JSON request to Loom's control pipe. Only
+   the page knows which of a command's options are on/off flags, so it parses
+   them (`parseArgs` in `cli.ts`, with each command's option list): a flag
+   never swallows the pane name after it, and an unknown option is an error.
 2. `control.rs` in `loom.exe` hands the request to the page as a `cli` event
    and waits for the page's `cli_reply`, up to the request's own timeout.
 3. The page runs the command in `main.ts`'s loomctl section, with the same
@@ -55,15 +59,19 @@ Rejected:
 the profile path for profile launches (`pipe.rs`, shared by both programs).
 Loom creates it with `first_pipe_instance`, so a second Loom on the same
 workspace can't take it over, and a command never reaches the wrong window.
+Debug builds use `loom-dev-<user>`, the way they keep their own data folder,
+so `tauri dev` beside the installed app doesn't answer for it.
 
 **Only your account.** The pipe's security descriptor grants your user SID and
 SYSTEM and nobody else. The default descriptor for pipes also gives everyone
 read access. Remote clients are refused. Anyone who can open the pipe can make
 Loom start processes as you, so this is the boundary that matters.
 
-**Panes find their own Loom.** Every pane gets `LOOM_PIPE` and Loom's folder at
-the front of its `PATH`. `loomctl` in a pane reaches the Loom that owns that pane,
-with no setup. This is what lets an agent orchestrate other agents: read their
+**Panes find their own Loom.** Every Loom also serves a pipe named after its
+process (`\\.\pipe\loom-<user>-pid<pid>`), and every pane gets that name as
+`LOOM_PIPE`, with Loom's folder at the front of its `PATH`. `loomctl` in a pane
+reaches the Loom that owns that pane with no setup, even when another Loom holds
+the workspace's pipe. This is what lets an agent orchestrate other agents: read their
 screens, answer their questions, start more and wait for them.
 
 **Confirmations become `--yes`.** Where a button asks first, the command refuses
@@ -75,6 +83,21 @@ commits, and refuses if any would be lost unless you add `--force`.
 state. The page polls the state every 200 ms, because a state changes in a
 dozen places. It answers with a timeout flag when time runs out, and `loomctl`
 exits 3 for that. Waits get an hour by default and other commands 30 seconds.
+A timeout ends the waiting, not the command: a `new` still running Git carries
+on, so a script checks `threads` before trying again. `loomctl` gives up on its
+own 20 seconds after that, in case Loom stops answering altogether.
+
+**Commands can overlap.** Each request runs as it arrives, so two terminals can
+act on one pane or thread at once. Text sent to a pane takes turns, one `send`
+or `choose` after another, so two sends arrive as two commands. A thread closes
+once: a second close is told it is already closed. Each start of a pane has a
+number that `stop`, a restart and closing the pane all move on, so a start
+that was still waiting for its session check or startup slot gives up, and a
+process that came up anyway is killed. `new` answers with the thread it made,
+and a failed start or Git removal comes back as an error, not "done".
+
+**Ids last as long as Loom does.** Pane and thread ids aren't saved; after a
+restart, use names or `<thread>:<n>`.
 
 **Help comes from the running Loom.** `loomctl help` lists the command table in
 `main.ts`, so it always matches the Loom you are talking to.
@@ -106,10 +129,16 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   over CDP, what the window shows: pane counts, the thread in front, the layout
   button, zoom, the theme's colors and the Overview. It also runs `loomctl` from
   inside a pane, and checks the exit codes for an unknown command, a bad pane,
-  a timeout and a missing Loom.
-- `cargo test` covers the pipe name and `loomctl`'s argument parsing, and
-  `node src/cli.test.ts` covers pane references, key names and option parsing.
-- `pty-close-check.mjs` and `ui-check.mjs` still pass.
+  a timeout and a missing Loom. It also replays the cases from the CLI review:
+  `close --yes alpha:2`, `LOOM_PIPE` ending in `-pid<pid>`, two sends and two
+  `new`s at once, two deletes of one worktree at once, `new .` from a folder
+  with a space, `--json` for a null answer, and `--panes 1.5` leaving no branch.
+- `ui-check.mjs` stops a pane while its session check is held open and checks
+  it never starts, then fails a restart with a refused `pty_spawn`.
+- `cargo test` covers the pipe names and `loomctl`'s own options, and
+  `node src/cli.test.ts` covers pane references, key names, option parsing and
+  folders relative to the terminal.
+- `pty-close-check.mjs` still passes.
 - A verbose `makensis` run lists `loomctl.exe` in the installer next to `loom.exe`.
 
 ## Not done yet

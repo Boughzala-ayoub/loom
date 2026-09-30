@@ -3,10 +3,14 @@
 //! the answer; the running Loom does the work, so the window shows it. A
 //! console program, unlike loom.exe, so shells wait for it and get its exit
 //! code. `loomctl help` asks the running Loom for its commands.
+//!
+//! Only loomctl's own options are read here. The command's words go to Loom as
+//! they are, because only Loom knows which options each command takes and which
+//! of them are on/off flags that must not swallow the next word.
 #[path = "../pipe.rs"]
 mod pipe;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 
 const USAGE: &str = "loomctl: control a running Loom.
@@ -16,90 +20,83 @@ Usage: loomctl [--json] [--profile FILE] [--timeout SECONDS] <command> [args...]
   loomctl help            the commands the running Loom knows
   loomctl help <command>  one command's arguments
 
-Options go anywhere: --key value, --key=value, or --flag on its own. After --,
-every word is an argument. An argument of - is read from standard input.
-Inside a Loom pane, loomctl talks to the Loom that owns the pane.
+Put a command's own options after it: --name value, --name=value, or --flag.
+After --, every word is an argument. An argument of - is read from standard
+input. Inside a Loom pane, loomctl talks to the Loom that owns the pane.
 
 Exit codes: 0 done, 1 the command failed, 2 Loom isn't running, 3 timed out.";
 
 /// Commands that wait for something get an hour unless told otherwise.
 const LONG: [&str; 2] = ["wait", "wait-any"];
+/// Other commands' answers, unless --timeout says otherwise.
+const DEFAULT_TIMEOUT: f64 = 30.0;
 
 #[derive(Debug, PartialEq)]
 struct Parsed {
     cmd: String,
-    args: Map<String, Value>,
+    argv: Vec<String>,
     json: bool,
     profile: Option<String>,
     timeout: Option<f64>,
+    version: bool,
 }
 
-fn parse(argv: &[String], stdin: &mut dyn FnMut() -> String) -> Result<Parsed, String> {
-    let mut parsed = Parsed { cmd: String::new(), args: Map::new(), json: false, profile: None, timeout: None };
-    let mut words = Vec::new();
+fn parse(args: &[String], stdin: &mut dyn FnMut() -> String) -> Result<Parsed, String> {
+    let mut parsed = Parsed { cmd: String::new(), argv: Vec::new(), json: false, profile: None, timeout: None, version: false };
+    let mut help = false;
     let mut rest = false;
+    let mut input: Option<String> = None;
     let mut i = 0;
-    while i < argv.len() {
-        let a = &argv[i];
+    while i < args.len() {
+        let a = &args[i];
         i += 1;
-        if rest || !a.starts_with("--") || a == "--" {
-            if a == "--" && !rest {
-                rest = true;
-            } else if a == "-" && !rest {
-                words.push(Value::String(stdin()));
-            } else if !rest && a == "-h" {
-                parsed.cmd = "help".into();
-            } else {
-                words.push(Value::String(a.clone()));
-            }
+        if rest {
+            parsed.argv.push(a.clone());
             continue;
         }
-        let (key, inline) = match a[2..].split_once('=') {
-            Some((k, v)) => (k.to_string(), Some(v.to_string())),
-            None => (a[2..].to_string(), None),
+        let (key, inline) = match a.strip_prefix("--") {
+            Some(k) => match k.split_once('=') {
+                Some((k, v)) => (k, Some(v.to_string())),
+                None => (k, None),
+            },
+            None => ("", None),
         };
-        let takes = |i: usize| argv.get(i).filter(|n| !n.starts_with("--") || n.as_str() == "--");
-        match key.as_str() {
-            "json" => parsed.json = true,
-            "help" => parsed.cmd = "help".into(),
-            "profile" | "timeout" => {
-                let value = match inline {
-                    Some(v) => v,
-                    None => {
-                        let v = takes(i).filter(|v| v.as_str() != "--").ok_or(format!("--{key} needs a value"))?.clone();
-                        i += 1;
-                        v
-                    }
-                };
-                if key == "profile" {
-                    parsed.profile = Some(value);
-                } else {
-                    parsed.timeout = Some(value.parse().map_err(|_| format!("--timeout needs seconds, not {value}"))?);
+        let mut value = |name: &str, inline: Option<String>| -> Result<String, String> {
+            if let Some(v) = inline {
+                return Ok(v);
+            }
+            let v = args.get(i).filter(|v| !v.starts_with("--")).ok_or(format!("--{name} needs a value"))?.clone();
+            i += 1;
+            Ok(v)
+        };
+        match (a.as_str(), key) {
+            ("--", _) => {
+                rest = true;
+                parsed.argv.push(a.clone());
+            }
+            (_, "json") => parsed.json = true,
+            (_, "help") | ("-h", _) => help = true,
+            (_, "version") | ("-V", _) => parsed.version = true,
+            (_, "profile") => parsed.profile = Some(value("profile", inline)?),
+            (_, "timeout") => {
+                let v = value("timeout", inline)?;
+                let secs: f64 = v.parse().map_err(|_| format!("--timeout needs seconds, not {v}"))?;
+                if !(secs > 0.0 && secs.is_finite()) {
+                    return Err(format!("--timeout needs seconds, not {v}"));
                 }
+                parsed.timeout = Some(secs);
             }
-            _ => {
-                let value = match inline {
-                    Some(v) => Value::String(v),
-                    None => match takes(i).filter(|v| v.as_str() != "--") {
-                        Some(v) => {
-                            i += 1;
-                            Value::String(if v == "-" { stdin() } else { v.clone() })
-                        }
-                        None => Value::Bool(true),
-                    },
-                };
-                parsed.args.insert(key, value);
-            }
+            ("-", _) => parsed.argv.push(input.get_or_insert_with(&mut *stdin).clone()),
+            _ if parsed.cmd.is_empty() && !a.starts_with('-') => parsed.cmd = a.clone(),
+            _ => parsed.argv.push(a.clone()),
         }
     }
-    let mut words = words.into_iter();
-    if parsed.cmd.is_empty() {
-        parsed.cmd = match words.next() {
-            Some(Value::String(c)) => c,
-            _ => String::new(),
-        };
+    if help {
+        if !parsed.cmd.is_empty() {
+            parsed.argv = vec![std::mem::take(&mut parsed.cmd)];
+        }
+        parsed.cmd = "help".into();
     }
-    parsed.args.insert("_".into(), Value::Array(words.collect()));
     Ok(parsed)
 }
 
@@ -123,25 +120,40 @@ fn connect(name: &str) -> Result<std::fs::File, i32> {
     Err(2)
 }
 
-fn run(argv: &[String]) -> i32 {
+/// What to print for a successful answer: `--json` always prints JSON, `null`
+/// included, so a consumer never gets empty output for a real answer.
+fn render(reply: &Value, json: bool) -> Option<String> {
+    let data = &reply["data"];
+    if json {
+        return Some(serde_json::to_string_pretty(data).unwrap_or_else(|_| "null".into()));
+    }
+    match reply["text"].as_str() {
+        Some("") => None,
+        Some(text) => Some(text.to_string()),
+        None if data.is_null() => None,
+        None => Some(serde_json::to_string_pretty(data).unwrap_or_default()),
+    }
+}
+
+fn run(args: &[String]) -> i32 {
     let mut stdin = || {
         let mut s = String::new();
         let _ = std::io::stdin().read_to_string(&mut s);
         s
     };
-    let parsed = match parse(argv, &mut stdin) {
+    let parsed = match parse(args, &mut stdin) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("loomctl: {e}");
             return 1;
         }
     };
-    if parsed.cmd.is_empty() {
-        println!("{USAGE}");
+    if parsed.version {
+        println!("loomctl {}", env!("CARGO_PKG_VERSION"));
         return 0;
     }
-    if parsed.cmd == "--version" {
-        println!("loomctl {}", env!("CARGO_PKG_VERSION"));
+    if parsed.cmd.is_empty() {
+        println!("{USAGE}");
         return 0;
     }
     // Inside a pane LOOM_PIPE names the Loom that owns it; --profile picks another.
@@ -153,11 +165,17 @@ fn run(argv: &[String]) -> i32 {
         Ok(f) => f,
         Err(code) => return code,
     };
-    let timeout = parsed.timeout.or(LONG.contains(&parsed.cmd.as_str()).then_some(3600.0));
-    let mut request = json!({ "cmd": parsed.cmd, "args": parsed.args });
-    if let Some(t) = timeout {
-        request["timeout"] = json!(t);
-    }
+    let timeout = parsed.timeout.unwrap_or(if LONG.contains(&parsed.cmd.as_str()) { 3600.0 } else { DEFAULT_TIMEOUT });
+    // Loom answers a timed-out request itself, 5 s after its limit. This is for
+    // a Loom that stopped answering altogether. A command already running may
+    // still finish after either.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs_f64(timeout + 20.0));
+        eprintln!("loomctl: Loom didn't answer within {timeout} s. The command may still finish.");
+        std::process::exit(3);
+    });
+    let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    let request = json!({ "cmd": parsed.cmd, "argv": parsed.argv, "cwd": cwd, "timeout": timeout });
     let mut reply = String::new();
     let sent = writeln!(file, "{request}").and_then(|_| file.flush()).and_then(|_| BufReader::new(&file).read_line(&mut reply));
     if let Err(e) = sent {
@@ -169,22 +187,15 @@ fn run(argv: &[String]) -> i32 {
         eprintln!("loomctl: {}", reply["error"].as_str().unwrap_or("the command failed"));
         return if reply["timeout"] == json!(true) { 3 } else { 1 };
     }
-    let data = &reply["data"];
-    match (parsed.json, reply["text"].as_str()) {
-        (false, Some(text)) => {
-            if !text.is_empty() {
-                println!("{text}");
-            }
-        }
-        _ if !data.is_null() => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
-        _ => {}
+    if let Some(out) = render(&reply, parsed.json) {
+        println!("{out}");
     }
     0
 }
 
 fn main() {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    std::process::exit(run(&argv));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::exit(run(&args));
 }
 
 #[cfg(test)]
@@ -192,47 +203,68 @@ mod tests {
     use super::*;
 
     fn p(words: &[&str]) -> Parsed {
-        let argv: Vec<String> = words.iter().map(|s| s.to_string()).collect();
-        parse(&argv, &mut || "from stdin".to_string()).unwrap()
+        let args: Vec<String> = words.iter().map(|s| s.to_string()).collect();
+        parse(&args, &mut || "from stdin".to_string()).unwrap()
+    }
+    fn v(words: &[&str]) -> Vec<String> {
+        words.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn words_flags_and_values() {
-        let x = p(&["send", "t1:2", "hello", "world", "--no-enter"]);
+    fn the_command_and_its_words_go_through_untouched() {
+        let x = p(&["send", "t1:2", "--no-enter", "echo", "hello"]);
         assert_eq!(x.cmd, "send");
-        assert_eq!(x.args["_"], json!(["t1:2", "hello", "world"]));
-        assert_eq!(x.args["no-enter"], json!(true));
-        let x = p(&["new", "C:\\repo", "--agent", "codex", "--name=fix it", "--panes", "2"]);
-        assert_eq!(x.args["agent"], json!("codex"));
-        assert_eq!(x.args["name"], json!("fix it"));
-        assert_eq!(x.args["panes"], json!("2"));
-        assert_eq!(x.args["_"], json!(["C:\\repo"]));
+        assert_eq!(x.argv, v(&["t1:2", "--no-enter", "echo", "hello"]));
+        // A command's own options before its name stay its own.
+        let x = p(&["--yes", "close", "alpha:2"]);
+        assert_eq!(x.cmd, "close");
+        assert_eq!(x.argv, v(&["--yes", "alpha:2"]));
     }
 
     #[test]
-    fn own_options_anywhere_and_the_rest_after_double_dash() {
-        let x = p(&["--json", "read", "--timeout", "5", "p1", "--profile", "w.json"]);
+    fn own_options_anywhere_but_not_after_double_dash() {
+        let x = p(&["--json", "read", "--timeout", "5", "p1", "--profile=w.json"]);
         assert!(x.json);
         assert_eq!(x.timeout, Some(5.0));
         assert_eq!(x.profile.as_deref(), Some("w.json"));
-        assert_eq!(x.args["_"], json!(["p1"]));
-        let x = p(&["send", "p1", "--", "--not-a-flag", "-"]);
-        assert_eq!(x.args["_"], json!(["p1", "--not-a-flag", "-"]));
+        assert_eq!((x.cmd.as_str(), x.argv), ("read", v(&["p1"])));
+        let x = p(&["send", "p1", "--", "--json", "-"]);
+        assert!(!x.json);
+        assert_eq!(x.argv, v(&["p1", "--", "--json", "-"]));
     }
 
     #[test]
-    fn a_dash_reads_standard_input() {
-        let x = p(&["send", "p1", "-"]);
-        assert_eq!(x.args["_"], json!(["p1", "from stdin"]));
-        let x = p(&["send", "p1", "--text", "-"]);
-        assert_eq!(x.args["text"], json!("from stdin"));
+    fn a_dash_reads_standard_input_once() {
+        assert_eq!(p(&["send", "p1", "-"]).argv, v(&["p1", "from stdin"]));
+        let mut reads = 0;
+        let args = v(&["send", "-", "--text", "-"]);
+        let x = parse(&args, &mut || {
+            reads += 1;
+            "in".to_string()
+        })
+        .unwrap();
+        assert_eq!(x.argv, v(&["in", "--text", "in"]));
+        assert_eq!(reads, 1);
     }
 
     #[test]
     fn help_and_bad_options() {
-        assert_eq!(p(&["--help"]).cmd, "help");
-        assert_eq!(p(&["help", "send"]).args["_"], json!(["send"]));
-        let argv = vec!["read".to_string(), "--timeout".to_string()];
-        assert!(parse(&argv, &mut String::new).is_err());
+        assert_eq!((p(&["--help"]).cmd, p(&["--help"]).argv), ("help".to_string(), vec![]));
+        let x = p(&["send", "--help"]);
+        assert_eq!((x.cmd.as_str(), x.argv), ("help", v(&["send"])));
+        assert_eq!(p(&["help", "send"]).argv, v(&["send"]));
+        for bad in [&["read", "--timeout"][..], &["read", "--timeout", "soon"], &["read", "--timeout", "0"], &["--profile"]] {
+            assert!(parse(&v(bad), &mut String::new).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn json_prints_null_answers_and_text_stays_quiet() {
+        let null = json!({ "ok": true, "data": null, "text": "Nobody is waiting." });
+        assert_eq!(render(&null, true).as_deref(), Some("null"));
+        assert_eq!(render(&null, false).as_deref(), Some("Nobody is waiting."));
+        let silent = json!({ "ok": true, "data": { "pane": "p1" }, "text": "" });
+        assert_eq!(render(&silent, false), None);
+        assert!(render(&silent, true).unwrap().contains("\"pane\""));
     }
 }
