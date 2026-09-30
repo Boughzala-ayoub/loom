@@ -38,7 +38,7 @@ try {
       if (location.search.includes('legacy-opencode2')) state.threads[0].panes.forEach(p => p.cmd = 'opencode2');
       if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
-      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [], pendingSessions: [] };
+      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [], pendingSessions: [], pendingWrites: [], pendingCodex: [] };
       // Count chimes instead of playing them; only createOscillator matters.
       const node = { connect() { return node; }, start() {}, stop() {}, frequency: { setValueAtTime() {} }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } };
       window.AudioContext = class { state = 'running'; currentTime = 0; destination = node; resume() {} createGain() { return node; } createOscillator() { qa.beeps++; return node; } };
@@ -63,10 +63,12 @@ try {
           return location.search.includes('restore') ? new Promise(resolve => setTimeout(resolve, qa.panes.length * 30)) : undefined;
         }
         if (cmd === 'pty_kill' && qa.holdKills) return new Promise(resolve => qa.pendingKills.push(resolve));
+        if (cmd === 'pty_write' && qa.holdWrites) return new Promise(resolve => qa.pendingWrites.push(resolve));
         if (cmd === 'pty_write' && qa.failWrite) throw new Error('Test terminal write failed');
         if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
         if (cmd === 'pty_kill' && qa.controlKill) return window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${args.id}`, payload: 1 });
         if (cmd === 'plugin:window|is_focused') return qa.focused ?? true;
+        if (cmd === 'has_codex_session' && qa.holdCodex) return new Promise(resolve => qa.pendingCodex.push(resolve));
         if (cmd === 'has_codex_session') return args.sid !== 'missing-session';
         if (cmd === 'pane_booted') return true;
         if (cmd === 'codex_sessions') return [{ id: 'valid-session', title: 'Saved Codex conversation' }];
@@ -227,17 +229,19 @@ try {
     const escape = () => page.keyboard.press('Escape');
     if (width === 1280) {
       // loomctl's stop against a pane still starting, and a restart that fails (LOOM_CLI_REVIEW F5, F7).
-      await page.goto(base + '?hold-session');
+      await page.goto(base + '?hold-session&dashboard'); // dashboard: the Codex pane has a saved session
       await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'cli_ready') && window.qa.pendingSessions.length > 0);
-      const cli = (cmd, ...argv) => page.evaluate(async ([cmd, argv]) => {
-        const id = window.qa.calls.length;
-        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, cwd: null, timeout: 5 } });
-        for (;;) {
+      const call = (cmd, argv, stdin) => page.evaluate(async ([cmd, argv, stdin]) => {
+        const id = window.qa.cliIds = (window.qa.cliIds ?? 0) + 1;
+        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin, cwd: null, timeout: 5 } });
+        for (const end = Date.now() + 15000; Date.now() < end;) {
           const reply = window.qa.calls.find(c => c.cmd === 'cli_reply' && c.args.id === id);
           if (reply) return reply.args.reply;
           await new Promise(r => setTimeout(r, 20));
         }
-      }, [cmd, argv]);
+        return { hung: [cmd, ...argv].join(' ') };
+      }, [cmd, argv, stdin ?? null]);
+      const cli = (cmd, ...argv) => call(cmd, argv);
       const stopped = await cli('stop', 'search-polish:1', '--yes');
       assert.equal(stopped.ok, true, JSON.stringify(stopped));
       await page.evaluate(() => { window.qa.sessionsReleased = true; window.qa.pendingSessions.splice(0).forEach(r => r(true)); });
@@ -256,6 +260,102 @@ try {
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl stop while starting, failed restart ${width}px`);
+
+      // Driving agents with loomctl (LOOM_CLI_AGENT_REVIEW A2 to A6).
+      const claude = stopped.data.id;
+      const out = async (id, text) => {
+        await page.evaluate(([id, text]) => window.qa.panes.filter(a => a.id === id).at(-1).onOut.onmessage(text), [id, text]);
+        await page.waitForTimeout(150);
+      };
+      const writes = id => page.evaluate(id => window.qa.calls.filter(c => c.cmd === 'pty_write' && c.args.id === id).map(c => c.args.data), id);
+      const enters = async () => (await writes(claude)).filter(d => d === '\r').length;
+      const holdWrites = () => page.evaluate(() => { window.qa.holdWrites = true; });
+      const releaseWrites = () => page.evaluate(() => { window.qa.holdWrites = false; window.qa.pendingWrites.splice(0).forEach(r => r()); });
+      // A2: text queued for a session never reaches the one a restart brings up.
+      await holdWrites();
+      const typing = cli('send', 'search-polish:1', '--no-enter', 'first words');
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+      const queued = cli('send', 'search-polish:1', '--no-enter', 'old-session task');
+      const again = await cli('restart', 'search-polish:1', '--yes');
+      assert.equal(again.ok, true, JSON.stringify(again));
+      await releaseWrites();
+      assert.equal((await typing).ok, true, 'Typed into the old session before the restart');
+      const stale = await queued;
+      assert.equal(stale.ok, false, JSON.stringify(stale));
+      assert.match(stale.error, /was restarted before Loom typed anything/);
+      assert.equal(stale.typed, false);
+      assert.ok(!(await writes(claude)).some(d => d.includes('old-session task')), 'Nothing queued for the old session was written');
+      assert.equal((await cli('send', 'search-polish:1', '--no-enter', 'fresh task')).ok, true, 'The new session takes input');
+      // A3: a stop during a dead Codex pane's restart, while it checks its saved session, cancels the restart.
+      const codex = await cli('stop', 'search-polish:2', '--yes');
+      assert.equal(codex.ok, true, JSON.stringify(codex));
+      const codexSpawns = await spawns(codex.data.id);
+      await page.evaluate(() => { window.qa.holdCodex = true; });
+      const restarting = cli('restart', 'search-polish:2');
+      await page.waitForFunction(() => window.qa.pendingCodex.length === 1);
+      const stopping = cli('stop', 'search-polish:2', '--yes');
+      await page.waitForTimeout(100);
+      await page.evaluate(() => { window.qa.holdCodex = false; window.qa.pendingCodex.splice(0).forEach(r => r(true)); });
+      const [restart3, stop3] = await Promise.all([restarting, stopping]);
+      assert.equal(stop3.ok, true, JSON.stringify(stop3));
+      assert.equal(stop3.text, 'search-polish:2 stopped', 'Not "already exited" while a start is pending');
+      assert.equal(restart3.ok, false, JSON.stringify(restart3));
+      assert.equal(await spawns(codex.data.id), codexSpawns, 'The cancelled restart never spawned');
+      // A4: choose answers only the question it was asked about.
+      const menuScreen = q => `\x1b[2J\x1b[H ${q}\r\n ❯ 1. Yes\r\n   2. No (esc)\r\n`;
+      await out(claude, menuScreen('Read README.md?'));
+      const readme = await cli('menu', 'search-polish:1');
+      assert.match(readme.data.rev, /^[0-9a-f]{8}$/, JSON.stringify(readme));
+      await holdWrites();
+      const busy = cli('keys', 'search-polish:1', 'x');
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+      const choosing = cli('choose', 'search-polish:1', '1');
+      await page.waitForTimeout(100);
+      await out(claude, menuScreen('Delete the project?'));
+      const entersBefore = await enters();
+      await releaseWrites();
+      assert.equal((await busy).ok, true);
+      const swapped = await choosing;
+      assert.equal(swapped.ok, false, JSON.stringify(swapped));
+      assert.match(swapped.error, /question on claude's screen changed/);
+      assert.equal(await enters(), entersBefore, 'No Enter for a question that changed under the same options');
+      const staleRev = await cli('choose', 'search-polish:1', '1', '--menu', readme.data.rev);
+      assert.equal(staleRev.ok, false, JSON.stringify(staleRev));
+      assert.match(staleRev.error, /another question now/);
+      const wipe = await cli('menu', 'search-polish:1');
+      assert.notEqual(wipe.data.rev, readme.data.rev);
+      assert.equal((await cli('choose', 'search-polish:1', '1', '--menu', wipe.data.rev)).ok, true);
+      assert.equal(await enters(), entersBefore + 1);
+      // A5: standard input is text, even when it starts with --.
+      await out(claude, '\x1b[2J\x1b[H> ');
+      await page.evaluate(id => { window.qa.onWrite = ({ id: to, data }) => { if (to === id && data !== '\r') window.qa.panes.filter(a => a.id === id).at(-1).onOut.onmessage(data.replace(/\x1b\[20[01]~/g, '').replace(/\n/g, '\r\n')); }; }, claude);
+      const dashes = '--no-enter --json\nSELECT 1; -- the task';
+      const piped = await call('send', ['search-polish:1', '-'], dashes + '\r\n');
+      assert.equal(piped.ok, true, JSON.stringify(piped));
+      assert.ok((await writes(claude)).includes(dashes), 'The pane got the text exactly, less the final line break');
+      assert.equal(await enters(), entersBefore + 2, '--no-enter in the text did not stop Enter');
+      // A6: a task taller than the screen submits once, collapsed or not; one that never shows says it was typed.
+      const task = ['TASK-HEADER unique', ...Array.from({ length: 120 }, (_, i) => `step ${i} of the task`)].join('\n');
+      await out(claude, '\x1b[2J\x1b[H> ');
+      const tall = await cli('send', 'search-polish:1', task);
+      assert.equal(tall.ok, true, JSON.stringify(tall));
+      assert.equal(await enters(), entersBefore + 3, 'Its start scrolled away, and it was still submitted');
+      await page.evaluate(id => { window.qa.onWrite = ({ id: to, data }) => { if (to === id && data !== '\r') window.qa.panes.filter(a => a.id === id).at(-1).onOut.onmessage('[Pasted text #1 +120 lines]'); }; }, claude);
+      await out(claude, '\x1b[2J\x1b[H> ');
+      assert.equal((await cli('send', 'search-polish:1', task)).ok, true, "Claude's collapsed paste counts as shown");
+      assert.equal(await enters(), entersBefore + 4);
+      await page.evaluate(() => { window.qa.onWrite = null; });
+      const pastes = async () => (await writes(claude)).filter(d => d.includes('TASK-HEADER')).length;
+      const pastesBefore = await pastes();
+      const lost = await cli('send', 'search-polish:1', task);
+      assert.equal(lost.ok, false, JSON.stringify(lost));
+      assert.equal(lost.typed, true);
+      assert.match(lost.error, /don't send it again/);
+      assert.equal(await pastes(), pastesBefore + 1, 'Pasted once');
+      assert.equal(await enters(), entersBefore + 4, 'and not submitted');
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS loomctl input bound to its session, stop cancels a pending restart, menu revisions, stdin text, long tasks ${width}px`);
     }
     await page.goto(base + '?long-location');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);

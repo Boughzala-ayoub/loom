@@ -13,20 +13,35 @@ loomctl.exe ──named pipe──> loom.exe (control.rs) ──"cli" event─�
             <── one JSON line ──                  <── cli_reply ──
 ```
 
-1. `loomctl <command> [args]` reads only its own options (`--json`,
-   `--profile`, `--timeout`) and sends the command, its other words untouched
-   and the terminal's folder as one JSON request to Loom's control pipe. Only
-   the page knows which of a command's options are on/off flags, so it parses
-   them (`parseArgs` in `cli.ts`, with each command's option list): a flag
-   never swallows the pane name after it, and an unknown option is an error.
-2. `control.rs` in `loom.exe` hands the request to the page as a `cli` event
-   and waits for the page's `cli_reply`, up to the request's own timeout.
-3. The page runs the command in `main.ts`'s loomctl section, with the same
+1. `loomctl` connects to Loom's control pipe and says hello with its protocol
+   number (`PROTOCOL` in `pipe.rs`). `control.rs` answers with its own, its
+   version, its process id and its own pipe, without involving the page.
+   Either side refuses a different protocol before any command is sent. This
+   matters after an update, which replaces `loomctl.exe` while the old Loom
+   may still be running: the first protocol sent `args` and this one `argv`,
+   and each read the other's request as "no arguments", so `close <pane>`
+   closed the pane in front. The first Loom has no hello: it answers it as an
+   unknown command, having run nothing, and `loomctl` stops there.
+   `loomctl info` prints the hello and stops.
+2. `loomctl <command> [args]` reads only its own options (`--json`,
+   `--profile`, `--timeout`) and sends the command, its other words untouched,
+   standard input if an argument is `-`, and the terminal's folder as one JSON
+   request. Only the page knows which of a command's options are on/off flags,
+   so it parses them (`parseArgs` in `cli.ts`, with each command's option
+   list): a flag never swallows the pane name after it, and an unknown option
+   is an error. Standard input goes in place of `-` only after that, so text
+   starting with `--` is never read as options.
+3. `control.rs` in `loom.exe` checks the request has a command and a list of
+   words, hands it to the page as a `cli` event and waits for the page's
+   `cli_reply`, up to the request's own timeout.
+4. The page runs the command in `main.ts`'s loomctl section, with the same
    functions the buttons call: `createThread`, `revealPane`, `sendReply`,
    `choose`, `closePane`, `toggleDashboard` and the rest. That's why the window
    shows every change: nothing takes a separate path around the UI.
-4. The answer goes back as `{ ok, data, text }`. `loomctl` prints `text`, or
-   `data` as JSON with `--json`.
+5. The answer goes back as `{ ok, data, text }`, or `{ ok: false, error }`
+   with `timeout` or `typed` when they apply. `loomctl` prints `text`, or
+   `data` as JSON with `--json`; with `--json` a failure prints the whole
+   answer as JSON as well as the message on stderr.
 
 Loom's threads, panes and their states live in the page, not in Rust, so the
 page is the only place that can answer "which panes are waiting" or run
@@ -93,8 +108,30 @@ or `choose` after another, so two sends arrive as two commands. A thread closes
 once: a second close is told it is already closed. Each start of a pane has a
 number that `stop`, a restart and closing the pane all move on, so a start
 that was still waiting for its session check or startup slot gives up, and a
-process that came up anyway is killed. `new` answers with the thread it made,
-and a failed start or Git removal comes back as an error, not "done".
+process that came up anyway is killed. `stop` also cancels a start on a pane
+that is dead but restarting, instead of answering "already exited". `new`
+answers with the thread it made, and a failed start or Git removal comes back
+as an error, not "done".
+
+**Input belongs to a session.** A `send`, `keys` or `choose` records the
+pane's start number when it is queued and checks it again before each write.
+If the pane stopped or restarted in between, the command fails and nothing
+reaches the new session.
+
+**Enter only once the text shows.** `send` pastes, then presses Enter only if
+the text appeared, so Enter never picks a menu option by accident. It counts
+the start of the text, its end (the start of a long task scrolls off), and the
+placeholders Claude and Codex draw instead of a long paste: `[Pasted text #1
++120 lines]` and `[Pasted Content 5000 chars]`, checked in a real Claude pane.
+When none shows, the text may still be sitting in the input, so the failure
+carries `typed: true` and says not to send it again.
+
+**Menus have ids.** `menu` gives each question an id, a hash of its question
+lines, options and kind but not the highlight. `choose` compares that id, not
+just the option labels, before every arrow key and Enter, so a "Delete the
+project?" that replaces "Read README.md?" with the same Yes/No options is not
+answered. `choose --menu <id>` also refuses a question other than the one the
+caller read.
 
 **Ids last as long as Loom does.** Pane and thread ids aren't saved; after a
 restart, use names or `<thread>:<n>`.
@@ -133,11 +170,22 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   `close --yes alpha:2`, `LOOM_PIPE` ending in `-pid<pid>`, two sends and two
   `new`s at once, two deletes of one worktree at once, `new .` from a folder
   with a space, `--json` for a null answer, and `--panes 1.5` leaving no branch.
+  From the agent-control review: `info`, a request in the first protocol's
+  shape refused with the panes untouched, this `loomctl` against a fake first
+  Loom stopping after the hello, standard input starting with `--` typed and
+  run, and a `--json` failure printed as JSON.
 - `ui-check.mjs` stops a pane while its session check is held open and checks
-  it never starts, then fails a restart with a refused `pty_spawn`.
-- `cargo test` covers the pipe names and `loomctl`'s own options, and
-  `node src/cli.test.ts` covers pane references, key names, option parsing and
-  folders relative to the terminal.
+  it never starts, then fails a restart with a refused `pty_spawn`. It holds a
+  write to queue a send, restarts the pane and checks the send is refused with
+  nothing typed; stops a dead Codex pane while its restart checks the saved
+  session and checks nothing spawns; changes a question under the same
+  options before a queued `choose` and checks no Enter; and sends a 120-line
+  task that scrolls, one that collapses to a placeholder, and one that never
+  shows (`typed: true`, pasted once, no Enter).
+- `cargo test` covers the pipe names, `loomctl`'s own options and the hello
+  check. `node src/cli.test.ts` covers pane references, key names, option
+  parsing and folders relative to the terminal, and `node src/prompt.test.ts`
+  the echo check and menu ids.
 - `pty-close-check.mjs` still passes.
 - A verbose `makensis` run lists `loomctl.exe` in the installer next to `loom.exe`.
 
@@ -150,3 +198,13 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
 - **Agent groups, dictation, font size and file previews** have no commands.
 - **An agent skill** that teaches Claude Code or Codex in a pane to orchestrate
   the others through `loomctl`.
+- **Knowing a task finished, and how.** `wait` sees states (idle, waiting,
+  exited), and Claude reads as idle after a short quiet spell, so a controller
+  can't yet tell "done" from "paused", bind a wait to the send before it, or
+  read a shell command's exit code (OSC 133 `D;<code>` is seen, not kept).
+- **Retrying safely.** No caller request ids, so after a timeout a script has
+  to look before sending or creating again.
+- **Picking a Codex or OpenCode session from the terminal** when a restart
+  needs one; it still takes the window.
+- **Unnumbered menus.** `menu` reads numbered questions only. Claude's
+  folder-trust prompt has no numbers, so it needs `keys` (down, enter).

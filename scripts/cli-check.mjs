@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, exis
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { createServer } from 'node:net';
+import { createServer, connect } from 'node:net';
 import { chromium } from 'playwright';
 
 const exe = resolve(process.env.LOOM_TEST_EXE || 'src-tauri/target/release/loom.exe');
@@ -234,6 +234,63 @@ try {
   ok('close-thread', 'epsilon dir', '--yes');
   ok('close-thread', 'gamma dir', '--yes');
   console.log('PASS the review\'s findings: flags, pane pipes, overlapping sends, news and closes, relative folders, null JSON, whole counts');
+
+  // LOOM_CLI_AGENT_REVIEW.md, against the real app and the real loomctl.
+  const info = ok('--json', 'info').json;
+  assert.equal(info.pid, child.pid);
+  assert.equal(info.protocol, 2);
+  assert.ok(info.pipe.endsWith(`-pid${child.pid}`), info.pipe);
+  // A1: a loomctl from before the hello is refused, and its command never runs.
+  const panesBefore = ok('--json', 'panes').json.map(p => p.id);
+  const oldReply = await new Promise((done, fail) => {
+    const s = connect(info.pipe, () => s.write(JSON.stringify({ cmd: 'close', args: { _: [panesBefore[0]], yes: true }, timeout: 30 }) + '\n'));
+    let got = '';
+    s.on('data', d => (got += d));
+    s.on('end', () => done(JSON.parse(got)));
+    s.on('error', fail);
+  });
+  assert.equal(oldReply.ok, false, JSON.stringify(oldReply));
+  assert.match(oldReply.error, /loomctl is older/);
+  await pause(300);
+  assert.deepEqual(ok('--json', 'panes').json.map(p => p.id), panesBefore, 'Nothing was closed');
+  // A1: this loomctl, reaching a Loom from before the hello, stops at the hello.
+  const oldPipe = `\\\\.\\pipe\\loom-cli-check-old-${process.pid}`;
+  const heard = [];
+  const oldLoom = createServer(s => {
+    let buf = '';
+    s.on('data', d => {
+      buf += d;
+      if (!buf.includes('\n')) return;
+      heard.push(JSON.parse(buf.split('\n')[0]));
+      s.end(JSON.stringify({ ok: false, error: 'Unknown command "null". loomctl help lists them.' }) + '\n');
+    });
+  });
+  await new Promise(r => oldLoom.listen(oldPipe, r));
+  r = await new Promise(done => {
+    const c = spawn(ctl, ['close', 'alpha:1', '--yes'], { env: { ...process.env, LOOM_PIPE: oldPipe } });
+    let err = '';
+    c.stderr.on('data', d => (err += d));
+    c.on('close', code => done({ code, err }));
+  });
+  oldLoom.close();
+  assert.equal(r.code, 2, r.err);
+  assert.match(r.err, /older than this loomctl/);
+  assert.deepEqual(heard.map(h => Object.keys(h)), [['hello']], 'Only the hello reached it, never the command');
+  // A5: standard input starting with -- is text, all of it.
+  const plain = { ...process.env };
+  delete plain.LOOM_PIPE;
+  r = spawnSync(ctl, ['--profile', profile, 'send', 'alpha:1', '-'], { input: '--no-enter & echo stdin-was-text\r\n', encoding: 'utf8', env: plain });
+  assert.equal(r.status, 0, r.stderr);
+  await pause(800);
+  const screen = ok('read', 'alpha:1', '--lines', '15').out;
+  assert.match(screen, />--no-enter & echo stdin-was-text$/m, screen);
+  assert.match(screen, /^stdin-was-text$/m, 'The line ran, so Enter was pressed');
+  // Failures under --json are JSON too.
+  r = loomctl('--json', 'read', 'nosuch:9');
+  assert.equal(r.code, 1);
+  assert.equal(r.json?.ok, false, r.out);
+  assert.match(r.json.error, /nosuch/);
+  console.log('PASS the agent review: info, both kinds of old loomctl and Loom refused before a command, stdin as text, JSON failures');
 
   // Failures say so, with the right exit codes.
   r = loomctl('nonsense');

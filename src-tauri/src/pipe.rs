@@ -10,6 +10,13 @@
 /// Debug builds keep to themselves, the way their data folder does.
 const PREFIX: &str = if cfg!(debug_assertions) { "loom-dev" } else { "loom" };
 
+/// What loomctl and Loom say to each other. Raise it whenever a request or an
+/// answer changes shape: an update replaces loomctl.exe while the old Loom may
+/// still be running, and the two must refuse each other rather than misread a
+/// command (the first version sent `args`, this one `argv`, and each read the
+/// other's as no arguments at all, so `close <pane>` closed the pane in front).
+pub const PROTOCOL: u64 = 2;
+
 fn user() -> String {
     std::env::var("USERNAME").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }

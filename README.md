@@ -496,13 +496,14 @@ loomctl read api-fix:1                  # what a pane shows, as text
 loomctl read api-fix:1 --lines 200      # its last 200 lines, history included
 loomctl send api-fix:1 run the tests    # type it, then Enter once it shows up
 loomctl wait api-fix:1                  # block until that agent waits for you
-loomctl menu api-fix:1                  # the numbered question on its screen
-loomctl choose api-fix:1 2              # pick option 2, as the Overview does
+loomctl menu api-fix:1                  # the numbered question on its screen, and its menu id
+loomctl choose api-fix:1 2 --menu 3f9a01c2   # pick option 2, only if it is still that question
 loomctl new C:\code\app --name login --agent codex   # a new worktree thread
 loomctl add login --agent claude        # another agent in that thread
 loomctl show login:2                    # bring it to the front
 loomctl close login:2 --yes             # stop it and close the pane
 loomctl --json panes                    # the same answers as JSON
+loomctl info                            # which Loom answers: version, process, its own pipe
 loomctl help                            # every command the running Loom knows
 ```
 
@@ -511,16 +512,28 @@ name, a unique start of it, or its id. Anything a button would ask about first
 needs `--yes`: closing a pane whose agent is running, stopping or restarting a
 running process, and closing a thread. `close-thread --delete worktree|branch` also refuses to lose
 uncommitted files or unmerged commits unless you add `--force`. `send -`
-reads the text from standard input. A command's options go after its name, in
+reads the text from standard input and types it as it is, less one final line
+break: text starting with `--` stays text. A command's options go after its name, in
 any order around its arguments; after `--`, every word is an argument. A
 relative folder, as in `loomctl new .`, is relative to the terminal you ran
 `loomctl` in. Pane and thread ids last until Loom exits; names and numbers
 change when you rename or reorder.
 
-Exit codes: 0 done, 1 the command failed, 2 Loom isn't running, 3 no answer
-in time (`--timeout`: 30 seconds, an hour for `wait`). A timeout stops the
-waiting, not the command, so a slow `new` or `close-thread` may still finish
-after it: check with `loomctl threads` before trying again.
+Text sent to a pane belongs to the session that was running when you sent it.
+If the pane stops or restarts first, the send fails and nothing is typed into
+the new session. `send` presses Enter only once the text shows on screen, which
+for a long task can be Claude's `[Pasted text #1 +120 lines]` or Codex's
+`[Pasted Content ...]`. If it never shows, `send` fails but says the text went
+in, so don't send it again: `loomctl read` shows it and `loomctl keys <pane>
+enter` submits it. With `--json`, a failure prints its answer as JSON too, with
+`"typed": true` in that case.
+
+Exit codes: 0 done, 1 the command failed, 2 Loom isn't running or is a
+different version than `loomctl`, 3 no answer in time (`--timeout`: 30
+seconds, an hour for `wait`). A timeout stops the waiting, not the command, so
+a slow `new` or `close-thread` may still finish after it: check with `loomctl
+threads` before trying again. After an update, restart Loom: until then the
+new `loomctl` and the old Loom refuse each other before running anything.
 
 Inside a Loom pane, `loomctl` is on the PATH and talks to the Loom that owns the
 pane, so an agent can read other panes, start agents and wait for them. For a

@@ -3,6 +3,7 @@
 //! where the threads and panes live, through the functions the buttons call,
 //! so whatever a command does shows in the window. This side only carries
 //! requests there and answers back.
+use crate::pipe::PROTOCOL;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -92,12 +93,40 @@ fn owner_only() -> Result<usize, String> {
     }
 }
 
+/// loomctl says hello with its protocol first and gets this Loom's back; only
+/// then does it send the command. A loomctl too old to say hello, or on
+/// another protocol, is refused before anything runs. `loomctl info` stops
+/// after the hello.
 async fn answer(app: AppHandle, pipe: NamedPipeServer) -> std::io::Result<()> {
     let (read, mut write) = tokio::io::split(pipe);
+    let mut read = BufReader::new(read.take(1 << 20));
     let mut line = String::new();
-    BufReader::new(read.take(1 << 20)).read_line(&mut line).await?;
+    read.read_line(&mut line).await?;
+    let theirs = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["hello"].as_u64()).unwrap_or(1);
+    let hello = if theirs == PROTOCOL {
+        json!({ "ok": true, "protocol": PROTOCOL, "version": app.package_info().version.to_string(), "pid": std::process::id(), "pipe": crate::pipe::instance_pipe() })
+    } else {
+        let error = if theirs < PROTOCOL {
+            "This loomctl is older than the running Loom. Use the loomctl.exe installed beside loom.exe."
+        } else {
+            "The running Loom is older than this loomctl. Restart Loom to finish the update."
+        };
+        json!({ "ok": false, "protocol": PROTOCOL, "error": error })
+    };
+    write.write_all(format!("{hello}\n").as_bytes()).await?;
+    write.flush().await?;
+    if theirs != PROTOCOL {
+        return Ok(());
+    }
+    line.clear();
+    if read.read_line(&mut line).await? == 0 {
+        return Ok(());
+    }
     let reply = match serde_json::from_str::<Value>(&line) {
-        Ok(request) => ask(&app, request).await,
+        Ok(request) if request["cmd"].is_string() && request["argv"].as_array().is_some_and(|a| a.iter().all(Value::is_string)) => {
+            ask(&app, request).await
+        }
+        Ok(_) => json!({ "ok": false, "error": "loomctl sent a request without a command and its words." }),
         Err(e) => json!({ "ok": false, "error": format!("loomctl sent a request Loom can't read: {e}") }),
     };
     write.write_all(format!("{reply}\n").as_bytes()).await?;
@@ -121,8 +150,10 @@ async fn ask(app: &AppHandle, request: Value) -> Value {
     let (tx, rx) = oneshot::channel();
     pending.waiting.lock().unwrap().insert(id, tx);
     let secs = request["timeout"].as_f64().unwrap_or(30.0).clamp(1.0, 86_400.0);
-    // The words go to the page unparsed: only it knows which options each command takes.
-    let event = json!({ "id": id, "cmd": request["cmd"], "argv": request["argv"], "cwd": request["cwd"], "timeout": secs });
+    // The words go to the page unparsed: only it knows which options each
+    // command takes. Standard input comes apart from them, so text starting
+    // with -- is never read as an option.
+    let event = json!({ "id": id, "cmd": request["cmd"], "argv": request["argv"], "stdin": request["stdin"], "cwd": request["cwd"], "timeout": secs });
     if let Err(e) = app.emit("cli", event) {
         pending.waiting.lock().unwrap().remove(&id);
         return json!({ "ok": false, "error": format!("Loom couldn't pass the command to its window: {e}") });

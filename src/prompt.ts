@@ -53,11 +53,29 @@ export function readMenu(screen: string): Menu | null {
   };
 }
 
-/** How many times the start of `text` shows on screen. Before and after a paste,
- * it says whether the agent took the text into an input it can submit. Spaces
- * and box borders are ignored, since an input box may wrap the text or pad it. */
-export function echoes(screen: string, text: string): number {
-  const flat = (s: string) => s.replace(/[\s│┃║]+/g, "");
-  const key = flat(text).slice(0, 24);
-  return key ? flat(screen).split(key).length - 1 : 0;
+/** A menu's identity: its question, options and kind, not which option is
+ * highlighted. `loomctl menu` shows it and `choose --menu` must match it, so an
+ * answer read for one question never goes to another with the same options. */
+export function menuRev(m: Menu): string {
+  const s = JSON.stringify([m.question, m.options, m.multi]);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return (h >>> 0).toString(16).padStart(8, "0");
 }
+
+// Long pastes show as one of these instead of the text: Claude's and Codex's.
+const PASTED = /\[Pastedtext#\d+(?:\+\d+lines)?\]|\[PastedContent\d+chars\]/g;
+
+/** Where a paste can show on screen: how many times the start of `text`, its
+ * end and a collapsed-paste placeholder appear. Before and after a paste, they
+ * say whether the agent took the text into an input it can submit (echoed).
+ * The start of a long text scrolls away and a longer one collapses, so any of
+ * the three counts. Spaces and box borders are ignored, since an input box may
+ * wrap the text or pad it. */
+export function echoes(screen: string, text: string): number[] {
+  const flat = (s: string) => s.replace(/[\s│┃║]+/g, "");
+  const shown = flat(screen), typed = flat(text);
+  const count = (key: string) => (key ? shown.split(key).length - 1 : 0);
+  return [count(typed.slice(0, 24)), count(typed.slice(-24)), typed ? (shown.match(PASTED) ?? []).length : 0];
+}
+export const echoed = (before: number[], after: number[]) => after.some((n, i) => n > before[i]);

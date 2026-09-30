@@ -1,5 +1,5 @@
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, echoes } from "./prompt.ts";
+import { readMenu, echoes, echoed, menuRev } from "./prompt.ts";
 
 let fails = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -114,10 +114,24 @@ check("A numbered answer above the input box is not a menu", readMenu(input), nu
 check("Codex composer text is not a menu", readMenu("› 1. fix the tests\n\n  100% context left"), null);
 check("A cursor on a lone option is not a menu", readMenu("❯ 2. Something"), null);
 
-check("Echo found once", echoes("│ > Yes, go ahead   │", "Yes, go ahead"), 1);
-check("Echo ignores wrapping", echoes("│ > Yes, go ahead and also │\n│ update the README │", "Yes, go ahead and also update the README"), 1);
-check("No echo", echoes("❯ 1. Yes", "no, do X instead"), 0);
-check("Empty text never echoes", echoes("anything", "   "), 0);
+check("Echo found once", echoes("│ > Yes, go ahead   │", "Yes, go ahead"), [1, 1, 0]);
+check("Echo ignores wrapping", echoes("│ > Yes, go ahead and also │\n│ update the README │", "Yes, go ahead and also update the README"), [1, 1, 0]);
+check("No echo", echoes("❯ 1. Yes", "no, do X instead"), [0, 0, 0]);
+check("Empty text never echoes", echoes("anything [Pasted text #1]", "   "), [0, 0, 0]);
+// A task taller than the screen: its start scrolled away, its end is at the cursor.
+const task = ["TASK-HEADER unique", ...Array.from({ length: 50 }, (_, i) => `step ${i} of the task`)].join("\n");
+const bottom = task.split("\n").slice(-24).join("\n");
+check("A long paste echoes by its end", echoed(echoes("> ", task), echoes(bottom, task)), true);
+check("Claude's collapsed paste echoes", echoed(echoes("> ", task), echoes("> [Pasted text #1 +50 lines]", task)), true);
+check("Codex's collapsed paste echoes", echoed(echoes("› ", task), echoes("│ › [Pasted Content 1024 │\n│ chars]", task)), true);
+check("A second collapsed paste still counts", echoed(echoes("[Pasted text #1 +50 lines]", task), echoes("[Pasted text #1 +50 lines][Pasted text #2 +50 lines]", task)), true);
+check("A menu that ignored the paste doesn't", echoed(echoes("❯ 1. Yes\n  2. No", task), echoes("❯ 1. Yes\n  2. No", task)), false);
+
+const readme = readMenu("Read README.md?\n❯ 1. Yes\n  2. No")!;
+const wipe = readMenu("Delete the project?\n❯ 1. Yes\n  2. No")!;
+check("Same options under another question are another menu", menuRev(readme) === menuRev(wipe), false);
+check("Moving the highlight keeps the menu", menuRev(readme) === menuRev(readMenu("Read README.md?\n  1. Yes\n❯ 2. No")!), true);
+check("A menu revision is 8 hex digits", /^[0-9a-f]{8}$/.test(menuRev(readme)), true);
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

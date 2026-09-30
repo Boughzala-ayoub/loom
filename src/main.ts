@@ -18,7 +18,7 @@ import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { readMenu, echoes, type Menu as AgentMenu } from "./prompt";
+import { readMenu, echoes, echoed, menuRev, type Menu as AgentMenu } from "./prompt";
 import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, str, table, type Args, type Options } from "./cli";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
@@ -1787,15 +1787,27 @@ class Pane {
     const before = this.launching;
     let done!: () => void;
     this.launching = new Promise<void>((r) => (done = r));
+    this.starts++;
     try {
       await before;
       return await this.launch(gen, resume, retry);
     } finally {
+      this.starts--;
       done();
     }
   }
   private launchGen = 0;
   private launching: Promise<void> = Promise.resolve();
+  private starts = 0;
+  /** A launch hasn't finished. A dead pane can be starting again (a restart
+   * checking its saved session), and a stop must still cancel that. */
+  get launchPending() {
+    return this.starts > 0;
+  }
+  /** Which launch the pane is on. Input queued for one is never typed into the next. */
+  get generation() {
+    return this.launchGen;
+  }
 
   private async launch(gen: number, resume: boolean, retry: boolean): Promise<true | string> {
     const stale = () => this.disposed || gen !== this.launchGen;
@@ -3262,40 +3274,64 @@ async function submit(p: Pane) {
   if (p.waitingSince === since) p.seen(); // A new alert raised meanwhile stays.
 }
 
+/** Input that stopped short of Enter. `typed`: the text is in the running
+ * process's input already, so sending it again would type it twice. */
+class NotSubmitted extends Error {
+  constructor(message: string, readonly typed: boolean) {
+    super(message);
+  }
+}
+
 /** One input sequence per pane at a time. A reply pastes, waits for the echo,
  * then presses Enter; a second one arriving in between (the Overview and
- * loomctl, or two loomctl calls) would join both texts into one submission. */
+ * loomctl, or two loomctl calls) would join both texts into one submission.
+ * A sequence belongs to the process that was running when it was queued: if
+ * the pane stops or restarts before or during it, `live` stops it, so text
+ * meant for one session never lands in the next. */
 const inputTurns = new WeakMap<Pane, Promise<unknown>>();
-function inTurn<T>(p: Pane, sequence: () => Promise<T>): Promise<T> {
+function inTurn<T>(p: Pane, sequence: (live: (typed: boolean) => void) => Promise<T>): Promise<T> {
+  const gen = p.generation;
+  // Whatever was typed went with the process it was typed into, so a retry is safe.
+  const live = (typed: boolean) => {
+    const why = !p.th.panes.includes(p) ? "was closed" : p.dead ? "stopped" : p.generation !== gen ? "was restarted" : "";
+    if (why) throw new NotSubmitted(`${p.agent} ${why} ${typed ? "while Loom was typing" : "before Loom typed anything"}; nothing was submitted.`, false);
+  };
   const run = (inputTurns.get(p) ?? Promise.resolve()).catch(() => {}).then(() => {
-    if (p.dead || !p.th.panes.includes(p)) throw new Error(`${p.agent} isn't running, so nothing was typed.`);
-    return sequence();
+    live(false);
+    return sequence(live);
   });
   inputTurns.set(p, run.catch(() => {}));
   return run;
 }
 
+const paste = (p: Pane, text: string) => (p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+
 /** Paste, then press Enter only if the text shows up on screen. On a menu or
  * anything else that doesn't take text, Enter would pick an option instead. */
 function sendReply(p: Pane, text: string) {
-  return inTurn(p, async () => {
+  return inTurn(p, async (live) => {
     const before = echoes(liveScreen(p), text);
-    await keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+    await keys(p, paste(p, text));
     await p.settle(150, 1000);
-    if (echoes(liveScreen(p), text) <= before) throw new Error(`${p.agent} didn't show your text, so Loom didn't press Enter. Open the session to answer.`);
+    live(true);
+    if (!echoed(before, echoes(liveScreen(p), text))) {
+      throw new NotSubmitted(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
+    }
     await submit(p);
   });
 }
 
 /** Pick option `i` the way a person would: one arrow key at a time, reading the
  * screen after each, and Enter only once `i` is highlighted. If the menu on
- * screen stops matching the one the button came from, nothing is chosen. */
+ * screen stops being the one the button came from (its question, options or
+ * kind, see menuRev), nothing is chosen. */
 function choose(p: Pane, menu: AgentMenu, i: number) {
-  return inTurn(p, async () => {
-    const same = (m: AgentMenu | null) => m?.options.join("\n") === menu.options.join("\n");
+  return inTurn(p, async (live) => {
+    const want = menuRev(menu);
     for (let step = 0; step <= menu.options.length; step++) {
+      live(step > 0);
       const now = readMenu(liveScreen(p, false));
-      if (!now || !same(now)) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
+      if (!now || menuRev(now) !== want) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
       if (now.selected === i) return submit(p);
       await keys(p, (p.term.modes.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + (now.selected > i ? "A" : "B"));
       await p.settle(80, 800);
@@ -6324,7 +6360,9 @@ const CLI: Record<string, CliCommand> = {
       const p = cliPane(a._[0]);
       const m = readMenu(liveScreen(p, false));
       if (!m) return { data: null, text: `${paneName(p)} isn't showing a numbered question.` };
-      return { data: m, text: [...m.question, ...m.options.map((o, i) => `${i === m.selected ? "❯" : " "} ${i + 1}. ${o}`)].join("\n") };
+      const rev = menuRev(m);
+      const lines = [...m.question, ...m.options.map((o, i) => `${i === m.selected ? "❯" : " "} ${i + 1}. ${o}`)];
+      return { data: { ...m, rev }, text: [...lines, `(menu ${rev}: choose --menu ${rev} answers only this question)`].join("\n") };
     },
   },
   show: {
@@ -6453,8 +6491,14 @@ const CLI: Record<string, CliCommand> = {
       const text = a._.slice(1).join(" ");
       if (!text) throw new Error("Give the text to send.");
       if (p.dead) throw new Error(`${paneName(p)} has exited. loomctl restart ${paneName(p)} starts it again.`);
-      if (flag(a, "no-enter")) await inTurn(p, () => keys(p, p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text));
-      else await sendReply(p, text);
+      try {
+        if (flag(a, "no-enter")) await inTurn(p, () => keys(p, paste(p, text)));
+        else await sendReply(p, text);
+      } catch (e) {
+        if (!(e instanceof NotSubmitted) || !e.typed) throw e;
+        const ref = paneName(p);
+        throw new NotSubmitted(`${p.agent} didn't show the text on its screen, so Loom didn't press Enter. The text went to ${ref} and may be waiting there, so don't send it again: loomctl read ${ref} shows it, and loomctl keys ${ref} enter submits it.`, true);
+      }
       return { data: { pane: p.id }, text: "" };
     },
   },
@@ -6471,8 +6515,9 @@ const CLI: Record<string, CliCommand> = {
         return b;
       });
       if (p.dead) throw new Error(`${paneName(p)} has exited.`);
-      await inTurn(p, async () => {
-        for (const b of bytes) {
+      await inTurn(p, async (live) => {
+        for (const [i, b] of bytes.entries()) {
+          live(i > 0);
           await keys(p, b);
           await p.settle(60, 500);
         }
@@ -6481,16 +6526,19 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   choose: {
-    usage: "choose <pane> <n>",
-    help: "Pick option n of the numbered question on a pane's screen, as the Overview's buttons do.",
+    usage: "choose <pane> <n> [--menu REV]",
+    help: "Pick option n of the numbered question on a pane's screen, as the Overview's buttons do. --menu REV (from loomctl menu) refuses any other question.",
+    options: { menu: "string" },
     run: async (a) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
       const n = Number(cliWord(a, 1, "an option number"));
       const m = readMenu(liveScreen(p, false));
       if (!m) throw new Error(`${paneName(p)} isn't showing a numbered question.`);
+      const rev = menuRev(m), expect = str(a, "menu");
+      if (expect !== undefined && expect !== rev) throw new Error(`${paneName(p)} shows another question now (menu ${rev}, not ${expect}), so nothing was chosen. loomctl menu ${paneName(p)} reads it.`);
       if (!Number.isInteger(n) || n < 1 || n > m.options.length) throw new Error(`Pick 1 to ${m.options.length}.`);
       await choose(p, m, n - 1);
-      return { data: { pane: p.id, option: n, text: m.options[n - 1] }, text: `Chose ${n}. ${m.options[n - 1]}` };
+      return { data: { pane: p.id, option: n, text: m.options[n - 1], rev }, text: `Chose ${n}. ${m.options[n - 1]}` };
     },
   },
   wait: {
@@ -6546,7 +6594,8 @@ const CLI: Record<string, CliCommand> = {
     options: { yes: "bool" },
     run: async (a) => {
       const p = cliPane(a._[0]);
-      if (p.dead) return { data: paneData(p), text: `${paneName(p)} has already exited.` };
+      // A dead pane may be starting again, still checking its session: that start is stopped too.
+      if (p.dead && !p.launchPending) return { data: paneData(p), text: `${paneName(p)} has already exited.` };
       if (!flag(a, "yes")) throw new Error(`Stopping ${paneName(p)} ends ${p.agent}. Pass --yes.`);
       await p.stop();
       return { data: paneData(p), text: `${paneName(p)} stopped`, note: `loomctl stopped ${paneName(p)}` };
@@ -6653,18 +6702,23 @@ const CLI: Record<string, CliCommand> = {
 
 /** Answers loomctl for as long as the window is up. */
 function installCli() {
-  void listen<{ id: number; cmd: string; argv: string[] | null; cwd: string | null; timeout: number }>("cli", async ({ payload }) => {
-    const { id, cmd, timeout } = payload;
+  void listen<{ id: number; cmd: string; argv: string[] | null; stdin: string | null; cwd: string | null; timeout: number }>("cli", async ({ payload }) => {
+    const { id, cmd, timeout, stdin } = payload;
     let reply: Record<string, unknown>;
     try {
       const command = Object.prototype.hasOwnProperty.call(CLI, cmd) ? CLI[cmd] : undefined;
       if (!command) throw new Error(`Unknown command "${cmd}". loomctl help lists them.`);
-      const args = parseArgs(payload.argv ?? [], command.options ?? {}, cmd);
+      // Missing words are a loomctl that doesn't match, never "no arguments": that would aim at the pane in front.
+      if (!Array.isArray(payload.argv)) throw new Error("loomctl sent no words with the command. Use the loomctl.exe beside loom.exe.");
+      const args = parseArgs(payload.argv, command.options ?? {}, cmd);
+      // Standard input comes apart from the words and goes in only now, so text starting with -- stays text.
+      if (typeof stdin === "string") args._ = args._.map((w) => (w === "-" ? stdin.replace(/\r?\n$/, "") : w));
       const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined });
       if (result.note) toast(result.note);
       reply = { ok: true, data: result.data ?? null, text: result.text };
     } catch (e) {
       reply = { ok: false, error: e instanceof Error ? e.message : String(e), timeout: e instanceof CliTimeout };
+      if (e instanceof NotSubmitted) reply.typed = e.typed;
     }
     await invoke("cli_reply", { id, reply }).catch(() => {});
   }).then(() => invoke("cli_ready"));
