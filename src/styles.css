@@ -7,28 +7,37 @@
  * draw, while the fixed chrome only ever sits over the static ground, where
  * translucency alone reads as glass and costs nothing. */
 :root {
-  /* Original Loom palette: deep navy with a warm copper accent. */
-  --bg: #0a0f1b;
-  --panel: #0e1626;
-  --raise: #141e33;
-  --line: #1c2a45;
-  --line-strong: #2a3c5c;
-  --text: #dce4f0;
-  --muted: #94a6c8;
-  --faint: #6e82a6;
-  --accent: #d97757;
-  --accent-dim: rgba(217, 119, 87, 0.14);
-  --ok: #6fbf73;
-  --err: #f85149;
-  --warn: #e3b341;
-  --blue: #91b9df;
-  --magenta: #bba6d8;
-  --cyan: #83c6d0;
+  /* Loom's palette, named for natural dyes. Indigo for the ground and the
+     cloth. Weld yellow is the one loud colour, and it only ever means an agent
+     wants you; woad blue marks work and selection, madder red an exit or an
+     error, sage what was added. "loom classic" keeps the old navy and copper. */
+  --bg: #0c1120;
+  --panel: #121a2d;
+  --raise: #19233b;
+  --line: #243150;
+  --line-strong: #34436a;
+  --text: #e8eaf1;
+  --muted: #9ba4bc;
+  --faint: #848da7;
+  --accent: #7ea6ef;
+  --accent-dim: rgba(126, 166, 239, 0.14);
+  --ok: #7cc08d;
+  --err: #e5605a;
+  --warn: #f2bb44;
+  --blue: #93b4e8;
+  --magenta: #c3a3dc;
+  --cyan: #7fc6cf;
 
   --mono: "Cascadia Mono", Consolas, "Courier New", monospace;
   --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --ui-small: "Segoe UI Variable Small", "Segoe UI", system-ui, sans-serif;
   --ui-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+
+  /* One height for everything you click, so the whole app grows together for
+     a finger. Narrow windows raise it, and they are also how a phone sees
+     Loom over remote desktop: 44 px there, a comfortable tap. */
+  --tap: 34px;
+  --tap-sm: 28px;
 
   /* Glass, mixed from the palette. */
   --shadow-c: rgb(0 0 0 / 0.5);
@@ -70,18 +79,17 @@ body {
   height: 100%;
   overflow: hidden;
   color: var(--text);
-  font: 13px/1.45 var(--ui);
+  font: 14px/1.45 var(--ui);
 }
 
-/* The ground everything floats on: a warp and a weft of hairlines, lit from
-   the top left in the accent and from the bottom right in the theme's blue.
-   Painted once; it only shows through the glass and between panes. */
+/* The ground everything floats on: a warp and a weft of hairlines under one
+   soft light from above. Painted once; it only shows through the glass and
+   between panes. */
 body {
   display: flex;
   flex-direction: column;
   background:
-    radial-gradient(70vw 60vh at 0% 0%, color-mix(in srgb, var(--accent) 17%, transparent), transparent 75%),
-    radial-gradient(70vw 80vh at 100% 100%, color-mix(in srgb, var(--blue) 12%, transparent), transparent 75%),
+    radial-gradient(90vw 70vh at 50% -20%, color-mix(in srgb, var(--blue) 9%, transparent), transparent 70%),
     repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 2.4%, transparent) 0 1px, transparent 1px 5px),
     repeating-linear-gradient(0deg, color-mix(in srgb, var(--text) 1.5%, transparent) 0 1px, transparent 1px 5px),
     var(--bg);
@@ -186,22 +194,31 @@ button:disabled:hover {
   border-color: transparent;
 }
 button.icon {
-  width: 28px;
-  height: 28px;
+  width: var(--tap-sm);
+  height: var(--tap-sm);
   padding: 0;
 }
-/* Primary: the accent as a lit surface, ink in the page colour. */
+/* Primary: a tint of the accent. Filled controls are kept for the one thing
+   that must pull you in, below. */
 button.primary {
-  color: var(--bg);
+  color: var(--accent);
   font-weight: 600;
-  background: linear-gradient(to bottom, color-mix(in srgb, #fff 14%, var(--accent)), var(--accent));
-  border-color: color-mix(in srgb, var(--accent) 70%, #000);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 25%, transparent), 0 4px 14px -6px var(--glow);
+  background: var(--accent-dim);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 button.primary:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+/* An agent wants you: the only place weld fills a control. */
+#waiting,
+#waiting:hover,
+#dashboard-next.primary:not(:disabled),
+#dashboard-next.primary:not(:disabled):hover {
   color: var(--bg);
-  background: linear-gradient(to bottom, color-mix(in srgb, #fff 22%, var(--accent)), color-mix(in srgb, #fff 6%, var(--accent)));
-  box-shadow: inset 0 1px 0 color-mix(in srgb, #fff 25%, transparent), 0 6px 20px -6px var(--glow);
+  background: var(--warn);
+  border-color: transparent;
+  font-weight: 600;
 }
 button.danger {
   color: var(--err);
@@ -250,7 +267,7 @@ select option {
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 46px;
+  height: calc(var(--tap) + 14px);
   padding: 0 10px;
   background: var(--glass-lit), var(--glass);
   border-bottom: 1px solid var(--edge);
@@ -260,17 +277,16 @@ select option {
 }
 #bar > button {
   flex: none;
-  height: 30px;
+  height: var(--tap);
 }
 #bar > button.icon {
-  width: 30px;
+  width: var(--tap);
 }
 .mark {
   width: 20px;
   height: 20px;
   flex: none;
   margin: 0 2px 0 4px;
-  filter: drop-shadow(0 0 8px var(--glow));
 }
 
 /* Where you are: project / thread, then the branch when it isn't the usual
@@ -300,7 +316,7 @@ select option {
   min-width: 40px;
   overflow: hidden;
   text-overflow: ellipsis;
-  font: 600 14px var(--ui-display);
+  font: 600 15px var(--ui-display);
   color: var(--text);
 }
 .chip {
@@ -343,24 +359,21 @@ select option {
 }
 
 /* The one thing in the bar that moves: somebody wants you. */
-#waiting,
-#waiting:hover {
-  gap: 7px;
-  color: var(--warn);
-  background: var(--warn-dim);
-  border-color: color-mix(in srgb, var(--warn) 45%, transparent);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
 #waiting {
   position: relative;
+  gap: 0; /* the word carries its own space, so it can hide on a phone */
+  font-variant-numeric: tabular-nums;
 }
 #waiting::before {
   content: "";
   width: 7px;
   height: 7px;
+  margin-right: 7px;
   border-radius: 50%;
-  background: var(--warn);
+  background: currentColor;
+}
+#waiting .lbl {
+  white-space: pre; /* a flex item would drop its leading space */
 }
 /* A ring leaving the dot, three times when another agent starts waiting
    (paintWaiting adds .ping), then still. Somebody is nearly always waiting, and
@@ -374,7 +387,7 @@ select option {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  border: 1.5px solid var(--warn);
+  border: 1.5px solid currentColor;
   opacity: 0;
   pointer-events: none;
 }
@@ -441,7 +454,7 @@ select option {
   display: flex;
   align-items: center;
   gap: 7px;
-  height: 36px;
+  height: var(--tap);
   margin: 12px 10px 10px;
   padding: 0 9px;
   color: var(--faint);
@@ -462,7 +475,7 @@ select option {
   flex: 1;
   height: 100%;
   padding: 0;
-  font-size: 12px;
+  font-size: 13px;
   background: none;
   border: 0;
   box-shadow: none;
@@ -535,7 +548,7 @@ select option {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 600 12px var(--ui);
+  font: 600 13px var(--ui);
   letter-spacing: 0.01em;
 }
 .project-n {
@@ -550,8 +563,8 @@ select option {
 }
 .repo > button {
   margin-left: auto;
-  width: 24px;
-  height: 24px;
+  width: var(--tap-sm);
+  height: var(--tap-sm);
   opacity: 0;
 }
 .repo:hover > button,
@@ -567,11 +580,12 @@ select option {
 .group::before {
   content: "";
   position: absolute;
-  left: 12px;
+  left: 14px; /* under the knots, which sit 1 px in behind the thread's border */
   top: 0;
   bottom: 10px;
-  width: 1px;
-  background: linear-gradient(to bottom, color-mix(in srgb, var(--text) 22%, transparent), color-mix(in srgb, var(--text) 10%, transparent) 80%, transparent);
+  width: 2px;
+  border-radius: 1px;
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--text) 20%, transparent), color-mix(in srgb, var(--text) 9%, transparent) 80%, transparent);
   pointer-events: none;
 }
 
@@ -595,7 +609,7 @@ select option {
 .thread-top {
   position: relative;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: center;
   gap: 2px 4px;
   padding: 6px 6px 8px 0;
@@ -609,7 +623,7 @@ select option {
   min-height: 20px;
 }
 .thread.listed .thread-top {
-  grid-template-columns: 24px minmax(0, 1fr) auto auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto auto;
   padding-top: 3px;
   padding-bottom: 3px;
 }
@@ -626,8 +640,8 @@ select option {
 .thread-top .fold {
   position: relative;
   flex: none;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   margin-left: 0;
   padding: 0;
   color: var(--faint);
@@ -640,6 +654,9 @@ select option {
   transform: rotate(-90deg);
   transition: opacity 0.12s, transform 0.15s;
 }
+/* Knots: hollow while quiet, filled while working, ringed in weld while
+   waiting. No glow: the colour is the signal. 12 px across with the border
+   (pseudo-elements keep content-box sizing), centred on the 2 px rail. */
 .fold::before {
   content: "";
   position: absolute;
@@ -648,7 +665,7 @@ select option {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  border: 1.5px solid var(--faint);
+  border: 2px solid var(--faint);
   background: var(--panel);
   transition: opacity 0.12s;
 }
@@ -671,12 +688,11 @@ select option {
 .thread[data-state="busy"] .fold::before {
   border-color: var(--accent);
   background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim), 0 0 10px var(--glow);
 }
 .thread[data-state="waiting"] .fold::before {
   border-color: var(--warn);
   background: var(--warn);
-  box-shadow: 0 0 0 3px var(--warn-dim), 0 0 10px var(--warn-glow);
+  box-shadow: 0 0 0 4px var(--warn-dim);
 }
 .thread[data-state="dead"] .fold::before {
   border-color: var(--err);
@@ -687,13 +703,12 @@ select option {
 .thread[data-state="busy"]::after {
   content: "";
   position: absolute;
-  left: 10px;
+  left: 13px;
   top: 0;
-  width: 3px;
+  width: 4px;
   height: 14px;
   border-radius: 2px;
   background: linear-gradient(to bottom, transparent, var(--accent), transparent);
-  box-shadow: 0 0 8px var(--glow);
   opacity: 0;
   pointer-events: none;
   animation: shuttle 1.6s cubic-bezier(0.45, 0, 0.55, 1) 2;
@@ -712,14 +727,14 @@ select option {
   display: block;
   flex: 0 1 auto;
   min-width: 0;
-  height: 24px;
+  height: 28px;
   padding: 0 2px;
-  line-height: 24px;
+  line-height: 28px;
   text-align: left;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font: 600 13px var(--ui);
+  font: 600 14px var(--ui);
   color: inherit;
   background: none;
 }
@@ -831,8 +846,8 @@ select option {
   border-radius: 7px;
 }
 .thread-tools button {
-  width: 24px;
-  height: 24px;
+  width: var(--tap-sm);
+  height: var(--tap-sm);
   padding: 0;
 }
 
@@ -846,12 +861,12 @@ select option {
   align-items: center;
   gap: 7px;
   width: 100%;
-  height: 26px;
+  height: var(--tap-sm);
   padding: 0 6px;
   border-radius: 6px;
   text-align: left;
   color: var(--faint);
-  font-size: 12px;
+  font-size: 13px;
 }
 .agent:hover {
   background: var(--hover);
@@ -966,7 +981,7 @@ select option {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 40px;
+  height: calc(var(--tap) + 10px);
   padding: 0 8px 0 6px;
   background: color-mix(in srgb, var(--panel) 40%, transparent);
   border-bottom: 1px solid var(--edge);
@@ -993,7 +1008,7 @@ select option {
   flex: 0 1 auto;
   min-width: 44px;
   max-width: 220px;
-  height: 28px;
+  height: var(--tap);
   padding: 0 4px 0 10px;
   border-radius: 7px;
   font: 12px var(--mono);
@@ -1027,7 +1042,7 @@ select option {
 #tabs .tab.panes {
   margin-right: 6px;
   padding-right: 12px;
-  font: 600 12px var(--ui);
+  font: 600 13px var(--ui);
   color: var(--text);
 }
 #tabs .tab.panes::after {
@@ -1077,7 +1092,7 @@ select option {
 }
 #wsactions > button,
 .split-btn > button {
-  height: 28px;
+  height: var(--tap);
 }
 /* Dictation as one control: Speak, then the language and the prefix it will
    use, each in sight and one click from its list. */
@@ -1087,7 +1102,7 @@ select option {
   border-radius: 8px;
 }
 .split-btn > button {
-  height: 26px;
+  height: calc(var(--tap) - 2px);
   border-radius: 0;
 }
 .split-btn > button + button {
@@ -1175,12 +1190,10 @@ select option {
 #dashboard { flex: 1; min-height: 0; overflow-y: auto; padding: 32px; background: var(--bg); scrollbar-gutter: stable; }
 #dashboard > * { max-width: 1200px; margin-left: auto; margin-right: auto; }
 #dashboard button, #dashboard-preview button { box-shadow: none; }
-#dashboard button.primary, #dashboard-preview button.primary { background: var(--accent); }
-#dashboard button.primary:hover, #dashboard-preview button.primary:hover { background: color-mix(in srgb, var(--accent) 88%, var(--text)); }
 .dashboard-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .dashboard-head h1 { margin: 0; font: 600 26px/1.25 var(--ui-display); letter-spacing: -.7px; }
 .dashboard-actions { display: flex; flex: none; align-items: center; gap: 8px; }
-.dashboard-actions button { min-height: 34px; }
+.dashboard-actions button { min-height: var(--tap); }
 #dashboard-counts { display: flex; flex-wrap: wrap; gap: 6px; padding-bottom: 14px; margin-top: 22px; margin-bottom: 14px; border-bottom: 1px solid var(--edge); }
 #dashboard-counts button[data-group] .i { flex: none; width: 14px; height: 14px; color: var(--faint); }
 #dashboard-counts button[data-group] { max-width: 100%; min-width: 0; white-space: normal; text-align: left; }
@@ -1229,16 +1242,16 @@ select option {
 #agent-group .new-actions { flex: none; }
 .dashboard-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 46px; align-items: center; min-width: 0; border: 1px solid var(--edge); border-radius: 10px; background: var(--panel); }
 .dashboard-card:has(.dashboard-row:hover), .dashboard-card:focus-within { border-color: var(--edge-hi); background: color-mix(in srgb, var(--panel) 90%, var(--text)); }
-.dashboard-card::before { content: ""; position: absolute; left: -24px; top: 21px; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--faint); background: var(--bg); }
+.dashboard-card::before { content: ""; position: absolute; left: -26px; top: 19px; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--faint); background: var(--bg); }
 .dashboard-card:has([data-state="waiting"]) { border-color: color-mix(in srgb, var(--warn) 30%, var(--edge)); background: color-mix(in srgb, var(--warn) 5%, var(--panel)); }
-.dashboard-card:has([data-state="waiting"])::before { border-color: var(--warn); background: var(--warn); box-shadow: 0 0 0 3px var(--warn-dim), 0 0 10px var(--warn-glow); }
-.dashboard-card:has([data-state="busy"])::before { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim), 0 0 10px var(--glow); }
-.dashboard-card:has([data-state="busy"])::after { content: ""; position: absolute; left: -21px; top: 12px; width: 3px; height: 14px; border-radius: 2px; background: linear-gradient(to bottom, transparent, var(--accent), transparent); box-shadow: 0 0 8px var(--glow); opacity: 0; pointer-events: none; animation: shuttle 1.6s cubic-bezier(0.45, 0, 0.55, 1) 2; }
+.dashboard-card:has([data-state="waiting"])::before { border-color: var(--warn); background: var(--warn); box-shadow: 0 0 0 3px var(--warn-dim); }
+.dashboard-card:has([data-state="busy"])::before { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.dashboard-card:has([data-state="busy"])::after { content: ""; position: absolute; left: -21px; top: 12px; width: 3px; height: 14px; border-radius: 2px; background: linear-gradient(to bottom, transparent, var(--accent), transparent); opacity: 0; pointer-events: none; animation: shuttle 1.6s cubic-bezier(0.45, 0, 0.55, 1) 2; }
 .dashboard-card:has([data-state="dead"])::before { border-color: var(--err); }
 .dashboard-card:has([data-state="dead"]) { background: transparent; }
 .dashboard-card:has([data-state="dead"]) .dashboard-identity { color: var(--muted); }
 .dashboard-card-actions { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
-.dashboard-open-terminal, .dashboard-preview-button, .dashboard-group-add { position: relative; width: 32px; height: 32px; padding: 0; color: var(--faint); }
+.dashboard-open-terminal, .dashboard-preview-button, .dashboard-group-add { position: relative; width: var(--tap); height: var(--tap); padding: 0; color: var(--faint); }
 .dashboard-open-terminal span, .dashboard-group-add span { display: none; }
 .dashboard-group-add b { position: absolute; top: -1px; right: -1px; min-width: 14px; padding: 0 3px; border-radius: 7px; background: var(--accent); color: var(--bg); font-size: 10px; font-weight: 600; line-height: 14px; text-align: center; }
 .dashboard-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) 116px; grid-template-rows: auto 1fr; gap: 7px 24px; width: 100%; padding: 18px; border: 0; border-radius: 9px; background: transparent; text-align: left; white-space: normal; justify-content: stretch; align-items: start; }
@@ -1246,7 +1259,7 @@ select option {
 .dashboard-identity { display: flex; gap: 8px; align-items: start; color: var(--text); min-width: 0; overflow-wrap: anywhere; }
 .dashboard-identity .ico { margin-top: 2px; }
 .dashboard-identity strong { font-weight: 500; }
-.dashboard-location { grid-column: 1; grid-row: 2; font-size: 11px; color: var(--faint); overflow-wrap: anywhere; line-height: 1.6; }
+.dashboard-location { grid-column: 1; grid-row: 2; font-size: 12px; color: var(--faint); overflow-wrap: anywhere; line-height: 1.6; }
 .dashboard-stat { margin-left: 2px; font: 500 11px var(--mono); white-space: nowrap; }
 .dashboard-tag { display: inline-block; margin: 0 0 0 2px; padding: 0 6px; border: 1px solid var(--edge-hi); border-radius: 4px; color: var(--muted); font-size: 10px; line-height: 15px; white-space: nowrap; }
 .dashboard-activity { display: grid; gap: 6px; grid-column: 2; grid-row: 1 / 3; min-width: 0; overflow-wrap: anywhere; }
@@ -1263,10 +1276,10 @@ select option {
 .dashboard-usage:empty { display: none; }
 .dashboard-usage .ctx { cursor: inherit; }
 .dashboard-reply { display: flex; grid-column: 1 / -1; gap: 8px; padding: 0 18px 16px; }
-.dashboard-reply input { flex: 1; min-width: 0; height: 32px; font-size: 12px; }
-.dashboard-reply button { flex: none; min-height: 32px; font-size: 12px; }
+.dashboard-reply input { flex: 1; min-width: 0; height: var(--tap); font-size: 13px; }
+.dashboard-reply button { flex: none; min-height: var(--tap); font-size: 13px; }
 .dashboard-choices { flex-wrap: wrap; gap: 6px; }
-.dashboard-choices button { flex: 0 1 auto; max-width: 100%; border: 1px solid var(--edge-hi); white-space: normal; text-align: left; }
+.dashboard-choices button { flex: 0 1 auto; max-width: 100%; min-height: var(--tap); border: 1px solid var(--edge-hi); white-space: normal; text-align: left; }
 .dashboard-choices > span { color: var(--muted); font-size: 12px; }
 .dashboard-choices button[data-n]::before { content: attr(data-n); min-width: 10px; color: var(--faint); font: 500 11px/18px var(--mono); }
 .dashboard-card:has(.dashboard-select:checked) { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-dim); }
@@ -1278,10 +1291,10 @@ select option {
 #dashboard-select[aria-pressed="true"] { color: var(--accent); background: var(--accent-dim); }
 #dashboard-bulk { position: sticky; bottom: 12px; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 16px; padding: 10px 12px; border: 1px solid var(--edge-hi); border-radius: 10px; background: var(--raise); box-shadow: 0 10px 30px -12px var(--shadow-c); }
 #dashboard-bulk-count { min-width: 76px; font-size: 12px; font-weight: 500; }
-#dashboard-bulk button { min-height: 32px; font-size: 12px; }
+#dashboard-bulk button { min-height: var(--tap); font-size: 13px; }
 #dashboard-bulk .i { width: 14px; height: 14px; }
 #dashboard-bulk-reply { display: flex; flex: 1 1 260px; gap: 8px; min-width: 0; }
-#dashboard-bulk-input { flex: 1; min-width: 0; height: 32px; font-size: 12px; }
+#dashboard-bulk-input { flex: 1; min-width: 0; height: var(--tap); font-size: 13px; }
 #dashboard-bulk-send { flex: none; }
 #dashboard-bulk-note { order: 6; flex: 1 0 100%; color: var(--muted); font-size: 11px; line-height: 1.5; }
 #dashboard-bulk-note:empty { display: none; }
@@ -1427,13 +1440,13 @@ select option {
 }
 .pane.active {
   border-color: color-mix(in srgb, var(--accent) 65%, transparent);
-  box-shadow: 0 0 0 1px var(--accent-dim), 0 0 30px -8px var(--glow), var(--lift);
+  box-shadow: 0 0 0 1px var(--accent-dim), var(--lift);
 }
 /* A finished turn outranks focus: it has to catch your eye across the grid. */
 .pane.waiting,
 .pane.waiting.active {
-  border-color: color-mix(in srgb, var(--warn) 75%, transparent);
-  box-shadow: 0 0 0 1px var(--warn-dim), 0 0 30px -8px var(--warn-glow), var(--lift);
+  border-color: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-dim), var(--lift);
 }
 .pane.drop {
   border-color: var(--accent);
@@ -1449,12 +1462,12 @@ select option {
   display: flex;
   align-items: center;
   gap: 7px;
-  height: 32px;
+  height: calc(var(--tap-sm) + 8px);
   padding: 0 4px 0 11px;
   border-bottom: 1px solid var(--edge);
   background: var(--sheen), var(--panel);
   color: var(--faint);
-  font-size: 12px;
+  font-size: 13px;
   user-select: none;
   cursor: grab;
 }
@@ -1540,8 +1553,8 @@ select option {
   margin-left: auto;
 }
 .pane-head button {
-  width: 24px;
-  height: 24px;
+  width: var(--tap-sm);
+  height: var(--tap-sm);
   padding: 0;
   color: var(--faint);
 }
@@ -1562,10 +1575,16 @@ select option {
 }
 /* Too narrow for everything: drop the gauge and the config button before the
    title, which is the only thing saying which pane this is. */
+/* A phone-wide header drops the state badge first: the pane's border and
+   the sidebar still show the state, and the gauge and settings are buttons. */
+@container (max-width: 300px) {
+  .pane-head .pane-state {
+    display: none;
+  }
+}
 @container (max-width: 220px) {
   .pane-head .ctx,
-  .pane-head .cfg,
-  .pane-head .pane-state {
+  .pane-head .cfg {
     display: none;
   }
 }
@@ -1584,7 +1603,7 @@ select option {
 .resume-notice {
   flex: none;
   padding: 12px;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.5;
   border-bottom: 1px solid var(--edge);
   background: var(--panel);
@@ -1593,7 +1612,7 @@ select option {
   margin: 0 0 8px;
 }
 .resume-notice button {
-  min-height: 30px;
+  min-height: var(--tap);
   margin: 0 6px 4px 0;
   border-color: var(--edge-hi);
 }
@@ -1695,8 +1714,9 @@ select option {
   overflow-wrap: break-word;
 }
 #empty button {
+  min-height: var(--tap);
   margin-top: 8px;
-  padding: 7px 20px;
+  padding: 0 20px;
 }
 #empty .keys-hint {
   max-width: none;
@@ -1739,7 +1759,7 @@ dialog,
   overflow-y: auto;
   padding: 5px;
   border-radius: 12px;
-  font-size: 12px;
+  font-size: 13px;
   animation: pop 0.14s ease-out;
 }
 @keyframes pop {
@@ -1757,7 +1777,7 @@ dialog,
   display: flex;
   align-items: center;
   gap: 6px;
-  min-height: 30px;
+  min-height: var(--tap);
   padding: 3px 4px 3px 10px;
   border-radius: 7px;
   color: var(--muted);
@@ -1782,8 +1802,8 @@ dialog,
   background: var(--err-dim);
 }
 .menu-item button {
-  width: 24px;
-  height: 22px;
+  width: var(--tap-sm);
+  height: var(--tap-sm);
   padding: 0;
   color: var(--muted);
   opacity: 0;
@@ -1816,7 +1836,6 @@ dialog,
   margin-left: -2px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 6px var(--glow);
 }
 #menu-add {
   width: 100%;
@@ -2011,11 +2030,11 @@ dialog,
 #preferences {
   position: fixed;
   z-index: 40;
-  top: 52px;
+  top: calc(var(--tap) + 20px);
   right: 8px;
   width: 340px;
   max-width: calc(100vw - 16px);
-  max-height: calc(100dvh - 64px);
+  max-height: calc(100dvh - var(--tap) - 32px);
   overflow-y: auto;
   padding: 16px;
   border-radius: 14px;
@@ -2044,10 +2063,11 @@ dialog,
 }
 .preference-row > span {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 .preference-row > button {
   display: block;
+  min-height: var(--tap);
   text-align: left;
   max-width: 100%;
   overflow: hidden;
@@ -2064,6 +2084,7 @@ dialog,
 }
 .preference-actions button {
   justify-content: space-between;
+  min-height: var(--tap);
 }
 
 /* Dialogs. */
@@ -2083,7 +2104,10 @@ dialog::backdrop {
 }
 dialog h2 {
   margin: 0 0 14px;
-  font: 600 17px/1.3 var(--ui-display);
+  font: 600 18px/1.3 var(--ui-display);
+}
+dialog :is(input:not([type="radio"], [type="checkbox"]), select) {
+  min-height: var(--tap);
 }
 .new-actions {
   display: flex;
@@ -2091,7 +2115,7 @@ dialog h2 {
   gap: 8px;
 }
 .new-actions > button {
-  min-height: 34px;
+  min-height: var(--tap);
   padding: 0 16px;
 }
 .new-actions > button:not(.primary) {
@@ -2121,6 +2145,7 @@ dialog h2 {
   padding: 7px 9px;
 }
 #new-browse {
+  min-height: var(--tap);
   margin: 0 0 12px 110px;
   border-color: var(--edge-hi);
 }
@@ -2135,11 +2160,13 @@ dialog h2 {
 .thread-mode legend {
   margin-bottom: 8px;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 13px;
 }
 #new .thread-mode label {
   display: flex;
+  align-items: center;
   gap: 8px;
+  min-height: calc(var(--tap) + 6px);
   margin: 0;
   padding: 10px 12px;
   border: 1px solid var(--edge-hi);
@@ -2262,7 +2289,7 @@ dialog h2 {
 .picker-title {
   margin: 0;
   padding: 12px 16px 6px;
-  font: 600 11px var(--ui-small);
+  font: 600 12px var(--ui-small);
   color: var(--faint);
 }
 #picker-list {
@@ -2279,6 +2306,7 @@ dialog h2 {
   align-items: center;
   gap: 1px 10px;
   width: 100%;
+  min-height: calc(var(--tap) + 8px);
   padding: 8px 10px;
   text-align: left;
   border-radius: 9px;
@@ -2434,18 +2462,18 @@ dialog h2 {
   min-height: 0;
   background: var(--glass);
   border-left: 1px solid var(--edge);
-  font-size: 12px;
+  font-size: 13px;
 }
 .panel-tabs {
   display: flex;
   align-items: center;
   gap: 2px;
-  height: 40px;
+  height: calc(var(--tap) + 8px);
   padding: 0 6px 0 8px;
   border-bottom: 1px solid var(--edge);
 }
 .panel-tabs [role="tab"] {
-  height: 28px;
+  height: var(--tap);
   padding: 0 10px;
   font-weight: 600;
 }
@@ -2468,7 +2496,7 @@ dialog h2 {
   margin-bottom: 8px;
 }
 #pr-btn {
-  height: 28px;
+  height: var(--tap-sm);
   border-color: var(--edge-hi);
 }
 .changes-ref {
@@ -2487,7 +2515,7 @@ dialog h2 {
 }
 #changes-base {
   min-height: 1.3em;
-  font: 10.5px var(--mono);
+  font: 11px var(--mono);
   overflow-wrap: anywhere;
 }
 #commit-msg {
@@ -2503,19 +2531,19 @@ dialog h2 {
 }
 .commit-row #commit-btn {
   flex: 1;
-  height: 30px;
+  height: var(--tap);
 }
 .commit-row #commit-more {
   flex: none;
-  width: 30px;
-  height: 30px;
+  width: var(--tap);
+  height: var(--tap);
 }
 #changes-body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 6px 10px;
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 12px;
   scrollbar-width: thin;
   scrollbar-color: var(--line-strong) transparent;
 }
@@ -2583,6 +2611,7 @@ dialog h2 {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-height: calc(var(--tap-sm) - 4px);
   padding: 2px 6px;
   color: var(--muted);
   cursor: pointer;
@@ -2608,6 +2637,7 @@ dialog h2 {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: calc(var(--tap-sm) - 4px);
   padding: 3px 6px;
   border-radius: 5px;
   color: var(--text);
@@ -2886,39 +2916,41 @@ dialog h2 {
 }
 
 @media (max-width: 760px) {
+  :root { --tap: 40px; --tap-sm: 34px; }
   /* Two rows: controls, then where you are. */
-  #bar { flex-wrap: wrap; height: 76px; padding: 4px 6px; gap: 2px 4px; align-content: center; }
+  #bar { flex-wrap: wrap; height: calc(2 * var(--tap) + 12px); padding: 4px 6px; gap: 2px 4px; align-content: center; }
   #crumbs { order: 1; flex-basis: 100%; padding: 0 6px; }
   #bar .mark { display: none; }
-  #bar > button { height: 32px; min-width: 32px; }
-  #new-thread { padding: 0 8px; }
+  #bar > button { min-width: var(--tap); }
+  #new-thread { padding: 0 10px; }
   #new-thread .lbl { display: none; }
-  #waiting { padding: 0 8px; }
-  #preferences { top: 82px; max-height: calc(100dvh - 94px); }
+  #waiting { padding: 0 10px; }
+  #preferences { top: calc(2 * var(--tap) + 18px); max-height: calc(100dvh - 2 * var(--tap) - 30px); }
   .chip { max-width: 120px; }
 
   #side { display: none; }
   #side.drawer-open { display: flex; position: absolute; z-index: 30; top: 0; bottom: 0; left: 0; width: min(280px, calc(100vw - 24px)); background: var(--glass-float); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); box-shadow: var(--float); }
   .side-resize { display: none; }
   #side-filter { min-height: 36px; }
-  .thread-top { grid-template-columns: 32px minmax(0, 1fr) auto; }
-  .thread.listed .thread-top { grid-template-columns: 32px minmax(0, 1fr) auto auto; }
-  .thread-top button, .thread-top .fold { min-width: 32px; width: 32px; height: 32px; }
-  .thread-top .thread-select { width: auto; height: 32px; line-height: 32px; }
-  .fold::before { left: 12px; top: 12px; }
-  .group::before { left: 16px; }
-  .thread[data-state="busy"]::after { left: 14px; }
-  .agent { height: 32px; }
+  .thread-top { grid-template-columns: var(--tap-sm) minmax(0, 1fr) auto; }
+  .thread.listed .thread-top { grid-template-columns: var(--tap-sm) minmax(0, 1fr) auto auto; }
+  .thread-top button, .thread-top .fold { min-width: var(--tap-sm); width: var(--tap-sm); height: var(--tap-sm); }
+  .thread-top .thread-select { width: auto; height: var(--tap-sm); line-height: var(--tap-sm); }
+  /* Knot and rail stay centred on the wider fold button. */
+  .fold::before { left: calc(var(--tap-sm) / 2 - 6px); top: calc(var(--tap-sm) / 2 - 6px); }
+  .group::before { left: calc(var(--tap-sm) / 2); }
+  .thread[data-state="busy"]::after { left: calc(var(--tap-sm) / 2 - 1px); }
+  .agent { height: var(--tap); }
 
   #dictate { min-width: 0; }
   #dictate .lbl, #changes-btn .lbl { display: none; }
+  /* Panes stack in one column here, so there is no grid layout to change. */
+  #layout { display: none; }
 
   .grid:not(.zooming) { display: flex; flex-direction: column; overflow-y: auto; }
   .grid:not(.zooming) > .pane { flex: none; min-height: 300px; height: 65dvh; }
   .grid:not(.zooming) > .pane:only-of-type { height: 100%; min-height: 0; }
   .grid .split { display: none; }
-  .pane-head { height: 38px; }
-  .pane-head button { min-height: 28px; min-width: 28px; }
   .menu-item button, .file .acts, .dir .acts { opacity: 1; }
   .menu-item { min-height: 36px; }
 
@@ -2938,13 +2970,19 @@ dialog h2 {
 /* Phones: the waiting chip and the usage chips need the row more than the
    search button does; the sidebar filter and the chip still reach every agent. */
 @media (max-width: 480px) {
+  :root { --tap: 44px; --tap-sm: 40px; }
   #search { display: none; }
-  #bar #crumbs { flex: 1 1 calc(100% - 112px); min-width: 0; }
+  #bar #crumbs { flex: 1 1 calc(100% - 130px); min-width: 0; }
+  /* A thumb needs 44 px buttons, so the first row keeps the count and drops the word. */
+  #waiting .lbl { display: none; }
   #plan, #codex-plan { order: 1; }
   /* The prefix keeps its words; the language shrinks to its caret. */
   #lang .lbl { display: none; }
   #lang { padding: 0 7px; }
   #prefix { max-width: 96px; }
+  /* The strip's actions hold one row at 320 px: a step below the bar's buttons. */
+  #wsactions > button { height: var(--tap-sm); min-width: var(--tap-sm); }
+  .split-btn > button { height: calc(var(--tap-sm) - 2px); }
   #wsactions { flex-wrap: wrap; }
   #bar { gap: 2px; }
   .plan-chip { padding: 0 6px; gap: 4px; }

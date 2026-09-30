@@ -162,6 +162,28 @@ const BASE = Object.fromEntries(
 const THEMES: Theme[] = [
   { label: "loom", vars: {} },
   {
+    // Loom's first palette, navy and copper, before the dye colours.
+    label: "loom classic",
+    vars: {
+      "--bg": "#0a0f1b",
+      "--panel": "#0e1626",
+      "--raise": "#141e33",
+      "--line": "#1c2a45",
+      "--line-strong": "#2a3c5c",
+      "--text": "#dce4f0",
+      "--muted": "#94a6c8",
+      "--faint": "#6e82a6",
+      "--accent": "#d97757",
+      "--accent-dim": "rgba(217, 119, 87, 0.14)",
+      "--ok": "#6fbf73",
+      "--err": "#f85149",
+      "--warn": "#e3b341",
+      "--blue": "#91b9df",
+      "--magenta": "#bba6d8",
+      "--cyan": "#83c6d0",
+    },
+  },
+  {
     label: "graphite",
     vars: {
       "--bg": "#131315",
@@ -2657,7 +2679,9 @@ function paintWaiting() {
     waitingShown = n;
     const b = $("#waiting");
     b.classList.toggle("hidden", !n);
-    b.textContent = `${n} waiting`;
+    // The word is its own span: the phone layout keeps only the count (styles.css).
+    b.replaceChildren(String(n), Object.assign(document.createElement("span"), { className: "lbl", textContent: " waiting" }));
+    b.setAttribute("aria-label", `${n} waiting`);
     // The beacon pulses for a newcomer, then holds still (styles.css #waiting.ping).
     if (more) (b.classList.remove("ping"), void b.offsetWidth, b.classList.add("ping"));
   }

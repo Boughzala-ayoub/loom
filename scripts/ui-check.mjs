@@ -200,6 +200,10 @@ try {
           const bounds = host.getBoundingClientRect();
           const style = getComputedStyle(host);
           const pane = host.closest('.pane');
+          // A pane scrolled out of the stacked column pauses its renderer and refits
+          // when it comes back into view (checked after thread-add-powershell).
+          const column = pane.closest('.grid')?.getBoundingClientRect(), box = pane.getBoundingClientRect();
+          if (column && (box.bottom <= column.top || box.top >= column.bottom)) return [];
           const bottom = pane.getBoundingClientRect().bottom - parseFloat(getComputedStyle(pane).borderBottomWidth) - 4;
           const right = bounds.right - parseFloat(style.paddingRight);
           return r.bottom > bottom + 0.5 || r.right > right + 0.5
@@ -1296,7 +1300,8 @@ try {
         bg: row.querySelector('.theme-preview').style.getPropertyValue('--bg'),
         accent: row.querySelector('.theme-preview').style.getPropertyValue('--accent'),
       })));
-      assert.equal(palettes.length, 38);
+      assert.equal(palettes.length, 39);
+      assert.deepEqual(palettes.find(p => p.label === 'loom classic'), { label: 'loom classic', bg: '#0a0f1b', accent: '#d97757' }, 'The original navy and copper palette stays available');
       await escape();
       for (const [i, palette] of [...palettes, palettes[0]].entries()) {
         await openThemes();
@@ -1319,14 +1324,14 @@ try {
               .map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
             return rgb.reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
           };
-          // Loom and Graphite retain their original colors by design.
+          // Loom classic and Graphite retain their original colors by design.
           const roles = classic ? ['text', 'muted'] : ['text', 'muted', 'faint', 'accent', 'ok', 'err', 'warn', 'blue', 'magenta', 'cyan'];
           return ['bg', 'panel', 'raise'].flatMap(bg =>
             roles.filter(fg => {
               const [a, b] = [luminance(bg), luminance(fg)].sort((x, y) => x - y);
               return (b + 0.05) / (a + 0.05) < 4.5;
             }).map(fg => `${fg} on ${bg}`));
-        }, ['loom', 'graphite'].includes(palette.label));
+        }, ['loom classic', 'graphite'].includes(palette.label));
         assert.deepEqual(lowContrast, [], palette.label + ' text contrast');
         await audit(`theme-${i}`);
         await openThemes();
@@ -1350,9 +1355,11 @@ try {
       await page.waitForTimeout(250);
     }
     // Language and prefix sit beside Speak, showing what the next dictation will use.
-    for (const id of ['lang', 'prefix', 'layout']) {
+    for (const id of ['lang', 'prefix', ...(width > 760 ? ['layout'] : [])]) {
       assert.equal(await page.locator('#strip #' + id).isVisible(), true, id + ' must be visible in the thread strip');
     }
+    // Stacked panes have no grid layout to change, so the narrow strip leaves it out.
+    if (width <= 760) assert.equal(await page.locator('#layout').isVisible(), false, 'The layout button hides where panes stack');
     assert.match(await page.locator('#prefix').textContent(), /\/prompt/, 'The prefix in use is shown without opening anything');
     assert.equal(await page.locator('#switch-thread').count(), 0);
     if (width <= 760) await page.click('#side-toggle');
@@ -1364,6 +1371,15 @@ try {
       await target.locator('.thread-add').focus();
       await page.keyboard.press('Enter');
       await audit('thread-add-' + command);
+      if (command === 'powershell' && width <= 760) {
+        for (const pane of await page.locator('.grid:not(.hidden) .pane').all()) {
+          await pane.scrollIntoViewIfNeeded();
+          await page.waitForFunction(el => {
+            const screen = el.querySelector('.xterm-screen'), host = el.querySelector('.pane-term');
+            return !screen || screen.getBoundingClientRect().right <= host.getBoundingClientRect().right + 0.5;
+          }, await pane.elementHandle(), { timeout: 2000 }).catch(() => assert.fail(`A stacked pane refits when it scrolls into view @${width}`));
+        }
+      }
       if (command === 'opencode') assert.equal(await page.locator('#wsname').textContent(), 'search-polish', 'Opening the picker does not switch threads');
       assert.equal(await page.locator('.thread-add').count(), 3);
       await page.locator('.menu-item').filter({ hasText: new RegExp('^' + command) }).locator('span').first().click();
@@ -1514,7 +1530,7 @@ try {
         if (!row.getBoundingClientRect().height) continue;
         const name = row.querySelector('.agent-name').getBoundingClientRect();
         const title = row.querySelector('.agent-title').getBoundingClientRect();
-        if (name.right > title.left || title.top >= name.bottom || row.getBoundingClientRect().height > 32) failures.push('agent row must stay compact on one line');
+        if (name.right > title.left || title.top >= name.bottom || row.getBoundingClientRect().height > parseFloat(getComputedStyle(row).getPropertyValue('--tap'))) failures.push('agent row must stay compact on one line, no taller than a tap target');
       }
       return failures;
     });
@@ -1610,18 +1626,20 @@ try {
       }
       await escape();
     }
-    await page.click('#layout');
-    assert.match(await page.locator('#layout').textContent(), /grid/);
-    await escape();
-    await audit('layout-grid');
-    await page.click('#layout');
-    assert.match(await page.locator('#layout').textContent(), /rows/);
-    await escape();
-    await page.waitForFunction(() => [...document.querySelectorAll('.grid:not(.hidden) .pane')].every(pane => {
-      const screen = pane.querySelector('.xterm-screen');
-      return !screen || screen.getBoundingClientRect().bottom <= pane.getBoundingClientRect().bottom - 4;
-    }), null, { timeout: 1500 });
-    await audit('layout-rows');
+    if (width > 760) {
+      await page.click('#layout');
+      assert.match(await page.locator('#layout').textContent(), /grid/);
+      await escape();
+      await audit('layout-grid');
+      await page.click('#layout');
+      assert.match(await page.locator('#layout').textContent(), /rows/);
+      await escape();
+      await page.waitForFunction(() => [...document.querySelectorAll('.grid:not(.hidden) .pane')].every(pane => {
+        const screen = pane.querySelector('.xterm-screen');
+        return !screen || screen.getBoundingClientRect().bottom <= pane.getBoundingClientRect().bottom - 4;
+      }), null, { timeout: 1500 });
+      await audit('layout-rows');
+    }
     await page.keyboard.press('F1');
     await audit('shortcuts');
     await escape();
