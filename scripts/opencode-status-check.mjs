@@ -28,12 +28,16 @@ try {
     mockIPC((call, args = {}) => {
       if (call === 'load_state') return JSON.stringify({ threads: [{ repo: 'C:\\test', dir: 'C:\\test', name: 'OpenCode status', panes: [{ cmd: command }] }] });
       if (call === 'pty_spawn') window.qa.pane = args;
-      if (call === 'take_wakes') return window.takeOpenCodeMarker();
       if (['take_sessions', 'model_options'].includes(call)) return [];
       if (call === 'session_usage' || call === 'last_messages') return {};
       if (call === 'git_run') return '';
       if (call === 'pane_booted') return true;
     }, { shouldMockEvents: true });
+    // Stands in for Rust's marker scan, which sends each wake as a "wakes" event (lib.rs send_wakes).
+    setInterval(async () => {
+      const woke = await window.takeOpenCodeMarker();
+      if (woke.length) void window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: woke });
+    }, 250);
   }).toString()})(${JSON.stringify(command)});` });
   const page = await context.newPage();
   await page.goto(base);

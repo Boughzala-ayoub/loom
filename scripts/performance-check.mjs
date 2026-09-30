@@ -23,7 +23,7 @@ try {
     mockWindows('main');
     mockIPC((call, args = {}) => {
       window.qa.calls[call] = (window.qa.calls[call] || 0) + 1;
-      if (window.qa.slowPolls && (['take_wakes', 'session_usage'].includes(call) || call === 'git_run' && ['diff', 'status'].includes(args.args?.[0]))) {
+      if (window.qa.slowPolls && (call === 'session_usage' || call === 'git_run' && ['diff', 'status'].includes(args.args?.[0]))) {
         const key = call === 'git_run' ? args.dir + ':' + args.args.join(' ') : call;
         const qa = window.qa;
         qa.inFlight[key] = (qa.inFlight[key] || 0) + 1;
@@ -45,7 +45,7 @@ try {
       if (call === 'plugin:window|is_minimized') return window.qa.minimized === true;
       if (call === 'git_run') return '';
       if (call === 'pane_booted') return true;
-      if (['take_wakes', 'take_sessions', 'model_options'].includes(call)) return [];
+      if (['take_sessions', 'model_options'].includes(call)) return [];
       if (call === 'session_usage') return {};
       if (call === 'last_messages') {
         (window.qa.messageProviders ??= []).push(args.panes.map(p => p[1]));

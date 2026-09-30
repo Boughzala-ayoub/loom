@@ -19,7 +19,7 @@ try {
           args.onOut.onmessage(Array.from({ length: 300 }, (_, i) => `History ${i}\r\n`).join(''));
         }
         if (call === 'git_run') return '';
-        if (['take_wakes', 'take_sessions', 'model_options'].includes(call)) return [];
+        if (['take_sessions', 'model_options'].includes(call)) return [];
         if (call === 'session_usage') return {};
         if (call === 'plugin:window|current_monitor') return { name: 'Test monitor', scaleFactor: scale,
           size: { width: 1920, height }, position: { x, y: 0 }, workArea: { position: { x, y: 0 }, size: { width: 1920, height } } };

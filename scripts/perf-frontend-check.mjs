@@ -30,7 +30,7 @@ try {
       if (call === 'plugin:path|join') return args.paths.join('\\');
       if (call === 'git_run') return '';
       if (call === 'pane_booted' || call === 'has_session' || call === 'has_codex_session') return true;
-      if (['take_wakes', 'take_sessions', 'model_options'].includes(call)) return [];
+      if (['take_sessions', 'model_options'].includes(call)) return [];
       if (call === 'session_usage') return {};
       if (call === 'last_messages') return Object.fromEntries(args.panes.map(p => [p[0], { user: 'Fix the bug', agent: 'Done.' }]));
     }, { shouldMockEvents: true });

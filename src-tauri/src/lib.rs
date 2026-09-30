@@ -253,7 +253,7 @@ fn pty_spawn(
         cmd.args(argv[1..].iter().map(|a| if a == "$LOOM_HOOKS" { &hooks_arg } else { a }));
     }
     // aa's WEZTERM_PANE equivalent: Claude's Stop/Notification hooks (and the
-    // opencode plugin) drop a marker named after this, and `take_wakes` turns
+    // opencode plugin) drop a marker named after this, and `send_wakes` turns
     // it back into a pane.
     cmd.env("LOOM_PANE", &id);
     cmd.env("LOOM_SESSION_FILE", data_dir(&app).join("session-marks").join(&id));
@@ -391,6 +391,9 @@ fn pty_spawn(
         if session.is_some() {
             // Output already read goes first, as it did before the bus batched it.
             app.state::<output::Bus>().flush();
+            // A turn that ended just before the exit still rings. Left behind, its
+            // marker would wake this pane's next launch, which reuses the id.
+            send_wakes(&app, std::slice::from_ref(&id));
             let _ = app.emit(&format!("pty-exit:{id}"), code);
         }
         // Release the input pipe and console even if the exited pane stays open.
@@ -774,17 +777,18 @@ fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
     ))
 }
 
-/// Which of `ids` finished a turn since the last call, consumed as they are
-/// read. Hooks can't write into the pane itself — a BEL sent to CONOUT$ is
-/// swallowed by conhost and never reaches ConPTY — so they drop a file instead,
-/// exactly like aa does with WEZTERM_PANE. The caller names its own panes: the
+/// Which of `ids` finished a turn, as a `wakes` event to the page, consumed as
+/// they are read. Hooks can't write into the pane itself — a BEL sent to CONOUT$
+/// is swallowed by conhost and never reaches ConPTY — so they drop a file
+/// instead, exactly like aa does with WEZTERM_PANE. Only this Loom's panes: the
 /// folder is per user, not per Loom, and a second Loom running at the same time
 /// used to eat the other's markers. opencode's plugin has no other way to ring.
-// ponytail: (async) so the scan is off the main thread; the markers live in
-// their own %TEMP%\loom-wait\ folder, so a poll only walks Loom's own files.
-#[tauri::command(async)]
-fn take_wakes(ids: Vec<String>) -> Vec<(String, String)> {
-    drain_wakes(&std::env::temp_dir().join("loom-wait"), &ids)
+/// The page used to poll this over IPC four times a second, idle or not.
+// ponytail: a 250 ms scan of one temp dir, no file watcher; the markers live in
+// their own %TEMP%\loom-wait\ folder, so it only walks Loom's own files.
+fn send_wakes(app: &AppHandle, ids: &[String]) {
+    let woke = drain_wakes(&std::env::temp_dir().join("loom-wait"), ids);
+    if !woke.is_empty() { let _ = app.emit("wakes", woke); }
 }
 
 /// `(pane id, session id)` for every pane in `ids` whose codex notify script
@@ -1408,6 +1412,13 @@ pub fn run() {
             app.manage(WindowMoved(moved));
             let handle = app.handle().clone();
             std::thread::spawn(move || handle.state::<output::Bus>().run());
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                // Copied out: file reads never hold the lock keystrokes wait on.
+                let ids: Vec<String> = handle.state::<Ptys>().0.lock().unwrap().keys().cloned().collect();
+                if !ids.is_empty() { send_wakes(&handle, &ids); }
+            });
             app.state::<WindowStateReady>().0.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })
@@ -1436,7 +1447,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::pty_spawn, output_bus, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
-            commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_wakes, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
+            commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::dictate_start,
             commands::dictate_stop,

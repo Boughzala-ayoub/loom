@@ -6341,21 +6341,15 @@ async function main() {
     true,
   );
 
-  // Claude's Stop/Notification hooks drop $TEMP\loom-wait\$env:LOOM_PANE; drain
-  // it into pane.wake(). ponytail: a 250ms poll of one temp dir, no file watcher.
-  let wakePoll = false;
-  setInterval(async () => {
-    if (wakePoll) return;
-    wakePoll = true;
-    const wakes = await invoke<[string, string][]>("take_wakes", { ids: threads.flatMap((t) => t.panes).map((p) => p.id) }).catch(() => [])
-      .finally(() => { wakePoll = false; });
-    if (!wakes.length) return;
-    const effortById = new Map(wakes);
+  // Claude's Stop/Notification hooks drop $TEMP\loom-wait\$env:LOOM_PANE; Rust
+  // drains this Loom's markers and sends them as they land (lib.rs send_wakes).
+  void listen<[string, string][]>("wakes", (e) => {
+    const effortById = new Map(e.payload);
     for (const p of threads.flatMap((t) => t.panes)) {
-      const e = effortById.get(p.id);
-      if (e !== undefined) p.wake(e);
+      const effort = effortById.get(p.id);
+      if (effort !== undefined) p.wake(effort);
     }
-  }, 250);
+  });
 
   // Codex's notify script and the opencode plugin drop the session id a pane is
   // really on (agent.ts). Only the next launch needs it, so it rides the 4 s

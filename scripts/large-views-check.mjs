@@ -37,7 +37,7 @@ try {
         if (call === 'git_stdin') window.qa.patches.push(args);
         if (call === 'read_file') return (line + '\n').repeat(count);
         if (call === 'pane_booted') return true;
-        if (['take_wakes', 'take_sessions', 'model_options'].includes(call)) return [];
+        if (['take_sessions', 'model_options'].includes(call)) return [];
         if (call === 'session_usage' || call === 'last_messages') return {};
       }, { shouldMockEvents: true });
     };

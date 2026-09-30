@@ -21,7 +21,7 @@ try {
         if (call === 'pty_spawn' || call === 'pty_resize') window.qa.size = args;
         if (call === 'pty_write') window.qa.writes.push(args.data);
         if (call === 'git_run') return '';
-        if (['take_wakes', 'take_sessions', 'model_options'].includes(call)) return [];
+        if (['take_sessions', 'model_options'].includes(call)) return [];
         if (call === 'session_usage') return {};
       }, { shouldMockEvents: true });
     }).toString()})(${JSON.stringify(cmd)});` });

@@ -37,7 +37,7 @@ try {
       if (location.search.includes('legacy-opencode2')) state.threads[0].panes.forEach(p => p.cmd = 'opencode2');
       if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
-      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, wakes: [], sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [] };
+      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [] };
       // Count chimes instead of playing them; only createOscillator matters.
       const node = { connect() { return node; }, start() {}, stop() {}, frequency: { setValueAtTime() {} }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } };
       window.AudioContext = class { state = 'running'; currentTime = 0; destination = node; resume() {} createGain() { return node; } createOscillator() { qa.beeps++; return node; } };
@@ -63,7 +63,6 @@ try {
         if (cmd === 'pty_write' && qa.failWrite) throw new Error('Test terminal write failed');
         if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
         if (cmd === 'pty_kill' && qa.controlKill) return window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${args.id}`, payload: 1 });
-        if (cmd === 'take_wakes') return qa.wakes.splice(0);
         if (cmd === 'plugin:window|is_focused') return qa.focused ?? true;
         if (cmd === 'has_codex_session') return args.sid !== 'missing-session';
         if (cmd === 'pane_booted') return true;

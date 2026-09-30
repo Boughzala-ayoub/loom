@@ -26,6 +26,8 @@
 //             one 9 px element animated four ways: a smooth infinite CSS animation, a steps()
 //             one, and a JS timer at 10 and at 5 Hz. What a single indicator costs per second.
 //             Then nothing moving with the focused terminal blurred, so its cursor stops blinking.
+//   wake      alone: the idle workspace without the bell. Drops a wake marker the way Claude's Stop
+//             hook does for five panes in turn, and times each until the page shows it waiting.
 // Numbers only, no pass/fail. Restores the shared files a test Loom rewrites. Kills only its own tree.
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir, homedir, availableParallelism } from 'node:os';
@@ -35,12 +37,12 @@ import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
-const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app', 'restore', 'blur', 'idle'];
-const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => !['agents', 'app', 'restore', 'blur', 'idle'].includes(m));
+const ALL = ['ipc', 'keys', 'opencode', 'ack', 'shutdown', 'agents', 'app', 'restore', 'blur', 'idle', 'wake'];
+const modes = process.argv.length > 2 ? process.argv.slice(2) : ALL.filter(m => !['agents', 'app', 'restore', 'blur', 'idle', 'wake'].includes(m));
 for (const m of modes) if (!ALL.includes(m)) throw new Error(`Unknown mode ${m}. Modes: ${ALL.join(', ')}`);
 const run = m => modes.includes(m);
 if (run('shutdown') && run('agents')) throw new Error('shutdown and agents each end every pane; run them separately');
-for (const m of ['app', 'restore', 'blur', 'idle']) if (run(m) && modes.length > 1) throw new Error(`${m} starts its own workspace; run it alone`);
+for (const m of ['app', 'restore', 'blur', 'idle', 'wake']) if (run(m) && modes.length > 1) throw new Error(`${m} starts its own workspace; run it alone`);
 const out = resolve('node_modules/.cache/perf-native-check');
 mkdirSync(out, { recursive: true });
 const procJson = fileURLToPath(new URL('proc-json.ps1', import.meta.url));
@@ -68,10 +70,10 @@ setInterval(() => { require('fs').appendFileSync(log, Date.now() + ' ' + n + ' '
     repo: dir, dir, name: `perf-${t}`, panes: [0, 1, 2].map(j => ({ cmd: `node ${join(dir, 'app-child.js')} ${appLogs[t * 3 + j]}` })),
   })) }));
 }
-if (run('idle')) {
+if (run('idle') || run('wake')) {
   // The bell makes each pane wait for you, the usual state of a real session. silent: no sound or
   // taskbar flash for 24 of them.
-  writeFileSync(join(dir, 'idle-child.js'), `process.stdout.write('\\x1b[2J\\x1b[H\\x1b[38;5;208m*\\x1b[0m Done. Waiting for your input\\r\\n\\r\\n> \\x07');
+  writeFileSync(join(dir, 'idle-child.js'), `process.stdout.write('\\x1b[2J\\x1b[H\\x1b[38;5;208m*\\x1b[0m Done. Waiting for your input\\r\\n\\r\\n> ${run('idle') ? '\\x07' : ''}');
 setInterval(() => {}, 1000);`);
   spawnSync('git', ['init', '-q', dir]);
   writeFileSync(profile, JSON.stringify({ silent: true, ui: { thread: 0 }, threads: Array.from({ length: 8 }, (_, t) => ({
@@ -352,6 +354,24 @@ try {
     for (const k of [...kinds, 'blurred']) console.log(`idle, ${k}`.padEnd(34), JSON.stringify(samples[k].map(pick)));
     console.log('app animations at rest'.padEnd(34), JSON.stringify(own), 'focus:', JSON.stringify(focused));
     report['24 quiet panes, one indicator'] = { own, focused, samples };
+  }
+  if (run('wake')) {
+    await page.waitForFunction(() => document.querySelectorAll('.pane[data-id]').length >= 24, null, { timeout: 60000 });
+    await pause(3000);
+    const ids = (await page.evaluate(() => [...document.querySelectorAll('.pane[data-id]')].map(p => p.dataset.id))).slice(0, 5);
+    const marks = join(tmpdir(), 'loom-wait');
+    mkdirSync(marks, { recursive: true });
+    const ms = [];
+    for (const id of ids) {
+      const t0 = Date.now();
+      writeFileSync(join(marks, id), '');
+      await page.waitForFunction(id => document.querySelector(`.pane[data-id="${id}"]`)?.classList.contains('waiting'), id, { timeout: 5000, polling: 10 });
+      ms.push(Date.now() - t0);
+      await pause(300);
+    }
+    const r = { markerToWaitingMs: ms, markersLeft: ids.filter(id => existsSync(join(marks, id))).length };
+    console.log('wake marker to waiting'.padEnd(34), JSON.stringify(r));
+    report['wake marker to waiting'] = r;
   }
   if (run('app')) {
     for (let i = 0; i < 600 && !appLogs.every(f => existsSync(f)); i++) await pause(100);
