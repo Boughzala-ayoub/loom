@@ -292,6 +292,77 @@ try {
   assert.match(r.json.error, /nosuch/);
   console.log('PASS the agent review: info, both kinds of old loomctl and Loom refused before a command, stdin as text, JSON failures');
 
+  // Second agent review. R2 and R4: every failure under --json is one JSON
+  // object with a code and whether the command went out, and a Loom that
+  // never answers the hello can't hold loomctl.
+  const fakeLoom = answer => new Promise(ready => {
+    const pipe = `\\\\.\\pipe\\loom-cli-check-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    const heard = [];
+    const server = createServer(s => {
+      let buf = '';
+      s.on('error', () => {});
+      s.on('data', d => {
+        buf += d;
+        for (let i; (i = buf.indexOf('\n')) >= 0; buf = buf.slice(i + 1)) {
+          heard.push(JSON.parse(buf.slice(0, i)));
+          answer(s, heard.at(-1));
+        }
+      });
+    });
+    server.listen(pipe, () => ready({ pipe, heard, close: () => server.close() }));
+  });
+  const via = (pipe, ...args) => new Promise(done => {
+    const t0 = Date.now();
+    const c = spawn(ctl, args, { env: { ...process.env, LOOM_PIPE: pipe } });
+    let out = '', err = '';
+    c.stdout.on('data', d => (out += d));
+    c.stderr.on('data', d => (err += d));
+    c.on('close', code => {
+      let json;
+      try { json = JSON.parse(out); } catch { json = undefined; }
+      done({ code, out, err, json, ms: Date.now() - t0 });
+    });
+  });
+  const shape = r => [r.code, r.json?.ok, r.json?.code, r.json?.sent];
+  r = loomctl('--json', 'read', '--timeout', 'soon');
+  assert.deepEqual(shape(r), [1, false, 'usage', false], r.out);
+  r = await via(`\\\\.\\pipe\\loom-cli-check-nobody-${process.pid}`, '--json', 'status');
+  assert.deepEqual(shape(r), [2, false, 'not-running', false], r.out);
+  const helloOk = { ok: true, protocol: info.protocol, version: info.version, pid: 1, pipe: 'fake' };
+  let fakeOne = await fakeLoom((s, line) => line.hello && s.end(JSON.stringify({ ok: false, error: 'Unknown command "null".' }) + '\n'));
+  r = await via(fakeOne.pipe, '--json', 'close', 'alpha:1', '--yes');
+  fakeOne.close();
+  assert.deepEqual(shape(r), [2, false, 'version', false], r.out);
+  fakeOne = await fakeLoom(() => {}); // takes the hello, never answers
+  r = await via(fakeOne.pipe, '--json', '--timeout', '1', 'close', 'alpha:1', '--yes');
+  fakeOne.close();
+  assert.deepEqual(shape(r), [3, false, 'timeout', false], r.out + r.err);
+  assert.ok(r.ms < 6000, `A silent hello held loomctl ${r.ms} ms`);
+  assert.deepEqual(fakeOne.heard.map(h => Object.keys(h)), [['hello']], 'No command went to a Loom that never said hello');
+  fakeOne = await fakeLoom((s, line) => (line.hello ? s.write(JSON.stringify(helloOk) + '\n') : s.destroy()));
+  r = await via(fakeOne.pipe, '--json', 'close', 'alpha:1', '--yes');
+  fakeOne.close();
+  assert.deepEqual(shape(r), [2, false, 'connection', true], r.out);
+  assert.match(r.json.error, /may have run/);
+  r = loomctl('--json', 'wait', 'alpha:1', '--state', 'exited', '--timeout', '1');
+  assert.deepEqual(shape(r), [3, false, 'timeout', true], r.out);
+  r = loomctl('--json', 'read', 'nosuch:9');
+  assert.deepEqual(shape(r), [1, false, 'failed', true], r.out);
+  // A real shell pane's exit code, and --gen from what panes showed.
+  const shell = ok('--json', 'add', 'alpha', '--cmd=').json;
+  for (let i = 0; i < 60 && !/PS .*>\s*$/m.test(ok('read', shell.ref).out); i++) await pause(250);
+  ok('send', shell.ref, 'cmd /c exit 7');
+  let shown;
+  for (let i = 0; i < 40 && (shown = ok('--json', 'panes', '--thread', 'alpha').json.find(p => p.id === shell.id)).exit !== 7; i++) await pause(250);
+  assert.deepEqual([shown.exit, shown.commands >= 1], [7, true], JSON.stringify(shown));
+  ok('send', shell.ref, '--gen', String(shown.generation), 'cmd /c exit 0');
+  ok('restart', shell.ref, '--yes');
+  r = loomctl('--json', 'send', shell.ref, '--gen', String(shown.generation), 'echo stale');
+  assert.deepEqual(shape(r), [1, false, 'failed', true], r.out);
+  assert.match(r.json.error, /was restarted before Loom typed anything/);
+  ok('close', shell.ref, '--yes');
+  console.log('PASS the second agent review: JSON for every failure, a silent hello bounded, shell exit codes, --gen');
+
   // Failures say so, with the right exit codes.
   r = loomctl('nonsense');
   assert.equal(r.code, 1);

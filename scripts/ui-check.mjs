@@ -356,6 +356,57 @@ try {
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl input bound to its session, stop cancels a pending restart, menu revisions, stdin text, long tasks ${width}px`);
+
+      // Second agent review. R1: the menu id covers the whole prompt, so a
+      // changed path under an option is another question.
+      const folderScreen = path => `\x1b[2J\x1b[H Which folder should be removed?\r\n \u276f 1. Build output\r\n      ${path}\r\n   2. Cancel\r\n`;
+      await out(claude, folderScreen('C:\\project\\build'));
+      const build = await cli('menu', 'search-polish:1');
+      assert.ok(build.data.prompt.includes('C:\\project\\build'), JSON.stringify(build.data));
+      await holdWrites();
+      const busy2 = cli('keys', 'search-polish:1', 'x');
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+      const queuedChoose = cli('choose', 'search-polish:1', '1');
+      await page.waitForTimeout(100);
+      await out(claude, folderScreen('C:\\project\\src'));
+      const entersR1 = await enters();
+      await releaseWrites();
+      assert.equal((await busy2).ok, true);
+      assert.equal((await queuedChoose).ok, false, 'A queued choose refuses the changed path');
+      const staleFolder = await cli('choose', 'search-polish:1', '1', '--menu', build.data.rev);
+      assert.equal(staleFolder.ok, false, JSON.stringify(staleFolder));
+      assert.match(staleFolder.error, /another question now/);
+      assert.equal(await enters(), entersR1, 'No Enter for either');
+      // R3: keys cut short by a restart say which went in, never "nothing".
+      const xs = async () => (await writes(claude)).filter(d => d === 'x').length;
+      const xsBefore = await xs();
+      await holdWrites();
+      const partial = cli('keys', 'search-polish:1', 'enter', 'x');
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+      assert.equal((await cli('restart', 'search-polish:1', '--yes')).ok, true);
+      await releaseWrites();
+      const cut = await partial;
+      assert.equal(cut.ok, false, JSON.stringify(cut));
+      assert.equal(cut.pressed, 1);
+      assert.match(cut.error, /was restarted after 1 of 2 keys \(enter\); the rest weren't pressed/);
+      assert.equal(await xs(), xsBefore, 'x never went in');
+      // --gen: input for a launch the caller saw, refused once the pane moved on.
+      const seen = (await cli('panes')).data.find(p => p.id === claude);
+      assert.ok(Number.isInteger(seen.generation) && seen.generation > 0, JSON.stringify(seen));
+      const old = await cli('send', 'search-polish:1', '--no-enter', '--gen', String(seen.generation - 1), 'for-an-old-launch');
+      assert.equal(old.ok, false, JSON.stringify(old));
+      assert.match(old.error, /was restarted before Loom typed anything, so nothing was sent/);
+      assert.ok(!(await writes(claude)).some(d => d.includes('for-an-old-launch')));
+      assert.equal((await cli('keys', 'search-polish:1', '--gen', String(seen.generation), 'x')).ok, true);
+      assert.equal(await xs(), xsBefore + 1);
+      // A shell's exit code, from Loom's prompt marks (OSC 133 D).
+      await out(claude, '\x1b]133;C\x07\x1b]133;D;7\x07');
+      const after = (await cli('panes')).data.find(p => p.id === claude);
+      assert.deepEqual([after.commands, after.exit], [seen.commands + 1, 7]);
+      assert.ok(Date.parse(after.lastOutput) > 0, JSON.stringify(after));
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS loomctl whole-prompt menu ids, partial keys, --gen, shell exit codes ${width}px`);
     }
     await page.goto(base + '?long-location');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);

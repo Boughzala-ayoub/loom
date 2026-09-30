@@ -1,7 +1,9 @@
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, echoes, echoed, menuRev } from "./prompt.ts";
+import { readMenu, echoes, echoed, menuRev, type Menu } from "./prompt.ts";
 
 let fails = 0;
+// The summary fields; `prompt` gets checks of its own.
+const shape = (m: Menu | null) => m && { question: m.question, options: m.options, selected: m.selected, multi: m.multi };
 function check(label: string, got: unknown, want: unknown) {
   const g = JSON.stringify(got);
   const w = JSON.stringify(want);
@@ -25,7 +27,7 @@ const claude = `
    3. No, and tell Claude what to do differently (esc)
 
 `;
-check("Claude permission prompt", readMenu(claude), {
+check("Claude permission prompt", shape(readMenu(claude)), {
   question: ["Bash command", "rm -rf build", "Remove the old build output", "Do you want to proceed?"],
   options: ["Yes", "Yes, and don't ask again for rm commands in C:\\projects\\loom", "No, and tell Claude what to do differently (esc)"],
   selected: 0,
@@ -40,7 +42,7 @@ const boxed = `
 │ ❯ 2. No (esc)                │
 ╰──────────────────────────────╯
 `;
-check("Boxed prompt, second option highlighted", readMenu(boxed), {
+check("Boxed prompt, second option highlighted", shape(readMenu(boxed)), {
   question: ["Edit file", "Do you want to make this edit"], options: ["Yes", "No (esc)"], selected: 1, multi: false,
 });
 
@@ -88,7 +90,7 @@ Do you prefer tea or coffee?
 
 Enter to select · ↑/↓ to navigate · Esc to cancel
 `;
-check("Claude AskUserQuestion", readMenu(claudeAsk), {
+check("Claude AskUserQuestion", shape(readMenu(claudeAsk)), {
   question: ["☐ Drink", "Do you prefer tea or coffee?"], options: ["Tea", "Coffee", "Type something."], selected: 0, multi: false,
 });
 
@@ -132,6 +134,39 @@ const wipe = readMenu("Delete the project?\n❯ 1. Yes\n  2. No")!;
 check("Same options under another question are another menu", menuRev(readme) === menuRev(wipe), false);
 check("Moving the highlight keeps the menu", menuRev(readme) === menuRev(readMenu("Read README.md?\n  1. Yes\n❯ 2. No")!), true);
 check("A menu revision is 8 hex digits", /^[0-9a-f]{8}$/.test(menuRev(readme)), true);
+
+// The revision covers the whole prompt, not just the summary.
+check("The prompt runs from the divider to the last option", readMenu(claude)?.prompt, [
+  "Bash command", "rm -rf build", "Remove the old build output", "Do you want to proceed?",
+  "1. Yes", "2. Yes, and don't ask again for rm commands in C:\\projects\\loom", "3. No, and tell Claude what to do differently (esc)",
+]);
+check("AskUserQuestion's descriptions are in it, the next divider ends it", readMenu(claudeAsk)?.prompt, [
+  "☐ Drink", "Do you prefer tea or coffee?", "1. Tea", "You prefer tea.", "2. Coffee", "You prefer coffee.", "3. Type something.",
+]);
+const folder = (path: string) => readMenu(`Which folder should be removed?
+❯ 1. Build output
+     ${path}
+  2. Cancel
+
+  Esc to cancel`)!;
+check("A changed path under an option is another menu", menuRev(folder("C:\\project\\build")) === menuRev(folder("C:\\project\\src")), false);
+check("The footer below a blank line is not part of it", folder("C:\\project\\build").prompt.includes("Esc to cancel"), false);
+check("The path is part of the prompt", folder("C:\\project\\build").prompt, ["Which folder should be removed?", "1. Build output", "C:\\project\\build", "2. Cancel"]);
+const command = (cmd: string) => readMenu(`──────
+ Bash command
+
+   ${cmd}
+   Clean up
+   Uses the shell
+   Runs in the repo
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No`)!;
+check("Same last four question lines, another command", JSON.stringify(command("rm -rf build").question) === JSON.stringify(command("rm -rf src").question), true);
+check("is another menu", menuRev(command("rm -rf build")) === menuRev(command("rm -rf src")), false);
+const moved = readMenu(claude.replace(" ❯ 1. Yes", "   1. Yes").replace("   2. Yes, and", " ❯ 2. Yes, and"))!;
+check("Moving the highlight keeps a long prompt's revision", [moved.selected, menuRev(moved) === menuRev(readMenu(claude)!)], [1, true]);
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

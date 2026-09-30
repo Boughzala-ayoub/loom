@@ -496,7 +496,7 @@ loomctl read api-fix:1                  # what a pane shows, as text
 loomctl read api-fix:1 --lines 200      # its last 200 lines, history included
 loomctl send api-fix:1 run the tests    # type it, then Enter once it shows up
 loomctl wait api-fix:1                  # block until that agent waits for you
-loomctl menu api-fix:1                  # the numbered question on its screen, and its menu id
+loomctl menu api-fix:1                  # the whole numbered question on its screen, and its menu id
 loomctl choose api-fix:1 2 --menu 3f9a01c2   # pick option 2, only if it is still that question
 loomctl new C:\code\app --name login --agent codex   # a new worktree thread
 loomctl add login --agent claude        # another agent in that thread
@@ -521,19 +521,38 @@ change when you rename or reorder.
 
 Text sent to a pane belongs to the session that was running when you sent it.
 If the pane stops or restarts first, the send fails and nothing is typed into
-the new session. `send` presses Enter only once the text shows on screen, which
-for a long task can be Claude's `[Pasted text #1 +120 lines]` or Codex's
-`[Pasted Content ...]`. If it never shows, `send` fails but says the text went
-in, so don't send it again: `loomctl read` shows it and `loomctl keys <pane>
-enter` submits it. With `--json`, a failure prints its answer as JSON too, with
-`"typed": true` in that case.
+the new session. `panes` shows each pane's `generation`, which goes up with
+every start; `send`, `keys` and `choose` take `--gen N` to refuse a pane that
+restarted since you looked. `send` presses Enter only once the text shows on
+screen, which for a long task can be Claude's `[Pasted text #1 +120 lines]`
+or Codex's `[Pasted Content ...]`. If it never shows, `send` fails but says
+the text went in (`"typed": true`), so don't send it again: `loomctl read`
+shows it and `loomctl keys <pane> enter` submits it. `keys` cut short by a
+restart says which keys went in (`"pressed"`), since an Enter may have run
+something.
+
+`menu` prints the whole question as drawn, from the divider above it to the
+last option's details, and an id for all of it. `choose --menu <id>` refuses
+the question if anything in it changed, a path or command included, but not
+if only the highlight moved.
+
+For a shell pane, `panes --json` also shows how many commands finished
+(`commands`) and the last one's exit code (`exit`), from Loom's PowerShell
+prompt, plus when the pane last drew anything (`lastOutput`).
+
+With `--json`, every failure prints one JSON object: `code` (`usage`,
+`not-running`, `busy`, `unreachable`, `version`, `connection`, `timeout` or
+`failed`), `sent` (whether the command reached Loom; if it did, it may have
+run) and `error`.
 
 Exit codes: 0 done, 1 the command failed, 2 Loom isn't running or is a
 different version than `loomctl`, 3 no answer in time (`--timeout`: 30
 seconds, an hour for `wait`). A timeout stops the waiting, not the command, so
 a slow `new` or `close-thread` may still finish after it: check with `loomctl
-threads` before trying again. After an update, restart Loom: until then the
-new `loomctl` and the old Loom refuse each other before running anything.
+threads` before trying again. Loom answers `loomctl`'s hello before any
+command within 10 seconds or `--timeout`, whichever is shorter, or `loomctl`
+gives up with nothing sent. After an update, restart Loom: until then the new
+`loomctl` and the old Loom refuse each other before running anything.
 
 Inside a Loom pane, `loomctl` is on the PATH and talks to the Loom that owns the
 pane, so an agent can read other panes, start agents and wait for them. For a

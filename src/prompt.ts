@@ -4,7 +4,7 @@
  * numbered list with a cursor glyph on the highlighted option. Text pasted into
  * one of those is not an answer, and the Enter after it picks whatever is
  * highlighted, so the overview offers the options as buttons instead. */
-export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean };
+export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[] };
 
 const CURSOR = /^[❯›▶➤]\s*/; // Not ASCII ">": that is Claude's input prompt.
 const OPTION = /^([❯›▶➤]\s*)?(\d{1,2})[.)]\s+(\S.*)$/;
@@ -12,6 +12,7 @@ const RULE = /^[─━═╌┄\-_╭╮╰╯┌┐└┘\s]+$/; // A divider o
 const CHECKBOX = /^(\[[ xX✔✓]\]|[☐☑☒◯◉○●])\s/;
 // Side borders of a boxed prompt, so "│ ❯ 1. Yes │" reads as "❯ 1. Yes".
 const unbox = (line: string) => line.replace(/^[\s│┃║]+|[\s│┃║]+$/g, "");
+const isRule = (line: string) => RULE.test(line) && !!line.trim();
 
 export function readMenu(screen: string): Menu | null {
   const lines = screen.split("\n").map(unbox);
@@ -42,22 +43,32 @@ export function readMenu(screen: string): Menu | null {
   const options = numbers.map(n => found.get(n)!);
   const question: string[] = [];
   for (let i = options[0].line - 1; i >= 0 && question.length < 4; i--) {
-    if (RULE.test(lines[i]) && lines[i].trim()) break;
+    if (isRule(lines[i])) break;
     if (lines[i].trim()) question.unshift(lines[i].trim());
   }
+  // The whole prompt as drawn, which menuRev covers: from the divider above it
+  // (or the top of the screen) through the last option's wrapped text and
+  // description, up to a blank line or a divider. `question` and `options` keep
+  // only a summary; a command or a path in the rest decides what "Yes" does.
+  let top = options[0].line, end = options[options.length - 1].line;
+  while (top > 0 && !isRule(lines[top - 1])) top--;
+  while (end + 1 < lines.length && lines[end + 1].trim() && !isRule(lines[end + 1])) end++;
+  const prompt = lines.slice(top, end + 1).map(l => (OPTION.test(l) ? l.replace(CURSOR, "") : l).trim()).filter(Boolean);
   return {
     question,
     options: options.map(o => o.text),
     selected: options.findIndex(o => o.cursor),
     multi: options.some(o => CHECKBOX.test(o.text)),
+    prompt,
   };
 }
 
-/** A menu's identity: its question, options and kind, not which option is
- * highlighted. `loomctl menu` shows it and `choose --menu` must match it, so an
- * answer read for one question never goes to another with the same options. */
+/** A menu's identity: the whole prompt as drawn and its kind, not which
+ * option is highlighted. `loomctl menu` shows it and `choose --menu` must match
+ * it, so an answer read for one question never goes to another with the same
+ * options, or to the same question about another command or path. */
 export function menuRev(m: Menu): string {
-  const s = JSON.stringify([m.question, m.options, m.multi]);
+  const s = JSON.stringify([m.prompt, m.multi]);
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
   return (h >>> 0).toString(16).padStart(8, "0");

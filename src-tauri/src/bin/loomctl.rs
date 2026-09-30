@@ -24,11 +24,17 @@ Usage: loomctl [--json] [--profile FILE] [--timeout SECONDS] <command> [args...]
 Put a command's own options after it: --name value, --name=value, or --flag.
 After --, every word is an argument. An argument of - is standard input, sent
 as it is: text starting with -- stays text. Inside a Loom pane, loomctl talks to
-the Loom that owns the pane. With --json, a failure prints its answer as JSON
-too; \"typed\": true there means text reached the pane but Enter wasn't pressed.
+the Loom that owns the pane.
+
+With --json, every failure prints one JSON object: \"code\" (usage, not-running,
+busy, unreachable, version, connection, timeout or failed), \"sent\" (whether
+the command reached Loom: if so it may have run) and \"error\". From Loom it can
+add \"typed\": true (text is in the pane, Enter wasn't pressed) or \"pressed\"
+(how many keys went in before a restart stopped the rest).
 
 Exit codes: 0 done, 1 the command failed, 2 Loom isn't running or is a
-different version, 3 timed out.";
+different version, 3 timed out. The hello before a command gets 10 seconds at
+most, so a stuck Loom never holds loomctl past --timeout plus 20 seconds.";
 
 /// Commands that wait for something get an hour unless told otherwise.
 const LONG: [&str; 2] = ["wait", "wait-any"];
@@ -110,24 +116,38 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
     Ok(parsed)
 }
 
-fn connect(name: &str) -> Result<std::fs::File, i32> {
+/// Opens the pipe, or the failure code and why not.
+fn connect(name: &str) -> Result<std::fs::File, (&'static str, String)> {
     for _ in 0..100 {
         match std::fs::OpenOptions::new().read(true).write(true).open(name) {
             Ok(f) => return Ok(f),
             // All pipe instances are serving other commands: they free up in milliseconds.
             Err(e) if e.raw_os_error() == Some(231) => std::thread::sleep(std::time::Duration::from_millis(50)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("loomctl: Loom isn't running, or not for this workspace ({name}).");
-                return Err(2);
+                return Err(("not-running", format!("Loom isn't running, or not for this workspace ({name}).")));
             }
-            Err(e) => {
-                eprintln!("loomctl: can't reach Loom at {name}: {e}");
-                return Err(2);
-            }
+            Err(e) => return Err(("unreachable", format!("can't reach Loom at {name}: {e}"))),
         }
     }
-    eprintln!("loomctl: Loom is busy; try again.");
-    Err(2)
+    Err(("busy", "Loom is busy; try again.".into()))
+}
+
+/// Every failure, one shape: under --json a single object on stdout with a
+/// stable `code` and `sent`, whether the command reached Loom (if it did, it
+/// may have run), plus what Loom said (`timeout`, `typed`, `pressed`). The
+/// message goes to stderr either way. Returns the exit status.
+fn fail(json: bool, code: &str, exit: i32, sent: bool, error: &str, from_loom: &Value) -> i32 {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&failure(code, sent, error, from_loom)).unwrap_or_default());
+    }
+    eprintln!("loomctl: {error}");
+    exit
+}
+
+fn failure(code: &str, sent: bool, error: &str, from_loom: &Value) -> Value {
+    let mut out = from_loom.as_object().cloned().unwrap_or_default();
+    out.extend([("ok".into(), json!(false)), ("code".into(), json!(code)), ("sent".into(), json!(sent)), ("error".into(), json!(error))]);
+    Value::Object(out)
 }
 
 /// What to print for a successful answer: `--json` always prints JSON, `null`
@@ -161,10 +181,11 @@ fn run(args: &[String]) -> i32 {
     let parsed = match parse(args) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("loomctl: {e}");
-            return 1;
+            let json = args.iter().take_while(|a| a.as_str() != "--").any(|a| a == "--json");
+            return fail(json, "usage", 1, false, &e, &Value::Null);
         }
     };
+    let json = parsed.json;
     if parsed.version {
         println!("loomctl {}", env!("CARGO_PKG_VERSION"));
         return 0;
@@ -184,64 +205,105 @@ fn run(args: &[String]) -> i32 {
         let _ = std::io::stdin().read_to_string(&mut s);
         s
     });
+    let timeout = parsed.timeout.unwrap_or(if LONG.contains(&parsed.cmd.as_str()) { 3600.0 } else { DEFAULT_TIMEOUT });
+    let watch = Watchdog::start(json, timeout.min(HELLO_SECS));
     let file = match connect(&name) {
         Ok(f) => f,
-        Err(code) => return code,
+        Err((code, error)) => return fail(json, code, 2, false, &error, &Value::Null),
     };
     let mut reader = BufReader::new(&file);
-    let mut exchange = |message: Value| -> Result<Value, String> {
+    let mut read = || -> Result<Value, String> {
         let mut line = String::new();
-        writeln!(&file, "{message}").and_then(|_| (&file).flush()).and_then(|_| reader.read_line(&mut line)).map_err(|e| format!("lost the connection to Loom: {e}"))?;
-        Ok(serde_json::from_str(&line).unwrap_or_else(|_| json!({ "ok": false, "error": "Loom closed the connection without an answer." })))
+        reader.read_line(&mut line).map_err(|e| format!("lost the connection to Loom: {e}"))?;
+        serde_json::from_str(&line).map_err(|_| "Loom closed the connection without an answer".to_string())
     };
-    let hello = match exchange(json!({ "hello": pipe::PROTOCOL })) {
+    let send = |message: Value| writeln!(&file, "{message}").and_then(|_| (&file).flush());
+    let hello = match send(json!({ "hello": pipe::PROTOCOL })).map_err(|e| format!("lost the connection to Loom: {e}")).and_then(|_| read()) {
         Ok(hello) => hello,
-        Err(e) => {
-            eprintln!("loomctl: {e}");
-            return 2;
-        }
+        Err(e) => return fail(json, "connection", 2, false, &e, &Value::Null),
     };
     if let Err(e) = greeted(&hello) {
-        eprintln!("loomctl: {e}");
-        return 2;
+        return fail(json, "version", 2, false, &e, &Value::Null);
     }
     if parsed.cmd == "info" {
         let info = json!({ "version": hello["version"], "protocol": hello["protocol"], "pid": hello["pid"], "pipe": hello["pipe"], "via": name });
-        match parsed.json {
+        match json {
             true => println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default()),
             false => println!("Loom {} (protocol {}), process {}\nits own pipe: {}", hello["version"].as_str().unwrap_or("?"), hello["protocol"], hello["pid"], hello["pipe"].as_str().unwrap_or("?")),
         }
         return 0;
     }
-    let timeout = parsed.timeout.unwrap_or(if LONG.contains(&parsed.cmd.as_str()) { 3600.0 } else { DEFAULT_TIMEOUT });
-    // Loom answers a timed-out request itself, 5 s after its limit. This is for
-    // a Loom that stopped answering altogether. A command already running may
-    // still finish after either.
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs_f64(timeout + 20.0));
-        eprintln!("loomctl: Loom didn't answer within {timeout} s. The command may still finish.");
-        std::process::exit(3);
-    });
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
     let request = json!({ "cmd": parsed.cmd, "argv": parsed.argv, "stdin": stdin, "cwd": cwd, "timeout": timeout });
-    let reply = match exchange(request) {
-        Ok(reply) => reply,
-        Err(e) => {
-            eprintln!("loomctl: {e}");
-            return 2;
-        }
-    };
-    if reply["ok"] != json!(true) {
-        if parsed.json {
-            println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
-        }
-        eprintln!("loomctl: {}", reply["error"].as_str().unwrap_or("the command failed"));
-        return if reply["timeout"] == json!(true) { 3 } else { 1 };
+    // Loom answers a timed-out request itself, 5 s after its limit. This is for
+    // a Loom that stopped answering altogether.
+    watch.sent(timeout + 20.0);
+    if let Err(e) = send(request) {
+        // Loom reads whole lines, so a request that didn't all go out never ran.
+        return fail(json, "connection", 2, false, &format!("lost the connection to Loom before the command went: {e}"), &Value::Null);
     }
-    if let Some(out) = render(&reply, parsed.json) {
+    let reply = match read() {
+        Ok(reply) => reply,
+        Err(e) => return fail(json, "connection", 2, true, &format!("{e}. The command may have run: check before trying again."), &Value::Null),
+    };
+    watch.done();
+    if reply["ok"] != json!(true) {
+        let error = reply["error"].as_str().unwrap_or("the command failed");
+        return match reply["timeout"] == json!(true) {
+            true => fail(json, "timeout", 3, true, error, &reply),
+            false => fail(json, "failed", 1, true, error, &reply),
+        };
+    }
+    if let Some(out) = render(&reply, json) {
         println!("{out}");
     }
     0
+}
+
+/// Loom answers the hello at once, from Rust: a Loom that doesn't is stuck.
+const HELLO_SECS: f64 = 10.0;
+
+/// Ends loomctl with a timeout if Loom stops answering, from before the hello
+/// on. It says whether the command had gone out: before, nothing ran; after,
+/// it may still finish.
+struct Watchdog {
+    start: std::time::Instant,
+    deadline_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    sent: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Watchdog {
+    fn start(json: bool, secs: f64) -> Watchdog {
+        use std::sync::atomic::Ordering::SeqCst;
+        let start = std::time::Instant::now();
+        let watch = Watchdog { start, deadline_ms: Default::default(), sent: Default::default() };
+        watch.deadline_ms.store((secs * 1000.0) as u64, SeqCst);
+        let (deadline, sent) = (watch.deadline_ms.clone(), watch.sent.clone());
+        std::thread::spawn(move || loop {
+            let (now, limit) = (start.elapsed().as_millis() as u64, deadline.load(SeqCst));
+            if now >= limit {
+                let sent = sent.load(SeqCst);
+                let error = match sent {
+                    true => "Loom didn't answer in time. The command may still finish: check before trying again.",
+                    false => "Loom didn't answer loomctl's hello in time, so no command was sent.",
+                };
+                std::process::exit(fail(json, "timeout", 3, sent, error, &json!({ "timeout": true })));
+            }
+            std::thread::sleep(std::time::Duration::from_millis((limit - now).min(250)));
+        });
+        watch
+    }
+
+    /// The command is about to go out: from now on it may run, and Loom gets `secs` more.
+    fn sent(&self, secs: f64) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.sent.store(true, SeqCst);
+        self.deadline_ms.store(self.start.elapsed().as_millis() as u64 + (secs * 1000.0) as u64, SeqCst);
+    }
+
+    fn done(&self) {
+        self.deadline_ms.store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn main() {
@@ -315,6 +377,16 @@ mod tests {
         for bad in [&["read", "--timeout"][..], &["read", "--timeout", "soon"], &["read", "--timeout", "0"], &["--profile"]] {
             assert!(parse(&v(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn every_failure_has_one_shape() {
+        let from_loom = json!({ "ok": false, "error": "Loom's words", "timeout": false, "typed": true });
+        assert_eq!(
+            failure("failed", true, "Loom's words", &from_loom),
+            json!({ "ok": false, "code": "failed", "sent": true, "error": "Loom's words", "timeout": false, "typed": true })
+        );
+        assert_eq!(failure("usage", false, "bad", &Value::Null), json!({ "ok": false, "code": "usage", "sent": false, "error": "bad" }));
     }
 
     #[test]

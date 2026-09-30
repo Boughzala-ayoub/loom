@@ -39,9 +39,12 @@ loomctl.exe ──named pipe──> loom.exe (control.rs) ──"cli" event─�
    `choose`, `closePane`, `toggleDashboard` and the rest. That's why the window
    shows every change: nothing takes a separate path around the UI.
 5. The answer goes back as `{ ok, data, text }`, or `{ ok: false, error }`
-   with `timeout` or `typed` when they apply. `loomctl` prints `text`, or
-   `data` as JSON with `--json`; with `--json` a failure prints the whole
-   answer as JSON as well as the message on stderr.
+   with `timeout`, `typed` or `pressed` when they apply. `loomctl` prints
+   `text`, or `data` as JSON with `--json`. Under `--json` every failure,
+   whether Loom or `loomctl` found it, prints one object with a stable `code`
+   (`usage`, `not-running`, `busy`, `unreachable`, `version`, `connection`,
+   `timeout`, `failed`) and `sent`: whether the command reached Loom, so a
+   script knows when it may have run. The message goes to stderr as well.
 
 Loom's threads, panes and their states live in the page, not in Rust, so the
 page is the only place that can answer "which panes are waiting" or run
@@ -100,7 +103,10 @@ dozen places. It answers with a timeout flag when time runs out, and `loomctl`
 exits 3 for that. Waits get an hour by default and other commands 30 seconds.
 A timeout ends the waiting, not the command: a `new` still running Git carries
 on, so a script checks `threads` before trying again. `loomctl` gives up on its
-own 20 seconds after that, in case Loom stops answering altogether.
+own 20 seconds after that, in case Loom stops answering altogether. Its clock
+starts before the hello, which gets 10 seconds or `--timeout`, whichever is
+shorter: a Loom that takes the connection and never answers ends in exit 3 with
+`sent: false`, and no command reaches it.
 
 **Commands can overlap.** Each request runs as it arrives, so two terminals can
 act on one pane or thread at once. Text sent to a pane takes turns, one `send`
@@ -114,9 +120,18 @@ answers with the thread it made, and a failed start or Git removal comes back
 as an error, not "done".
 
 **Input belongs to a session.** A `send`, `keys` or `choose` records the
-pane's start number when it is queued and checks it again before each write.
-If the pane stopped or restarted in between, the command fails and nothing
-reaches the new session.
+pane's start number (`generation` in `panes`) when it is queued, or takes the
+one the caller saw with `--gen`, and checks it again before each write. If the
+pane stopped or restarted in between, the command fails and nothing reaches
+the new session. A `keys` cut short that way says how many keys went in
+(`pressed`) instead of "nothing was sent": an Enter among them may have run a
+command already.
+
+**Shell outcomes.** Loom's PowerShell prompt reports each finished command and
+its exit code (OSC 133 `D;<code>`). `panes --json` shows the count (`commands`)
+and the last code (`exit`), and `lastOutput`, when the pane last drew. A
+script can note `commands`, send, and poll until it grows to read the exit
+code. Agents have no such marker.
 
 **Enter only once the text shows.** `send` pastes, then presses Enter only if
 the text appeared, so Enter never picks a menu option by accident. It counts
@@ -126,12 +141,17 @@ placeholders Claude and Codex draw instead of a long paste: `[Pasted text #1
 When none shows, the text may still be sitting in the input, so the failure
 carries `typed: true` and says not to send it again.
 
-**Menus have ids.** `menu` gives each question an id, a hash of its question
-lines, options and kind but not the highlight. `choose` compares that id, not
-just the option labels, before every arrow key and Enter, so a "Delete the
-project?" that replaces "Read README.md?" with the same Yes/No options is not
-answered. `choose --menu <id>` also refuses a question other than the one the
-caller read.
+**Menus have ids.** `menu` prints the whole prompt as drawn: from the divider
+above it (or the top of the screen) through the last option's wrapped text and
+description, up to a blank line or the next divider. Its id is a hash of all
+of that with only the highlight glyph taken out. An earlier id covered the
+question's last four lines and each option's first line, so a path under an
+option or a command higher up could change and keep the id. `choose` compares
+the id before every arrow key and Enter, so neither a "Delete the project?"
+under the same Yes/No nor `rm -rf src` where `rm -rf build` was gets answered,
+and `choose --menu <id>` refuses any question but the one the caller read.
+Anything on screen outside those bounds, such as a status line below a blank
+line, stays out, so a clock there can't block an answer.
 
 **Ids last as long as Loom does.** Pane and thread ids aren't saved; after a
 restart, use names or `<thread>:<n>`.
@@ -173,7 +193,13 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   From the agent-control review: `info`, a request in the first protocol's
   shape refused with the panes untouched, this `loomctl` against a fake first
   Loom stopping after the hello, standard input starting with `--` typed and
-  run, and a `--json` failure printed as JSON.
+  run, and a `--json` failure printed as JSON. From the second agent review:
+  fake Looms that give an old greeting, take the hello and never answer
+  (exit 3 within seconds, `sent: false`, only the hello heard), or drop the
+  connection after the command (`connection`, `sent: true`); a bad option, a
+  missing Loom, a Loom-side timeout and a failed command, each as one JSON
+  object; a real PowerShell pane reporting `exit 7`; and `--gen` refused
+  after a restart.
 - `ui-check.mjs` stops a pane while its session check is held open and checks
   it never starts, then fails a restart with a refused `pty_spawn`. It holds a
   write to queue a send, restarts the pane and checks the send is refused with
@@ -181,11 +207,16 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   session and checks nothing spawns; changes a question under the same
   options before a queued `choose` and checks no Enter; and sends a 120-line
   task that scrolls, one that collapses to a placeholder, and one that never
-  shows (`typed: true`, pasted once, no Enter).
-- `cargo test` covers the pipe names, `loomctl`'s own options and the hello
-  check. `node src/cli.test.ts` covers pane references, key names, option
-  parsing and folders relative to the terminal, and `node src/prompt.test.ts`
-  the echo check and menu ids.
+  shows (`typed: true`, pasted once, no Enter). Then it changes only the path
+  under an option (a queued `choose` and a stale `--menu` both refused, no
+  Enter), restarts a pane between the two keys of `keys enter x` (`pressed: 1`,
+  no `x`), refuses `--gen` for an old launch, and reads an exit code from an
+  OSC 133 mark.
+- `cargo test` covers the pipe names, `loomctl`'s own options, the hello check
+  and the failure shape. `node src/cli.test.ts` covers pane references, key
+  names, option parsing and folders relative to the terminal, and
+  `node src/prompt.test.ts` the echo check and menu ids, including a changed
+  path under an option and a changed command above four identical lines.
 - `pty-close-check.mjs` still passes.
 - A verbose `makensis` run lists `loomctl.exe` in the installer next to `loom.exe`.
 
@@ -198,12 +229,17 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
 - **Agent groups, dictation, font size and file previews** have no commands.
 - **An agent skill** that teaches Claude Code or Codex in a pane to orchestrate
   the others through `loomctl`.
-- **Knowing a task finished, and how.** `wait` sees states (idle, waiting,
-  exited), and Claude reads as idle after a short quiet spell, so a controller
-  can't yet tell "done" from "paused", bind a wait to the send before it, or
-  read a shell command's exit code (OSC 133 `D;<code>` is seen, not kept).
-- **Retrying safely.** No caller request ids, so after a timeout a script has
-  to look before sending or creating again.
+- **Knowing an agent's task finished, and how.** `wait` sees states (idle,
+  waiting, exited), and Claude reads as idle after a short quiet spell, so a
+  controller can't yet tell "done" from "paused" or bind a wait to the send
+  before it. Shells have `commands` and `exit`; agents have nothing like them.
+- **Retrying safely.** No caller request ids or stored results, so after a
+  timeout or a dropped connection with `sent: true` a script has to look
+  before sending or creating again.
+- **Finding every running Loom.** `info` names the one a pipe reaches, but
+  nothing lists them all, and the hello doesn't say which workspace file it has.
+- **Prompts taller than the screen.** A menu id covers what is on screen; if
+  the prompt starts above it, the top isn't in the id.
 - **Picking a Codex or OpenCode session from the terminal** when a restart
   needs one; it still takes the window.
 - **Unnumbered menus.** `menu` reads numbered questions only. Claude's
