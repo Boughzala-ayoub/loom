@@ -617,7 +617,8 @@ account can open, and it refuses remote connections. A second Loom on the same
 workspace doesn't take over the pipe, and each Loom's panes talk to it on a
 pipe of its own (`...-pid<pid>`), so they never reach the other window. A
 `tauri dev` build uses `loom-dev-<user>` and leaves the installed Loom alone.
-`docs/cli-control.md` has the design.
+`docs/loomctl.md` is the full usage guide, with recipes; `docs/cli-control.md`
+has the design.
 
 ## State
 
