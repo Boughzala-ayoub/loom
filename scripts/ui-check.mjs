@@ -231,16 +231,16 @@ try {
       // loomctl's stop against a pane still starting, and a restart that fails (LOOM_CLI_REVIEW F5, F7).
       await page.goto(base + '?hold-session&dashboard'); // dashboard: the Codex pane has a saved session
       await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'cli_ready') && window.qa.pendingSessions.length > 0);
-      const call = (cmd, argv, stdin, key) => page.evaluate(async ([cmd, argv, stdin, key]) => {
+      const call = (cmd, argv, stdin, key, timeout = 5) => page.evaluate(async ([cmd, argv, stdin, key, timeout]) => {
         const id = window.qa.cliIds = (window.qa.cliIds ?? 0) + 1;
-        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin, cwd: null, timeout: 5, key } });
+        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin, cwd: null, timeout, key } });
         for (const end = Date.now() + 15000; Date.now() < end;) {
           const reply = window.qa.calls.find(c => c.cmd === 'cli_reply' && c.args.id === id);
           if (reply) return reply.args.reply;
           await new Promise(r => setTimeout(r, 20));
         }
         return { hung: [cmd, ...argv].join(' ') };
-      }, [cmd, argv, stdin ?? null, key ?? null]);
+      }, [cmd, argv, stdin ?? null, key ?? null, timeout]);
       const cli = (cmd, ...argv) => call(cmd, argv);
       const stopped = await cli('stop', 'search-polish:1', '--yes');
       assert.equal(stopped.ok, true, JSON.stringify(stopped));
@@ -430,6 +430,22 @@ try {
       const together = await Promise.all([call('send', ['search-polish:1', '--no-enter', 'once'], null, 'job-2'), call('send', ['search-polish:1', '--no-enter', 'once'], null, 'job-2')]);
       assert.deepEqual(together.map(r => r.ok), [true, true]);
       assert.equal((await writes(claude)).filter(d => d === 'once').length, 1, 'Two at once with one key run once');
+      // A key still running survives 256 newer keys: its retry waits for it rather than running again.
+      await holdWrites();
+      const heldKeyed = call('send', ['search-polish:1', '--no-enter', 'long task'], null, 'held-job');
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+      await page.evaluate(async () => {
+        const ids = Array.from({ length: 256 }, (_, i) => 100000 + i);
+        for (const id of ids) await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd: 'panes', argv: [], stdin: null, cwd: null, timeout: 5, key: `filler-${id}` } });
+        const replied = () => new Set(window.qa.calls.filter(c => c.cmd === 'cli_reply').map(c => c.args.id));
+        while (!ids.every(id => replied().has(id))) await new Promise(r => setTimeout(r, 20));
+      });
+      const retryKeyed = call('send', ['search-polish:1', '--no-enter', 'long task'], null, 'held-job');
+      await page.waitForTimeout(100);
+      await releaseWrites();
+      const [firstKeyed, secondKeyed] = await Promise.all([heldKeyed, retryKeyed]);
+      assert.deepEqual([firstKeyed.ok, secondKeyed.ok, secondKeyed.replayed], [true, true, true], JSON.stringify(secondKeyed));
+      assert.equal((await writes(claude)).filter(d => d === 'long task').length, 1, 'Typed once');
       // turns: each time an agent finishes or asks after new input; repeats and idle reminders don't count.
       const turnsNow = async () => (await cli('panes')).data.find(p => p.id === claude).turns;
       await out(claude, '\x07'); // the turn after the input above
@@ -455,23 +471,47 @@ try {
       await out(claude, menuScreen('Run the tests?') + '\x07');
       const agentResult = await agentDone;
       assert.deepEqual([agentResult.ok, agentResult.data.done, agentResult.data.asking], [true, true, true], JSON.stringify(agentResult));
-      // A shell's: its own command line's exit code, paired by the marker on the line.
+      // A receipt's outcome comes from the launch it went to: one finished before
+      // a restart keeps it, and one cut off by a restart never takes the next launch's turn.
+      await out(claude, '\x1b[2J\x1b[H> ');
+      const kept = await cli('send', 'search-polish:1', '--receipt', 'first task');
+      await out(claude, '\x07');
+      assert.equal((await cli('restart', 'search-polish:1', '--yes')).ok, true);
+      const keptResult = await cli('wait', '--receipt', kept.text);
+      assert.deepEqual([keptResult.ok, keptResult.data.done, keptResult.data.asking], [true, true, null], JSON.stringify(keptResult));
+      const cutShort = await cli('send', 'search-polish:1', '--receipt', 'second task'); // turns is 0 after the restart
+      assert.equal(cutShort.ok, true, JSON.stringify(cutShort));
+      assert.equal((await cli('restart', 'search-polish:1', '--yes')).ok, true);
+      await cli('send', 'search-polish:1', '--no-enter', 'the new launch working');
+      await out(claude, '\x07');
+      assert.equal(await turnsNow(), 1, 'The new launch finished a turn');
+      const cutResult = await cli('wait', '--receipt', cutShort.text);
+      assert.equal(cutResult.ok, false, JSON.stringify(cutResult));
+      assert.match(cutResult.error, /restarted before it finished/);
+      // A shell's: its own command line's exit code, paired by the marker at the end of the line.
+      // The mock shells answer each Enter with E, C, D and a fresh prompt, after `delay` ms.
       const shellPane = added.data.id;
-      await page.evaluate(id => {
-        const pane = () => window.qa.panes.filter(a => a.id === id).at(-1).onOut;
+      const twin = (await call('add', ['search-polish', '--cmd='])).data.id;
+      await page.evaluate(ids => {
         const prompt = '\x1b]133;A\x07PS> \x1b]133;B\x07';
-        let line = '';
-        window.qa.onWrite = ({ id: to, data }) => {
-          if (to !== id) return;
-          if (data !== '\r') { line += data; pane().onmessage(data); return; }
+        const qa = window.qa;
+        qa.shell = { delay: 0, hang: false, events: [], lines: {} };
+        const pane = id => qa.panes.filter(a => a.id === id).at(-1).onOut;
+        qa.onWrite = ({ id, data }) => {
+          if (!ids.includes(id)) return;
+          qa.shell.events.push(`write:${data}`);
+          if (data !== '\r') { qa.shell.lines[id] = (qa.shell.lines[id] ?? '') + data; pane(id).onmessage(data); return; }
+          const line = qa.shell.lines[id] ?? '';
+          qa.shell.lines[id] = '';
+          if (qa.shell.hang) return;
           const code = /exit (\d+)/.exec(line)?.[1] ?? '0';
-          pane().onmessage(`\x1b]133;E;${line}\x07\x1b]133;C\x07\r\n\x1b]133;D;${code}\x07${prompt}`);
-          line = '';
+          setTimeout(() => { qa.shell.events.push(`done:${code}`); pane(id).onmessage(`\x1b]133;E;${line}\x07\x1b]133;C\x07\r\n\x1b]133;D;${code}\x07${prompt}`); }, qa.shell.delay);
         };
-        pane().onmessage(prompt);
-      }, shellPane);
+        for (const id of ids) pane(id).onmessage(prompt);
+      }, [shellPane, twin]);
       await page.waitForTimeout(150);
-      const shellRef = (await cli('panes')).data.find(p => p.id === shellPane).ref;
+      const refOf = async id => (await cli('panes')).data.find(p => p.id === id).ref;
+      const shellRef = await refOf(shellPane), twinRef = await refOf(twin);
       const shellReceipt = await cli('send', shellRef, '--receipt', 'cmd /c exit 5');
       assert.equal(shellReceipt.ok, true, JSON.stringify(shellReceipt));
       assert.ok((await writes(shellPane)).some(d => d === `cmd /c exit 5  # loom-receipt:${shellReceipt.text}`), 'The marker rides on the line as a comment');
@@ -479,13 +519,49 @@ try {
       assert.equal(plain.ok, true);
       const shellResult = await cli('wait', '--receipt', shellReceipt.text);
       assert.deepEqual([shellResult.data.failed, shellResult.data.exit], [true, 5], 'The receipt has its own command\'s code, not the later 9');
-      await out(shellPane, '\x1b]133;C\x07');
-      const busyShell = await cli('send', shellRef, '--receipt', 'echo hi');
-      assert.equal(busyShell.ok, false, JSON.stringify(busyShell));
-      assert.match(busyShell.error, /isn't at Loom's PowerShell prompt/);
+      // An Enter queued ahead spends the prompt: a receipt behind it waits for the next prompt, even when the marks are slow.
+      await page.evaluate(() => { window.qa.shell.delay = 300; window.qa.shell.events = []; });
+      const aheadSend = cli('send', shellRef, 'cmd /c exit 9');
+      await page.waitForFunction(() => window.qa.shell.events.includes('write:cmd /c exit 9')); // typed, Enter still to come
+      const behind = await cli('send', shellRef, '--receipt', 'cmd /c exit 3');
+      const ahead = await aheadSend;
+      assert.deepEqual([ahead.ok, behind.ok], [true, true], JSON.stringify(behind));
+      const events = await page.evaluate(() => window.qa.shell.events);
+      assert.ok(events.indexOf('done:9') >= 0 && events.indexOf('done:9') < events.findIndex(e => e.startsWith('write:cmd /c exit 3')), `Typed only after the command ahead finished: ${JSON.stringify(events)}`);
+      const behindResult = await cli('wait', '--receipt', behind.text);
+      assert.deepEqual([behindResult.data.failed, behindResult.data.exit], [true, 3], JSON.stringify(behindResult));
+      await page.evaluate(() => { window.qa.shell.delay = 0; });
+      // A receipt queued behind a send that starts a program never types into the program.
+      await holdWrites();
+      const starter = cli('send', shellRef, 'interactive-app');
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+      const intoApp = cli('send', shellRef, '--receipt', 'cmd /c exit 4');
+      await page.waitForTimeout(100);
+      await out(shellPane, '\x1b]133;C\x07'); // the program starts, and has the pane now
+      await releaseWrites();
+      await starter;
+      const refused = await intoApp;
+      assert.deepEqual([refused.ok, refused.typed], [false, false], JSON.stringify(refused));
+      assert.match(refused.error, /isn't at Loom's PowerShell prompt/);
+      assert.ok(!(await writes(shellPane)).some(d => d.includes('cmd /c exit 4')), 'Nothing typed into the program');
+      await out(shellPane, '\x1b]133;D;0\x07\x1b]133;A\x07PS> \x1b]133;B\x07');
+      // Marker-like text in a command is just text: the appended comment decides.
+      const literal = await cli('send', shellRef, '--receipt', 'Write-Output "loom-receipt:abcdefabcdefabcd"');
+      const literalResult = await call('wait', ['--receipt', literal.text], null, null, 3);
+      assert.deepEqual([literalResult.ok, literalResult.data?.failed], [true, false], JSON.stringify(literalResult));
+      // Another pane can't finish a receipt, even with its token on the line.
+      await page.evaluate(() => { window.qa.shell.hang = true; });
+      const pending = await cli('send', shellRef, '--receipt', 'cmd /c exit 6');
+      await page.evaluate(() => { window.qa.shell.hang = false; });
+      assert.equal((await cli('send', twinRef, `cmd /c exit 9  # loom-receipt:${pending.text}`)).ok, true);
+      const notYet = await call('wait', ['--receipt', pending.text], null, null, 1);
+      assert.deepEqual([notYet.ok, notYet.timeout], [false, true], `The other pane's exit 9 isn't this receipt's: ${JSON.stringify(notYet)}`);
+      await out(shellPane, `\x1b]133;E;cmd /c exit 6  # loom-receipt:${pending.text}\x07\x1b]133;C\x07\x1b]133;D;6\x07\x1b]133;A\x07PS> \x1b]133;B\x07`);
+      const own = await cli('wait', '--receipt', pending.text);
+      assert.deepEqual([own.data.pane, own.data.exit], [shellPane, 6], JSON.stringify(own));
       assert.equal((await cli('wait', '--receipt', 'nosuchtoken')).ok, false);
       await page.evaluate(() => { window.qa.onWrite = null; });
-      assert.equal((await cli('close', shellRef, '--yes')).ok, true);
+      for (const id of [shellPane, twin]) assert.equal((await cli('close', id, '--yes')).ok, true); // by id: refs renumber as panes close
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl --key retries, agent turns, receipts for agents and shells ${width}px`);

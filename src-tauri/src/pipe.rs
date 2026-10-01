@@ -15,7 +15,9 @@ const PREFIX: &str = if cfg!(debug_assertions) { "loom-dev" } else { "loom" };
 /// still be running, and the two must refuse each other rather than misread a
 /// command (the first version sent `args`, this one `argv`, and each read the
 /// other's as no arguments at all, so `close <pane>` closed the pane in front).
-pub const PROTOCOL: u64 = 2;
+/// 3: requests carry `--key`, which a protocol-2 Loom dropped without a word,
+/// running a retried mutation twice.
+pub const PROTOCOL: u64 = 3;
 
 fn user() -> String {
     std::env::var("USERNAME").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric()).collect()

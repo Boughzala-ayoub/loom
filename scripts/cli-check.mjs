@@ -238,7 +238,7 @@ try {
   // LOOM_CLI_AGENT_REVIEW.md, against the real app and the real loomctl.
   const info = ok('--json', 'info').json;
   assert.equal(info.pid, child.pid);
-  assert.equal(info.protocol, 2);
+  assert.equal(info.protocol, 3);
   assert.ok(info.pipe.endsWith(`-pid${child.pid}`), info.pipe);
   // A1: a loomctl from before the hello is refused, and its command never runs.
   const panesBefore = ok('--json', 'panes').json.map(p => p.id);
@@ -402,6 +402,13 @@ try {
   ok('close', victim.ref, '--yes');
   console.log('PASS the third agent review: exact or unknown shell exit codes, cut-off requests never run');
 
+  // A Loom on protocol 2 drops --key without a word, so this loomctl refuses it
+  // at the hello: a keyed send never reaches it.
+  fakeOne = await fakeLoom((s, line) => line.hello && s.write(JSON.stringify({ ...helloOk, protocol: 2 }) + '\n'));
+  r = await via(fakeOne.pipe, '--json', '--key', 'old-app-task', 'send', 'p1', '--no-enter', 'task');
+  fakeOne.close();
+  assert.deepEqual(shape(r), [2, false, 'version', false], r.out);
+  assert.deepEqual(fakeOne.heard.map(h => Object.keys(h)), [['hello']], 'Only the hello reached the protocol-2 Loom');
   // --key: a retry of a real add gets the first pane, not a second one.
   const panesBeforeKey = ok('--json', 'panes').json.length;
   const keyed1 = ok('--json', '--key', `check-${process.pid}`, 'add', 'alpha', '--cmd=');

@@ -565,17 +565,23 @@ loomctl --json wait --receipt $r      # {"done":true,"failed":true,"exit":1,...}
 In a shell, the token rides on the command line as a comment
 (`npm test  # loom-receipt:<token>`), and Loom's prompt reports that line's
 own exit code, so someone else's command on the same pane can't answer for
-it. It needs the PowerShell prompt waiting for a command (`atPrompt` in
-`panes --json`). In an agent pane the receipt is the first turn after your
-Enter, with `asking: true` if it stopped on a question; two callers sending
-to one agent at once can't be told apart there, since it may answer both in
-one turn.
+it. Only that comment at the very end of the line counts, and only from the
+pane and the launch the receipt went to. It needs the PowerShell prompt
+waiting for a command (`atPrompt` in `panes --json`): if a command sent just
+before is still running, `send --receipt` waits up to 5 seconds for the next
+prompt and otherwise fails with nothing typed. In an agent pane the receipt is
+the first turn after your Enter, recorded when it comes in, with `asking:
+true` if it stopped on a question; two callers sending to one agent at once
+can't be told apart there, since it may answer both in one turn. A receipt
+whose pane restarts, exits or closes before the outcome fails; one that
+finished first keeps its outcome.
 
 `--key NAME` makes a retry safe: Loom runs each key once, and the same command
 with the same key gets the first answer, waiting for it if it's still
 running, so a `send` or `new` retried after a timeout doesn't run twice. The
-same key with another command is refused. Loom keeps the last 256 keys until
-it exits.
+same key with another command is refused. A key stays as long as its command
+runs; of the finished ones, Loom keeps the last 256 until it exits. With 1024
+keyed commands still running, a new one is refused unrun.
 
 With `--json`, every failure prints one JSON object: `code` (`usage`,
 `not-running`, `busy`, `unreachable`, `version`, `connection`, `timeout` or

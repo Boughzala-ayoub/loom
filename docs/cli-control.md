@@ -161,23 +161,42 @@ the outcome it names. In a shell, the token goes on the command line as a
 PowerShell comment, `# loom-receipt:<token>`. The prompt's OSC 133 `E` mark
 carries the line that runs, and `Pane.mark` pairs the token in an `E` with
 the `D` after it. Commands run one at a time at the prompt, so that pairing
-is exact even when other writers use the pane. The shell has to be at its
-prompt (`B` seen, no `E`/`C`/`D` since; `atPrompt` in `panes`), otherwise
-the line would go to whatever is running. In an agent pane, the token stands
-for the first turn after the Enter, with `asking` if a numbered question is
-on screen. An agent may answer two queued prompts in one turn, so two
+is exact even when other writers use the pane. Only the comment at the very
+end of the `E` line counts, so a command that merely prints marker-like text
+doesn't hide its own receipt. A result counts only from the pane and launch
+the receipt was sent to (`finishReceipt`), so a token copied into another
+pane, or a restarted pane reusing it, can't answer for it. The shell has to
+be at its prompt (`B` seen since the last line break typed into it;
+`atPrompt` in `panes`), otherwise the line would go to whatever is running.
+That is checked in the pane's input turn, right before the paste, and any
+Enter typed into the shell spends the prompt at once (`usePrompt`), because
+the `E` and `C` marks only arrive a moment later. So a receipt queued behind
+a command waits up to 5 s for the next `B`, or gives up with nothing typed.
+The first version checked before queueing, so a receipt queued behind a
+command that started a program typed into that program. In an agent pane,
+the token stands for the first turn after the Enter, recorded when that
+launch's turn signal arrives (`turnReceipts`), with `asking` if a numbered
+question is on screen. The first version compared the live turn count
+instead, and after a restart reset it, the new launch's turns could complete
+an old receipt. An agent may answer two queued prompts in one turn, so two
 callers on one agent aren't told apart; a receipt there means "my prompt went
 in and a turn came back". A receipt ends in an error if the pane restarts,
-exits or closes first. Receipts live in memory, the last 500.
+exits or closes before its outcome; one with an outcome keeps it. Receipts
+live in memory: the last 500 finished, and every pending one up to 2000.
 
 **Retries with `--key`.** `loomctl --key NAME` sends a caller's name for the
 request. The page keeps a map from key to the command and the promise of its
-answer (`keyed` in `main.ts`, the last 256). A retry with the same key and
-the same command, cwd and stdin awaits that promise instead of running again,
-even if the first is still running. A retry with the same key and a
-different command is refused. The answer comes back with `replayed`, and
-`loomctl` says so on stderr. Keys live in memory, so they don't survive a
-restart of Loom.
+answer (`keyed` in `main.ts`). A retry with the same key and the same
+command, cwd and stdin awaits that promise instead of running again, even if
+the first is still running. A retry with the same key and a different command
+is refused. The answer comes back with `replayed`, and `loomctl` says so on
+stderr. Only finished keys are evicted, beyond the last 256; a running one
+stays, since evicting it would let its retry run a second time, as the first
+version did under 256 newer keys. With 1024 keyed commands running, new ones
+are refused unrun. Keys live in memory, so they don't survive a restart of
+Loom. The key is why `PROTOCOL` went to 3: a protocol-2 Loom answered the
+same hello and dropped `key` without a word, so a retry against it ran twice.
+Now the hello refuses it before any command.
 
 **Enter only once the text shows.** `send` pastes, then presses Enter only if
 the text appeared, so Enter never picks a menu option by accident. It counts
@@ -250,7 +269,8 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   written to the real pipe without its newline before the connection ends,
   which must leave the pane open. Then a real `add` twice with one `--key`
   (one pane, the second answer replayed, the key refused for `status`), and
-  a receipt from a real PowerShell prompt reporting `exit 4`.
+  a receipt from a real PowerShell prompt reporting `exit 4`, and a
+  protocol-2 Loom refused at the hello before a keyed `send` reaches it.
 - `ui-check.mjs` stops a pane while its session check is held open and checks
   it never starts, then fails a restart with a refused `pty_spawn`. It holds a
   write to queue a send, restarts the pane and checks the send is refused with
@@ -267,7 +287,15 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   turn doesn't count, a bell plus a Stop hook for one turn counts once,
   `wait --turn-after` returns), an agent receipt that ends on a question, and
   a shell receipt that reports its own `exit 5` though a later command exits
-  9, plus a refusal while a command runs.
+  9. From the review of those: a running key that survives 256 newer keys
+  and types once; an agent receipt finished before a restart that keeps its
+  turn, and one cut off by a restart that fails though the new launch
+  finishes a turn; a receipt queued behind a command whose marks come 300 ms
+  late, typed only after it finished; one queued behind a send that starts a
+  program, refused with nothing typed; a command printing marker-like text
+  that still completes its receipt; and another pane's command carrying the
+  token that can't complete it. Each of these fails on the frontend from
+  before the fix.
 - `cargo test` covers the pipe names, `loomctl`'s own options, the hello check,
   the failure shape and the whole-line rule for requests.
   `src-tauri/src/shell-init.test.ps1` (run it with `powershell -NoProfile

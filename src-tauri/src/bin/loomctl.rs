@@ -28,8 +28,9 @@ the Loom that owns the pane.
 
 --key NAME makes a retry safe: Loom runs a key once. The same command again
 with that key gets the first answer, failures included, waiting for it if the
-first is still running. The same key with another command is refused. Loom
-keeps the last 256 keys until it exits.
+first is still running. The same key with another command is refused. A key
+stays while its command runs; Loom keeps the last 256 finished ones until it
+exits.
 
 With --json, every failure prints one JSON object: \"code\" (usage, not-running,
 busy, unreachable, version, connection, timeout or failed), \"sent\" (whether
