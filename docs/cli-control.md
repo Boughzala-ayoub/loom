@@ -148,10 +148,15 @@ true.
 Claude's bell and its Stop/Notification hooks, Codex's OSC 9, OpenCode's
 OSC 99. That is what raises the attention dot (`Pane.wake`). `turns` counts
 those signals, but only after input written since the last counted one
-(`lastIn > lastTurnAt`). A single turn often signals twice (bell and hook),
-and Claude's idle reminder comes a minute later with no new input, so
-counting raw signals would overcount. Counting only the first signal after
-input gives one per turn. `wait --turn-after N` waits for the next one. This
+(`lastIn > lastTurnAt`). Claude's idle reminder comes a minute later with no
+new input, so it doesn't count. A single turn often signals twice, though:
+Claude's bell at once and its Stop hook a marker poll (250 ms) and a
+PowerShell start later; OpenCode's plugin and its OSC 99. The input rule alone
+let the second one count when the caller had sent its next task in between,
+which finished that task's receipt with nothing done. So every signal carries
+its source (`WakeSource`), and the first source to count a turn in a launch
+is the only one that counts turns until the pane restarts (`turnSource`). The
+others still raise the alert. `wait --turn-after N` waits for the next one. This
 replaces the screen-quiet guess (Claude reads as idle after 1.5 s of no
 output) as the way to know an agent is done. It still says nothing about
 whether the work succeeded.
@@ -182,7 +187,12 @@ an old receipt. An agent may answer two queued prompts in one turn, so two
 callers on one agent aren't told apart; a receipt there means "my prompt went
 in and a turn came back". A receipt ends in an error if the pane restarts,
 exits or closes before its outcome; one with an outcome keeps it. Receipts
-live in memory: the last 500 finished, and every pending one up to 2000.
+live in memory: the last 500 settled (an outcome, or a pane that restarted,
+exited or closed), however many are pending, and up to 2000 pending, past
+which `send --receipt` refuses. `pruneSettled` in `cli.ts` keeps both this
+store and the `--key` cache; it counts only settled entries against the
+limit. The first version counted every entry, so pending ones pushed out the
+finished outcomes a late wait or a retry still needed.
 
 **Retries with `--key`.** `loomctl --key NAME` sends a caller's name for the
 request. The page keeps a map from key to the command and the promise of its
@@ -190,9 +200,10 @@ answer (`keyed` in `main.ts`). A retry with the same key and the same
 command, cwd and stdin awaits that promise instead of running again, even if
 the first is still running. A retry with the same key and a different command
 is refused. The answer comes back with `replayed`, and `loomctl` says so on
-stderr. Only finished keys are evicted, beyond the last 256; a running one
-stays, since evicting it would let its retry run a second time, as the first
-version did under 256 newer keys. With 1024 keyed commands running, new ones
+stderr. Only finished keys are evicted, beyond the last 256 finished ones,
+pruned whenever a request finishes; a running one stays, since evicting it
+would let its retry run a second time, as the first version did under 256
+newer keys. With 1024 keyed commands running, new ones
 are refused unrun. Keys live in memory, so they don't survive a restart of
 Loom. The key is why `PROTOCOL` went to 3: a protocol-2 Loom answered the
 same hello and dropped `key` without a word, so a retry against it ran twice.
@@ -295,7 +306,11 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   program, refused with nothing typed; a command printing marker-like text
   that still completes its receipt; and another pane's command carrying the
   token that can't complete it. Each of these fails on the frontend from
-  before the fix.
+  before the fix. From the next review: a finished key that still replays
+  while 256 keyed sends are held running on another pane, and an agent task
+  B that a late second signal for task A doesn't finish, with the bell first
+  and then with the hook first; both fail on the frontend before that fix.
+  `node src/cli.test.ts` covers `pruneSettled`, which both stores use.
 - `cargo test` covers the pipe names, `loomctl`'s own options, the hello check,
   the failure shape and the whole-line rule for requests.
   `src-tauri/src/shell-init.test.ps1` (run it with `powershell -NoProfile

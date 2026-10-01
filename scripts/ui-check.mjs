@@ -63,7 +63,7 @@ try {
           return location.search.includes('restore') ? new Promise(resolve => setTimeout(resolve, qa.panes.length * 30)) : undefined;
         }
         if (cmd === 'pty_kill' && qa.holdKills) return new Promise(resolve => qa.pendingKills.push(resolve));
-        if (cmd === 'pty_write' && qa.holdWrites) return new Promise(resolve => qa.pendingWrites.push(resolve));
+        if (cmd === 'pty_write' && (qa.holdWrites === true || qa.holdWrites === args.id)) return new Promise(resolve => qa.pendingWrites.push(resolve)); // true: every pane; an id: that one
         if (cmd === 'pty_write' && qa.failWrite) throw new Error('Test terminal write failed');
         if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
         if (cmd === 'pty_kill' && qa.controlKill) return window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${args.id}`, payload: 1 });
@@ -446,6 +446,20 @@ try {
       const [firstKeyed, secondKeyed] = await Promise.all([heldKeyed, retryKeyed]);
       assert.deepEqual([firstKeyed.ok, secondKeyed.ok, secondKeyed.replayed], [true, true, true], JSON.stringify(secondKeyed));
       assert.equal((await writes(claude)).filter(d => d === 'long task').length, 1, 'Typed once');
+      // 256 keys still running don't push out a finished one: its retry still replays.
+      const other2 = (await cli('panes')).data.find(p => p.thread === 'review-keyboard-navigation');
+      await page.evaluate(id => { window.qa.holdWrites = id; }, claude);
+      await page.evaluate(() => {
+        for (let i = 0; i < 256; i++) void window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id: 200000 + i, cmd: 'send', argv: ['search-polish:1', '--no-enter', `queued ${i}`], stdin: null, cwd: null, timeout: 30, key: `queued-${i}` } });
+      });
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+      assert.equal((await call('send', [other2.id, '--no-enter', 'mutate once'], null, 'recent-done')).ok, true);
+      assert.equal((await call('panes', [], null, 'one-more-key')).ok, true);
+      const recentRetry = await call('send', [other2.id, '--no-enter', 'mutate once'], null, 'recent-done');
+      assert.deepEqual([recentRetry.ok, recentRetry.replayed], [true, true], JSON.stringify(recentRetry));
+      assert.equal((await writes(other2.id)).filter(d => d === 'mutate once').length, 1, 'The finished key replayed rather than typing again');
+      await releaseWrites();
+      await page.waitForFunction(() => { const got = new Set(window.qa.calls.filter(c => c.cmd === 'cli_reply').map(c => c.args.id)); for (let i = 0; i < 256; i++) if (!got.has(200000 + i)) return false; return true; }, null, { timeout: 30000 });
       // turns: each time an agent finishes or asks after new input; repeats and idle reminders don't count.
       const turnsNow = async () => (await cli('panes')).data.find(p => p.id === claude).turns;
       await out(claude, '\x07'); // the turn after the input above
@@ -488,6 +502,27 @@ try {
       const cutResult = await cli('wait', '--receipt', cutShort.text);
       assert.equal(cutResult.ok, false, JSON.stringify(cutResult));
       assert.match(cutResult.error, /restarted before it finished/);
+      // A turn's second signal, from the other path, can land after the next task
+      // went in: it must not finish that task. Bell first then a late hook, and
+      // (on a fresh launch) hook first then a late bell.
+      const hook = async () => {
+        await page.evaluate(id => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, '']] }), claude);
+        await page.waitForTimeout(150);
+      };
+      for (const [first, late] of [[() => out(claude, '\x07'), hook], [hook, () => out(claude, '\x07')]]) {
+        assert.equal((await cli('restart', 'search-polish:1', '--yes')).ok, true); // a launch whose first turn picks its signal
+        await out(claude, '\x1b[2J\x1b[H> ');
+        const taskA = await cli('send', 'search-polish:1', '--receipt', 'task A');
+        await first();
+        assert.equal((await cli('wait', '--receipt', taskA.text)).ok, true, 'A finished');
+        const taskB = await cli('send', 'search-polish:1', '--receipt', 'task B');
+        await late(); // A's second signal
+        const early = await call('wait', ['--receipt', taskB.text], null, null, 1);
+        assert.deepEqual([early.ok, early.timeout], [false, true], `A's late signal didn't finish B: ${JSON.stringify(early)}`);
+        await first(); // B's own turn
+        const bDone = await cli('wait', '--receipt', taskB.text);
+        assert.deepEqual([bDone.ok, bDone.data?.turn], [true, 2], JSON.stringify(bDone));
+      }
       // A shell's: its own command line's exit code, paired by the marker at the end of the line.
       // The mock shells answer each Enter with E, C, D and a fresh prompt, after `delay` ms.
       const shellPane = added.data.id;

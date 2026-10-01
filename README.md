@@ -550,9 +550,11 @@ receipt (below).
 For an agent pane, `turns` counts the times it finished or stopped to ask
 since it started, from the agent's own signals (Claude's bell and Stop hook,
 Codex's and OpenCode's notifications), not from the screen going quiet. A
-turn counts only after new input, so one turn that rings twice, or Claude's
-idle reminder, counts once or not at all. `loomctl wait <pane> --turn-after N`
-returns when turn N+1 is in.
+turn counts only after new input, and only from the signal that counted the
+pane's first turn since it started: one turn that rings both the bell and
+the Stop hook counts once, even when the second arrives after your next task
+went in, and Claude's idle reminder doesn't count. `loomctl wait <pane>
+--turn-after N` returns when turn N+1 is in.
 
 `send --receipt` prints a token, and `loomctl wait --receipt <token>` waits for
 what that send started:
@@ -580,8 +582,10 @@ finished first keeps its outcome.
 with the same key gets the first answer, waiting for it if it's still
 running, so a `send` or `new` retried after a timeout doesn't run twice. The
 same key with another command is refused. A key stays as long as its command
-runs; of the finished ones, Loom keeps the last 256 until it exits. With 1024
-keyed commands still running, a new one is refused unrun.
+runs, and Loom keeps the last 256 finished ones until it exits, however many
+are still running. With 1024 keyed commands still running, a new one is
+refused unrun. Receipts work the same way: the last 500 with an outcome stay,
+and `send --receipt` refuses a new one while 2000 are pending.
 
 With `--json`, every failure prints one JSON object: `code` (`usage`,
 `not-running`, `busy`, `unreachable`, `version`, `connection`, `timeout` or

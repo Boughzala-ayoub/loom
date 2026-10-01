@@ -75,6 +75,19 @@ export function num(args: Args, name: string, fallback: number, min: number, max
   return v;
 }
 
+/** Drops the oldest settled entries once more than `keep` of them are settled.
+ * Unsettled ones always stay and don't use up `keep`: a running --key or a
+ * pending receipt must still be found, and must not push out a finished one
+ * a retry or a late wait still needs. */
+export function pruneSettled<V>(map: Map<string, V>, settled: (v: V) => boolean, keep: number) {
+  let n = 0;
+  for (const v of map.values()) if (settled(v)) n++;
+  for (const [k, v] of map) {
+    if (n <= keep) return;
+    if (settled(v)) (map.delete(k), n--);
+  }
+}
+
 /** A string option, or undefined when it's missing. */
 export const str = (args: Args, name: string) => (typeof args[name] === "string" ? (args[name] as string) : undefined);
 

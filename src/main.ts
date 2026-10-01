@@ -19,7 +19,7 @@ import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, echoes, echoed, menuRev, type Menu as AgentMenu } from "./prompt";
-import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, str, table, type Args, type Options } from "./cli";
+import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, pruneSettled, str, table, type Args, type Options } from "./cli";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
@@ -1734,10 +1734,10 @@ class Pane {
     // Codex reports a finished turn (and an approval prompt) as OSC 9 — see
     // CODEX_FLAGS in agent.ts. OSC 99 is the kitty notification opentui TUIs
     // use; "p=?" there is a capability probe, not news.
-    this.term.parser.registerOscHandler(9, () => (this.wake(), true));
-    this.term.parser.registerOscHandler(99, (d) => (d.includes("p=?") || this.wake(), true));
+    this.term.parser.registerOscHandler(9, () => (this.wake(undefined, "osc9"), true));
+    this.term.parser.registerOscHandler(99, (d) => (d.includes("p=?") || this.wake(undefined, "osc99"), true));
     // Claude rings BEL when a turn finishes (Stop hook / idle prompt).
-    this.term.onBell(() => this.wake());
+    this.term.onBell(() => this.wake(undefined, "bell"));
     this.fit.fit();
 
     const unlisten = await listen<number>(`pty-exit:${this.id}`, (e) => this.exited(e.payload));
@@ -1823,6 +1823,7 @@ class Pane {
     this.commands = this.turns = 0;
     this.lastFailed = this.lastExit = null;
     this.lastTurnAt = Date.now();
+    this.turnSource = undefined;
     this.atPrompt = false;
     this.receiptRunning = undefined;
     this.startupStarted = Date.now();
@@ -2068,7 +2069,7 @@ class Pane {
   /** Turn finished: flag the pane yellow and blip, until you look at it.
    * The marker carries the session's effort level — keep the last-known one
    * (letters only: it lands on a command line at next boot). */
-  wake(effort?: string) {
+  wake(effort: string | undefined, source: WakeSource) {
     if (this.agent === "opencode" && (effort === "opencode:busy" || effort === "opencode:waiting")) {
       this.opencodeStatus = true;
       if (this.dead) return;
@@ -2086,9 +2087,13 @@ class Pane {
       save();
     }
     // A turn: the agent says it finished or needs you, after input since the
-    // last one. One turn often rings twice (the bell and Claude's Stop hook),
-    // and Claude's idle reminder comes with no input at all: neither counts.
-    if (this.agent !== "shell" && this.lastIn > this.lastTurnAt) {
+    // last one. Claude's idle reminder comes with no input: it doesn't count.
+    // One turn often signals twice, though (Claude's bell, then its Stop hook a
+    // marker poll and a PowerShell start later; OpenCode's plugin and OSC 99),
+    // and the second can land after the next task went in. So the first source
+    // that counts a turn is the only one that counts them for this launch; the
+    // others still raise the alert.
+    if (this.agent !== "shell" && this.lastIn > this.lastTurnAt && (this.turnSource ??= source) === source) {
       this.turns++;
       this.lastTurnAt = Date.now();
       turnReceipts(this);
@@ -2283,6 +2288,8 @@ class Pane {
   /** Times an agent finished a turn or stopped to ask, each after new input (wake). */
   turns = 0;
   lastTurnAt = 0;
+  /** The one signal that counts turns for this launch: the first that did. */
+  turnSource: WakeSource | undefined;
 }
 
 /** A thread, as Orca has them: one branch of work in its own git worktree,
@@ -3386,6 +3393,10 @@ function sendReply(p: Pane, text: string, { gen, beforePaste, beforeEnter }: { g
  * the ;D after it, so another command on the same pane can't answer for it.
  * An agent's is the first turn after the Enter: two callers sending to one
  * agent at once can't be told apart, since it may answer both in one turn. */
+/** Where an agent's "finished or needs you" came from: the terminal bell,
+ * OSC 9 (Codex), OSC 99 (OpenCode's TUI) or a marker file (Claude's hooks,
+ * OpenCode's plugin). */
+type WakeSource = "bell" | "osc9" | "osc99" | "hook";
 type Receipt = { pane: Pane; ref: string; gen: number; turnsAt?: number; result?: { failed: boolean | null; exit: number | null } | { turn: number } };
 const receipts = new Map<string, Receipt>();
 /** A result for receipt `token`, kept only if it comes from the pane and the
@@ -3393,16 +3404,15 @@ const receipts = new Map<string, Receipt>();
  * or a restarted pane's next turns, aren't its outcome. */
 function finishReceipt(token: string, from: Pane, result: NonNullable<Receipt["result"]>) {
   const r = receipts.get(token);
-  if (r && !r.result && r.pane === from && r.gen === from.generation) r.result = result;
+  if (!r || r.result || r.pane !== from || r.gen !== from.generation) return;
+  r.result = result;
+  keepReceipts();
 }
-/** The last 500 finished receipts, and every one still waiting for its
- * outcome up to 2000: a wait on a pending receipt must still find it. */
-function keepReceipts() {
-  for (const [token, r] of receipts) {
-    if (receipts.size <= 500) return;
-    if (r.result || receipts.size > 2000) receipts.delete(token);
-  }
-}
+/** A receipt is settled once it has its outcome, or can't get one (its pane
+ * restarted, exited or closed). The last 500 settled stay, however many are
+ * pending; send --receipt refuses a 2001st pending one rather than drop one. */
+const receiptSettled = (r: Receipt) => !!r.result || gone(r.pane) || r.pane.dead || r.pane.generation !== r.gen;
+const keepReceipts = () => pruneSettled(receipts, receiptSettled, 500);
 /** An agent's turn just came in: it completes that launch's receipts sent before it. */
 function turnReceipts(p: Pane) {
   for (const [token, r] of receipts) if (r.turnsAt !== undefined && p.turns > r.turnsAt) finishReceipt(token, p, { turn: r.turnsAt + 1 });
@@ -6610,6 +6620,7 @@ const CLI: Record<string, CliCommand> = {
       let token: string | undefined;
       if (flag(a, "receipt")) {
         if (flag(a, "no-enter")) throw new Error("A receipt is for a command that runs: leave out --no-enter.");
+        if ([...receipts.values()].filter((r) => !receiptSettled(r)).length >= 2000) throw new Error("2000 receipts are still waiting for their outcome, so this wasn't sent. Wait for some first.");
         token = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         receipts.set(token, { pane: p, ref, gen });
         keepReceipts();
@@ -6883,7 +6894,8 @@ async function runCli(payload: CliRequest): Promise<Record<string, unknown>> {
 /** --key: each key's command and its answer, which a retry gets instead of a
  * second run, even while the first is still going. Every key still running
  * stays (a retry of one must never run it again), up to 1024; past that, new
- * keyed requests are refused unrun. Of the finished ones, the last 256 stay.
+ * keyed requests are refused unrun. Of the finished ones, the last 256 stay,
+ * however many are running (pruneSettled, on each finish).
  * ponytail: in memory, per Loom; a store on disk if retries must survive a
  * restart. */
 const keyed = new Map<string, { what: string; reply: Promise<Record<string, unknown>>; done: boolean }>();
@@ -6904,11 +6916,10 @@ function installCli() {
       if (key) {
         const entry = { what, reply: run, done: false };
         keyed.set(key, entry);
-        void run.then(() => (entry.done = true));
-        for (const [k, e] of keyed) {
-          if (keyed.size <= 256) break;
-          if (e.done) keyed.delete(k);
-        }
+        void run.then(() => {
+          entry.done = true;
+          pruneSettled(keyed, (e) => e.done, 256);
+        });
       }
       reply = await run;
     }
@@ -7250,7 +7261,7 @@ async function main() {
     const effortById = new Map(e.payload);
     for (const p of threads.flatMap((t) => t.panes)) {
       const effort = effortById.get(p.id);
-      if (effort !== undefined) p.wake(effort);
+      if (effort !== undefined) p.wake(effort, "hook");
     }
   });
 

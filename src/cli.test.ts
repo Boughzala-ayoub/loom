@@ -1,5 +1,5 @@
 // Self-check for loomctl's pure helpers. Run: node src/cli.test.ts
-import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, str, table, type Args } from "./cli.ts";
+import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, pruneSettled, str, table, type Args } from "./cli.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -75,6 +75,19 @@ eq("shift-tab", keyBytes("shift-tab", false), "\x1b[Z");
 eq("unknown words are refused", keyBytes("hello", false), null);
 
 eq("table aligns all but the last column", table([["a", "bb", "x y"], ["ccc", "d", "z"]]), "a    bb  x y\nccc  d   z");
+
+// pruneSettled: what the --key cache and the receipt store keep.
+const entries = (...done: boolean[]) => new Map(done.map((d, i) => [`k${i}`, { done: d }]));
+const kept = (m: Map<string, { done: boolean }>) => [...m.keys()].join(" ");
+let cache = entries(...Array(256).fill(false), true, true);
+pruneSettled(cache, (e) => e.done, 256);
+eq("256 running entries don't push out the 2 finished ones", cache.size, 258);
+cache = entries(true, false, true, true, false);
+pruneSettled(cache, (e) => e.done, 2);
+eq("Past the limit, the oldest finished go and the running stay", kept(cache), "k1 k2 k3 k4");
+cache = entries(false, false, false);
+pruneSettled(cache, (e) => e.done, 0);
+eq("Running entries never go, whatever the limit", cache.size, 3);
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");
