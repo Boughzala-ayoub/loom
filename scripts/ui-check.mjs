@@ -231,16 +231,16 @@ try {
       // loomctl's stop against a pane still starting, and a restart that fails (LOOM_CLI_REVIEW F5, F7).
       await page.goto(base + '?hold-session&dashboard'); // dashboard: the Codex pane has a saved session
       await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'cli_ready') && window.qa.pendingSessions.length > 0);
-      const call = (cmd, argv, stdin) => page.evaluate(async ([cmd, argv, stdin]) => {
+      const call = (cmd, argv, stdin, key) => page.evaluate(async ([cmd, argv, stdin, key]) => {
         const id = window.qa.cliIds = (window.qa.cliIds ?? 0) + 1;
-        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin, cwd: null, timeout: 5 } });
+        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin, cwd: null, timeout: 5, key } });
         for (const end = Date.now() + 15000; Date.now() < end;) {
           const reply = window.qa.calls.find(c => c.cmd === 'cli_reply' && c.args.id === id);
           if (reply) return reply.args.reply;
           await new Promise(r => setTimeout(r, 20));
         }
         return { hung: [cmd, ...argv].join(' ') };
-      }, [cmd, argv, stdin ?? null]);
+      }, [cmd, argv, stdin ?? null, key ?? null]);
       const cli = (cmd, ...argv) => call(cmd, argv);
       const stopped = await cli('stop', 'search-polish:1', '--yes');
       assert.equal(stopped.ok, true, JSON.stringify(stopped));
@@ -414,6 +414,81 @@ try {
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl whole-prompt menu ids, partial keys, --gen, shell exit codes ${width}px`);
+
+      // --key: a retry gets the first answer instead of a second run.
+      const paneCount = async () => (await cli('panes')).data.length;
+      const before = await paneCount();
+      const added = await call('add', ['search-polish', '--cmd='], null, 'job-1');
+      const again2 = await call('add', ['search-polish', '--cmd='], null, 'job-1');
+      assert.equal(added.ok, true, JSON.stringify(added));
+      assert.deepEqual([again2.replayed, again2.data.id], [true, added.data.id], 'The retry answers with the pane the first one made');
+      assert.equal(await paneCount(), before + 1, 'One pane, not two');
+      const other = await call('add', ['review-keyboard-navigation', '--cmd='], null, 'job-1');
+      assert.equal(other.ok, false, JSON.stringify(other));
+      assert.match(other.error, /used for a different command/);
+      assert.equal(await paneCount(), before + 1);
+      const together = await Promise.all([call('send', ['search-polish:1', '--no-enter', 'once'], null, 'job-2'), call('send', ['search-polish:1', '--no-enter', 'once'], null, 'job-2')]);
+      assert.deepEqual(together.map(r => r.ok), [true, true]);
+      assert.equal((await writes(claude)).filter(d => d === 'once').length, 1, 'Two at once with one key run once');
+      // turns: each time an agent finishes or asks after new input; repeats and idle reminders don't count.
+      const turnsNow = async () => (await cli('panes')).data.find(p => p.id === claude).turns;
+      await out(claude, '\x07'); // the turn after the input above
+      const t0 = await turnsNow();
+      await out(claude, '\x07');
+      assert.equal(await turnsNow(), t0, 'No input since the last turn: not a turn');
+      await cli('send', 'search-polish:1', '--no-enter', 'go');
+      const waiting = cli('wait', 'search-polish:1', '--turn-after', String(t0));
+      await out(claude, '\x07');
+      await page.evaluate(id => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, '']] }), claude);
+      await page.waitForTimeout(100);
+      assert.equal(await turnsNow(), t0 + 1, 'The bell and the Stop hook for one turn count once');
+      const turned = await waiting;
+      assert.equal(turned.ok, true, JSON.stringify(turned));
+      assert.equal(turned.data.turns, t0 + 1);
+      // Receipts. An agent's: the first turn after the Enter.
+      await page.evaluate(id => { window.qa.onWrite = ({ id: to, data }) => { if (to === id && data !== '\r') window.qa.panes.filter(a => a.id === id).at(-1).onOut.onmessage(data); }; }, claude);
+      await out(claude, '\x1b[2J\x1b[H> ');
+      const agentReceipt = await cli('send', 'search-polish:1', '--receipt', 'write the tests');
+      assert.match(agentReceipt.text, /^[0-9a-f]{16}$/, JSON.stringify(agentReceipt));
+      assert.ok(!(await writes(claude)).some(d => d.includes('loom-receipt')), "An agent's prompt carries no marker");
+      const agentDone = cli('wait', '--receipt', agentReceipt.text);
+      await out(claude, menuScreen('Run the tests?') + '\x07');
+      const agentResult = await agentDone;
+      assert.deepEqual([agentResult.ok, agentResult.data.done, agentResult.data.asking], [true, true, true], JSON.stringify(agentResult));
+      // A shell's: its own command line's exit code, paired by the marker on the line.
+      const shellPane = added.data.id;
+      await page.evaluate(id => {
+        const pane = () => window.qa.panes.filter(a => a.id === id).at(-1).onOut;
+        const prompt = '\x1b]133;A\x07PS> \x1b]133;B\x07';
+        let line = '';
+        window.qa.onWrite = ({ id: to, data }) => {
+          if (to !== id) return;
+          if (data !== '\r') { line += data; pane().onmessage(data); return; }
+          const code = /exit (\d+)/.exec(line)?.[1] ?? '0';
+          pane().onmessage(`\x1b]133;E;${line}\x07\x1b]133;C\x07\r\n\x1b]133;D;${code}\x07${prompt}`);
+          line = '';
+        };
+        pane().onmessage(prompt);
+      }, shellPane);
+      await page.waitForTimeout(150);
+      const shellRef = (await cli('panes')).data.find(p => p.id === shellPane).ref;
+      const shellReceipt = await cli('send', shellRef, '--receipt', 'cmd /c exit 5');
+      assert.equal(shellReceipt.ok, true, JSON.stringify(shellReceipt));
+      assert.ok((await writes(shellPane)).some(d => d === `cmd /c exit 5  # loom-receipt:${shellReceipt.text}`), 'The marker rides on the line as a comment');
+      const plain = await cli('send', shellRef, 'cmd /c exit 9'); // someone else's command, after ours
+      assert.equal(plain.ok, true);
+      const shellResult = await cli('wait', '--receipt', shellReceipt.text);
+      assert.deepEqual([shellResult.data.failed, shellResult.data.exit], [true, 5], 'The receipt has its own command\'s code, not the later 9');
+      await out(shellPane, '\x1b]133;C\x07');
+      const busyShell = await cli('send', shellRef, '--receipt', 'echo hi');
+      assert.equal(busyShell.ok, false, JSON.stringify(busyShell));
+      assert.match(busyShell.error, /isn't at Loom's PowerShell prompt/);
+      assert.equal((await cli('wait', '--receipt', 'nosuchtoken')).ok, false);
+      await page.evaluate(() => { window.qa.onWrite = null; });
+      assert.equal((await cli('close', shellRef, '--yes')).ok, true);
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS loomctl --key retries, agent turns, receipts for agents and shells ${width}px`);
     }
     await page.goto(base + '?long-location');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
@@ -961,6 +1036,16 @@ try {
     assert.equal(await page.locator('#menu-list .menu-item.on').count(), 1, 'The new group holds the agent it was made from');
     assert.equal(await addTo(first).locator('b').textContent(), '1', 'The card counts its groups');
     assert.equal(await page.locator('#pane-menu').isVisible(), true, 'The menu stays up while cards refresh');
+    // Cards re-sort as agents change state, and the open menu follows its card's
+    // button: one that lands below the screen must not take the menu with it.
+    const moveCard = (id, margin) => page.evaluate(([id, margin]) => {
+      document.querySelector(`.dashboard-group-add[data-key="group-${id}"]`).closest('.dashboard-card').style.marginTop = margin;
+      dispatchEvent(new Event('resize'));
+    }, [id, margin]);
+    await moveCard(first, '3000px');
+    const movedMenu = await page.locator("#pane-menu").boundingBox();
+    assert.ok(movedMenu.y >= 0 && movedMenu.y + movedMenu.height <= page.viewportSize().height, `The menu stays on screen when its card moves off it: ${JSON.stringify(movedMenu)}`);
+    await moveCard(first, '');
     await audit('group-add-menu');
     await page.fill('#menu-add', 'quick GROUP');
     await page.press('#menu-add', 'Enter');

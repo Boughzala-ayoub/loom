@@ -504,6 +504,8 @@ loomctl show login:2                    # bring it to the front
 loomctl close login:2 --yes             # stop it and close the pane
 loomctl --json panes                    # the same answers as JSON
 loomctl info                            # which Loom answers: version, process, its own pipe
+loomctl send api-fix:1 --receipt 'npm test'   # a token for wait --receipt
+loomctl --key job-7 new C:\code\app --name login   # retried with the same key, runs once
 loomctl help                            # every command the running Loom knows
 ```
 
@@ -542,8 +544,38 @@ it started (`commands`, the startup command included), whether the last one
 pane last drew anything (`lastOutput`). `exit` is `null` when PowerShell can't
 say which code: after a failing cmdlet, or a native command exiting with the
 same code as the one before. `failed` is still right then. On a pane others
-also type into, `commands` can grow for someone else's command, so check the
-pane is yours or print a marker of your own.
+also type into, `commands` can grow for someone else's command, so use a
+receipt (below).
+
+For an agent pane, `turns` counts the times it finished or stopped to ask
+since it started, from the agent's own signals (Claude's bell and Stop hook,
+Codex's and OpenCode's notifications), not from the screen going quiet. A
+turn counts only after new input, so one turn that rings twice, or Claude's
+idle reminder, counts once or not at all. `loomctl wait <pane> --turn-after N`
+returns when turn N+1 is in.
+
+`send --receipt` prints a token, and `loomctl wait --receipt <token>` waits for
+what that send started:
+
+```
+$r = loomctl send api-fix:3 --receipt 'npm test'
+loomctl --json wait --receipt $r      # {"done":true,"failed":true,"exit":1,...}
+```
+
+In a shell, the token rides on the command line as a comment
+(`npm test  # loom-receipt:<token>`), and Loom's prompt reports that line's
+own exit code, so someone else's command on the same pane can't answer for
+it. It needs the PowerShell prompt waiting for a command (`atPrompt` in
+`panes --json`). In an agent pane the receipt is the first turn after your
+Enter, with `asking: true` if it stopped on a question; two callers sending
+to one agent at once can't be told apart there, since it may answer both in
+one turn.
+
+`--key NAME` makes a retry safe: Loom runs each key once, and the same command
+with the same key gets the first answer, waiting for it if it's still
+running, so a `send` or `new` retried after a timeout doesn't run twice. The
+same key with another command is refused. Loom keeps the last 256 keys until
+it exits.
 
 With `--json`, every failure prints one JSON object: `code` (`usage`,
 `not-running`, `busy`, `unreachable`, `version`, `connection`, `timeout` or

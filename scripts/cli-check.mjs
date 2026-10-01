@@ -324,6 +324,11 @@ try {
     });
   });
   const shape = r => [r.code, r.json?.ok, r.json?.code, r.json?.sent];
+  // A PowerShell pane takes typing once its prompt is drawn and PSReadLine is reading: text sent sooner can be lost.
+  const atPrompt = async id => {
+    for (let i = 0; i < 80 && !ok('--json', 'panes').json.find(p => p.id === id)?.atPrompt; i++) await pause(250);
+    await pause(500);
+  };
   r = loomctl('--json', 'read', '--timeout', 'soon');
   assert.deepEqual(shape(r), [1, false, 'usage', false], r.out);
   r = await via(`\\\\.\\pipe\\loom-cli-check-nobody-${process.pid}`, '--json', 'status');
@@ -350,7 +355,7 @@ try {
   assert.deepEqual(shape(r), [1, false, 'failed', true], r.out);
   // A real shell pane's exit code, and --gen from what panes showed.
   const shell = ok('--json', 'add', 'alpha', '--cmd=').json;
-  for (let i = 0; i < 60 && !/PS .*>\s*$/m.test(ok('read', shell.ref).out); i++) await pause(250);
+  await atPrompt(shell.id);
   // The way a script reads an outcome: note commands, send, wait for it to grow.
   // (The startup command counts too: the first prompt reports it.)
   const shellNow = () => ok('--json', 'panes', '--thread', 'alpha').json.find(q => q.id === shell.id);
@@ -371,7 +376,7 @@ try {
   console.log('PASS the second agent review: JSON for every failure, a silent hello bounded, shell exit codes, --gen');
 
   // Third agent review. S2: exit is the exact code or null, never a guess.
-  for (let i = 0; i < 60 && !/PS .*>\s*$/m.test(ok('read', shell.ref).out); i++) await pause(250);
+  await atPrompt(shell.id);
   const exits = [];
   for (const line of ['cmd /c exit 7', 'cmd /c exit 7', "Get-Item 'C:\\nope-loom' -ErrorAction SilentlyContinue", 'cmd /c exit 0']) exits.push((await outcome(line)).slice(0, 3));
   assert.deepEqual(exits, [[1, true, 7], [1, true, null], [1, true, null], [1, false, 0]], 'A repeated 7 and a failed cmdlet have no exact code, not 1 or a stale 7');
@@ -396,6 +401,26 @@ try {
   assert.ok(ok('--json', 'panes').json.some(p => p.id === victim.id), 'A close without its newline did not run');
   ok('close', victim.ref, '--yes');
   console.log('PASS the third agent review: exact or unknown shell exit codes, cut-off requests never run');
+
+  // --key: a retry of a real add gets the first pane, not a second one.
+  const panesBeforeKey = ok('--json', 'panes').json.length;
+  const keyed1 = ok('--json', '--key', `check-${process.pid}`, 'add', 'alpha', '--cmd=');
+  const keyed2 = ok('--json', '--key', `check-${process.pid}`, 'add', 'alpha', '--cmd=');
+  assert.equal(keyed2.json.id, keyed1.json.id, 'The retry answers with the first pane');
+  assert.match(keyed2.err, /didn't run again/);
+  assert.equal(ok('--json', 'panes').json.length, panesBeforeKey + 1, 'One pane, not two');
+  r = loomctl('--json', '--key', `check-${process.pid}`, 'status');
+  assert.deepEqual(shape(r), [1, false, 'failed', true], r.out);
+  // A receipt from a real PowerShell prompt: its own command's exit code.
+  const rcpt = keyed1.json;
+  await atPrompt(rcpt.id);
+  const token = ok('send', rcpt.ref, '--receipt', 'cmd /c exit 4').out;
+  assert.match(token, /^[0-9a-f]{16}$/);
+  r = ok('--json', 'wait', '--receipt', token, '--timeout', '20');
+  assert.deepEqual([r.json.done, r.json.failed, r.json.exit], [true, true, 4], r.out);
+  assert.match(ok('read', rcpt.ref, '--lines', '5').out, /cmd \/c exit 4 {2}# loom-receipt:/);
+  ok('close', rcpt.ref, '--yes');
+  console.log('PASS --key retries and a shell receipt, against the real app');
 
   // Failures say so, with the right exit codes.
   r = loomctl('nonsense');

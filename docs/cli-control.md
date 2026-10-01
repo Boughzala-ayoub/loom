@@ -142,8 +142,42 @@ its `exit` code, and `lastOutput`, when the pane last drew. PowerShell leaves
 tell a failing cmdlet from a native command exiting with the same code as the
 last one. It used to report 1 there, which was fine for a red dot but not for
 a script; now it sends `D;1;exact=0` and `exit` is `null`, with `failed` still
-true. A script can note `commands`, send, and poll until it grows, on a shell
-no one else types into. Agents have no such marker.
+true.
+
+**Agent turns.** Loom already hears when an agent finishes or stops to ask:
+Claude's bell and its Stop/Notification hooks, Codex's OSC 9, OpenCode's
+OSC 99. That is what raises the attention dot (`Pane.wake`). `turns` counts
+those signals, but only after input written since the last counted one
+(`lastIn > lastTurnAt`). A single turn often signals twice (bell and hook),
+and Claude's idle reminder comes a minute later with no new input, so
+counting raw signals would overcount. Counting only the first signal after
+input gives one per turn. `wait --turn-after N` waits for the next one. This
+replaces the screen-quiet guess (Claude reads as idle after 1.5 s of no
+output) as the way to know an agent is done. It still says nothing about
+whether the work succeeded.
+
+**Receipts.** `send --receipt` returns a token, and `wait --receipt` waits for
+the outcome it names. In a shell, the token goes on the command line as a
+PowerShell comment, `# loom-receipt:<token>`. The prompt's OSC 133 `E` mark
+carries the line that runs, and `Pane.mark` pairs the token in an `E` with
+the `D` after it. Commands run one at a time at the prompt, so that pairing
+is exact even when other writers use the pane. The shell has to be at its
+prompt (`B` seen, no `E`/`C`/`D` since; `atPrompt` in `panes`), otherwise
+the line would go to whatever is running. In an agent pane, the token stands
+for the first turn after the Enter, with `asking` if a numbered question is
+on screen. An agent may answer two queued prompts in one turn, so two
+callers on one agent aren't told apart; a receipt there means "my prompt went
+in and a turn came back". A receipt ends in an error if the pane restarts,
+exits or closes first. Receipts live in memory, the last 500.
+
+**Retries with `--key`.** `loomctl --key NAME` sends a caller's name for the
+request. The page keeps a map from key to the command and the promise of its
+answer (`keyed` in `main.ts`, the last 256). A retry with the same key and
+the same command, cwd and stdin awaits that promise instead of running again,
+even if the first is still running. A retry with the same key and a
+different command is refused. The answer comes back with `replayed`, and
+`loomctl` says so on stderr. Keys live in memory, so they don't survive a
+restart of Loom.
 
 **Enter only once the text shows.** `send` pastes, then presses Enter only if
 the text appeared, so Enter never picks a menu option by accident. It counts
@@ -179,7 +213,7 @@ restart, use names or `<thread>:<n>`.
 | Moving around | `show`, `next`, `overview`, `changes`, `layout`, `zoom`, `window` |
 | Threads and panes | `new`, `add`, `rename`, `close`, `close-thread`, `restart`, `stop` |
 | Input | `send`, `keys`, `choose` |
-| Waiting | `wait`, `wait-any` |
+| Waiting | `wait` (for a state, `--turn-after N` or `--receipt R`), `wait-any` |
 | Settings | `theme`, `set` |
 
 ## A bug found on the way
@@ -214,7 +248,9 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   after a restart. From the third: the same pane running `exit 7` twice, a
   failing cmdlet and `exit 0` (7, then unknown, unknown, 0), and a `close`
   written to the real pipe without its newline before the connection ends,
-  which must leave the pane open.
+  which must leave the pane open. Then a real `add` twice with one `--key`
+  (one pane, the second answer replayed, the key refused for `status`), and
+  a receipt from a real PowerShell prompt reporting `exit 4`.
 - `ui-check.mjs` stops a pane while its session check is held open and checks
   it never starts, then fails a restart with a refused `pty_spawn`. It holds a
   write to queue a send, restarts the pane and checks the send is refused with
@@ -226,7 +262,12 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   under an option (a queued `choose` and a stale `--menu` both refused, no
   Enter), restarts a pane between the two keys of `keys enter x` (`pressed: 1`,
   no `x`), refuses `--gen` for an old launch, and reads an exit code from an
-  OSC 133 mark.
+  OSC 133 mark. Then `--key` (a replayed `add`, a refused reuse, two sends at
+  once with one key typing once), turns (a bell with no input since the last
+  turn doesn't count, a bell plus a Stop hook for one turn counts once,
+  `wait --turn-after` returns), an agent receipt that ends on a question, and
+  a shell receipt that reports its own `exit 5` though a later command exits
+  9, plus a refusal while a command runs.
 - `cargo test` covers the pipe names, `loomctl`'s own options, the hello check,
   the failure shape and the whole-line rule for requests.
   `src-tauri/src/shell-init.test.ps1` (run it with `powershell -NoProfile
@@ -246,15 +287,12 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
 - **Agent groups, dictation, font size and file previews** have no commands.
 - **An agent skill** that teaches Claude Code or Codex in a pane to orchestrate
   the others through `loomctl`.
-- **Knowing an agent's task finished, and how.** `wait` sees states (idle,
-  waiting, exited), and Claude reads as idle after a short quiet spell, so a
-  controller can't yet tell "done" from "paused" or bind a wait to the send
-  before it. Shells have `commands`, `failed` and `exit`, but a count isn't a
-  receipt for one caller's command on a shared pane; agents have nothing like
-  them.
-- **Retrying safely.** No caller request ids or stored results, so after a
-  timeout or a dropped connection with `sent: true` a script has to look
-  before sending or creating again.
+- **Whether an agent's work succeeded.** Turns and receipts say an agent
+  finished or asked, not whether it did what was asked. Reading its answer is
+  still up to the caller.
+- **Two callers on one agent.** An agent receipt can't tell which of two
+  queued prompts a turn answered.
+- **Retries across a restart of Loom.** `--key` answers live in memory.
 - **Finding every running Loom.** `info` names the one a pipe reaches, but
   nothing lists them all, and the hello doesn't say which workspace file it has.
 - **Prompts taller than the screen.** A menu id covers what is on screen; if

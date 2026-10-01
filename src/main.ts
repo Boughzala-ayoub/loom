@@ -1818,9 +1818,12 @@ class Pane {
     this.startupRetry = retry;
     this.spawnResume = resume;
     this.exitCode = undefined;
-    // A new process: the last one's commands and exit codes aren't its own.
-    this.commands = 0;
+    // A new process: the last one's commands, exit codes and turns aren't its own.
+    this.commands = this.turns = 0;
     this.lastFailed = this.lastExit = null;
+    this.lastTurnAt = Date.now();
+    this.atPrompt = false;
+    this.receiptRunning = undefined;
     this.startupStarted = Date.now();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
       try {
@@ -2081,6 +2084,13 @@ class Pane {
       this.effort = effort;
       save();
     }
+    // A turn: the agent says it finished or needs you, after input since the
+    // last one. One turn often rings twice (the bell and Claude's Stop hook),
+    // and Claude's idle reminder comes with no input at all: neither counts.
+    if (this.agent !== "shell" && this.lastIn > this.lastTurnAt) {
+      this.turns++;
+      this.lastTurnAt = Date.now();
+    }
     if (this.waiting) return;
     this.waiting = true;
     this.waitingSince = Date.now();
@@ -2227,11 +2237,19 @@ class Pane {
   }
 
   /** OSC 133 from shell-init.ps1: the pane's busy state (;C a command started,
-   * ;D it exited) and, for loomctl, how many finished and the last exit code.
-   * A/B/E are emitted and ignored. */
+   * ;D it exited) and, for loomctl, how many finished, the last exit code,
+   * whether the prompt is waiting for a command (;B), and which command line
+   * runs (;E), which pairs a send --receipt with its own ;D. A is ignored. */
   private mark(data: string) {
     const [kind, code, ...rest] = data.split(";");
+    if (kind === "B") return void (this.atPrompt = true);
+    if (kind === "E") {
+      this.atPrompt = false;
+      this.receiptRunning = /loom-receipt:([a-z0-9]+)/.exec(data)?.[1];
+      return;
+    }
     if (kind !== "C" && kind !== "D") return;
+    this.atPrompt = false;
     this.busy = kind === "C";
     if (kind === "D") {
       const known = /^-?\d+$/.test(code ?? "");
@@ -2239,6 +2257,8 @@ class Pane {
       this.lastFailed = known ? code !== "0" : null;
       // exact=0: the prompt knows the command failed but not its code (shell-init.ps1).
       this.lastExit = known && !rest.includes("exact=0") ? Number(code) : null;
+      if (this.receiptRunning) finishReceipt(this.receiptRunning, { failed: this.lastFailed, exit: this.lastExit });
+      this.receiptRunning = undefined;
     }
     this.paint();
   }
@@ -2247,6 +2267,13 @@ class Pane {
   commands = 0;
   lastFailed: boolean | null = null;
   lastExit: number | null = null;
+  /** The shell's prompt is waiting for a command line. */
+  atPrompt = false;
+  /** The receipt on the command line running now (a send --receipt comment). */
+  receiptRunning: string | undefined;
+  /** Times an agent finished a turn or stopped to ask, each after new input (wake). */
+  turns = 0;
+  lastTurnAt = 0;
 }
 
 /** A thread, as Orca has them: one branch of work in its own git worktree,
@@ -3329,7 +3356,7 @@ const paste = (p: Pane, text: string) => (p.term.modes.bracketedPasteMode ? `\x1
 
 /** Paste, then press Enter only if the text shows up on screen. On a menu or
  * anything else that doesn't take text, Enter would pick an option instead. */
-function sendReply(p: Pane, text: string, gen?: number) {
+function sendReply(p: Pane, text: string, gen?: number, beforeEnter?: () => void) {
   return inTurn(p, async (live) => {
     const before = echoes(liveScreen(p), text);
     await keys(p, paste(p, text));
@@ -3338,8 +3365,21 @@ function sendReply(p: Pane, text: string, gen?: number) {
     if (!echoed(before, echoes(liveScreen(p), text))) {
       throw new NotSubmitted(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
     }
+    beforeEnter?.();
     await submit(p);
   }, gen);
+}
+
+/** What send --receipt hands back a token for. A shell's receipt rides on the
+ * command line as a comment, and Pane.mark pairs the ;E that carries it with
+ * the ;D after it, so another command on the same pane can't answer for it.
+ * An agent's is the first turn after the Enter: two callers sending to one
+ * agent at once can't be told apart, since it may answer both in one turn. */
+type Receipt = { pane: Pane; ref: string; gen: number; turnsAt?: number; result?: { failed: boolean | null; exit: number | null } };
+const receipts = new Map<string, Receipt>();
+function finishReceipt(token: string, result: NonNullable<Receipt["result"]>) {
+  const r = receipts.get(token);
+  if (r && !r.result) r.result = result;
 }
 
 /** Pick option `i` the way a person would: one arrow key at a time, reading the
@@ -6083,9 +6123,11 @@ function place() {
   const right = Math.min(window.innerWidth - r.right, window.innerWidth - menu.offsetWidth - gap);
   menu.style.right = `${Math.max(gap, right)}px`;
   // Under the anchor, or above it when it sits at the bottom edge (the overview's selection bar) and the menu would cover it.
+  // On screen either way: an overview card re-sorted below the fold takes its
+  // button, and the menu re-anchored to it, along (dashboard refresh).
   const below = r.bottom + 4, above = r.top - 4 - menu.offsetHeight;
   const flip = below + menu.offsetHeight > window.innerHeight - gap && above >= gap;
-  menu.style.top = `${Math.max(gap, flip ? above : Math.min(below, window.innerHeight - menu.offsetHeight - gap))}px`;
+  menu.style.top = `${Math.max(gap, Math.min(flip ? above : below, window.innerHeight - menu.offsetHeight - gap))}px`;
 }
 
 function showMenu(at: HTMLElement, m: Menu) {
@@ -6207,7 +6249,7 @@ const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
   title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, dir: p.th.dir, front: current === p.th && p.th.active === p,
   // Which launch this is (send --gen takes it), and what a shell with Loom's prompt last reported.
-  generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit,
+  generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit, atPrompt: p.atPrompt, turns: p.turns,
   lastOutput: p.lastOut ? new Date(p.lastOut).toISOString() : null,
 });
 /** --gen: input for that launch of the pane only. */
@@ -6289,6 +6331,23 @@ async function until(ok: () => boolean, seconds: number, what: string) {
 }
 
 const gone = (p: Pane) => !p.th.panes.includes(p) || !threads.includes(p.th);
+
+/** wait --receipt: the outcome of what send --receipt sent, once it's in. */
+async function waitReceipt(token: string, seconds: number) {
+  const r = receipts.get(token);
+  if (!r) throw new Error(`No receipt ${token}. Receipts last until Loom exits.`);
+  const p = r.pane;
+  const done = () => !!r.result || (r.turnsAt !== undefined && p.turns > r.turnsAt);
+  const lost = () => gone(p) || p.dead || p.generation !== r.gen;
+  await until(() => done() || lost(), seconds, `receipt ${token} on ${r.ref}`);
+  if (!done()) throw new Error(`${r.ref} ${gone(p) ? "was closed" : p.dead ? "exited" : "restarted"} before it finished, so there's no outcome; it may have run partway.`);
+  if (r.result) {
+    const { failed, exit } = r.result;
+    return { data: { receipt: token, pane: p.id, done: true, failed, exit }, text: failed === false ? "succeeded" : failed ? `failed${exit === null ? "" : ` with exit ${exit}`}` : "finished" };
+  }
+  const asking = !!readMenu(liveScreen(p, false));
+  return { data: { receipt: token, pane: p.id, done: true, turn: r.turnsAt! + 1, asking }, text: `${r.ref} finished its turn${asking ? " with a question: loomctl menu reads it" : ""}` };
+}
 
 
 function openClose(word: string | undefined, now: boolean, what: string) {
@@ -6510,23 +6569,34 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   send: {
-    usage: "send <pane> <text...> [--no-enter] [--gen N]",
-    help: "Type text into a pane and press Enter once it shows there. - reads the text from standard input. --gen N (a pane's generation from loomctl panes) refuses a pane that restarted since.",
-    options: { "no-enter": "bool", gen: "int" },
+    usage: "send <pane> <text...> [--no-enter] [--gen N] [--receipt]",
+    help: "Type text into a pane and press Enter once it shows there. - reads the text from standard input. --gen N (a pane's generation from loomctl panes) refuses a pane that restarted since. --receipt prints a token for loomctl wait --receipt: a shell's command (at Loom's PowerShell prompt; a comment carries the token) or an agent's next turn.",
+    options: { "no-enter": "bool", gen: "int", receipt: "bool" },
     run: async (a) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
-      const text = a._.slice(1).join(" ");
+      let text = a._.slice(1).join(" ");
       if (!text) throw new Error("Give the text to send.");
       if (p.dead) throw new Error(`${paneName(p)} has exited. loomctl restart ${paneName(p)} starts it again.`);
+      const ref = paneName(p), gen = cliGen(a) ?? p.generation;
+      let token: string | undefined;
+      if (flag(a, "receipt")) {
+        if (flag(a, "no-enter")) throw new Error("A receipt is for a command that runs: leave out --no-enter.");
+        if (p.agent === "shell" && !p.atPrompt) throw new Error(`${ref} isn't at Loom's PowerShell prompt (a command is running, or another program has the pane), so a receipt couldn't be told apart from it.`);
+        token = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        receipts.set(token, { pane: p, ref, gen });
+        if (receipts.size > 500) receipts.delete(receipts.keys().next().value!);
+        if (p.agent === "shell") text = `${text}  # loom-receipt:${token}`;
+      }
+      const receipt = token && receipts.get(token);
       try {
-        if (flag(a, "no-enter")) await inTurn(p, () => keys(p, paste(p, text)), cliGen(a));
-        else await sendReply(p, text, cliGen(a));
+        if (flag(a, "no-enter")) await inTurn(p, () => keys(p, paste(p, text)), gen);
+        else await sendReply(p, text, gen, receipt && p.agent !== "shell" ? () => (receipt.turnsAt = p.turns) : undefined);
       } catch (e) {
+        if (token) receipts.delete(token);
         if (!(e instanceof NotSubmitted) || !e.typed) throw e;
-        const ref = paneName(p);
         throw new NotSubmitted(`${p.agent} didn't show the text on its screen, so Loom didn't press Enter. The text went to ${ref} and may be waiting there, so don't send it again: loomctl read ${ref} shows it, and loomctl keys ${ref} enter submits it.`, true);
       }
-      return { data: { pane: p.id }, text: "" };
+      return { data: { pane: p.id, ...(token ? { receipt: token } : {}) }, text: token ?? "" };
     },
   },
   keys: {
@@ -6579,11 +6649,20 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   wait: {
-    usage: "wait [pane] [--state waiting] [--timeout S]",
-    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting.",
-    options: { state: "string" },
+    usage: "wait [pane] [--state waiting] [--turn-after N [--gen N]] [--receipt R] [--timeout S]",
+    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting. --turn-after N: until an agent finishes turn N+1 (turns in loomctl panes). --receipt R: until the command or turn behind send --receipt's token finishes.",
+    options: { state: "string", "turn-after": "int", gen: "int", receipt: "string" },
     run: async (a, ctx) => {
+      const token = str(a, "receipt");
+      if (token !== undefined) return waitReceipt(token, ctx.seconds);
       const p = cliPane(a._[0]);
+      if (a["turn-after"] !== undefined) {
+        const after = num(a, "turn-after", 0, 0, Number.MAX_SAFE_INTEGER), gen = cliGen(a) ?? p.generation;
+        if (p.agent === "shell") throw new Error("--turn-after is for agent panes. A shell counts commands (loomctl panes --json), and send --receipt waits for one.");
+        await until(() => gone(p) || p.dead || p.generation !== gen || p.turns > after, ctx.seconds, `${paneName(p)} to finish turn ${after + 1}`);
+        if (p.turns <= after || p.generation !== gen) throw new Error(`${paneName(p)} ${gone(p) ? "was closed" : p.dead ? "exited" : "restarted"} before turn ${after + 1}.`);
+        return { data: paneData(p), text: `${paneName(p)} finished turn ${p.turns}` };
+      }
       const want = cliStates(str(a, "state"), "waiting");
       await until(() => gone(p) || want.includes(cliState(p)), ctx.seconds, `${paneName(p)} to be ${want.join(" or ")}`);
       if (gone(p)) throw new Error("The pane was closed.");
@@ -6737,25 +6816,51 @@ const CLI: Record<string, CliCommand> = {
   },
 };
 
+type CliRequest = { id: number; cmd: string; argv: string[] | null; stdin: string | null; cwd: string | null; timeout: number; key: string | null };
+
+/** One loomctl request, run: its answer, failures included. */
+async function runCli(payload: CliRequest): Promise<Record<string, unknown>> {
+  const { cmd, timeout, stdin } = payload;
+  try {
+    const command = Object.prototype.hasOwnProperty.call(CLI, cmd) ? CLI[cmd] : undefined;
+    if (!command) throw new Error(`Unknown command "${cmd}". loomctl help lists them.`);
+    // Missing words are a loomctl that doesn't match, never "no arguments": that would aim at the pane in front.
+    if (!Array.isArray(payload.argv)) throw new Error("loomctl sent no words with the command. Use the loomctl.exe beside loom.exe.");
+    const args = parseArgs(payload.argv, command.options ?? {}, cmd);
+    // Standard input comes apart from the words and goes in only now, so text starting with -- stays text.
+    if (typeof stdin === "string") args._ = args._.map((w) => (w === "-" ? stdin.replace(/\r?\n$/, "") : w));
+    const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined });
+    if (result.note) toast(result.note);
+    return { ok: true, data: result.data ?? null, text: result.text };
+  } catch (e) {
+    const reply: Record<string, unknown> = { ok: false, error: e instanceof Error ? e.message : String(e), timeout: e instanceof CliTimeout };
+    if (e instanceof NotSubmitted) Object.assign(reply, { typed: e.typed }, e.pressed === undefined ? {} : { pressed: e.pressed });
+    return reply;
+  }
+}
+
+/** --key: each key's command and its answer, which a retry gets instead of a
+ * second run, even while the first is still going. The last 256 keys, until
+ * Loom exits. ponytail: in memory, per Loom; a store on disk if retries must
+ * survive a restart. */
+const keyed = new Map<string, { what: string; reply: Promise<Record<string, unknown>> }>();
+
 /** Answers loomctl for as long as the window is up. */
 function installCli() {
-  void listen<{ id: number; cmd: string; argv: string[] | null; stdin: string | null; cwd: string | null; timeout: number }>("cli", async ({ payload }) => {
-    const { id, cmd, timeout, stdin } = payload;
+  void listen<CliRequest>("cli", async ({ payload }) => {
+    const { id, key } = payload;
+    const what = JSON.stringify([payload.cmd, payload.argv, payload.stdin, payload.cwd]);
+    const earlier = key ? keyed.get(key) : undefined;
     let reply: Record<string, unknown>;
-    try {
-      const command = Object.prototype.hasOwnProperty.call(CLI, cmd) ? CLI[cmd] : undefined;
-      if (!command) throw new Error(`Unknown command "${cmd}". loomctl help lists them.`);
-      // Missing words are a loomctl that doesn't match, never "no arguments": that would aim at the pane in front.
-      if (!Array.isArray(payload.argv)) throw new Error("loomctl sent no words with the command. Use the loomctl.exe beside loom.exe.");
-      const args = parseArgs(payload.argv, command.options ?? {}, cmd);
-      // Standard input comes apart from the words and goes in only now, so text starting with -- stays text.
-      if (typeof stdin === "string") args._ = args._.map((w) => (w === "-" ? stdin.replace(/\r?\n$/, "") : w));
-      const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined });
-      if (result.note) toast(result.note);
-      reply = { ok: true, data: result.data ?? null, text: result.text };
-    } catch (e) {
-      reply = { ok: false, error: e instanceof Error ? e.message : String(e), timeout: e instanceof CliTimeout };
-      if (e instanceof NotSubmitted) Object.assign(reply, { typed: e.typed }, e.pressed === undefined ? {} : { pressed: e.pressed });
+    if (earlier) {
+      reply = earlier.what === what ? { ...(await earlier.reply), replayed: true } : { ok: false, error: `--key ${key} was used for a different command, so this one didn't run.` };
+    } else {
+      const run = runCli(payload);
+      if (key) {
+        keyed.set(key, { what, reply: run });
+        if (keyed.size > 256) keyed.delete(keyed.keys().next().value!);
+      }
+      reply = await run;
     }
     await invoke("cli_reply", { id, reply }).catch(() => {});
   }).then(() => invoke("cli_ready"));

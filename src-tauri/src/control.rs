@@ -181,7 +181,7 @@ async fn ask(app: &AppHandle, request: Value) -> Value {
     // The words go to the page unparsed: only it knows which options each
     // command takes. Standard input comes apart from them, so text starting
     // with -- is never read as an option.
-    let event = json!({ "id": id, "cmd": request["cmd"], "argv": request["argv"], "stdin": request["stdin"], "cwd": request["cwd"], "timeout": secs });
+    let event = json!({ "id": id, "cmd": request["cmd"], "argv": request["argv"], "stdin": request["stdin"], "cwd": request["cwd"], "timeout": secs, "key": request["key"] });
     if let Err(e) = app.emit("cli", event) {
         pending.waiting.lock().unwrap().remove(&id);
         return json!({ "ok": false, "error": format!("Loom couldn't pass the command to its window: {e}") });

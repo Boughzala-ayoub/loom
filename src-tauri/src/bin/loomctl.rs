@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 
 const USAGE: &str = "loomctl: control a running Loom.
 
-Usage: loomctl [--json] [--profile FILE] [--timeout SECONDS] <command> [args...]
+Usage: loomctl [--json] [--profile FILE] [--timeout SECONDS] [--key NAME] <command> [args...]
 
   loomctl help            the commands the running Loom knows
   loomctl help <command>  one command's arguments
@@ -25,6 +25,11 @@ Put a command's own options after it: --name value, --name=value, or --flag.
 After --, every word is an argument. An argument of - is standard input, sent
 as it is: text starting with -- stays text. Inside a Loom pane, loomctl talks to
 the Loom that owns the pane.
+
+--key NAME makes a retry safe: Loom runs a key once. The same command again
+with that key gets the first answer, failures included, waiting for it if the
+first is still running. The same key with another command is refused. Loom
+keeps the last 256 keys until it exits.
 
 With --json, every failure prints one JSON object: \"code\" (usage, not-running,
 busy, unreachable, version, connection, timeout or failed), \"sent\" (whether
@@ -49,13 +54,16 @@ struct Parsed {
     profile: Option<String>,
     timeout: Option<f64>,
     version: bool,
+    /// --key: the caller's name for this request. Loom runs a key once and
+    /// answers a retry with the first answer.
+    key: Option<String>,
     /// An argument is `-`: standard input goes with the request, apart from
     /// the words, so Loom never parses it as options.
     stdin: bool,
 }
 
 fn parse(args: &[String]) -> Result<Parsed, String> {
-    let mut parsed = Parsed { cmd: String::new(), argv: Vec::new(), json: false, profile: None, timeout: None, version: false, stdin: false };
+    let mut parsed = Parsed { cmd: String::new(), argv: Vec::new(), json: false, profile: None, timeout: None, version: false, key: None, stdin: false };
     let mut help = false;
     let mut rest = false;
     let mut i = 0;
@@ -91,6 +99,13 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
             (_, "help") | ("-h", _) => help = true,
             (_, "version") | ("-V", _) => parsed.version = true,
             (_, "profile") => parsed.profile = Some(value("profile", inline)?),
+            (_, "key") => {
+                let v = value("key", inline)?;
+                if v.is_empty() || v.len() > 200 {
+                    return Err("--key takes a name of 1 to 200 characters".into());
+                }
+                parsed.key = Some(v);
+            }
             (_, "timeout") => {
                 let v = value("timeout", inline)?;
                 let secs: f64 = v.parse().map_err(|_| format!("--timeout needs seconds, not {v}"))?;
@@ -234,7 +249,7 @@ fn run(args: &[String]) -> i32 {
         return 0;
     }
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
-    let request = json!({ "cmd": parsed.cmd, "argv": parsed.argv, "stdin": stdin, "cwd": cwd, "timeout": timeout });
+    let request = json!({ "cmd": parsed.cmd, "argv": parsed.argv, "stdin": stdin, "cwd": cwd, "timeout": timeout, "key": parsed.key });
     // Loom answers a timed-out request itself, 5 s after its limit. This is for
     // a Loom that stopped answering altogether.
     watch.sent(timeout + 20.0);
@@ -249,6 +264,9 @@ fn run(args: &[String]) -> i32 {
         Err(e) => return fail(json, "connection", 2, true, &format!("{e}. The command may have run: check before trying again."), &Value::Null),
     };
     watch.done();
+    if reply["replayed"] == json!(true) {
+        eprintln!("loomctl: the answer to the earlier request with this --key; the command didn't run again.");
+    }
     if reply["ok"] != json!(true) {
         let error = reply["error"].as_str().unwrap_or("the command failed");
         return match reply["timeout"] == json!(true) {
@@ -379,6 +397,15 @@ mod tests {
         for bad in [&["read", "--timeout"][..], &["read", "--timeout", "soon"], &["read", "--timeout", "0"], &["--profile"]] {
             assert!(parse(&v(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_key_is_loomctls_own_option() {
+        let x = p(&["--key", "job-7", "send", "p1", "hi"]);
+        assert_eq!((x.key.as_deref(), x.argv), (Some("job-7"), v(&["p1", "hi"])));
+        assert_eq!(p(&["send", "p1", "--key=job-8", "hi"]).key.as_deref(), Some("job-8"));
+        assert_eq!(p(&["send", "p1", "--", "--key", "x"]).key, None);
+        assert!(parse(&v(&["--key=", "status"])).is_err());
     }
 
     #[test]
