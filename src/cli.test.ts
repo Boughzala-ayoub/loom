@@ -76,18 +76,26 @@ eq("unknown words are refused", keyBytes("hello", false), null);
 
 eq("table aligns all but the last column", table([["a", "bb", "x y"], ["ccc", "d", "z"]]), "a    bb  x y\nccc  d   z");
 
-// pruneSettled: what the --key cache and the receipt store keep.
-const entries = (...done: boolean[]) => new Map(done.map((d, i) => [`k${i}`, { done: d }]));
-const kept = (m: Map<string, { done: boolean }>) => [...m.keys()].join(" ");
-let cache = entries(...Array(256).fill(false), true, true);
-pruneSettled(cache, (e) => e.done, 256);
+// pruneSettled: what the --key cache and the receipt store keep. Entries in
+// creation order; each number is when it settled, undefined while it runs.
+const entries = (...at: (number | undefined)[]) => new Map(at.map((a, i) => [`k${i}`, { at: a }]));
+const kept = (m: Map<string, { at?: number }>) => [...m.keys()].join(" ");
+let cache = entries(...Array(256).fill(undefined), 1, 2);
+pruneSettled(cache, (e) => e.at, 256);
 eq("256 running entries don't push out the 2 finished ones", cache.size, 258);
-cache = entries(true, false, true, true, false);
-pruneSettled(cache, (e) => e.done, 2);
-eq("Past the limit, the oldest finished go and the running stay", kept(cache), "k1 k2 k3 k4");
-cache = entries(false, false, false);
-pruneSettled(cache, (e) => e.done, 0);
+cache = entries(1, undefined, 2, 3, undefined);
+pruneSettled(cache, (e) => e.at, 2);
+eq("Past the limit, the first to finish go and the running stay", kept(cache), "k1 k2 k3 k4");
+cache = entries(undefined, undefined, undefined);
+pruneSettled(cache, (e) => e.at, 0);
 eq("Running entries never go, whatever the limit", cache.size, 3);
+// Created first, finished last: the newest result, so it stays and an older one goes.
+cache = entries(257, ...Array.from({ length: 256 }, (_, i) => i + 1));
+pruneSettled(cache, (e) => e.at, 256);
+eq("A request that started first and finished last keeps its result", [cache.has("k0"), cache.has("k1"), cache.size], [true, false, 256]);
+cache = entries(5, 2, undefined, 9, 1);
+pruneSettled(cache, (e) => e.at, 2);
+eq("Out of order, the two that finished last stay", kept(cache), "k0 k2 k3");
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

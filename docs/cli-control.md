@@ -190,9 +190,14 @@ exits or closes before its outcome; one with an outcome keeps it. Receipts
 live in memory: the last 500 settled (an outcome, or a pane that restarted,
 exited or closed), however many are pending, and up to 2000 pending, past
 which `send --receipt` refuses. `pruneSettled` in `cli.ts` keeps both this
-store and the `--key` cache; it counts only settled entries against the
-limit. The first version counted every entry, so pending ones pushed out the
-finished outcomes a late wait or a retry still needed.
+store and the `--key` cache. It counts only settled entries against the
+limit, and evicts in the order they settled. Each settling takes a number
+from one counter (`settlings`), and a receipt cut off by its pane counts as
+settling when that is first noticed. The first version counted every entry,
+so pending ones pushed out the finished outcomes a late wait or a retry
+still needed. The next one evicted in creation order, so a request that
+started first and finished last, the newest result, went the moment it
+finished, before its own answer was back.
 
 **Retries with `--key`.** `loomctl --key NAME` sends a caller's name for the
 request. The page keeps a map from key to the command and the promise of its
@@ -310,7 +315,13 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   while 256 keyed sends are held running on another pane, and an agent task
   B that a late second signal for task A doesn't finish, with the bell first
   and then with the hook first; both fail on the frontend before that fix.
-  `node src/cli.test.ts` covers `pruneSettled`, which both stores use.
+  Then the key held while 256 newer keys finish, released last, and retried:
+  it replays, typed once, and fails on the frontend before settle-order
+  eviction. `node src/cli.test.ts` covers `pruneSettled`, which both stores
+  use, including a request that started first and finished last and entries
+  that settle out of order. The receipt store's version of that case is
+  covered there, not in the harness: it needs 500 receipts at about 150 ms
+  each.
 - `cargo test` covers the pipe names, `loomctl`'s own options, the hello check,
   the failure shape and the whole-line rule for requests.
   `src-tauri/src/shell-init.test.ps1` (run it with `powershell -NoProfile

@@ -554,7 +554,11 @@ turn counts only after new input, and only from the signal that counted the
 pane's first turn since it started: one turn that rings both the bell and
 the Stop hook counts once, even when the second arrives after your next task
 went in, and Claude's idle reminder doesn't count. `loomctl wait <pane>
---turn-after N` returns when turn N+1 is in.
+--turn-after N` returns when turn N+1 is in. If the signal that counts doesn't
+also come for questions (say the bell rings when a turn ends but only the
+Notification hook fires on a permission prompt), a question raises the alert
+without finishing a receipt: a controller waiting on a receipt should also
+watch for `wait --state waiting` and `menu`.
 
 `send --receipt` prints a token, and `loomctl wait --receipt <token>` waits for
 what that send started:
@@ -582,10 +586,11 @@ finished first keeps its outcome.
 with the same key gets the first answer, waiting for it if it's still
 running, so a `send` or `new` retried after a timeout doesn't run twice. The
 same key with another command is refused. A key stays as long as its command
-runs, and Loom keeps the last 256 finished ones until it exits, however many
-are still running. With 1024 keyed commands still running, a new one is
-refused unrun. Receipts work the same way: the last 500 with an outcome stay,
-and `send --receipt` refuses a new one while 2000 are pending.
+runs, and Loom keeps the last 256 to finish until it exits, however many are
+still running: a slow command that finishes after newer ones counts as the
+newest. With 1024 keyed commands still running, a new one is refused unrun.
+Receipts work the same way: the last 500 to get an outcome stay, and `send
+--receipt` refuses a new one while 2000 are pending.
 
 With `--json`, every failure prints one JSON object: `code` (`usage`,
 `not-running`, `busy`, `unreachable`, `version`, `connection`, `timeout` or

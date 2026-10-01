@@ -446,6 +446,9 @@ try {
       const [firstKeyed, secondKeyed] = await Promise.all([heldKeyed, retryKeyed]);
       assert.deepEqual([firstKeyed.ok, secondKeyed.ok, secondKeyed.replayed], [true, true, true], JSON.stringify(secondKeyed));
       assert.equal((await writes(claude)).filter(d => d === 'long task').length, 1, 'Typed once');
+      const afterFinish = await call('send', ['search-polish:1', '--no-enter', 'long task'], null, 'held-job');
+      assert.deepEqual([afterFinish.ok, afterFinish.replayed], [true, true], `Started first but finished after 256 newer keys, it's the newest result and still replays: ${JSON.stringify(afterFinish)}`);
+      assert.equal((await writes(claude)).filter(d => d === 'long task').length, 1, 'Still typed once');
       // 256 keys still running don't push out a finished one: its retry still replays.
       const other2 = (await cli('panes')).data.find(p => p.thread === 'review-keyboard-navigation');
       await page.evaluate(id => { window.qa.holdWrites = id; }, claude);

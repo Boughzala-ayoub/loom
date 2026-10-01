@@ -3397,8 +3397,10 @@ function sendReply(p: Pane, text: string, { gen, beforePaste, beforeEnter }: { g
  * OSC 9 (Codex), OSC 99 (OpenCode's TUI) or a marker file (Claude's hooks,
  * OpenCode's plugin). */
 type WakeSource = "bell" | "osc9" | "osc99" | "hook";
-type Receipt = { pane: Pane; ref: string; gen: number; turnsAt?: number; result?: { failed: boolean | null; exit: number | null } | { turn: number } };
+type Receipt = { pane: Pane; ref: string; gen: number; turnsAt?: number; result?: { failed: boolean | null; exit: number | null } | { turn: number }; settledAt?: number };
 const receipts = new Map<string, Receipt>();
+/** Counts settlings, keys' and receipts' alike: their order decides which finished ones are kept. */
+let settlings = 0;
 /** A result for receipt `token`, kept only if it comes from the pane and the
  * launch the receipt was sent to: a token copied into another pane's command,
  * or a restarted pane's next turns, aren't its outcome. */
@@ -3406,13 +3408,18 @@ function finishReceipt(token: string, from: Pane, result: NonNullable<Receipt["r
   const r = receipts.get(token);
   if (!r || r.result || r.pane !== from || r.gen !== from.generation) return;
   r.result = result;
+  r.settledAt = ++settlings;
   keepReceipts();
 }
 /** A receipt is settled once it has its outcome, or can't get one (its pane
- * restarted, exited or closed). The last 500 settled stay, however many are
+ * restarted, exited or closed). The last 500 to settle stay, however many are
  * pending; send --receipt refuses a 2001st pending one rather than drop one. */
 const receiptSettled = (r: Receipt) => !!r.result || gone(r.pane) || r.pane.dead || r.pane.generation !== r.gen;
-const keepReceipts = () => pruneSettled(receipts, receiptSettled, 500);
+function keepReceipts() {
+  // One cut off by its pane is noticed here, not when it happened: it counts as settling now.
+  for (const r of receipts.values()) if (r.settledAt === undefined && receiptSettled(r)) r.settledAt = ++settlings;
+  pruneSettled(receipts, (r) => r.settledAt, 500);
+}
 /** An agent's turn just came in: it completes that launch's receipts sent before it. */
 function turnReceipts(p: Pane) {
   for (const [token, r] of receipts) if (r.turnsAt !== undefined && p.turns > r.turnsAt) finishReceipt(token, p, { turn: r.turnsAt + 1 });
@@ -6894,11 +6901,11 @@ async function runCli(payload: CliRequest): Promise<Record<string, unknown>> {
 /** --key: each key's command and its answer, which a retry gets instead of a
  * second run, even while the first is still going. Every key still running
  * stays (a retry of one must never run it again), up to 1024; past that, new
- * keyed requests are refused unrun. Of the finished ones, the last 256 stay,
- * however many are running (pruneSettled, on each finish).
+ * keyed requests are refused unrun. Of the finished ones, the last 256 to
+ * finish stay, however many are running (pruneSettled, on each finish).
  * ponytail: in memory, per Loom; a store on disk if retries must survive a
  * restart. */
-const keyed = new Map<string, { what: string; reply: Promise<Record<string, unknown>>; done: boolean }>();
+const keyed = new Map<string, { what: string; reply: Promise<Record<string, unknown>>; doneAt?: number }>();
 
 /** Answers loomctl for as long as the window is up. */
 function installCli() {
@@ -6909,16 +6916,16 @@ function installCli() {
     let reply: Record<string, unknown>;
     if (earlier) {
       reply = earlier.what === what ? { ...(await earlier.reply), replayed: true } : { ok: false, error: `--key ${key} was used for a different command, so this one didn't run.` };
-    } else if (key && [...keyed.values()].filter((k) => !k.done).length >= 1024) {
+    } else if (key && [...keyed.values()].filter((k) => k.doneAt === undefined).length >= 1024) {
       reply = { ok: false, error: "1024 requests with --key are still running, so this one didn't run. Try again once some finish." };
     } else {
       const run = runCli(payload);
       if (key) {
-        const entry = { what, reply: run, done: false };
+        const entry: { what: string; reply: typeof run; doneAt?: number } = { what, reply: run };
         keyed.set(key, entry);
         void run.then(() => {
-          entry.done = true;
-          pruneSettled(keyed, (e) => e.done, 256);
+          entry.doneAt = ++settlings;
+          pruneSettled(keyed, (e) => e.doneAt, 256);
         });
       }
       reply = await run;

@@ -75,17 +75,21 @@ export function num(args: Args, name: string, fallback: number, min: number, max
   return v;
 }
 
-/** Drops the oldest settled entries once more than `keep` of them are settled.
- * Unsettled ones always stay and don't use up `keep`: a running --key or a
- * pending receipt must still be found, and must not push out a finished one
- * a retry or a late wait still needs. */
-export function pruneSettled<V>(map: Map<string, V>, settled: (v: V) => boolean, keep: number) {
-  let n = 0;
-  for (const v of map.values()) if (settled(v)) n++;
+/** Drops the entries that settled longest ago once more than `keep` have
+ * settled. `settledAt` is an entry's place in the order things settled (a
+ * counter), or undefined while it runs. Unsettled ones always stay and don't
+ * use up `keep`: a running --key or a pending receipt must still be found,
+ * and must not push out a finished one a retry or a late wait still needs.
+ * By settling order, not the map's, which is creation order: a request that
+ * started first and finished last is the newest result, not the oldest. */
+export function pruneSettled<V>(map: Map<string, V>, settledAt: (v: V) => number | undefined, keep: number) {
+  const settled: [string, number][] = [];
   for (const [k, v] of map) {
-    if (n <= keep) return;
-    if (settled(v)) (map.delete(k), n--);
+    const at = settledAt(v);
+    if (at !== undefined) settled.push([k, at]);
   }
+  settled.sort((a, b) => a[1] - b[1]);
+  for (const [k] of settled.slice(0, Math.max(0, settled.length - keep))) map.delete(k);
 }
 
 /** A string option, or undefined when it's missing. */
