@@ -68,10 +68,69 @@ export function readMenu(screen: string): Menu | null {
  * it, so an answer read for one question never goes to another with the same
  * options, or to the same question about another command or path. */
 export function menuRev(m: Menu): string {
-  const s = JSON.stringify([m.prompt, m.multi]);
+  return hash32(JSON.stringify([m.prompt, m.multi]));
+}
+
+/** FNV-1a, 8 hex digits: an id for screen text, not a secret. */
+export function hash32(s: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
   return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/** A screen cell, as much as reading an input line needs. The second cell of
+ * a wide character is "". */
+export type Cell = { ch: string; dim: boolean; inverse: boolean };
+/** What an agent's input holds. `draft`: text someone typed and hasn't sent.
+ * `suggestion`: text the agent shows that typing replaces. `unknown`: Loom
+ * can't tell, so a caller must not assume either. */
+export type Input = { kind: "empty" | "suggestion" | "draft" | "unknown"; text: string | null; why?: string };
+
+// Claude's input line, bare when empty; ! is its bash mode. Claude 2.1 puts a
+// no-break space after ❯ (seen in a live pane's read-back), older ones a space.
+const PROMPT = /^[>❯!](?:[  ]|$)/;
+const BORDER = /^[\s│┃║]$/;
+
+/** What Claude Code's input line holds, from its cells. Claude 2.1 (read off
+ * 2.1.286's renderer) draws typed text plain, and its placeholder and prompt
+ * suggestion, shown only while the input is empty, dim: with the first
+ * character inverse as the caret when the terminal has focus, all dim when it
+ * doesn't. A draft can end in a dim hint ("/review [pr]"). The same words
+ * plain or dim are a draft or a suggestion; anything else is `unknown`, and so
+ * is every other agent: their inputs were never checked. */
+export function readInput(rows: Cell[][], agent: string): Input {
+  const unknown = (why: string): Input => ({ kind: "unknown", text: null, why });
+  if (agent !== "claude") return unknown(`Loom can't tell a draft from a suggestion in ${agent}'s input.`);
+  const lines = rows.map((r) => unbox(r.map((c) => c.ch || "").join("")));
+  // The last prompt line on screen right under a rule: earlier prompts in the
+  // transcript have no rule above them.
+  let at = -1;
+  for (let i = lines.length - 1; i > 0 && at < 0; i--) if (PROMPT.test(lines[i]) && isRule(lines[i - 1])) at = i;
+  if (at < 0) return unknown("Claude's input line isn't on screen.");
+  let end = at + 1;
+  while (end < lines.length && !isRule(lines[end])) end++;
+  if (end === lines.length) return unknown("Claude's input line has no rule under it.");
+  // Its text starts after the glyph and a space; wrapped rows indent to there.
+  const start = rows[at].findIndex((c) => !BORDER.test(c.ch || " ")) + 2;
+  const cells: Cell[] = [];
+  for (let y = at; y < end; y++) {
+    const row = rows[y].slice(start).filter((c) => c.ch !== "");
+    while (row.length && BORDER.test(row[row.length - 1].ch) && !row[row.length - 1].inverse) row.pop();
+    if (y > at) cells.push({ ch: "\n", dim: false, inverse: false });
+    cells.push(...row);
+  }
+  const shown = cells.filter((c) => c.ch.trim());
+  const plain = shown.filter((c) => !c.dim && !c.inverse), dim = shown.filter((c) => c.dim);
+  const text = (keep: (c: Cell) => boolean) => cells.filter((c) => c.ch === "\n" || keep(c)).map((c) => c.ch).join("").replace(/\s+$/, "");
+  if (!shown.length) return { kind: "empty", text: "" };
+  if (!dim.length) return { kind: "draft", text: text(() => true) };
+  // A suggestion: all dim, but for an inverse caret on its first character.
+  if (!plain.length && shown.every((c, i) => c.dim || (i === 0 && c.inverse))) return { kind: "suggestion", text: text(() => true) };
+  // Typed text, then a dim hint after it. One plain character before dim text
+  // is also how the placeholder looks with its caret drawn plain: can't tell.
+  const lastPlain = shown.length - 1 - [...shown].reverse().findIndex((c) => !c.dim), firstDim = shown.findIndex((c) => c.dim);
+  if (lastPlain < firstDim && lastPlain >= 1) return { kind: "draft", text: text((c) => !c.dim) };
+  return unknown("Claude's input mixes plain and dim text in a way Loom doesn't recognize.");
 }
 
 // Long pastes show as one of these instead of the text: Claude's and Codex's.

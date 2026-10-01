@@ -110,8 +110,10 @@ shows one.
 | `status` | Counts by state, the pane in front, and every pane waiting for you. |
 | `threads` | Every thread: name, id, state, pane count, branch and folder. |
 | `panes [--thread T] [--state S]` | Every pane, or a thread's, or the ones in a state (`--state idle,waiting` for several). |
-| `read [pane] [--lines N]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included. |
+| `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included. See [What the input holds](#what-the-input-holds). |
 | `menu [pane]` | The numbered question on the pane's screen, if any, with an id for it. See [Answering questions](#answering-questions). |
+| `receipt <token>` | What `send --receipt` sent and what came back, without waiting. See [Receipts as a record](#receipts-as-a-record). |
+| `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
 | `help [command]` | The commands, or one command. |
 
@@ -150,7 +152,7 @@ shows one.
 | `restart [pane] [--yes]` | Start the pane's process again, resuming its session. A running one needs `--yes`. |
 | `stop [pane] --yes` | Stop the process and keep the pane. A start still in progress is cancelled too. |
 | `close [pane] [--yes]` | Close a pane. One running an agent needs `--yes`. |
-| `close-thread <thread> --yes [--delete worktree\|branch] [--force]` | Close a thread and its panes. |
+| `close-thread <thread> --yes [--delete worktree\|branch] [--plan REV] [--discard LIST] [--force]` | Close a thread and its panes. |
 
 `new` opens the folder's Git repository (a relative folder is relative to your
 terminal). Without `--name` it opens the repository itself, or brings up the
@@ -167,15 +169,73 @@ Loom replaces it. With neither `--agent` nor `--cmd`, the first one runs.
 around it, and `--cmd=` (empty) is a plain PowerShell.
 
 `close-thread --delete worktree` also removes the worktree folder, and
-`--delete branch` removes the branch too. Both work only on worktrees Loom made,
-and refuse while there are uncommitted files or unmerged commits unless you add
-`--force`.
+`--delete branch` removes the branch too. Both work only on worktrees Loom made.
+What they protect is in [Deleting a worktree](#deleting-a-worktree).
+
+### Deleting a worktree
+
+Deleting a worktree destroys four kinds of thing that may exist nowhere else.
+`close-thread` refuses while it would lose any of them that `--discard` doesn't
+name:
+
+| `--discard` | What it allows to be lost |
+| --- | --- |
+| `tracked` | Changes to files Git tracks |
+| `untracked` | Files Git doesn't track and doesn't ignore |
+| `ignored` | Files Git ignores, such as `.env`, `node_modules/` or `target/` |
+| `commits` | With `--delete branch`, commits no other branch or remote has |
+
+Name several with commas (`--discard ignored,untracked`), or `--discard all`.
+`--force` is `--discard all`, as before.
+
+Ignored files count because Loom can't tell a build folder from a `.env` or
+notes that exist only there. So a worktree whose only extra files are ignored
+still needs `--discard ignored`. A folder ignored as a whole, like
+`node_modules/`, counts as one entry; what's inside it isn't listed. If Loom
+can't read the folder's status, it refuses rather than assume nothing is lost.
+
+`close-plan` shows what would happen, and changes nothing:
+
+```powershell
+$plan = loomctl --json close-plan login --delete branch | ConvertFrom-Json
+$plan.lost        # counts: tracked, untracked, ignored, commits
+$plan.ignored     # the ignored paths (the first 50)
+$plan.discard     # what --discard has to name to go ahead
+loomctl close-thread $plan.thread --yes --delete branch --plan $plan.rev --discard ignored
+```
+
+The plan names the thread (`thread`, `dir`, `repo`, `branch`), the panes it
+stops with their generations, the worktree's HEAD, and the lists of tracked,
+untracked and ignored paths. Its `rev` covers all of it. `close-thread --plan
+REV` reads it again before closing anything and refuses if any of it changed:
+another pane, a restart, a new file, a new commit. Without `--plan`, the check
+uses whatever is there when the command runs.
+
+After the panes stop, Loom reads the folder once more, since a pane's process
+writes until it's gone. If the folder changed, Loom keeps it and says so. The
+Delete worktree buttons in the window work the same way: their dialog lists
+what would be lost, ignored files included, and nothing goes if that changed
+before you answered.
+
+A cleanup that stops part-way says which steps finished, in `steps`:
+
+```json
+{ "ok": false, "code": "failed", "closed": "mupvx2k-30",
+  "steps": { "panes": "closed", "worktree": "failed", "branch": "kept" },
+  "error": "Closed login and stopped its panes, but couldn't remove its worktree folder, ..." }
+```
+
+`worktree` is `removed`, `kept` (it changed while the panes closed), `failed`
+(Git refused; the folder may be partly deleted) or `null` when not asked.
+`branch` is `deleted`, `kept` (the folder step didn't finish), `failed` or
+`null`. A thread whose panes closed is gone from Loom even when its folder
+stayed: remove that folder with `git worktree remove`.
 
 ### Typing into panes
 
 | Command | What it does |
 | --- | --- |
-| `send <pane> <text...> [--no-enter] [--gen N] [--receipt]` | Type text and press Enter once it shows on screen. |
+| `send <pane> <text...> [--no-enter] [--gen N] [--receipt] [--input REV] [--replace]` | Type text and press Enter once it shows on screen. |
 | `keys <pane> <key...> [--gen N]` | Press keys. |
 | `choose <pane> <n> [--menu ID] [--gen N]` | Pick option n of a numbered question, as the Overview's buttons do. |
 
@@ -190,11 +250,93 @@ How `send` works:
    `"typed": true`. The text may be sitting in the input, so don't send it
    again: `loomctl read` shows it and `loomctl keys <pane> enter` submits it.
 
+Between the paste and the Enter, Loom's paste is the only input it expects. If
+anything else writes to the pane meanwhile, such as a key pressed in the
+window, dictation or a dropped file, both are in the input, so Loom holds back
+the Enter and fails with `"typed": true`. Look at the input before sending
+anything. Input like that arriving after the send's turn began but before the
+paste (while a shell receipt waits for its prompt, say) stops the send with
+nothing typed (`"typed": false`). Loom's last checks, `--input` and
+`--replace` among them, run right before the paste with nothing in between.
+
+When writing to the pane itself fails, Loom can't tell how much went in, so
+the failure says which write is in doubt with `"uncertain"`: `"type"` (some or
+all of the text may be in the input) or `"submit"` (the text is in the input
+and Enter may or may not have gone in). Either way it carries `"typed": true`.
+Only a failure with `"typed": false` wrote nothing and is safe to send again.
+
 `--no-enter` only types. Sends to one pane take turns, so two at once arrive as
 two commands. Input belongs to the session that was running when you sent it:
 if the pane stops or restarts first, the send fails and nothing reaches the new
 session. `--gen N` goes further and refuses unless the pane is still on the
 generation you saw in `panes --json`.
+
+`send` answers with the pane, its generation, and the SHA-256 and byte count
+of the text's UTF-8 (`sha256`, `bytes`), so a caller can check Loom typed what
+it meant to. The text is what Loom got: words joined with single spaces, or
+standard input less one final line break. A shell receipt's comment isn't part
+of it.
+
+### What the input holds
+
+An agent's input can show text nobody typed: Claude puts a suggested next
+prompt there, dim, and the first letter you type replaces it. As plain text it
+looks the same as a draft someone typed and hasn't sent. `read --json` tells
+them apart where Loom can:
+
+```powershell
+$r = loomctl --json read api-fix:1 | ConvertFrom-Json
+$r.input.kind     # draft, suggestion, empty or unknown
+$r.input.text     # the draft or suggestion as drawn
+$r.input.rev      # what send --input takes
+```
+
+| `kind` | Meaning |
+| --- | --- |
+| `draft` | Text someone typed and hasn't sent. Sending types after it. |
+| `suggestion` | Text the agent shows that typing replaces. |
+| `empty` | Nothing in the input. |
+| `unknown` | Loom can't tell. Treat any text there as a draft. |
+
+Only Claude's input is read, from how Claude Code 2.1 draws it: `❯` (or `>`)
+and a space or a no-break space before the input, typed text plain, its
+placeholder and suggestion dim. Codex, OpenCode and shells are
+always `unknown`, and so is Claude when its input isn't on screen (a question
+is up) or is drawn some other way. `input.why` says which.
+
+`read --json` also gives the terminal `cursor` (`x`, `y` on the screen, and
+`hidden` when the program hid it; Claude hides it and draws its own caret).
+`read --styles` adds the screen's `rows` as runs of text with their style:
+`bold`, `dim`, `italic`, `underline`, `inverse`, and `fg`/`bg` as a palette
+index or `#rrggbb`.
+
+`--input REV` makes a send conditional on the input you read. Loom checks it in
+the pane's turn, right before typing, and types nothing if anything wrote to
+the pane since: another `loomctl` call, a key pressed in the window, a paste or
+dictation, even before the agent draws it. It also refuses if a draft appeared
+or changed. A suggestion arriving or changing doesn't count, since typing
+replaces it.
+
+```powershell
+loomctl send api-fix:1 --input $r.input.rev 'run the tests'
+```
+
+`--replace` types only over an empty input or a suggestion. It refuses a draft
+or an input Loom can't read, typing nothing, and over a suggestion it presses
+Enter only once the input reads as a draft without it. Loom never clears a
+draft for you: Ctrl-C interrupts a turn and Esc can open Claude's rewind menu,
+so no key is safe. Clear it in the window.
+
+To look before committing to the whole text, type a first letter and read
+again. Each step is checked against the read before it, so a writer in between
+stops the rest:
+
+```powershell
+$r = loomctl --json read api-fix:1 | ConvertFrom-Json
+loomctl send api-fix:1 --no-enter --input $r.input.rev 'W'
+$r = loomctl --json read api-fix:1 | ConvertFrom-Json    # the suggestion is gone: draft "W"
+loomctl send api-fix:1 --input $r.input.rev 'rite the tests'
+```
 
 `keys` takes `enter` (or `return`), `esc` (or `escape`), `tab`, `shift-tab`
 (or `backtab`), `backspace`, `space`, `delete` (or `del`), `pageup`,
@@ -291,6 +433,43 @@ A receipt fails if its pane restarts, exits or closes before the outcome
 arrives. One that already has its outcome keeps it. Loom keeps the last 500
 receipts with an outcome and refuses a new one while 2000 are still pending.
 
+### Receipts as a record
+
+The screen moves on: a long task scrolls away or shows as
+`[Pasted text #1 +120 lines]`. `loomctl receipt <token>` answers from Loom's
+own record instead, in two parts:
+
+```json
+{ "receipt": "0512e22855924d79", "pane": "mupi1lr6-35", "ref": "studio:1", "generation": 1, "key": "task-42",
+  "wrote": { "sha256": "92bc5e…", "bytes": 41, "stage": "submitted",
+             "acceptedAt": "…", "typedAt": "…", "submittedAt": "…" },
+  "acknowledged": { "turn": 4, "at": "…" },
+  "outcome": "acknowledged" }
+```
+
+`wrote` is what Loom did: the digest and size of the text, and how far it got.
+`stage` is `accepted`, `typed`, or `submitted` once Enter went in. `uncertain`
+is `null`, or names the write that failed and may have gone in anyway: `type`
+(the text, so `stage` stays `accepted`) or `submit` (Enter, after the text was
+typed). A receipt whose Enter is uncertain stays `pending`, since the agent may
+be working on it. The next turn on that pane acknowledges it, whatever input
+started that turn, so `acknowledged` doesn't prove this Enter or this task
+reached the agent: `uncertain` stays `submit`, and only the agent's screen or
+answer can tell. `acknowledged`
+is what the pane signaled back: an agent's turn ending (`turn`), or a shell
+command's `failed` and `exit`. It is `null` until then. `outcome` is `pending`,
+`acknowledged`, or `none` when nothing will come (the pane restarted, exited or
+closed, or Enter was never pressed). A turn ending means the agent stopped,
+not that the job is done: read its answer.
+
+Loom keeps the digest, never the text, since prompts can hold secrets. Save the
+prompt on your side and hash its UTF-8 to compare. When `send --receipt` fails
+after writing anything (`"typed": true`), the failure carries the `receipt`.
+One whose Enter was held back shows `stage: "typed"`, and `wait --receipt` on
+it fails at once. Only a send that wrote nothing drops its receipt. A retry with the same `--key` answers with the first receipt and types
+nothing. Receipts live in memory: after Loom restarts or drops one, `receipt`
+fails with `"unavailable": true`.
+
 ## Retrying safely
 
 A command can time out or lose its connection after Loom ran it. Give each
@@ -335,9 +514,15 @@ and a failure prints one object:
 | `connection` | The connection broke. Check `sent`. | 2 |
 | `timeout` | No answer in time. Check `sent`. | 3 |
 
-From Loom, a failure can also carry `timeout`, `typed` (text is in the pane,
-Enter wasn't pressed) and `pressed` (keys that went in before a restart). The
-message also goes to stderr. Without `--json`, a success prints readable text
+From Loom, a failure can also carry `timeout`, `typed` (text may be in the
+pane and Enter wasn't surely pressed) and `pressed` (keys that went in before a
+restart). Other fields say more where a command needs to: `uncertain` (`type`
+or `submit`, the write that failed and may have gone in anyway), `receipt` (the
+record of a send that wrote something and didn't finish), `unavailable` (no
+such receipt any more),
+`closed` and `steps` (a cleanup that stopped part-way), `lost` and `discard`
+(what deleting would lose, and what `--discard` must name), and `plan` (a
+plan's revision now). The message also goes to stderr. Without `--json`, a success prints readable text
 and a failure prints only to stderr. The exit code is 0 on success either way.
 
 ## Recipes
@@ -363,7 +548,9 @@ loomctl read $sh.id --lines 40
 Hand an agent a task from a file, and wait for its turn:
 
 ```powershell
-$p = loomctl --json panes --thread login | ConvertFrom-Json | Where-Object agent -eq 'claude' | Select-Object -First 1
+$p = @(loomctl --json panes --thread login | ConvertFrom-Json | Where-Object agent -eq 'claude')
+if ($p.Count -ne 1) { throw "expected one Claude pane in login, found $($p.Count)" }
+$p = $p[0]
 $r = Get-Content task.md -Raw | loomctl --key login-task-1 send $p.id - --gen $p.generation --receipt
 $done = loomctl --json --timeout 3600 wait --receipt $r | ConvertFrom-Json
 if ($done.asking) { loomctl menu $p.id } else { loomctl read $p.id --lines 80 }
@@ -380,10 +567,11 @@ From an agent inside a Loom pane, the same commands work with no setup, and
 they reach the Loom that owns the pane. An agent can read other panes, start
 agents with `add`, hand them tasks with `send --receipt`, and wait for them.
 
-Clean up a finished worktree:
+Clean up a finished worktree, after seeing what it would lose:
 
 ```powershell
-loomctl close-thread login --yes --delete branch
+loomctl close-plan login --delete branch
+loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
 ```
 
 ## Limits
@@ -392,6 +580,10 @@ loomctl close-thread login --yes --delete branch
   restart, look up ids again with `panes` rather than reusing old ones.
 - A receipt or a turn says an agent finished or asked, not that its work is
   right.
+- Loom reads only Claude's input as a draft or a suggestion, and only as
+  Claude Code 2.1 draws it. Everything else is `unknown`. Loom never clears a
+  draft.
+- Receipts keep a digest of the text, not the text. Keep your own copy.
 - Restarting a Codex or OpenCode pane that has no saved session to resume needs
   a choice in the window.
 - `loomctl` finds one Loom per pipe. It can't list every Loom running.

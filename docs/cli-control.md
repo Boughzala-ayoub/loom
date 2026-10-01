@@ -101,8 +101,10 @@ screens, answer their questions, start more and wait for them.
 
 **Confirmations become `--yes`.** Where a button asks first, the command refuses
 without `--yes` instead of opening a dialog a script can't click. Deleting a
-worktree also runs the dialog's own check for uncommitted files and unmerged
-commits, and refuses if any would be lost unless you add `--force`.
+worktree also runs the dialog's own check, for changed, untracked and ignored
+files and for commits only on the branch, and refuses to lose any that
+`--discard` doesn't name (`--force` names them all). `close-plan` shows the
+same check without closing anything, and `--plan` refuses if it changed since.
 
 **Waiting is a command.** `wait` and `wait-any` block until a pane reaches a
 state. The page polls the state every 200 ms, because a state changes in a

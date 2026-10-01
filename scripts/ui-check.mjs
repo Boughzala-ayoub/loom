@@ -62,9 +62,16 @@ try {
           args.onOut.onmessage('\x1b]0;Review workspace navigation\x07\x1b[34m❯ loom\x1b[0m\r\n\r\nReady to work on this thread.\r\nChanges stay in its own worktree.\r\n\r\n\x1b[32m+ Ready\x1b[0m  \x1b[33m~ Pending\x1b[0m  \x1b[31m- Removed\x1b[0m\r\n\x1b[34mBlue\x1b[0m  \x1b[35mMagenta\x1b[0m  \x1b[36mCyan\x1b[0m\r\n');
           return location.search.includes('restore') ? new Promise(resolve => setTimeout(resolve, qa.panes.length * 30)) : undefined;
         }
+        if (cmd === 'pty_kill' && qa.onKill) qa.onKill(args.id); // Lets a test change the worktree as its panes stop.
         if (cmd === 'pty_kill' && qa.holdKills) return new Promise(resolve => qa.pendingKills.push(resolve));
         if (cmd === 'pty_write' && (qa.holdWrites === true || qa.holdWrites === args.id)) return new Promise(resolve => qa.pendingWrites.push(resolve)); // true: every pane; an id: that one
         if (cmd === 'pty_write' && qa.failWrite) throw new Error('Test terminal write failed');
+        // One write held in flight, reaching the pane when released; one that fails before
+        // the pane gets it; one the pane gets but whose answer is lost.
+        if (cmd === 'pty_write' && qa.gateWrite?.(args.data)) return new Promise(resolve => qa.gated.push(() => { qa.onWrite?.(args); resolve(); }));
+        if (cmd === 'pty_write' && qa.failWriteIf?.(args.data)) throw new Error('Test: the terminal write failed');
+        if (cmd === 'pty_write' && qa.loseReplyIf?.(args.data)) { qa.onWrite?.(args); throw new Error('Test: the terminal answered, and the answer was lost'); }
+        if (cmd === 'dictate_stop') return qa.dictation ?? '';
         if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
         if (cmd === 'pty_kill' && qa.controlKill) return window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${args.id}`, payload: 1 });
         if (cmd === 'plugin:window|is_focused') return qa.focused ?? true;
@@ -119,7 +126,10 @@ try {
         if (cmd === 'git_run') {
           const a = args.args;
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
-          if (a[0] === 'status') return (a.includes('--branch') ? '## main...origin/main [ahead 2]\0' : '') + (qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0');
+          if (a[0] === 'status' && qa.statusFor?.[args.dir] !== undefined) return qa.statusFor[args.dir]; // one worktree's own status
+          if (a[0] === 'status') return (a.includes('--branch') ? '## main...origin/main [ahead 2]\0' : '') + (qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0') + (a.includes('--ignored=matching') ? qa.ignored ?? '' : '');
+          if (a[0] === 'worktree' && a[1] === 'remove' && qa.failRemove) throw new Error('Test: the worktree folder is in use');
+          if (a[0] === 'branch' && a[1] === '-D' && qa.failBranch) throw new Error('Test: the branch is checked out elsewhere');
           if (a.includes('--numstat')) return '18\t4\tsrc/main.ts\n7\t2\tsrc/styles.css\n';
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
           if ((a[0] === 'diff' || a[0] === 'show') && qa.longDiff) return 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1,601 @@\n context line one\n' + '+added line\n'.repeat(600);
@@ -603,6 +613,456 @@ try {
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl --key retries, agent turns, receipts for agents and shells ${width}px`);
+
+      // Operator experience review (2026-10-01). Input: a draft and a suggestion
+      // with the same words read apart, and guarded sends check the input in the
+      // pane's turn. A fresh launch, so its first turn picks the bell.
+      assert.equal((await cli('restart', 'search-polish:1', '--yes')).ok, true);
+      assert.equal((await cli('show', 'search-polish:1')).ok, true);
+      const composer = () => page.evaluate(([id, rule]) => {
+        const qa = window.qa;
+        // Claude 2.1's input: typed text plain; its suggestion dim, the caret inverse on its first letter.
+        // qa.prompt: the glyph and separator before it, "> " or this PC's "❯" and a no-break space.
+        qa.draw = body => qa.panes.filter(a => a.id === id).at(-1).onOut.onmessage(`\x1b[2J\x1b[H● Done.\r\n${rule}\r\n${qa.prompt ?? '> '}${body}\x1b[0m\r\n${rule}\r\n  ? for shortcuts`);
+        qa.ghost = text => `\x1b[7m${text[0]}\x1b[0m\x1b[2m${text.slice(1)}`;
+        qa.input = ''; qa.submitted = []; qa.keep = ''; qa.collapse = false;
+        // Typing replaces the suggestion (qa.keep: a provider that leaves it in front), a
+        // multi-line paste collapses (qa.collapse), and Enter submits what's there.
+        qa.onWrite = ({ id: to, data }) => {
+          if (to !== id || qa.slowEcho) return; // slowEcho: the agent hasn't drawn it yet
+          if (data === '\r') { qa.submitted.push(qa.input); qa.input = ''; return qa.draw('\x1b[7m \x1b[0m'); }
+          const typed = data.replace(/\x1b\[20[01]~/g, '');
+          qa.input += qa.collapse && typed.includes('\n') ? '[Pasted text #1 +3 lines]' : typed;
+          qa.draw(qa.keep + qa.input + '\x1b[7m \x1b[0m');
+        };
+      }, [claude, '─'.repeat(40)]);
+      await composer();
+      const ask = 'fix the sign-up form fields too';
+      const drawn = async body => { await page.evaluate(body => window.qa.draw(body), body); await page.waitForTimeout(150); };
+      const showGhost = () => page.evaluate(() => { window.qa.input = ''; }).then(() => page.evaluate(ask => window.qa.ghost(ask), ask)).then(drawn);
+      const showDraft = () => page.evaluate(ask => { window.qa.input = ask; }, ask).then(() => drawn(`${ask}\x1b[7m \x1b[0m`));
+      const readNow = async (...more) => (await cli('read', 'search-polish:1', ...more)).data;
+      const submittedLast = () => page.evaluate(() => window.qa.submitted.at(-1));
+      const typedCount = async text => (await writes(claude)).filter(d => d.includes(text)).length;
+      {
+        await showGhost();
+        const ghost = await readNow('--styles');
+        await showDraft();
+        const draft = await readNow();
+        assert.equal(ghost.text, draft.text, 'As plain text the two screens are the same');
+        assert.deepEqual([ghost.input.kind, ghost.input.text, draft.input.kind, draft.input.text], ['suggestion', ask, 'draft', ask], JSON.stringify([ghost.input, draft.input]));
+        const row = ghost.rows.find(r => r.runs.map(run => run.text).join('').startsWith('> '));
+        assert.deepEqual(row.runs.slice(1).map(run => [run.text, !!run.inverse, !!run.dim]), [['f', true, false], [ask.slice(1), false, true]], JSON.stringify(row));
+        assert.ok(Number.isInteger(ghost.cursor.x) && Number.isInteger(ghost.cursor.y), JSON.stringify(ghost.cursor));
+        await out(claude, '\x1b[?25l');
+        assert.equal((await readNow()).cursor.hidden, true, 'The app hid the cursor');
+        await out(claude, '\x1b[?25h');
+        assert.equal((await readNow()).cursor.hidden, false);
+        assert.equal((await cli('read', 'search-polish:1', '--styles', '--lines', '5')).ok, false, '--styles is for the screen');
+        const codex = (await cli('panes')).data.find(p => p.agent === 'codex');
+        assert.equal((await cli('read', codex.id)).data.input.kind, 'unknown', "Codex's input was never checked: unknown, not a guess");
+      }
+      {
+        // A real draft survives a replace nobody approved: nothing typed, the draft still there.
+        await showDraft();
+        const before = (await writes(claude)).length;
+        const refused = await cli('send', 'search-polish:1', '--replace', 'write the tests');
+        assert.deepEqual([refused.ok, refused.typed], [false, false], JSON.stringify(refused));
+        assert.match(refused.error, /holds a draft someone typed/);
+        assert.equal((await writes(claude)).length, before, 'Nothing typed over the draft');
+        assert.equal((await readNow()).input.text, ask, 'The draft is untouched');
+        // An approved replace over a suggestion submits only the new text.
+        await showGhost();
+        const entersBefore = await enters();
+        const replaced = await cli('send', 'search-polish:1', '--replace', 'write the tests');
+        assert.equal(replaced.ok, true, JSON.stringify(replaced));
+        assert.deepEqual([await enters(), await submittedLast()], [entersBefore + 1, 'write the tests'], 'No old text appended');
+        // A provider that keeps the suggestion and types after it: Enter is held back.
+        await showGhost();
+        await page.evaluate(ask => { window.qa.keep = `\x1b[2m${ask}\x1b[0m`; }, ask);
+        const held = await cli('send', 'search-polish:1', '--replace', 'write the tests');
+        assert.deepEqual([held.ok, held.typed], [false, true], JSON.stringify(held));
+        assert.match(held.error, /couldn't see the suggestion gone/);
+        assert.equal(await enters(), entersBefore + 1, 'No Enter after the old text');
+        await page.evaluate(() => { window.qa.keep = ''; });
+      }
+      {
+        // One call: --input with the revision just read goes through.
+        await showGhost();
+        const fresh = (await readNow()).input.rev;
+        const sent = await cli('send', 'search-polish:1', '--input', fresh, 'write the tests');
+        assert.equal(sent.ok, true, JSON.stringify(sent));
+        // Another loomctl writer between the read and the send: nothing typed.
+        await showGhost();
+        const seen = (await readNow()).input.rev;
+        assert.equal((await cli('keys', 'search-polish:1', 'x')).ok, true);
+        const typedBefore = await typedCount('stale task');
+        const stale = await cli('send', 'search-polish:1', '--input', seen, 'stale task');
+        assert.deepEqual([stale.ok, stale.typed], [false, false], JSON.stringify(stale));
+        assert.match(stale.error, /input changed since revision/);
+        assert.equal(await typedCount('stale task'), typedBefore);
+        // Someone typing in the window counts the same, even before the agent draws it.
+        await showGhost();
+        const seen2 = (await readNow()).input.rev;
+        await page.evaluate(() => { window.qa.slowEcho = true; });
+        await page.locator(`.pane[data-id="${claude}"] .xterm-helper-textarea`).focus();
+        await page.keyboard.type('h');
+        await page.waitForFunction(id => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data === 'h'), claude);
+        assert.equal((await readNow()).input.kind, 'suggestion', 'The screen still shows only the suggestion');
+        const human = await cli('send', 'search-polish:1', '--input', seen2, 'stale task');
+        await page.evaluate(() => { window.qa.slowEcho = false; });
+        assert.deepEqual([human.ok, human.typed], [false, false], JSON.stringify(human));
+        assert.equal(await typedCount('stale task'), typedBefore);
+        // The preview workflow: a first letter, a look, then the rest, each against what was read.
+        await showGhost();
+        assert.equal((await cli('send', 'search-polish:1', '--no-enter', '--input', (await readNow()).input.rev, 'W')).ok, true);
+        await page.waitForTimeout(150);
+        const preview = (await readNow()).input;
+        assert.deepEqual([preview.kind, preview.text], ['draft', 'W'], 'The letter dismissed the suggestion');
+        const rest = await cli('send', 'search-polish:1', '--input', preview.rev, 'rite the tests');
+        assert.equal(rest.ok, true, JSON.stringify(rest));
+        assert.equal(await submittedLast(), 'Write the tests');
+        // ... and a writer between its two calls stops the rest.
+        await showGhost();
+        assert.equal((await cli('send', 'search-polish:1', '--no-enter', '--input', (await readNow()).input.rev, 'W')).ok, true);
+        await page.waitForTimeout(150);
+        const preview2 = (await readNow()).input;
+        await cli('keys', 'search-polish:1', 'x');
+        const restBefore = await typedCount('rest of it');
+        const raced = await cli('send', 'search-polish:1', '--input', preview2.rev, 'rest of it');
+        assert.deepEqual([raced.ok, raced.typed], [false, false], JSON.stringify(raced));
+        assert.equal(await typedCount('rest of it'), restBefore);
+      }
+      let auditToken;
+      {
+        // Receipts keep the digest of exactly what was typed, not the text, after the screen moved on.
+        await showGhost();
+        await page.evaluate(() => { window.qa.collapse = true; });
+        const exact = 'Fix the form.\n\n\t- keep tabs\n- é and 🙂';
+        const digest = '92bc5efe82e8124ca71fb15b541e581e2c5f2dd483bd93407c2d917552612c6b'; // node:crypto
+        const sent = await call('send', ['search-polish:1', '-', '--receipt'], exact + '\r\n', 'audit-task-1');
+        assert.deepEqual([sent.ok, sent.data?.sha256, sent.data?.bytes], [true, digest, 41], JSON.stringify(sent));
+        auditToken = sent.data.receipt;
+        await out(claude, '\x1b[2J\x1b[H● Working on something else entirely\r\n');
+        const record = (await cli('receipt', auditToken)).data;
+        assert.deepEqual([record.wrote.sha256, record.wrote.bytes, record.wrote.stage, record.key, record.pane, record.generation, record.acknowledged, record.outcome],
+          [digest, 41, 'submitted', 'audit-task-1', claude, sent.data.generation, null, 'pending'], JSON.stringify(record));
+        const at = ['acceptedAt', 'typedAt', 'submittedAt'].map(k => Date.parse(record.wrote[k]));
+        assert.ok(at.every(t => t > 0) && at[0] <= at[1] && at[1] <= at[2], JSON.stringify(record.wrote));
+        assert.ok(!JSON.stringify(record).includes('keep tabs'), 'The record holds no text');
+        // The same key again answers with the first record, typing nothing.
+        const typedBefore = await typedCount('keep tabs');
+        const retried = await call('send', ['search-polish:1', '-', '--receipt'], exact + '\r\n', 'audit-task-1');
+        assert.deepEqual([retried.replayed, retried.data.receipt, retried.data.sha256], [true, auditToken, digest], JSON.stringify(retried));
+        assert.equal(await typedCount('keep tabs'), typedBefore, 'The retry typed nothing');
+        // The agent's turn ends: acknowledged, and nothing claims the job succeeded.
+        await out(claude, '\x07');
+        const acked = (await cli('receipt', auditToken)).data;
+        assert.equal(acked.outcome, 'acknowledged', JSON.stringify(acked));
+        assert.deepEqual(Object.keys(acked.acknowledged).sort(), ['at', 'turn'], JSON.stringify(acked.acknowledged));
+        const waited = (await cli('wait', '--receipt', auditToken)).data;
+        assert.ok(waited.done && !('failed' in waited) && !('success' in waited), JSON.stringify(waited));
+        // Typed, but Enter held back: on record as typed, and wait says so at once.
+        await page.evaluate(() => { window.qa.onWrite = null; window.qa.collapse = false; });
+        const unsent = await cli('send', 'search-polish:1', '--receipt', 'this never shows on screen');
+        assert.deepEqual([unsent.ok, unsent.typed, typeof unsent.receipt], [false, true, 'string'], JSON.stringify(unsent));
+        const unsentRecord = (await cli('receipt', unsent.receipt)).data;
+        assert.deepEqual([unsentRecord.wrote.stage, unsentRecord.wrote.submittedAt, unsentRecord.outcome], ['typed', null, 'none'], JSON.stringify(unsentRecord));
+        const unsentWait = await call('wait', ['--receipt', unsent.receipt], null, null, 3);
+        assert.deepEqual([unsentWait.ok, unsentWait.timeout], [false, false], JSON.stringify(unsentWait));
+        assert.match(unsentWait.error, /didn't press Enter/);
+        const never = await cli('receipt', '0123456789abcdef');
+        assert.deepEqual([never.ok, never.unavailable], [false, true], JSON.stringify(never));
+      }
+      {
+        // Deleting a worktree: ignored files count as loss, a plan pins what was
+        // seen, and a cleanup that stops part-way says which steps finished.
+        const worktree = async name => {
+          const made = await cli('new', 'C:\\projects\\loom', '--name', name, '--cmd=');
+          assert.equal(made.ok, true, JSON.stringify(made));
+          await page.evaluate(dir => { window.qa.statusFor = { ...window.qa.statusFor, [dir]: '' }; }, made.data.dir);
+          return made.data;
+        };
+        const statusOf = (dir, z) => page.evaluate(([dir, z]) => { window.qa.statusFor[dir] = z; }, [dir, z]);
+        const open = async id => (await cli('threads')).data.some(t => t.id === id);
+        const killed = ids => page.evaluate(ids => window.qa.calls.some(c => c.cmd === 'pty_kill' && ids.includes(c.args.id)), ids);
+        const gitCalls = (verb, dir) => page.evaluate(([verb, dir]) => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args.slice(0, 2).join(' ') === verb && (!dir || c.args.args.includes(dir))).length, [verb, dir]);
+        const a = await worktree('cleanup-a');
+        const paneIds = a.panes.map(p => p.id);
+        await statusOf(a.dir, '!! .env\0!! node_modules/\0');
+        const plan = await cli('close-plan', a.id, '--delete', 'branch');
+        assert.equal(plan.ok, true, JSON.stringify(plan));
+        assert.deepEqual([plan.data.thread, plan.data.dir, plan.data.branch, plan.data.panes.map(p => p.id), plan.data.lost, plan.data.ignored, plan.data.discard],
+          [a.id, a.dir, a.branch, paneIds, { tracked: 0, untracked: 0, ignored: 2, commits: 0 }, ['.env', 'node_modules/'], ['ignored']], JSON.stringify(plan.data));
+        assert.match(plan.data.rev, /^[0-9a-f]{16}$/);
+        assert.match(plan.text, /--discard ignored/);
+        assert.ok(await open(a.id) && !(await killed(paneIds)), 'A plan changes nothing');
+        // A clean tree with only ignored files no longer deletes without a word.
+        const unauthorized = await cli('close-thread', a.id, '--yes', '--delete', 'branch');
+        assert.equal(unauthorized.ok, false, JSON.stringify(unauthorized));
+        assert.match(unauthorized.error, /2 ignored files or folders will be deleted: \.env, node_modules\//);
+        assert.deepEqual(unauthorized.discard, ['ignored']);
+        assert.ok(await open(a.id) && !(await killed(paneIds)), 'Refused before closing anything');
+        // A worktree or a thread that changed after the plan fails before cleanup.
+        await statusOf(a.dir, '!! .env\0!! node_modules/\0?? notes/new.md\0');
+        const changed = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan.data.rev, '--discard', 'ignored');
+        assert.equal(changed.ok, false, JSON.stringify(changed));
+        assert.match(changed.error, /changed since plan/);
+        await statusOf(a.dir, '!! .env\0!! node_modules/\0');
+        const extra = await cli('add', a.id, '--cmd=');
+        const morePanes = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan.data.rev, '--discard', 'ignored');
+        assert.equal(morePanes.ok, false, JSON.stringify(morePanes));
+        assert.match(morePanes.error, /changed since plan/);
+        assert.ok(await open(a.id) && !(await killed([...paneIds, extra.data.id])), 'Still open, every pane still running');
+        assert.equal(await gitCalls('worktree remove') + await gitCalls('branch -D'), 0);
+        // With the plan as it now is and the ignored files allowed, it goes, step by step.
+        const plan2 = (await cli('close-plan', a.id, '--delete', 'branch')).data;
+        const done = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan2.rev, '--discard', 'ignored');
+        assert.equal(done.ok, true, JSON.stringify(done));
+        assert.deepEqual(done.data.steps, { panes: 'closed', worktree: 'removed', branch: 'deleted' });
+        assert.ok(!(await open(a.id)));
+        // The folder won't go: the panes are closed, the folder failed, the branch is kept.
+        const b = await worktree('cleanup-b');
+        await page.evaluate(() => { window.qa.failRemove = true; });
+        const stuck = await cli('close-thread', b.id, '--yes', '--delete', 'branch');
+        assert.equal(stuck.ok, false, JSON.stringify(stuck));
+        assert.deepEqual([stuck.closed, stuck.steps], [b.id, { panes: 'closed', worktree: 'failed', branch: 'kept' }], JSON.stringify(stuck));
+        assert.match(stuck.error, /stopped its panes, but couldn't remove its worktree folder, which may be partly deleted, so its branch was kept/);
+        assert.equal(await gitCalls('branch -D', b.branch), 0, 'No branch deleted after the folder failed');
+        // The folder goes and the branch won't: said apart. --force still deletes without looking.
+        const c = await worktree('cleanup-c');
+        await page.evaluate(() => { window.qa.failRemove = false; window.qa.failBranch = true; });
+        const branchStuck = await cli('close-thread', c.id, '--yes', '--delete', 'branch', '--force');
+        assert.deepEqual([branchStuck.ok, branchStuck.steps], [false, { panes: 'closed', worktree: 'removed', branch: 'failed' }], JSON.stringify(branchStuck));
+        // Something writes as the panes stop: the folder is kept, and the answer says why.
+        const d = await worktree('cleanup-d');
+        await page.evaluate(([dir, ids]) => { window.qa.failBranch = false; window.qa.onKill = id => { if (ids.includes(id)) window.qa.statusFor[dir] = '?? crash.log\0'; }; }, [d.dir, d.panes.map(p => p.id)]);
+        const racing = await cli('close-thread', d.id, '--yes', '--delete', 'worktree');
+        assert.deepEqual([racing.ok, racing.steps], [false, { panes: 'closed', worktree: 'kept', branch: null }], JSON.stringify(racing));
+        assert.match(racing.error, /kept its worktree folder: its untracked files changed while its panes closed/);
+        assert.equal(await gitCalls('worktree remove', d.dir), 0);
+        await page.evaluate(() => { window.qa.onKill = null; delete window.qa.statusFor; });
+      }
+      // Pane 7 review (2026-10-01).
+      assert.equal((await cli('show', 'search-polish:1')).ok, true);
+      await composer();
+      const showEmpty = () => page.evaluate(() => { window.qa.input = ''; }).then(() => drawn('\x1b[7m \x1b[0m'));
+      const held = () => page.evaluate(() => window.qa.input);
+      {
+        // This PC's Claude draws "❯" and a no-break space: read, replaced and checked after the paste.
+        await page.evaluate(() => { window.qa.prompt = '❯\u00a0'; });
+        await showGhost();
+        const ghost = (await readNow()).input;
+        await showDraft();
+        const draft = (await readNow()).input;
+        assert.deepEqual([ghost.kind, ghost.text, draft.kind, draft.text], ['suggestion', ask, 'draft', ask], JSON.stringify([ghost, draft]));
+        await drawn(`\x1b[2m${ask}`);
+        assert.equal((await readNow()).input.kind, 'suggestion', 'Unfocused, all dim');
+        await showGhost();
+        const entersBefore = await enters();
+        const replaced = await cli('send', 'search-polish:1', '--replace', 'write the tests');
+        assert.equal(replaced.ok, true, JSON.stringify(replaced));
+        assert.deepEqual([await enters(), await submittedLast()], [entersBefore + 1, 'write the tests']);
+        // The collapsed paste pane 7 showed reads as a draft after the paste, so Enter goes.
+        await page.evaluate(() => { window.qa.collapse = true; });
+        await showGhost();
+        const collapsed = await cli('send', 'search-polish:1', '--replace', 'first line\nsecond line\nthird line');
+        assert.equal(collapsed.ok, true, JSON.stringify(collapsed));
+        assert.equal(await submittedLast(), '[Pasted text #1 +3 lines]');
+        await page.evaluate(() => { window.qa.collapse = false; });
+      }
+      {
+        // Nothing joins a send between its paste and its Enter. Loom's paste is held
+        // in flight (gateWrite) while another writer that doesn't queue behind it writes.
+        const inFlight = async (text, args) => {
+          await page.evaluate(text => { window.qa.gated = []; window.qa.gateWrite = d => d.includes(text); }, text);
+          const sending = cli('send', 'search-polish:1', ...args, text);
+          await page.waitForFunction(() => window.qa.gated.length === 1);
+          return [sending];
+        };
+        const release = () => page.evaluate(() => { window.qa.gateWrite = null; window.qa.gated.splice(0).forEach(go => go()); });
+        const writesOf = text => page.evaluate(([id, text]) => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data.includes(text)), [claude, text]);
+        // Typing in the window during the paste, into an empty input, guarded and with a receipt.
+        await showEmpty();
+        let entersBefore = await enters();
+        const [typing] = await inFlight('approved text', ['--input', (await readNow()).input.rev, '--receipt']);
+        await page.locator(`.pane[data-id="${claude}"] .xterm-helper-textarea`).focus();
+        await page.keyboard.type(' AND A HUMAN EDIT');
+        await release();
+        const typed = await typing;
+        assert.deepEqual([typed.ok, typed.typed], [false, true], JSON.stringify(typed));
+        assert.match(typed.error, /Something else was typed into claude while Loom was pasting, so it didn't press Enter/);
+        assert.equal(await enters(), entersBefore, 'No Enter');
+        assert.ok((await held()).includes('approved text') && (await held()).includes('AND A HUMAN EDIT'), `The joined draft stays for a person: ${await held()}`);
+        const typedRecord = (await cli('receipt', typed.receipt)).data;
+        assert.deepEqual([typedRecord.wrote.stage, typedRecord.wrote.uncertain, typedRecord.outcome], ['typed', null, 'none'], JSON.stringify(typedRecord));
+        // Dictation during the paste, over a suggestion with --replace.
+        await page.evaluate(() => { document.activeElement?.blur(); window.qa.dictation = 'and some dictated words'; });
+        await showGhost();
+        entersBefore = await enters();
+        const [dictating] = await inFlight('second approved text', ['--replace']);
+        await page.keyboard.down('F4');
+        await page.waitForTimeout(150);
+        await page.keyboard.up('F4');
+        await page.waitForFunction(id => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data.includes('dictated words')), claude);
+        await release();
+        const dictated = await dictating;
+        assert.deepEqual([dictated.ok, dictated.typed], [false, true], JSON.stringify(dictated));
+        assert.equal(await enters(), entersBefore, 'No Enter after dictation joined');
+        assert.ok((await held()).includes('second approved text') && (await held()).includes('dictated words'), await held());
+        // A file dropped after the paste landed, while Loom waits to see it: no Enter either.
+        await showGhost();
+        entersBefore = await enters();
+        const [dropping] = await inFlight('third approved text', ['--input', (await readNow()).input.rev]);
+        const box = await page.locator(`.pane[data-id="${claude}"]`).boundingBox();
+        await page.evaluate(({ x, y }) => {
+          window.qa.gateWrite = null;
+          window.qa.gated.splice(0).forEach(go => go());
+          setTimeout(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://drag-drop', payload: { paths: ['C:\\notes\\dropped.txt'], position: { x, y } } }), 30);
+        }, { x: box.x + box.width / 2, y: box.y + box.height / 2 });
+        const dropped = await dropping;
+        assert.deepEqual([dropped.ok, dropped.typed], [false, true], JSON.stringify(dropped));
+        assert.ok(await writesOf('dropped.txt'), 'The drop reached the pane');
+        assert.equal(await enters(), entersBefore, 'No Enter after the drop');
+        assert.ok((await held()).includes('third approved text') && (await held()).includes('dropped.txt'), await held());
+        // Sends queued behind each other aren't other writers: each submits once.
+        await showEmpty();
+        entersBefore = await enters();
+        const queued = await Promise.all([cli('send', 'search-polish:1', 'queued one'), cli('send', 'search-polish:1', 'queued two')]);
+        assert.deepEqual(queued.map(r => r.ok), [true, true], JSON.stringify(queued));
+        assert.equal(await enters(), entersBefore + 2);
+        assert.deepEqual((await page.evaluate(() => window.qa.submitted.slice(-2))).sort(), ['queued one', 'queued two']);
+      }
+      {
+        // A failed write keeps its receipt and says what may have gone in. Only a
+        // send that wrote nothing is gone, and only it is safe to send again.
+        await showEmpty();
+        const before = await cli('send', 'search-polish:1', '--receipt', '--input', 'not-a-revision', 'never typed');
+        assert.deepEqual([before.ok, before.typed, before.receipt, before.uncertain], [false, false, undefined, undefined], JSON.stringify(before));
+        // The paste's write fails: some of the text may be in.
+        await page.evaluate(() => { window.qa.failWriteIf = d => d.includes('paste fails'); });
+        const pasteFail = await cli('send', 'search-polish:1', '--receipt', 'paste fails here');
+        assert.deepEqual([pasteFail.ok, pasteFail.typed, pasteFail.uncertain, typeof pasteFail.receipt], [false, true, 'type', 'string'], JSON.stringify(pasteFail));
+        const pasteRecord = (await cli('receipt', pasteFail.receipt)).data;
+        assert.deepEqual([pasteRecord.wrote.stage, pasteRecord.wrote.uncertain, pasteRecord.outcome], ['accepted', 'type', 'none'], JSON.stringify(pasteRecord));
+        const pasteWait = await call('wait', ['--receipt', pasteFail.receipt], null, null, 3);
+        assert.deepEqual([pasteWait.ok, pasteWait.timeout], [false, false], JSON.stringify(pasteWait));
+        assert.match(pasteWait.error, /may have typed part of/);
+        // Enter's write fails before the pane gets it: typed, Enter uncertain, the text waiting in the input.
+        await showEmpty();
+        await page.evaluate(() => { window.qa.failWriteIf = d => d === '\r'; });
+        const submittedBefore = await page.evaluate(() => window.qa.submitted.length);
+        const enterFail = await call('send', ['search-polish:1', '--receipt', 'enter fails'], null, 'enter-fail-1');
+        assert.deepEqual([enterFail.ok, enterFail.typed, enterFail.uncertain], [false, true, 'submit'], JSON.stringify(enterFail));
+        assert.match(enterFail.error, /writing Enter failed \(.*\), so it may or may not have gone in/);
+        const enterRecord = (await cli('receipt', enterFail.receipt)).data;
+        assert.deepEqual([enterRecord.wrote.stage, enterRecord.wrote.uncertain, enterRecord.wrote.submittedAt, enterRecord.key, enterRecord.outcome],
+          ['typed', 'submit', null, 'enter-fail-1', 'pending'], JSON.stringify(enterRecord));
+        assert.deepEqual([await held(), await page.evaluate(() => window.qa.submitted.length)], ['enter fails', submittedBefore], 'In the input, not submitted');
+        // Retried with its key: the first answer, nothing typed again.
+        const typedOnce = await typedCount('enter fails');
+        const retried = await call('send', ['search-polish:1', '--receipt', 'enter fails'], null, 'enter-fail-1');
+        assert.deepEqual([retried.replayed, retried.receipt, retried.uncertain], [true, enterFail.receipt, 'submit'], JSON.stringify(retried));
+        assert.equal(await typedCount('enter fails'), typedOnce);
+        // Enter reaches the pane and its answer is lost: uncertain the same, until the turn settles it.
+        await page.evaluate(() => { window.qa.failWriteIf = null; window.qa.loseReplyIf = d => d === '\r'; });
+        await showEmpty();
+        const lost = await cli('send', 'search-polish:1', '--receipt', 'enter answer lost');
+        assert.deepEqual([lost.ok, lost.typed, lost.uncertain], [false, true, 'submit'], JSON.stringify(lost));
+        assert.equal(await submittedLast(), 'enter answer lost', 'The pane did take the Enter');
+        await page.evaluate(() => { window.qa.loseReplyIf = null; });
+        await out(claude, '\x07');
+        const settled = (await cli('receipt', lost.receipt)).data;
+        assert.deepEqual([settled.wrote.stage, settled.wrote.uncertain, settled.outcome], ['typed', 'submit', 'acknowledged'], JSON.stringify(settled));
+        // Without a receipt, the failure still says the text went in and Enter is uncertain.
+        await page.evaluate(() => { window.qa.failWriteIf = d => d === '\r'; });
+        await showEmpty();
+        const plain = await cli('send', 'search-polish:1', 'plain enter fails');
+        assert.deepEqual([plain.ok, plain.typed, plain.uncertain, plain.receipt], [false, true, 'submit', undefined], JSON.stringify(plain));
+        await page.evaluate(() => { window.qa.failWriteIf = null; window.qa.prompt = undefined; });
+      }
+      {
+        // Follow-up review (2026-10-01 21:12). A writer whose continuation is already
+        // queued can't slip between Loom's last check and its paste. Right-click paste
+        // reads the clipboard and pastes in a promise continuation; here the clipboard
+        // answers at a chosen microtask depth after the send's digest, swept from before
+        // the send's turn starts to after its paste begins.
+        await page.evaluate(() => {
+          const qa = window.qa;
+          qa.realDigest = crypto.subtle.digest;
+          navigator.clipboard.readText = () => new Promise(resolve => { qa.clip = resolve; });
+          crypto.subtle.digest = async (...args) => {
+            const out = await qa.realDigest.apply(crypto.subtle, args);
+            if (qa.clipDepth !== undefined) {
+              let n = qa.clipDepth;
+              qa.clipDepth = undefined;
+              const step = () => (n-- > 0 ? queueMicrotask(step) : qa.clip(' HUMAN'));
+              step();
+            }
+            return out;
+          };
+        });
+        const rightClick = id => page.evaluate(id => document.querySelector(`.pane[data-id="${id}"] .pane-term`).dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })), id);
+        const humans = () => typedCount(' HUMAN');
+        const tally = { refused: 0, held: 0 };
+        for (const start of ['empty', 'suggestion']) {
+          for (let depth = 0; depth < 40; depth++) {
+            await (start === 'empty' ? showEmpty() : showGhost());
+            const rev = (await readNow()).input.rev;
+            const humansBefore = await humans();
+            await rightClick(claude);
+            await page.evaluate(depth => { window.qa.clipDepth = depth; }, depth);
+            const sent = await cli('send', 'search-polish:1', '--input', rev, '--replace', '--receipt', 'approved text');
+            const at = `${start} input, writer at microtask ${depth}: ${JSON.stringify(sent)}`;
+            assert.equal(await humans(), humansBefore + 1, `The writer wrote: ${at}`);
+            assert.equal(sent.ok, false, at);
+            assert.ok(!(await page.evaluate(() => window.qa.submitted.some(s => s.includes('HUMAN')))), `Nothing joined was submitted: ${at}`);
+            if (sent.typed) {
+              tally.held++;
+              assert.match(sent.error, /while Loom was pasting, so it didn't press Enter/, at);
+              assert.equal((await cli('receipt', sent.receipt)).data.wrote.stage, 'typed', at);
+            } else {
+              tally.refused++;
+              assert.equal(sent.receipt, undefined, at);
+            }
+          }
+        }
+        assert.ok(tally.refused > 0 && tally.held > 0, `The sweep spans the paste's start: ${JSON.stringify(tally)}`);
+        console.log(`pre-paste writer sweep (80 runs): ${tally.refused} refused before typing, ${tally.held} held Enter`);
+        await page.evaluate(() => { crypto.subtle.digest = window.qa.realDigest; delete navigator.clipboard.readText; });
+        // A shell receipt waits for its prompt; typing in the window meanwhile stops it with nothing typed.
+        const shell = (await cli('add', 'search-polish', '--cmd=')).data.id;
+        const waiting = cli('send', shell, '--receipt', 'echo approved');
+        await page.waitForTimeout(300);
+        await page.locator(`.pane[data-id="${shell}"] .xterm-helper-textarea`).focus();
+        await page.keyboard.type('rm');
+        await out(shell, '\x1b]133;A\x07PS> \x1b]133;B\x07');
+        const waited = await waiting;
+        assert.deepEqual([waited.ok, waited.typed, waited.receipt], [false, false, undefined], JSON.stringify(waited));
+        assert.match(waited.error, /while Loom waited to type, so it typed nothing/);
+        assert.ok(!(await writes(shell)).some(d => d.includes('echo approved')), 'Nothing of the send was typed');
+        assert.equal((await cli('close', shell, '--yes')).ok, true);
+        // A failed Enter, then a turn that had nothing to do with it: the receipt is
+        // acknowledged and still uncertain, never shown as submitted.
+        assert.equal((await cli('show', 'search-polish:1')).ok, true);
+        await showEmpty();
+        await page.evaluate(() => { window.qa.failWriteIf = d => d === '\r'; });
+        const unsent = await cli('send', 'search-polish:1', '--receipt', 'never reached the agent');
+        assert.deepEqual([unsent.typed, unsent.uncertain], [true, 'submit'], JSON.stringify(unsent));
+        await page.evaluate(() => { window.qa.failWriteIf = null; });
+        await out(claude, '\x07');
+        const acked = (await cli('receipt', unsent.receipt)).data;
+        assert.deepEqual([acked.outcome, acked.wrote.stage, acked.wrote.uncertain, acked.wrote.submittedAt], ['acknowledged', 'typed', 'submit', null], JSON.stringify(acked));
+        assert.ok(!(await page.evaluate(() => window.qa.submitted.some(s => s.includes('never reached')))), 'The agent never got it');
+      }
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS loomctl input kinds and guarded sends, receipt records, worktree deletion plans and steps, no-break prompt, paste-to-Enter writers, receipts on failed writes, pre-paste writer sweep, unrelated turns after a failed Enter ${width}px`);
+      // In memory only: after a restart, a receipt says it's unavailable rather than pending.
+      await page.reload();
+      await page.waitForFunction(() => window.qa?.calls.some(c => c.cmd === 'cli_ready'));
+      const afterRestart = await cli('receipt', auditToken);
+      assert.deepEqual([afterRestart.ok, afterRestart.unavailable], [false, true], JSON.stringify(afterRestart));
     }
     await page.goto(base + '?long-location');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
@@ -2051,16 +2511,26 @@ try {
       await page.waitForSelector('#confirm[open]');
       return page.textContent('#confirm-detail');
     };
-    await page.evaluate(() => window.qa.unmerged = '2');
+    await page.evaluate(() => { window.qa.unmerged = '2'; window.qa.ignored = '!! .env\0!! node_modules/\0'; });
     const risky = await deleteDetail();
     assert.match(risky, /3 uncommitted files will be deleted/);
+    assert.match(risky, /2 ignored files or folders will be deleted: \.env, node_modules\//);
     assert.match(risky, /2 commits exist only on loom\//);
     await audit('confirm-delete-worktree');
     await page.click('#confirm button[value=cancel]');
-    await page.evaluate(() => { window.qa.unmerged = '0'; window.qa.clean = true; });
+    await page.evaluate(() => { window.qa.unmerged = '0'; window.qa.clean = true; delete window.qa.ignored; });
     assert.doesNotMatch(await deleteDetail(), /⚠/);
     await page.click('#confirm button[value=cancel]');
-    await page.evaluate(() => { delete window.qa.unmerged; window.qa.clean = false; });
+    // A clean tree's only copy of a file can be an ignored one: the dialog names it.
+    await page.evaluate(() => { window.qa.ignored = '!! notes/private.md\0'; });
+    assert.match(await deleteDetail(), /1 ignored file or folder will be deleted: notes\/private\.md/);
+    // It changes while the dialog is open: confirming then closes nothing.
+    const openThread = await page.textContent('#wsname');
+    await page.evaluate(() => { window.qa.ignored = '!! notes/private.md\0!! notes/second.md\0'; });
+    await page.click('#confirm-action');
+    await page.waitForTimeout(300);
+    assert.equal(await page.textContent('#wsname'), openThread, 'The thread is still open');
+    await page.evaluate(() => { delete window.qa.unmerged; window.qa.clean = false; delete window.qa.ignored; });
     assert.ok(!(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'git_run' && c.args.args[1] === 'remove'))), 'Cancel must not remove anything');
     await page.locator('.grid:not(.hidden) .cfg').first().click();
     await audit('pane-settings');

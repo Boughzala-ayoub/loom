@@ -27,6 +27,16 @@ export function parseStatus(z: string): Change[] {
   return out;
 }
 
+/** What deleting a worktree destroys, from `git status --porcelain=v1 -z -uall
+ * --ignored=matching`: changed tracked files, each untracked file, and each
+ * ignored path. A folder ignored as a whole (node_modules/) is one path, so
+ * churn inside it doesn't change the list. */
+export function lossInventory(z: string): { tracked: string[]; untracked: string[]; ignored: string[] } {
+  const out = { tracked: [] as string[], untracked: [] as string[], ignored: [] as string[] };
+  for (const c of parseStatus(z)) (c.x === "?" ? out.untracked : c.x === "!" ? out.ignored : out.tracked).push(c.path);
+  return out;
+}
+
 /** The `## ` line `git status --porcelain=v1 -z --branch` starts with, as the
  * two answers it replaces: `upstream` is what `rev-parse --abbrev-ref
  * @{upstream}` printed and `span` what `rev-list --left-right --count

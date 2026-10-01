@@ -1,5 +1,5 @@
 // Self-check for loomctl's pure helpers. Run: node src/cli.test.ts
-import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, pruneSettled, str, table, type Args } from "./cli.ts";
+import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args } from "./cli.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -96,6 +96,25 @@ eq("A request that started first and finished last keeps its result", [cache.has
 cache = entries(5, 2, undefined, 9, 1);
 pruneSettled(cache, (e) => e.at, 2);
 eq("Out of order, the two that finished last stay", kept(cache), "k0 k2 k3");
+
+// --discard: each loss named, or all; anything else is refused rather than read as "nothing".
+eq("--discard missing allows nothing", [...discards(undefined)], []);
+eq("--discard ignored", [...discards("ignored")], ["ignored"]);
+eq("--discard takes a comma list, any case, spaces around", [...discards("IGNORED, untracked")], ["ignored", "untracked"]);
+eq("--discard all is every loss", [...discards("all")], [...LOSSES]);
+throws("--discard refuses a loss it doesn't know", () => discards("everything"));
+throws("--discard refuses an empty list", () => discards(""));
+throws("--discard refuses an empty item", () => discards("ignored,"));
+
+// Receipt digests: SHA-256 of the UTF-8 bytes, vectors from node:crypto (OpenSSL).
+const vectors: [string, string][] = [
+  ["", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+  ["line one\nline two\r\n", "8c7668e428096f1a8d66a54d0ca3e727ed4ac884e7451e228eaccc8905233194"],
+  ["col\tcol\tcol", "12f47969038b073235e4e80bed5e1855b543ec267ccb3fab52bf59e53ee9053e"],
+  ["café 世界 🙂", "de532ba63c92451a6605839a8ea7fbb921c84679415570ff3e8d3d29e55b4f7a"],
+  ["Fix the form.\n\n\t- keep tabs\n- é and 🙂", "92bc5efe82e8124ca71fb15b541e581e2c5f2dd483bd93407c2d917552612c6b"],
+];
+for (const [text, want] of vectors) eq(`sha256 of ${JSON.stringify(text)}`, await sha256(text), want);
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

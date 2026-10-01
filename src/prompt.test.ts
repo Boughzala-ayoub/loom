@@ -1,5 +1,5 @@
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, echoes, echoed, menuRev, type Menu } from "./prompt.ts";
+import { readMenu, readInput, echoes, echoed, menuRev, type Cell, type Menu } from "./prompt.ts";
 
 let fails = 0;
 // The summary fields; `prompt` gets checks of its own.
@@ -167,6 +167,59 @@ check("Same last four question lines, another command", JSON.stringify(command("
 check("is another menu", menuRev(command("rm -rf build")) === menuRev(command("rm -rf src")), false);
 const moved = readMenu(claude.replace(" ❯ 1. Yes", "   1. Yes").replace("   2. Yes, and", " ❯ 2. Yes, and"))!;
 check("Moving the highlight keeps a long prompt's revision", [moved.selected, menuRev(moved) === menuRev(readMenu(claude)!)], [1, true]);
+
+// readInput: Claude's input line, cell by cell. A run's style: d dim, i inverse, w wide (two cells).
+const cells = (...runs: [string, string?][]): Cell[] => runs.flatMap(([t, s = ""]) => [...t].flatMap((ch) => {
+  const c = { ch, dim: s.includes("d"), inverse: s.includes("i") };
+  return s.includes("w") ? [c, { ...c, ch: "" }] : [c];
+}));
+const pad = (row: Cell[]) => [...row, ...cells([" ".repeat(Math.max(0, 60 - row.length))])];
+const rule = "─".repeat(60);
+// The screen around it: an earlier prompt in the transcript (no rule above), the
+// input between two rules, then the shortcuts hint.
+const claudeScreen = (...input: Cell[][]) => [
+  cells(["> an earlier prompt in the transcript"]),
+  cells(["● Done. The form validates now."]),
+  cells([rule]),
+  [...cells(["> "]), ...input[0]],
+  ...input.slice(1).map((r) => [...cells(["  "]), ...r]),
+  cells([rule]),
+  cells(["  ? for shortcuts"]),
+].map(pad);
+const read = (...input: Cell[][]) => readInput(claudeScreen(...input), "claude");
+const words = "fix the sign-up form fields too";
+const ghost = read(cells([words[0], "i"], [words.slice(1), "d"]));
+const typed = read(cells([words], [" ", "i"]));
+check("A suggestion and a draft with the same words read apart", [ghost.kind, typed.kind, ghost.text, typed.text], ["suggestion", "draft", words, words]);
+check("Unfocused, a suggestion is all dim", read(cells([words, "d"])), { kind: "suggestion", text: words });
+check("Only the caret is an empty input", read(cells([" ", "i"])), { kind: "empty", text: "" });
+check("No caret at all is empty too", read([]), { kind: "empty", text: "" });
+check("One typed character is a draft", read(cells(["W"], [" ", "i"])), { kind: "draft", text: "W" });
+check("The caret inside a draft is part of it", read(cells(["fix"], ["e", "i"], ["d"])), { kind: "draft", text: "fixed" });
+check("A command's dim hint isn't part of the draft", read(cells(["/review"], [" [pr-number]", "d"])), { kind: "draft", text: "/review" });
+check("One plain character before dim text could be either", read(cells(["f"], ["ix the form", "d"])).kind, "unknown");
+check("Dim text before plain text isn't a known shape", read(cells(["old", "d"], ["new"])).kind, "unknown");
+check("A draft over two rows", read(cells(["first line"]), cells(["second line"], [" ", "i"])), { kind: "draft", text: "first line\nsecond line" });
+check("Wide characters count once", read(cells(["世界", "w"], [" ", "i"])), { kind: "draft", text: "世界" });
+const boxedInput = ["╭" + "─".repeat(58) + "╮", "│ > draft text" + " ".repeat(45) + "│", "╰" + "─".repeat(58) + "╯"].map((l) => cells([l]));
+check("Claude 1's boxed input", readInput(boxedInput, "claude"), { kind: "draft", text: "draft text" });
+check("Bash mode's ! prompt", readInput([cells([rule]), cells(["! ls -la"]), cells([rule])].map(pad), "claude"), { kind: "draft", text: "ls -la" });
+check("A menu instead of the input is unknown", readInput(claude.split("\n").map((l) => pad(cells([l]))), "claude").kind, "unknown");
+check("An input cut off before its rule is unknown", readInput(claudeScreen(cells(["text"])).slice(0, 4), "claude").kind, "unknown");
+check("Other agents' inputs are unknown", readInput(claudeScreen(cells([words])), "codex").kind, "unknown");
+
+// Claude 2.1 on this PC puts a no-break space after ❯. The last seven lines of
+// pane 7's read-back (loomctl read, 2026-10-01), as they were.
+const pane7 = ["✻ Cogitated for 32s · done 13:16", "", "─".repeat(138), "❯ [Pasted text #1]", "─".repeat(138), "  Opus 5.5 | XHIGH | ctx 12% | loom | main*  [PONYTAIL]", "  paste again to expand"];
+check("Pane 7's collapsed paste is a draft", readInput(pane7.map((l) => cells([l])), "claude"), { kind: "draft", text: "[Pasted text #1]" });
+check("Pane 7's empty input is a bare ❯", readInput(pane7.map((l, i) => cells([i === 3 ? "❯" : l])), "claude"), { kind: "empty", text: "" });
+const nbsp = (...input: Cell[]) => readInput([cells([rule]), [...cells(["❯ "]), ...input], cells([rule])].map(pad), "claude");
+check("After ❯ and a no-break space: a draft", nbsp(...cells([words], [" ", "i"])), { kind: "draft", text: words });
+check("After ❯ and a no-break space: a suggestion", nbsp(...cells([words[0], "i"], [words.slice(1), "d"])), { kind: "suggestion", text: words });
+check("After ❯ and a no-break space: an unfocused suggestion", nbsp(...cells([words, "d"])), { kind: "suggestion", text: words });
+for (const [name, sep] of [["an em space", " "], ["a tab", "\t"]]) {
+  check(`After ❯ and ${name}: still unknown`, readInput([cells([rule]), cells([`❯${sep}text`]), cells([rule])].map(pad), "claude").kind, "unknown");
+}
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

@@ -13,13 +13,13 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, codexThread, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
-import { parseStatus, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
+import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { readMenu, echoes, echoed, menuRev, type Menu as AgentMenu } from "./prompt";
-import { callerPath, flag, keyBytes, num, onOff, paneRef, parseArgs, pruneSettled, str, table, type Args, type Options } from "./cli";
+import { readMenu, readInput, hash32, echoes, echoed, menuRev, type Cell, type Menu as AgentMenu } from "./prompt";
+import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
@@ -1384,6 +1384,7 @@ async function micStop() {
         // Codex reads an Enter that lands right behind pasted text as part of
         // the paste (a newline in the composer), so let the input settle first.
         await p.settle(150, 1000);
+        p.inputSeq++;
         invoke("pty_write", { id: p.id, data: "\r" });
       }
     } else if (pre.text) {
@@ -1392,6 +1393,7 @@ async function micStop() {
       // DEL inside a bracketed paste is literal text, not a keypress.
       // ponytail: blind, so it eats anything you typed into the pane while
       // dictating. You weren't typing, you were talking.
+      p.inputSeq++;
       invoke("pty_write", { id: p.id, data: "\x7f".repeat(pre.text.length) });
     }
     p.th.focusPane(p);
@@ -1484,6 +1486,12 @@ class Pane {
   usage: Usage | null = null; // null until claude is up in this pane; zeroed until its first turn
   lastOut = 0; // when the pty last drew anything, for settle()
   lastIn = 0; // when you last typed, so an echo doesn't read as the agent working
+  /** Every write of input to the process: typing, pastes, dictation, loomctl.
+   * Part of the input revision send --input checks, so any writer in between
+   * is noticed even before the screen shows what it wrote. */
+  inputSeq = 0;
+  /** DECTCEM: the app hid the terminal cursor (Claude draws its own caret). */
+  cursorHidden = false;
   /** What the config panel last set, each stamped with the turn count at the
    * time. `/model` and `/effort` change nothing the transcript records until the
    * next turn runs, so these are what the panel shows meanwhile. Stamped one by
@@ -1723,6 +1731,7 @@ class Pane {
       // focus, not you answering: pass them on, leave the alert alone.
       if (d === "\x1b[I" || d === "\x1b[O") return void invoke("pty_write", { id: this.id, data: d }).catch(() => {});
       this.lastIn = Date.now();
+      this.inputSeq++;
       this.usePrompt(d);
       const waitingSince = this.waitingSince;
       void invoke("pty_write", { id: this.id, data: d }).then(() => {
@@ -1731,6 +1740,11 @@ class Pane {
       }, e => toast(`Could not write to ${this.agent}: ${String(e)}`));
     });
     this.term.parser.registerOscHandler(133, (d) => (this.mark(d), true));
+    // Watched, not handled: false lets xterm show or hide the cursor itself.
+    for (const final of ["h", "l"]) this.term.parser.registerCsiHandler({ prefix: "?", final }, (params) => {
+      if (params.includes(25)) this.cursorHidden = final === "l";
+      return false;
+    });
     // Codex reports a finished turn (and an approval prompt) as OSC 9 — see
     // CODEX_FLAGS in agent.ts. OSC 99 is the kitty notification opentui TUIs
     // use; "p=?" there is a capability probe, not news.
@@ -2052,6 +2066,7 @@ class Pane {
   }
 
   run(cmd: string) {
+    this.inputSeq++;
     invoke("pty_write", { id: this.id, data: cmd + "\r" });
     this.th.focusPane(this);
   }
@@ -3032,6 +3047,60 @@ function liveScreen(p: Pane, joined = true) {
   return lines.join("\n");
 }
 
+/** The live screen's rows as readInput's cells. */
+function screenCells(p: Pane): Cell[][] {
+  const buf = p.term.buffer.active, cell = buf.getNullCell(), rows: Cell[][] = [];
+  for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
+    const line = buf.getLine(y), row: Cell[] = [];
+    for (let x = 0; line && x < line.length; x++) {
+      line.getCell(x, cell);
+      // An unwritten cell has no chars; a wide character's second cell has no width.
+      row.push({ ch: cell.getWidth() ? cell.getChars() || " " : "", dim: !!cell.isDim(), inverse: !!cell.isInverse() });
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** What a pane's input holds (readInput), and its revision for send --input:
+ * the launch, every input write Loom made to the pane, and any draft text it
+ * can see. A suggestion coming or going isn't a change: typing replaces it. */
+function inputState(p: Pane) {
+  const input = readInput(screenCells(p), p.agent);
+  const seen = input.kind === "draft" ? `draft\0${input.text}` : input.kind === "unknown" ? "unknown" : "clear";
+  return { ...input, rev: `${p.generation}.${p.inputSeq}.${hash32(seen)}` };
+}
+
+/** read --styles: the live screen's rows as runs of text that share a style.
+ * Colors are a palette index or #rrggbb; default styles are left out. */
+function styledRows(p: Pane) {
+  const buf = p.term.buffer.active, cell = buf.getNullCell();
+  const hex = (n: number) => `#${n.toString(16).padStart(6, "0")}`;
+  const rows: { y: number; runs: Record<string, unknown>[] }[] = [];
+  for (let y = 0; y < p.term.rows; y++) {
+    const line = buf.getLine(buf.baseY + y), runs: Record<string, unknown>[] = [];
+    let key = "";
+    for (let x = 0; line && x < line.length; x++) {
+      line.getCell(x, cell);
+      if (!cell.getWidth()) continue;
+      const style = {
+        bold: !!cell.isBold() || undefined, dim: !!cell.isDim() || undefined, italic: !!cell.isItalic() || undefined,
+        underline: !!cell.isUnderline() || undefined, inverse: !!cell.isInverse() || undefined,
+        fg: cell.isFgDefault() ? undefined : cell.isFgRGB() ? hex(cell.getFgColor()) : cell.getFgColor(),
+        bg: cell.isBgDefault() ? undefined : cell.isBgRGB() ? hex(cell.getBgColor()) : cell.getBgColor(),
+      };
+      const k = JSON.stringify(style);
+      if (k === key) runs[runs.length - 1].text += cell.getChars() || " ";
+      else runs.push({ x, text: cell.getChars() || " ", ...JSON.parse(k) }), (key = k);
+    }
+    // Trailing blanks in the default style are the row's padding.
+    const last = runs[runs.length - 1];
+    if (last && Object.keys(last).length === 2) (last.text = String(last.text).trimEnd()) || runs.pop();
+    rows.push({ y, runs });
+  }
+  return rows;
+}
+
 function renderDashboard() {
   const projects = [...new Set(threads.map(t => t.repo))];
   if (JSON.stringify(projects) !== JSON.stringify([...dashboardProject.options].slice(1).map(o => o.value))) {
@@ -3324,6 +3393,7 @@ function stepDashboardPreview(step: 1 | -1 | "waiting") {
  * alone, so an answer that stops part-way still shows as waiting. */
 function keys(p: Pane, data: string) {
   p.lastIn = Date.now(); // The echo is not the agent working.
+  p.inputSeq++;
   p.usePrompt(data);
   return invoke("pty_write", { id: p.id, data });
 }
@@ -3338,6 +3408,8 @@ async function submit(p: Pane) {
  * process's input already, so sending it again would type it twice.
  * `pressed`: how many of a key sequence went in before it stopped. */
 class NotSubmitted extends Error {
+  /** Fields for loomctl's --json beside the message (a receipt to look up). */
+  details: Record<string, unknown> = {};
   constructor(message: string, readonly typed: boolean, readonly pressed?: number) {
     super(message);
   }
@@ -3371,20 +3443,51 @@ function inTurn<T>(p: Pane, sequence: (live: (typed: boolean) => void) => Promis
 
 const paste = (p: Pane, text: string) => (p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
 
+/** The text didn't show on screen, so Enter wasn't pressed (sendReply). */
+class NotShown extends NotSubmitted {}
+
+/** How far a send got, as times: Loom began writing the text (`typing`), that
+ * write finished (`typed`), it began writing Enter (`entering`), and that one
+ * finished (`submitted`). A write that failed may have gone in part-way. */
+type SendSteps = { typing?: number; typed?: number; entering?: number; submitted?: number };
+
 /** Paste, then press Enter only if the text shows up on screen. On a menu or
- * anything else that doesn't take text, Enter would pick an option instead. */
-function sendReply(p: Pane, text: string, { gen, beforePaste, beforeEnter }: { gen?: number; beforePaste?: (live: (typed: boolean) => void) => Promise<void>; beforeEnter?: () => void } = {}) {
+ * anything else that doesn't take text, Enter would pick an option instead.
+ * From the paste to the Enter, the paste is the only input Loom expects: other
+ * loomctl calls wait their turn, but typing in the window, dictation or a drop
+ * don't, and would join the text. So any of them before the paste stops the
+ * send with nothing typed, and after it holds the Enter back. `beforePaste`
+ * may wait (for a shell's prompt); `check` is the caller's last look, run
+ * with nothing awaited between it and the paste write. */
+function sendReply(p: Pane, text: string, { gen, beforePaste, check, beforeEnter, steps = {} }: { gen?: number; beforePaste?: (live: (typed: boolean) => void) => Promise<void>; check?: () => void; beforeEnter?: () => void; steps?: SendSteps } = {}) {
   return inTurn(p, async (live) => {
+    const start = p.inputSeq;
     await beforePaste?.(live);
+    // From here to the write starting, one synchronous stretch: nothing can
+    // write between what was checked and what is typed.
+    live(false);
+    if (p.inputSeq !== start) {
+      throw new NotSubmitted(`Something else was typed into ${p.agent} while Loom waited to type, so it typed nothing. Look at its input before sending again.`, false);
+    }
+    check?.();
     const before = echoes(liveScreen(p), text);
+    // Counted before the write starts, so a writer during the write counts too.
+    const own = p.inputSeq + 1;
+    steps.typing = Date.now();
     await keys(p, paste(p, text));
+    steps.typed = Date.now();
     await p.settle(150, 1000);
     live(true);
     if (!echoed(before, echoes(liveScreen(p), text))) {
-      throw new NotSubmitted(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
+      throw new NotShown(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
+    }
+    if (p.inputSeq !== own) {
+      throw new NotSubmitted(`Something else was typed into ${p.agent} while Loom was pasting, so it didn't press Enter: its input holds both. Open the session and check it before sending anything.`, true);
     }
     beforeEnter?.();
+    steps.entering = Date.now();
     await submit(p);
+    steps.submitted = Date.now();
   }, gen);
 }
 
@@ -3397,7 +3500,18 @@ function sendReply(p: Pane, text: string, { gen, beforePaste, beforeEnter }: { g
  * OSC 9 (Codex), OSC 99 (OpenCode's TUI) or a marker file (Claude's hooks,
  * OpenCode's plugin). */
 type WakeSource = "bell" | "osc9" | "osc99" | "hook";
-type Receipt = { pane: Pane; ref: string; gen: number; turnsAt?: number; result?: { failed: boolean | null; exit: number | null } | { turn: number }; settledAt?: number };
+/** What Loom wrote is kept apart from what came back. Written: the SHA-256 and
+ * byte count of the text's UTF-8 (never the text: prompts hold secrets), the
+ * caller's --key, when Loom accepted it, and how far its writes got (`steps`).
+ * `unsent` when Enter was never written; `uncertain` names the write that
+ * failed and may have gone in anyway. Back: `result` and `resultAt`, the
+ * pane's own signal, which says a turn ended or a command exited, not that
+ * the job was done. */
+type Receipt = {
+  pane: Pane; ref: string; gen: number; turnsAt?: number;
+  result?: { failed: boolean | null; exit: number | null } | { turn: number }; resultAt?: number; settledAt?: number;
+  key: string | null; sha256: string; bytes: number; acceptedAt: number; steps: SendSteps; unsent?: boolean; uncertain?: "type" | "submit";
+};
 const receipts = new Map<string, Receipt>();
 /** Counts settlings, keys' and receipts' alike: their order decides which finished ones are kept. */
 let settlings = 0;
@@ -3408,13 +3522,14 @@ function finishReceipt(token: string, from: Pane, result: NonNullable<Receipt["r
   const r = receipts.get(token);
   if (!r || r.result || r.pane !== from || r.gen !== from.generation) return;
   r.result = result;
+  r.resultAt = Date.now();
   r.settledAt = ++settlings;
   keepReceipts();
 }
 /** A receipt is settled once it has its outcome, or can't get one (its pane
  * restarted, exited or closed). The last 500 to settle stay, however many are
  * pending; send --receipt refuses a 2001st pending one rather than drop one. */
-const receiptSettled = (r: Receipt) => !!r.result || gone(r.pane) || r.pane.dead || r.pane.generation !== r.gen;
+const receiptSettled = (r: Receipt) => !!r.result || !!r.unsent || gone(r.pane) || r.pane.dead || r.pane.generation !== r.gen;
 function keepReceipts() {
   // One cut off by its pane is noticed here, not when it happened: it counts as settling now.
   for (const r of receipts.values()) if (r.settledAt === undefined && receiptSettled(r)) r.settledAt = ++settlings;
@@ -4097,24 +4212,45 @@ const git = (dir: string, ...args: string[]) => invoke<string>("git_run", { dir,
 const gitOk = (dir: string, ok: number[], ...args: string[]) =>
   invoke<string>("git_run", { dir, args, ok });
 
-/** What deleting a worktree destroys that exists nowhere else: uncommitted
- * files, and with `branch` the commits no other branch or remote holds. Empty
- * when nothing, else warning lines framed for the confirm's detail. */
-async function atRisk(th: Thread, branch: boolean): Promise<string> {
-  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
-  const [dirty, only] = await Promise.all([
-    git(th.dir, "status", "--porcelain=v1", "-z", "-uall").then(s => parseStatus(s).length, () => -1),
+/** What deleting a worktree destroys that exists nowhere else: changed and
+ * untracked files, ignored files (.env, node_modules/: a wholly ignored folder
+ * is one entry), and with `branch` the commits no other branch or remote
+ * holds. HEAD rides along, so a new commit is a change too. Throws when git
+ * can't say: unknown is never "nothing to lose". */
+type Inventory = { head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number };
+async function inventory(th: Thread, branch: boolean): Promise<Inventory> {
+  const [status, head, commits] = await Promise.all([
+    git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--ignored=matching"),
+    git(th.dir, "rev-parse", "HEAD").then((s) => s.trim(), () => ""), // no commits yet
     branch && th.branch
-      ? git(th.repo, "rev-list", "--count", th.branch, "--not", `--exclude=${th.branch}`, "--branches", "--remotes")
-          .then(s => +s.trim(), () => -1)
+      ? git(th.repo, "rev-list", "--count", th.branch, "--not", `--exclude=${th.branch}`, "--branches", "--remotes").then((s) => {
+          const n = Number(s.trim());
+          if (!Number.isInteger(n) || n < 0) throw new Error(`git counted "${s.trim()}" commits on ${th.branch}`);
+          return n;
+        })
       : 0,
   ]);
+  return { head, ...lossInventory(status), commits };
+}
+const lossCounts = (inv: Inventory): Record<Loss, number> => ({ tracked: inv.tracked.length, untracked: inv.untracked.length, ignored: inv.ignored.length, commits: inv.commits });
+
+/** An inventory as warning lines for the confirm's detail, or "" when deleting loses nothing. */
+function riskText(inv: Inventory | null, th: Thread): string {
+  const plural = (n: number, w: string, ws = `${w}s`) => `${n} ${n === 1 ? w : ws}`;
+  if (!inv) return "\n⚠ Could not read the worktree's status or its branch.\n";
+  const uncommitted = inv.tracked.length + inv.untracked.length, ignored = inv.ignored;
   const lines = [
-    dirty < 0 ? "⚠ Could not read the worktree's status." : dirty ? `⚠ ${plural(dirty, "uncommitted file")} will be deleted.` : "",
-    only < 0 ? `⚠ Could not check whether ${th.branch} is merged.` : only ? `⚠ ${plural(only, "commit")} ${only === 1 ? "exists" : "exist"} only on ${th.branch}.` : "",
+    uncommitted ? `⚠ ${plural(uncommitted, "uncommitted file")} will be deleted.` : "",
+    ignored.length ? `⚠ ${plural(ignored.length, "ignored file or folder", "ignored files or folders")} will be deleted: ${ignored.slice(0, 5).join(", ")}${ignored.length > 5 ? ", …" : ""}` : "",
+    inv.commits ? `⚠ ${plural(inv.commits, "commit")} ${inv.commits === 1 ? "exists" : "exist"} only on ${th.branch}.` : "",
   ].filter(Boolean);
   return lines.length ? `\n${lines.join("\n")}\n` : "";
 }
+
+/** Which of two inventories' parts differ, for the message that says why a folder was kept. */
+const inventoryDiff = (was: Inventory, now: Inventory) =>
+  (["head", "tracked", "untracked", "ignored", "commits"] as const).filter((k) => JSON.stringify(was[k]) !== JSON.stringify(now[k]))
+    .map((k) => (k === "head" ? "a new commit" : k === "commits" ? "the branch's own commits" : `its ${k} files`)).join(", ");
 
 /** Take a thread out of the list, and out of git as far as `mode` says:
  * "close" keeps the worktree on disk, "worktree" removes the folder and keeps
@@ -4125,21 +4261,42 @@ async function atRisk(th: Thread, branch: boolean): Promise<string> {
  * and splice(-1) would drop the last, unrelated one. */
 const closingThreads = new WeakSet<Thread>();
 
-/** `removed` once the thread is out of Loom; `error` when the folder or branch
- * it was asked to delete is still there (the window also shows it). */
-async function removeThread(th: Thread, mode: "close" | "worktree" | "all", force = false): Promise<{ removed: boolean; error?: string }> {
+/** `removed` once the thread is out of Loom. Then, for a worktree being
+ * deleted, what became of its folder and branch: `kept` on purpose, `failed`
+ * when git refused, with `error` saying which and why (the window shows it). */
+type Removal = { removed: boolean; error?: string; worktree?: "removed" | "kept" | "failed"; branch?: "deleted" | "kept" | "failed" };
+
+/** `approved`: what loomctl checked deleting would lose, so there is no
+ * dialog; null for --force or a plain close. Without it the dialog asks,
+ * showing what would be lost, and nothing goes unless that still holds when
+ * you answer. Either way the folder is read once more after its panes close,
+ * since they write until they're gone, and kept if it changed. */
+async function removeThread(th: Thread, mode: "close" | "worktree" | "all", approved?: Inventory | null): Promise<Removal> {
   if (closingThreads.has(th) || !threads.includes(th)) return { removed: false, error: `${th.name} is already closing or closed.` };
   closingThreads.add(th);
   try {
-    const risk = mode === "close" || !th.isWorktree || force ? "" : await atRisk(th, mode === "all");
-    const what =
-      mode === "close"
-        ? `Close ${th.name}?`
-        : mode === "worktree"
-          ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept.`
-          : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost.`;
-    if (!force && (th.panes.length || mode !== "close")) {
-      if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return { removed: false };
+    const deleting = mode !== "close" && th.isWorktree;
+    let expected = approved ?? null;
+    if (approved === undefined) {
+      const seen = deleting ? await inventory(th, mode === "all").catch(() => null) : null;
+      const risk = deleting ? riskText(seen, th) : "";
+      const what =
+        mode === "close"
+          ? `Close ${th.name}?`
+          : mode === "worktree"
+            ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept.`
+            : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost.`;
+      if (th.panes.length || mode !== "close") {
+        if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return { removed: false };
+      }
+      // The dialog may have stood open a while: what it said must still be so.
+      const now = seen && (await inventory(th, mode === "all").catch(() => null));
+      if (seen && (!now || inventoryDiff(seen, now))) {
+        const error = `${th.name}'s worktree changed while the dialog was open (${now ? inventoryDiff(seen, now) : "its status can't be read now"}), so nothing was closed. Look again before deleting it.`;
+        toast(error);
+        return { removed: false, error };
+      }
+      expected = seen;
     }
     const i = threads.indexOf(th);
     if (i === -1) return { removed: false, error: `${th.name} is already closed.` };
@@ -4149,7 +4306,15 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", forc
     show(threads[Math.min(i, threads.length - 1)] ?? null);
     save();
     await cleanup;
-    if (mode === "close" || !th.isWorktree) return { removed: true };
+    if (!deleting) return { removed: true };
+    const branch = mode === "all" && th.branch ? "kept" : undefined;
+    const partial = (r: Removal & { error: string }) => (toast(`Closed ${th.name}, but ${r.error}`), r);
+    if (expected) {
+      const now = await inventory(th, mode === "all").catch(() => null);
+      if (!now || inventoryDiff(expected, now)) {
+        return partial({ removed: true, worktree: "kept", branch, error: `kept its worktree folder${branch ? " and branch" : ""}: ${now ? `${inventoryDiff(expected, now)} changed while its panes closed` : "its status couldn't be read once its panes closed"}.` });
+      }
+    }
     try {
       // The killed panes' processes take a beat to die, and Windows refuses to
       // delete a folder that is still some process's cwd — retry a few times.
@@ -4162,12 +4327,17 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", forc
           await new Promise((r) => setTimeout(r, 300));
         }
       }
-      if (mode === "all" && th.branch) await git(th.repo, "branch", "-D", th.branch);
-      return { removed: true };
     } catch (e) {
-      toast(String(e));
-      return { removed: true, error: String(e) };
+      return partial({ removed: true, worktree: "failed", branch, error: `couldn't remove its worktree folder, which may be partly deleted${branch ? ", so its branch was kept" : ""}: ${String(e)}` });
     }
+    if (branch) {
+      try {
+        await git(th.repo, "branch", "-D", th.branch);
+      } catch (e) {
+        return partial({ removed: true, worktree: "removed", branch: "failed", error: `removed its worktree folder and couldn't delete the branch ${th.branch}: ${String(e)}` });
+      }
+    }
+    return { removed: true, worktree: "removed", branch: branch && "deleted" };
   } finally {
     closingThreads.delete(th);
   }
@@ -5518,6 +5688,7 @@ type Sent = "ok" | "sent" | "lost";
 async function slash(p: Pane, cmd: string, confirmed: () => boolean): Promise<Sent> {
   p.term.paste(cmd);
   await p.settle(150, 1000); // let the input take it before the Enter
+  p.inputSeq++;
   await invoke("pty_write", { id: p.id, data: "\r" });
   for (const t0 = Date.now(); ; ) {
     if (confirmed()) return "ok";
@@ -6269,12 +6440,19 @@ function countFinds(p: Pane) {
 // command wants --yes instead.
 
 type CliResult = { data?: unknown; text?: string; note?: string };
-/** How long the caller waits, and the folder its terminal was in. */
-type CliContext = { seconds: number; cwd?: string };
+/** How long the caller waits, the folder its terminal was in, and its --key. */
+type CliContext = { seconds: number; cwd?: string; key?: string };
 /** `options`: every --option the command takes (cli.ts parseArgs checks them). */
 type CliCommand = { usage: string; help: string; options?: Options; run: (a: Args, ctx: CliContext) => CliResult | Promise<CliResult> };
 /** A wait that ran out: loomctl exits 3 for it rather than 1. */
 class CliTimeout extends Error {}
+/** A failure with fields for --json beside the message: what a cleanup got
+ * done before it stopped, or that a record isn't there. */
+class CliError extends Error {
+  constructor(message: string, readonly details: Record<string, unknown>) {
+    super(message);
+  }
+}
 
 /** A pane's state in one word, the Overview's words. */
 const cliState = (p: Pane) => (p.dead ? "exited" : p.starting ? "starting" : p.waiting ? "waiting" : p.busy ? "working" : "idle");
@@ -6375,10 +6553,59 @@ async function until(ok: () => boolean, seconds: number, what: string) {
 
 const gone = (p: Pane) => !p.th.panes.includes(p) || !threads.includes(p.th);
 
+/** --delete: what close-plan and close-thread delete besides closing. */
+function cliDelete(a: Args, th: Thread): "" | "worktree" | "branch" {
+  const del = str(a, "delete") ?? "";
+  if (del && del !== "worktree" && del !== "branch") throw new Error(`--delete takes worktree or branch, not ${del}.`);
+  if (del && !th.isWorktree) throw new Error(`${th.name} isn't a worktree Loom made, so there is nothing to delete.`);
+  return del as "" | "worktree" | "branch";
+}
+
+/** close-plan: the thread, the panes closing it stops, and with `del` what
+ * deleting loses. `rev` covers all of it in full (the lists shown stop at 50),
+ * so close-thread --plan refuses if any of it changed. */
+async function closePlan(th: Thread, del: "" | "worktree" | "branch") {
+  const inv = del ? await inventory(th, del === "branch") : null;
+  const panes = th.panes.map((p) => ({ id: p.id, ref: paneName(p), agent: p.agent, generation: p.generation }));
+  const target = { thread: th.id, name: th.name, dir: th.dir, repo: th.repo, branch: th.branch || null, delete: del || null };
+  const rev = (await sha256(JSON.stringify([target, panes.map((p) => [p.id, p.generation]), inv]))).slice(0, 16);
+  const lost = inv && lossCounts(inv);
+  const data = {
+    rev, ...target, panes,
+    ...(inv && lost
+      ? { head: inv.head || null, lost, discard: LOSSES.filter((l) => lost[l]), tracked: inv.tracked.slice(0, 50), untracked: inv.untracked.slice(0, 50), ignored: inv.ignored.slice(0, 50) }
+      : {}),
+  };
+  return { data, inv };
+}
+
+/** A receipt Loom still has, or a failure saying it isn't available. */
+function cliReceipt(token: string) {
+  const r = receipts.get(token);
+  if (r) return r;
+  throw new CliError(`Receipt ${token} isn't available. Loom keeps receipts in memory until it exits, and only the last 500 with an outcome, so it was dropped, Loom restarted since, or this Loom never issued it.`, { unavailable: true });
+}
+
+/** loomctl receipt: what Loom wrote for a send --receipt and what came back,
+ * as two parts, so a turn's end is never mistaken for the job being done. */
+function receiptRecord(token: string, r: Receipt) {
+  const at = (t?: number) => (t ? new Date(t).toISOString() : null);
+  const res = r.result;
+  return {
+    receipt: token, pane: r.pane.id, ref: r.ref, generation: r.gen, key: r.key,
+    wrote: {
+      sha256: r.sha256, bytes: r.bytes, stage: r.steps.submitted ? "submitted" : r.steps.typed ? "typed" : "accepted", uncertain: r.uncertain ?? null,
+      acceptedAt: at(r.acceptedAt), typedAt: at(r.steps.typed), submittedAt: at(r.steps.submitted),
+    },
+    acknowledged: !res ? null : "turn" in res ? { turn: res.turn, at: at(r.resultAt) } : { failed: res.failed, exit: res.exit, at: at(r.resultAt) },
+    outcome: res ? "acknowledged" : receiptSettled(r) ? "none" : "pending",
+  };
+}
+
 /** wait --receipt: the outcome of what send --receipt sent, once it's in. */
 async function waitReceipt(token: string, seconds: number) {
-  const r = receipts.get(token);
-  if (!r) throw new Error(`No receipt ${token}. Receipts last until Loom exits.`);
+  const r = cliReceipt(token);
+  if (r.unsent && !r.result) throw new Error(`Loom ${r.uncertain === "type" ? "may have typed part of" : "typed"} ${token}'s text into ${r.ref} but didn't press Enter, so no outcome will come. loomctl read ${r.ref} shows the input.`);
   const p = r.pane;
   // The result is recorded by the launch the receipt went to (finishReceipt),
   // so it stands after a restart, and a later launch can't supply one.
@@ -6463,11 +6690,12 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   read: {
-    usage: "read [pane] [--lines N]",
-    help: "The pane's screen as text, or its last N lines including history.",
-    options: { lines: "int" },
+    usage: "read [pane] [--lines N] [--styles]",
+    help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the screen's rows with their styles.",
+    options: { lines: "int", styles: "bool" },
     run: (a) => {
       const p = cliPane(a._[0]);
+      if (flag(a, "styles") && a.lines !== undefined) throw new Error("--styles reads the screen, not history: leave out --lines.");
       let raw: string;
       if (a.lines === undefined) raw = liveScreen(p);
       else {
@@ -6481,7 +6709,9 @@ const CLI: Record<string, CliCommand> = {
         raw = lines.join("\n");
       }
       const text = raw.split("\n").map((l) => l.trimEnd()).join("\n").replace(/\n+$/, "");
-      return { data: { pane: p.id, ref: paneName(p), text }, text };
+      const buf = p.term.buffer.active;
+      const cursor = { x: buf.cursorX, y: buf.cursorY, hidden: p.cursorHidden };
+      return { data: { pane: p.id, ref: paneName(p), text, cursor, input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p) } : {}) }, text };
     },
   },
   menu: {
@@ -6615,21 +6845,26 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   send: {
-    usage: "send <pane> <text...> [--no-enter] [--gen N] [--receipt]",
-    help: "Type text into a pane and press Enter once it shows there. - reads the text from standard input. --gen N (a pane's generation from loomctl panes) refuses a pane that restarted since. --receipt prints a token for loomctl wait --receipt: a shell's command (at Loom's PowerShell prompt; a comment carries the token) or an agent's next turn.",
-    options: { "no-enter": "bool", gen: "int", receipt: "bool" },
-    run: async (a) => {
+    usage: "send <pane> <text...> [--no-enter] [--gen N] [--receipt] [--input REV] [--replace]",
+    help: "Type text into a pane and press Enter once it shows there. - reads the text from standard input. --gen N (a pane's generation from loomctl panes) refuses a pane that restarted since. --receipt prints a token for loomctl wait --receipt and loomctl receipt: a shell's command (at Loom's PowerShell prompt; a comment carries the token) or an agent's next turn. --input REV (from read --json) types nothing if anyone wrote to the pane or its input changed since that read. --replace types only over an empty input or a suggestion, never a draft, and presses Enter only if none of the suggestion is left.",
+    options: { "no-enter": "bool", gen: "int", receipt: "bool", input: "string", replace: "bool" },
+    run: async (a, ctx) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
-      let text = a._.slice(1).join(" ");
+      const asked = a._.slice(1).join(" ");
+      let text = asked;
       if (!text) throw new Error("Give the text to send.");
       if (p.dead) throw new Error(`${paneName(p)} has exited. loomctl restart ${paneName(p)} starts it again.`);
       const ref = paneName(p), gen = cliGen(a) ?? p.generation;
+      const expect = str(a, "input"), replace = flag(a, "replace");
+      // The caller's text as Loom got it, before a shell receipt's comment.
+      const digest = await sha256(asked), bytes = new TextEncoder().encode(asked).length;
+      const steps: SendSteps = {};
       let token: string | undefined;
       if (flag(a, "receipt")) {
         if (flag(a, "no-enter")) throw new Error("A receipt is for a command that runs: leave out --no-enter.");
         if ([...receipts.values()].filter((r) => !receiptSettled(r)).length >= 2000) throw new Error("2000 receipts are still waiting for their outcome, so this wasn't sent. Wait for some first.");
         token = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-        receipts.set(token, { pane: p, ref, gen });
+        receipts.set(token, { pane: p, ref, gen, key: ctx.key ?? null, sha256: digest, bytes, acceptedAt: Date.now(), steps });
         keepReceipts();
         if (p.agent === "shell") text = `${text}  # loom-receipt:${token}`;
       }
@@ -6642,20 +6877,67 @@ const CLI: Record<string, CliCommand> = {
         live(false);
         if (!p.atPrompt) throw new NotSubmitted(`${ref} isn't at Loom's PowerShell prompt (a command is still running, or another program has the pane), so nothing was typed. loomctl wait --receipt for the command before, then send again.`, false);
       };
+      // --input and --replace look at the input in the pane's turn, right before
+      // typing, so no other loomctl call can type in between.
+      let shown: ReturnType<typeof inputState> | undefined;
+      const guard = () => {
+        if (expect === undefined && !replace) return;
+        shown = inputState(p);
+        if (expect !== undefined && shown.rev !== expect) throw new NotSubmitted(`${ref}'s input changed since revision ${expect} (it's ${shown.rev} now, ${shown.kind}), so nothing was typed. loomctl --json read ${ref} shows it.`, false);
+        if (replace && shown.kind !== "empty" && shown.kind !== "suggestion") {
+          throw new NotSubmitted(`${ref}'s input ${shown.kind === "draft" ? "holds a draft someone typed." : `can't be read: ${shown.why}`} So --replace typed nothing: Loom never clears a draft. Clear it in the window, or send without --replace to type after it.`, false);
+        }
+      };
+      // --replace over a suggestion: Enter only once the input reads as a draft
+      // without it. Typing must have replaced it, not landed after it.
+      const leftover = () => {
+        if (!replace || shown?.kind !== "suggestion" || !shown.text) return;
+        const flat = (s: string) => s.replace(/\s+/g, ""), old = flat(shown.text), now = inputState(p);
+        if (now.kind !== "draft" || (!flat(asked).includes(old) && flat(now.text ?? "").includes(old))) {
+          throw new NotSubmitted(`Loom couldn't see the suggestion gone from ${ref}'s input after typing (it reads as ${now.kind}), so it didn't press Enter. The text is in the input, so don't send it again: loomctl read ${ref} shows it.`, true);
+        }
+      };
       try {
-        if (flag(a, "no-enter")) await inTurn(p, () => keys(p, paste(p, text)), gen);
-        else
+        if (flag(a, "no-enter")) {
+          await inTurn(p, async () => {
+            guard();
+            steps.typing = Date.now();
+            await keys(p, paste(p, text));
+            steps.typed = Date.now();
+          }, gen);
+        } else
           await sendReply(p, text, {
             gen,
+            steps,
             beforePaste: receipt && p.agent === "shell" ? atPrompt : undefined,
-            beforeEnter: receipt && p.agent !== "shell" ? () => void (receipt.turnsAt = p.turns) : undefined,
+            check: guard,
+            beforeEnter: () => {
+              leftover();
+              if (receipt && p.agent !== "shell") receipt.turnsAt = p.turns;
+            },
           });
       } catch (e) {
-        if (token) receipts.delete(token);
-        if (!(e instanceof NotSubmitted) || !e.typed) throw e;
-        throw new NotSubmitted(`${p.agent} didn't show the text on its screen, so Loom didn't press Enter. The text went to ${ref} and may be waiting there, so don't send it again: loomctl read ${ref} shows it, and loomctl keys ${ref} enter submits it.`, true);
+        // Judged by how far the writes got, not by the error: a write that failed
+        // may have gone in part-way, so only nothing written is safe to send again.
+        if (!steps.typing) {
+          if (token) receipts.delete(token);
+          throw e;
+        }
+        const uncertain = steps.entering && !steps.submitted ? "submit" : !steps.typed ? "type" : undefined;
+        if (receipt) Object.assign(receipt, { unsent: !steps.entering, uncertain }), keepReceipts();
+        const details = { ...(token && { receipt: token }), ...(uncertain && { uncertain }) };
+        // A pane that restarted or closed took the text with it, so a retry is safe.
+        if (e instanceof NotSubmitted && !e.typed) throw Object.assign(e, { details: { ...e.details, ...details } });
+        const why = e instanceof Error ? e.message : String(e);
+        const err =
+          e instanceof NotShown ? new NotSubmitted(`${p.agent} didn't show the text on its screen, so Loom didn't press Enter. The text went to ${ref} and may be waiting there, so don't send it again: loomctl read ${ref} shows it, and loomctl keys ${ref} enter submits it.`, true)
+          : e instanceof NotSubmitted ? e
+          : uncertain === "submit" ? new NotSubmitted(`Loom typed the text into ${ref}, then writing Enter failed (${why}), so it may or may not have gone in. Don't send it again: loomctl read ${ref} shows whether it's still waiting in the input.`, true)
+          : new NotSubmitted(`Writing the text into ${ref} failed (${why}), maybe part-way, so some of it may be in the input. Don't send it again before loomctl read ${ref} shows what's there.`, true);
+        err.details = details;
+        throw err;
       }
-      return { data: { pane: p.id, ...(token ? { receipt: token } : {}) }, text: token ?? "" };
+      return { data: { pane: p.id, generation: gen, sha256: digest, bytes, ...(token ? { receipt: token } : {}) }, text: token ?? "" };
     },
   },
   keys: {
@@ -6728,6 +7010,17 @@ const CLI: Record<string, CliCommand> = {
       return { data: paneData(p), text: `${paneName(p)} is ${cliState(p)}` };
     },
   },
+  receipt: {
+    usage: "receipt <token>",
+    help: "What send --receipt sent, without waiting: the SHA-256 and size of the text Loom typed, its --key, when it was accepted, typed and submitted, and what the pane signaled back (a turn's end or a command's exit), if anything yet.",
+    run: (a) => {
+      const token = cliWord(a, 0, "a receipt");
+      const record = receiptRecord(token, cliReceipt(token));
+      const { wrote, acknowledged } = record;
+      const back = !acknowledged ? `nothing back yet (${record.outcome})` : "turn" in acknowledged ? `turn ${acknowledged.turn} ended ${acknowledged.at}` : `exited ${acknowledged.exit ?? "with an unknown code"} ${acknowledged.at}`;
+      return { data: record, text: `${record.ref}: ${wrote.stage} ${wrote.submittedAt ?? wrote.typedAt ?? wrote.acceptedAt}, sha256 ${wrote.sha256} (${wrote.bytes} bytes); ${back}` };
+    },
+  },
   "wait-any": {
     usage: "wait-any [--state waiting] [--thread T] [--new] [--timeout S]",
     help: "Block until any pane is in a state; --new skips the ones already in it.",
@@ -6788,26 +7081,57 @@ const CLI: Record<string, CliCommand> = {
       return { data: { closed: p.id }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
     },
   },
-  "close-thread": {
-    usage: "close-thread <thread> --yes [--delete worktree|branch] [--force]",
-    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Work that would be lost needs --force.",
-    options: { yes: "bool", delete: "string", force: "bool" },
+  "close-plan": {
+    usage: "close-plan <thread> [--delete worktree|branch]",
+    help: "What close-thread would do, changing nothing: the thread and the panes it stops, and with --delete what deleting loses that exists nowhere else (changed, untracked and ignored files, the branch's own commits). Its rev is what close-thread --plan takes.",
+    options: { delete: "string" },
     run: async (a) => {
       const th = cliThread(cliWord(a, 0, "a thread"));
-      const del = str(a, "delete") ?? "";
-      if (del && del !== "worktree" && del !== "branch") throw new Error(`--delete takes worktree or branch, not ${del}.`);
-      if (del && !th.isWorktree) throw new Error(`${th.name} isn't a worktree Loom made, so there is nothing to delete.`);
+      const { data } = await closePlan(th, cliDelete(a, th));
+      const lost = data.lost ? LOSSES.filter((l) => data.lost![l]).map((l) => `${data.lost![l]} ${l}`).join(", ") : "";
+      const go = `loomctl close-thread ${th.id} --yes${data.delete ? ` --delete ${data.delete}` : ""} --plan ${data.rev}${data.discard?.length ? ` --discard ${data.discard.join(",")}` : ""}`;
+      return {
+        data,
+        text: [
+          `Closes ${th.name} (${th.id}) and stops ${data.panes.length ? data.panes.map((p) => `${p.ref} ${p.agent}`).join(", ") : "no panes"}.`,
+          data.delete ? `Deletes ${th.dir}${data.delete === "branch" ? ` and the branch ${th.branch}` : ""}. ${lost ? `Loses ${lost}.` : "Loses nothing that exists only there."}` : "Deletes nothing.",
+          ...(data.ignored?.length ? [`Ignored: ${data.ignored.join(", ")}${data.lost!.ignored > data.ignored.length ? ", …" : ""}`] : []),
+          `To go ahead: ${go}`,
+        ].join("\n"),
+      };
+    },
+  },
+  "close-thread": {
+    usage: "close-thread <thread> --yes [--delete worktree|branch] [--plan REV] [--discard LIST] [--force]",
+    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Deleting refuses while it would lose anything --discard doesn't name: tracked, untracked, ignored (files git ignores, like .env or node_modules) and commits, comma-separated, or all. --plan REV (from close-plan) refuses before closing anything if the thread, its panes or its folder changed since. --force is --discard all.",
+    options: { yes: "bool", delete: "string", force: "bool", plan: "string", discard: "string" },
+    run: async (a) => {
+      const th = cliThread(cliWord(a, 0, "a thread"));
+      const del = cliDelete(a, th), force = flag(a, "force"), expect = str(a, "plan");
+      if (!del && a.discard !== undefined) throw new Error("--discard is for --delete: closing a thread deletes nothing.");
+      const allowed = force ? new Set(LOSSES) : discards(str(a, "discard"));
       const what = `${th.panes.length} pane${th.panes.length === 1 ? "" : "s"}${del ? ` and deletes ${del === "branch" ? `the worktree and branch ${th.branch}` : "the worktree folder"}` : ""}`;
       if (!flag(a, "yes")) throw new Error(`Closing ${th.name} stops its ${what}. Pass --yes.`);
-      if (del && !flag(a, "force")) {
-        const risk = (await atRisk(th, del === "branch")).trim();
-        if (risk) throw new Error(`${risk}\nPass --force as well to delete anyway.`);
+      // Read now, in this one call, right before anything closes.
+      let plan: Awaited<ReturnType<typeof closePlan>> | undefined;
+      if (expect !== undefined || (del && !force)) {
+        plan = await closePlan(th, del).catch((e) => {
+          throw new Error(`Couldn't read what deleting ${th.name} would lose, so nothing was closed: ${e instanceof Error ? e.message : String(e)}`);
+        });
+        if (expect !== undefined && plan.data.rev !== expect) {
+          throw new CliError(`${th.name} changed since plan ${expect} (it's ${plan.data.rev} now), so nothing was closed. loomctl close-plan ${th.id}${del ? ` --delete ${del}` : ""} shows it.`, { plan: plan.data.rev });
+        }
+        const missing = plan.data.lost ? LOSSES.filter((l) => plan!.data.lost![l] && !allowed.has(l)) : [];
+        if (missing.length) {
+          throw new CliError(`${riskText(plan.inv, th).trim()}\nSo nothing was closed. loomctl close-plan ${th.id} --delete ${del} lists what; pass --discard ${missing.join(",")} to delete it anyway.`, { lost: plan.data.lost, discard: missing });
+        }
       }
       const name = th.name;
-      const result = await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", true);
+      const result = await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", force ? null : plan?.inv ?? null);
       if (!result.removed) throw new Error(result.error ?? `${name} wasn't closed.`);
-      if (result.error) throw new Error(`Closed ${name}, but ${del === "branch" ? "its worktree or branch" : "its worktree"} is still there: ${result.error}`);
-      return { data: { closed: th.id }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
+      const steps = { panes: "closed", worktree: result.worktree ?? null, branch: result.branch ?? null };
+      if (result.error) throw new CliError(`Closed ${name} and stopped its panes, but ${result.error}`, { closed: th.id, steps });
+      return { data: { closed: th.id, steps }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
     },
   },
   theme: {
@@ -6888,17 +7212,19 @@ async function runCli(payload: CliRequest): Promise<Record<string, unknown>> {
     const args = parseArgs(payload.argv, command.options ?? {}, cmd);
     // Standard input comes apart from the words and goes in only now, so text starting with -- stays text.
     if (typeof stdin === "string") args._ = args._.map((w) => (w === "-" ? stdin.replace(/\r?\n$/, "") : w));
-    const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined });
+    const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined, key: payload.key ?? undefined });
     if (result.note) toast(result.note);
     return { ok: true, data: result.data ?? null, text: result.text };
   } catch (e) {
     const reply: Record<string, unknown> = { ok: false, error: e instanceof Error ? e.message : String(e), timeout: e instanceof CliTimeout };
-    if (e instanceof NotSubmitted) Object.assign(reply, { typed: e.typed }, e.pressed === undefined ? {} : { pressed: e.pressed });
+    if (e instanceof NotSubmitted) Object.assign(reply, { typed: e.typed }, e.pressed === undefined ? {} : { pressed: e.pressed }, e.details);
+    if (e instanceof CliError) Object.assign(reply, e.details);
     return reply;
   }
 }
 
-/** --key: each key's command and its answer, which a retry gets instead of a
+/** --key: each key's command, as its SHA-256 (the words can be a prompt, and
+ * prompts hold secrets), and its answer, which a retry gets instead of a
  * second run, even while the first is still going. Every key still running
  * stays (a retry of one must never run it again), up to 1024; past that, new
  * keyed requests are refused unrun. Of the finished ones, the last 256 to
@@ -6911,7 +7237,9 @@ const keyed = new Map<string, { what: string; reply: Promise<Record<string, unkn
 function installCli() {
   void listen<CliRequest>("cli", async ({ payload }) => {
     const { id, key } = payload;
-    const what = JSON.stringify([payload.cmd, payload.argv, payload.stdin, payload.cwd]);
+    // Hashed first: from here to keyed.set nothing awaits, so a retry arriving
+    // meanwhile still finds the first one's entry.
+    const what = key ? await sha256(JSON.stringify([payload.cmd, payload.argv, payload.stdin, payload.cwd])) : "";
     const earlier = key ? keyed.get(key) : undefined;
     let reply: Record<string, unknown>;
     if (earlier) {

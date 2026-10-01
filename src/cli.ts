@@ -92,6 +92,31 @@ export function pruneSettled<V>(map: Map<string, V>, settledAt: (v: V) => number
   for (const [k] of settled.slice(0, Math.max(0, settled.length - keep))) map.delete(k);
 }
 
+/** What deleting a worktree can lose, as close-thread's --discard names it:
+ * changed tracked files, untracked files, ignored files, and (deleting the
+ * branch) commits no other branch or remote has. */
+export const LOSSES = ["tracked", "untracked", "ignored", "commits"] as const;
+export type Loss = (typeof LOSSES)[number];
+
+/** --discard's comma list, or all, as the losses it allows. */
+export function discards(value: string | undefined): Set<Loss> {
+  const out = new Set<Loss>();
+  if (value === undefined) return out;
+  for (const w of value.toLowerCase().split(",").map((s) => s.trim())) {
+    if (w === "all") LOSSES.forEach((l) => out.add(l));
+    else if ((LOSSES as readonly string[]).includes(w)) out.add(w as Loss);
+    else throw new Error(`--discard takes ${LOSSES.join(", ")} or all, not ${w || "nothing"}.`);
+  }
+  return out;
+}
+
+/** SHA-256 of the text's UTF-8 bytes in hex: what a caller hashes on its side
+ * to match a receipt to the prompt it saved. */
+export async function sha256(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** A string option, or undefined when it's missing. */
 export const str = (args: Args, name: string) => (typeof args[name] === "string" ? (args[name] as string) : undefined);
 

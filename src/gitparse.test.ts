@@ -1,5 +1,5 @@
 // Self-check for gitparse. Run: node src/gitparse.test.ts
-import { parseStatus, parseNumstat, sumStat, diffClass } from "./gitparse.ts";
+import { parseStatus, parseNumstat, sumStat, diffClass, lossInventory } from "./gitparse.ts";
 
 let fails = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -138,6 +138,14 @@ const branches: [string, { upstream: string; span: string; ask: boolean }][] = [
 for (const [line, want] of branches) check(`branch: ${line || "(no line)"}`, parseBranch(line + NUL + " M a.ts" + NUL), want);
 check("status skips the branch line", parseStatus("## main...origin/main [ahead 1]" + NUL + " M a.ts" + NUL + "## odd.ts" + NUL),
   [{ path: "a.ts", x: " ", y: "M" }, { path: "odd.ts", x: "#", y: "#" }]);
+// git 2.39's own `status --porcelain=v1 -z -uall --ignored=matching` in a repo
+// ignoring node_modules/, .env, *.log and build, plus tracked changes and a rename.
+const loss = lossInventory([" M a.ts", "R  new.ts", "old.ts", "D  gone.ts", "?? src/app.ts", "!! .env", "!! build/", "!! logs/a.log", "!! logs/b.log", "!! node_modules/", "!! src/debug.log", ""].join("\0"));
+check("worktree loss: tracked changes, a rename once by its new name", loss.tracked, ["a.ts", "new.ts", "gone.ts"]);
+check("worktree loss: untracked files one by one", loss.untracked, ["src/app.ts"]);
+check("worktree loss: ignored files, a wholly ignored folder as one entry", loss.ignored, [".env", "build/", "logs/a.log", "logs/b.log", "node_modules/", "src/debug.log"]);
+check("worktree loss: a clean tree with only an ignored file still lists it", lossInventory("!! notes/private.md\0"), { tracked: [], untracked: [], ignored: ["notes/private.md"] });
+check("worktree loss: nothing", lossInventory(""), { tracked: [], untracked: [], ignored: [] });
 check("upstream labels", [["origin/main", "2\t1"], ["origin/main", "0\t0"], ["main", "0\t3"], ["", ""]].map(([u, s]) => upstreamLabel(u, s)),
   ["→ origin/main  ↓2 ↑1", "→ origin/main", "→ main   ↑3", "→ not pushed yet"]);
 
