@@ -122,15 +122,43 @@ async fn answer(app: AppHandle, pipe: NamedPipeServer) -> std::io::Result<()> {
     if read.read_line(&mut line).await? == 0 {
         return Ok(());
     }
-    let reply = match serde_json::from_str::<Value>(&line) {
-        Ok(request) if request["cmd"].is_string() && request["argv"].as_array().is_some_and(|a| a.iter().all(Value::is_string)) => {
-            ask(&app, request).await
-        }
-        Ok(_) => json!({ "ok": false, "error": "loomctl sent a request without a command and its words." }),
-        Err(e) => json!({ "ok": false, "error": format!("loomctl sent a request Loom can't read: {e}") }),
+    let reply = match request(&line) {
+        Ok(request) => ask(&app, request).await,
+        Err(error) => json!({ "ok": false, "error": error }),
     };
     write.write_all(format!("{reply}\n").as_bytes()).await?;
     write.flush().await
+}
+
+/// The command in loomctl's request line, if it is one to run: whole, JSON, a
+/// command and a list of words. Whole means it ends in its newline. read_line
+/// also hands back what came before a dropped connection or the size limit,
+/// and that can be valid JSON, so without the newline loomctl can't tell
+/// whether a failed send ran.
+fn request(line: &str) -> Result<Value, String> {
+    if !line.ends_with('\n') {
+        return Err("loomctl's request was cut off, so it didn't run.".into());
+    }
+    let request: Value = serde_json::from_str(line).map_err(|e| format!("loomctl sent a request Loom can't read: {e}"))?;
+    match request["cmd"].is_string() && request["argv"].as_array().is_some_and(|a| a.iter().all(Value::is_string)) {
+        true => Ok(request),
+        false => Err("loomctl sent a request without a command and its words.".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request;
+
+    #[test]
+    fn only_a_whole_request_line_runs() {
+        let close = r#"{"cmd":"close","argv":["p1","--yes"],"stdin":null,"cwd":"C:\\","timeout":30}"#;
+        assert!(request(&format!("{close}\n")).is_ok());
+        // Valid JSON cut off before its newline, as read_line returns it at EOF or the size limit.
+        assert!(request(close).unwrap_err().contains("cut off"));
+        assert!(request(&close[..close.len() / 2]).is_err());
+        assert!(request("{\"cmd\":\"close\",\"args\":{}}\n").unwrap_err().contains("without a command"));
+    }
 }
 
 /// Hands a request to the page and waits for its answer: the request's own

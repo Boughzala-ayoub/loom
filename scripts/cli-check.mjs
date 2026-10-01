@@ -351,17 +351,51 @@ try {
   // A real shell pane's exit code, and --gen from what panes showed.
   const shell = ok('--json', 'add', 'alpha', '--cmd=').json;
   for (let i = 0; i < 60 && !/PS .*>\s*$/m.test(ok('read', shell.ref).out); i++) await pause(250);
-  ok('send', shell.ref, 'cmd /c exit 7');
-  let shown;
-  for (let i = 0; i < 40 && (shown = ok('--json', 'panes', '--thread', 'alpha').json.find(p => p.id === shell.id)).exit !== 7; i++) await pause(250);
-  assert.deepEqual([shown.exit, shown.commands >= 1], [7, true], JSON.stringify(shown));
+  // The way a script reads an outcome: note commands, send, wait for it to grow.
+  // (The startup command counts too: the first prompt reports it.)
+  const shellNow = () => ok('--json', 'panes', '--thread', 'alpha').json.find(q => q.id === shell.id);
+  const outcome = async line => {
+    const base = shellNow().commands;
+    ok('send', shell.ref, line);
+    let p;
+    for (let i = 0; i < 40 && (p = shellNow()).commands <= base; i++) await pause(250);
+    return [p.commands - base, p.failed, p.exit, p];
+  };
+  let [, , , shown] = await outcome('cmd /c exit 7');
+  assert.deepEqual([shown.failed, shown.exit], [true, 7], JSON.stringify(shown));
   ok('send', shell.ref, '--gen', String(shown.generation), 'cmd /c exit 0');
   ok('restart', shell.ref, '--yes');
   r = loomctl('--json', 'send', shell.ref, '--gen', String(shown.generation), 'echo stale');
   assert.deepEqual(shape(r), [1, false, 'failed', true], r.out);
   assert.match(r.json.error, /was restarted before Loom typed anything/);
-  ok('close', shell.ref, '--yes');
   console.log('PASS the second agent review: JSON for every failure, a silent hello bounded, shell exit codes, --gen');
+
+  // Third agent review. S2: exit is the exact code or null, never a guess.
+  for (let i = 0; i < 60 && !/PS .*>\s*$/m.test(ok('read', shell.ref).out); i++) await pause(250);
+  const exits = [];
+  for (const line of ['cmd /c exit 7', 'cmd /c exit 7', "Get-Item 'C:\\nope-loom' -ErrorAction SilentlyContinue", 'cmd /c exit 0']) exits.push((await outcome(line)).slice(0, 3));
+  assert.deepEqual(exits, [[1, true, 7], [1, true, null], [1, true, null], [1, false, 0]], 'A repeated 7 and a failed cmdlet have no exact code, not 1 or a stale 7');
+  assert.ok(shellNow().generation > shown.generation, 'The restart moved the generation on');
+  ok('close', shell.ref, '--yes');
+  // S1: a request cut off before its newline never runs, over the real pipe.
+  const victim = ok('--json', 'add', 'alpha', '--cmd=').json;
+  await new Promise(done => {
+    const s = connect(info.pipe, () => s.write(JSON.stringify({ hello: info.protocol }) + '\n'));
+    let got = '', sent = false;
+    s.on('data', d => {
+      got += d;
+      if (sent || !got.includes('\n')) return;
+      sent = true;
+      s.end(JSON.stringify({ cmd: 'close', argv: [victim.id, '--yes'], stdin: null, cwd: dir, timeout: 30 }));
+      setTimeout(() => s.destroy(), 1500);
+    });
+    s.on('close', done);
+    s.on('error', () => {});
+  });
+  await pause(800);
+  assert.ok(ok('--json', 'panes').json.some(p => p.id === victim.id), 'A close without its newline did not run');
+  ok('close', victim.ref, '--yes');
+  console.log('PASS the third agent review: exact or unknown shell exit codes, cut-off requests never run');
 
   // Failures say so, with the right exit codes.
   r = loomctl('nonsense');

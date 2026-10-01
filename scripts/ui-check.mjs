@@ -402,8 +402,15 @@ try {
       // A shell's exit code, from Loom's prompt marks (OSC 133 D).
       await out(claude, '\x1b]133;C\x07\x1b]133;D;7\x07');
       const after = (await cli('panes')).data.find(p => p.id === claude);
-      assert.deepEqual([after.commands, after.exit], [seen.commands + 1, 7]);
+      assert.deepEqual([after.commands, after.failed, after.exit], [seen.commands + 1, true, 7]);
       assert.ok(Date.parse(after.lastOutput) > 0, JSON.stringify(after));
+      // A failure whose code the prompt can't know is a failure with no code, not a guessed 1.
+      await out(claude, '\x1b]133;C\x07\x1b]133;D;1;exact=0\x07');
+      const unknown = (await cli('panes')).data.find(p => p.id === claude);
+      assert.deepEqual([unknown.commands, unknown.failed, unknown.exit], [seen.commands + 2, true, null]);
+      await out(claude, '\x1b]133;C\x07\x1b]133;D;0\x07');
+      const fine = (await cli('panes')).data.find(p => p.id === claude);
+      assert.deepEqual([fine.failed, fine.exit], [false, 0]);
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl whole-prompt menu ids, partial keys, --gen, shell exit codes ${width}px`);

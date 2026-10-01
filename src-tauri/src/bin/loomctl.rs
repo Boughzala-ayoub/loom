@@ -217,7 +217,7 @@ fn run(args: &[String]) -> i32 {
         reader.read_line(&mut line).map_err(|e| format!("lost the connection to Loom: {e}"))?;
         serde_json::from_str(&line).map_err(|_| "Loom closed the connection without an answer".to_string())
     };
-    let send = |message: Value| writeln!(&file, "{message}").and_then(|_| (&file).flush());
+    let send = |message: Value| (&file).write_all(format!("{message}\n").as_bytes());
     let hello = match send(json!({ "hello": pipe::PROTOCOL })).map_err(|e| format!("lost the connection to Loom: {e}")).and_then(|_| read()) {
         Ok(hello) => hello,
         Err(e) => return fail(json, "connection", 2, false, &e, &Value::Null),
@@ -239,8 +239,10 @@ fn run(args: &[String]) -> i32 {
     // a Loom that stopped answering altogether.
     watch.sent(timeout + 20.0);
     if let Err(e) = send(request) {
-        // Loom reads whole lines, so a request that didn't all go out never ran.
-        return fail(json, "connection", 2, false, &format!("lost the connection to Loom before the command went: {e}"), &Value::Null);
+        // Loom runs only a request that arrived whole, with its newline, but a
+        // failed write can't say how much got there, so this stays uncertain.
+        let error = format!("lost the connection to Loom while sending the command ({e}). It may have reached Loom: check before trying again.");
+        return fail(json, "connection", 2, true, &error, &Value::Null);
     }
     let reply = match read() {
         Ok(reply) => reply,

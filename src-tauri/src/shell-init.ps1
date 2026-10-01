@@ -35,13 +35,15 @@ function Global:Prompt() {
   if ($h -and $h.Id -ne $Global:__bsLastId) {
     $Global:__bsLastId = $h.Id
     # $? decides pass/fail; LASTEXITCODE only supplies the number, and only if it
-    # actually moved -- PowerShell leaves it stale after a failing cmdlet.
-    # ponytail: two identical native exit codes in a row report 1 the second time.
-    # Still nonzero, still red; exact codes would need a native-command hook.
-    $code = if ($__ok) { 0 }
-            elseif ($null -ne $__exit -and $__exit -ne 0 -and $__exit -ne $Global:__bsPrevExit) { $__exit }
-            else { 1 }
-    $out += (__bsOsc "D;$code")
+    # actually moved -- PowerShell leaves it stale after a failing cmdlet. When it
+    # didn't move, the command failed with a code we can't know: a cmdlet, or a
+    # native command exiting the same as the last one. The mark says so
+    # (D;1;exact=0) rather than guess, since loomctl shows the code to scripts.
+    # ponytail: exact repeats would need a native-command hook.
+    $mark = if ($__ok) { 'D;0' }
+            elseif ($null -ne $__exit -and $__exit -ne 0 -and $__exit -ne $Global:__bsPrevExit) { "D;$__exit" }
+            else { 'D;1;exact=0' }
+    $out += (__bsOsc $mark)
   }
   $out += (__bsOsc 'A')
   $out += (& $Global:__bsPrompt)

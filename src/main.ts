@@ -1818,6 +1818,9 @@ class Pane {
     this.startupRetry = retry;
     this.spawnResume = resume;
     this.exitCode = undefined;
+    // A new process: the last one's commands and exit codes aren't its own.
+    this.commands = 0;
+    this.lastFailed = this.lastExit = null;
     this.startupStarted = Date.now();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
       try {
@@ -2227,17 +2230,22 @@ class Pane {
    * ;D it exited) and, for loomctl, how many finished and the last exit code.
    * A/B/E are emitted and ignored. */
   private mark(data: string) {
-    const [kind, code] = data.split(";");
+    const [kind, code, ...rest] = data.split(";");
     if (kind !== "C" && kind !== "D") return;
     this.busy = kind === "C";
     if (kind === "D") {
+      const known = /^-?\d+$/.test(code ?? "");
       this.commands++;
-      this.lastExit = /^-?\d+$/.test(code ?? "") ? Number(code) : null;
+      this.lastFailed = known ? code !== "0" : null;
+      // exact=0: the prompt knows the command failed but not its code (shell-init.ps1).
+      this.lastExit = known && !rest.includes("exact=0") ? Number(code) : null;
     }
     this.paint();
   }
-  /** Commands a shell with Loom's prompt finished, and the last one's exit code (OSC 133 D). */
+  /** Commands a shell with Loom's prompt finished (OSC 133 D), whether the last
+   * failed, and its exit code when the prompt knows it exactly. */
   commands = 0;
+  lastFailed: boolean | null = null;
   lastExit: number | null = null;
 }
 
@@ -6199,7 +6207,7 @@ const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
   title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, dir: p.th.dir, front: current === p.th && p.th.active === p,
   // Which launch this is (send --gen takes it), and what a shell with Loom's prompt last reported.
-  generation: p.generation, commands: p.commands, exit: p.lastExit,
+  generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit,
   lastOutput: p.lastOut ? new Date(p.lastOut).toISOString() : null,
 });
 /** --gen: input for that launch of the pane only. */

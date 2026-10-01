@@ -45,6 +45,13 @@ loomctl.exe ──named pipe──> loom.exe (control.rs) ──"cli" event─�
    (`usage`, `not-running`, `busy`, `unreachable`, `version`, `connection`,
    `timeout`, `failed`) and `sent`: whether the command reached Loom, so a
    script knows when it may have run. The message goes to stderr as well.
+   `sent` is `false` only before any of the command went out. Loom runs a
+   request only if its line arrived whole, newline included (`request` in
+   `control.rs`): `read_line` also returns what came before a dropped
+   connection, and a valid JSON command cut off there used to run. A real
+   pipe test showed it: a `close` sent without its newline, then the
+   connection ended, closed the pane. Even so, a write that fails partway
+   reports `sent: true`, since `loomctl` can't prove how much arrived.
 
 Loom's threads, panes and their states live in the page, not in Rust, so the
 page is the only place that can answer "which panes are waiting" or run
@@ -127,11 +134,16 @@ the new session. A `keys` cut short that way says how many keys went in
 (`pressed`) instead of "nothing was sent": an Enter among them may have run a
 command already.
 
-**Shell outcomes.** Loom's PowerShell prompt reports each finished command and
-its exit code (OSC 133 `D;<code>`). `panes --json` shows the count (`commands`)
-and the last code (`exit`), and `lastOutput`, when the pane last drew. A
-script can note `commands`, send, and poll until it grows to read the exit
-code. Agents have no such marker.
+**Shell outcomes.** Loom's PowerShell prompt reports each finished command
+(OSC 133 `D;<code>`). `panes --json` shows the count since the pane started
+(`commands`; the startup command is the first), whether the last `failed`,
+its `exit` code, and `lastOutput`, when the pane last drew. PowerShell leaves
+`$LASTEXITCODE` alone after a cmdlet, so when it hasn't moved the prompt can't
+tell a failing cmdlet from a native command exiting with the same code as the
+last one. It used to report 1 there, which was fine for a red dot but not for
+a script; now it sends `D;1;exact=0` and `exit` is `null`, with `failed` still
+true. A script can note `commands`, send, and poll until it grows, on a shell
+no one else types into. Agents have no such marker.
 
 **Enter only once the text shows.** `send` pastes, then presses Enter only if
 the text appeared, so Enter never picks a menu option by accident. It counts
@@ -199,7 +211,10 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   connection after the command (`connection`, `sent: true`); a bad option, a
   missing Loom, a Loom-side timeout and a failed command, each as one JSON
   object; a real PowerShell pane reporting `exit 7`; and `--gen` refused
-  after a restart.
+  after a restart. From the third: the same pane running `exit 7` twice, a
+  failing cmdlet and `exit 0` (7, then unknown, unknown, 0), and a `close`
+  written to the real pipe without its newline before the connection ends,
+  which must leave the pane open.
 - `ui-check.mjs` stops a pane while its session check is held open and checks
   it never starts, then fails a restart with a refused `pty_spawn`. It holds a
   write to queue a send, restarts the pane and checks the send is refused with
@@ -212,8 +227,10 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
   Enter), restarts a pane between the two keys of `keys enter x` (`pressed: 1`,
   no `x`), refuses `--gen` for an old launch, and reads an exit code from an
   OSC 133 mark.
-- `cargo test` covers the pipe names, `loomctl`'s own options, the hello check
-  and the failure shape. `node src/cli.test.ts` covers pane references, key
+- `cargo test` covers the pipe names, `loomctl`'s own options, the hello check,
+  the failure shape and the whole-line rule for requests.
+  `src-tauri/src/shell-init.test.ps1` (run it with `powershell -NoProfile
+  -File`) covers the prompt's exit marks, repeats included. `node src/cli.test.ts` covers pane references, key
   names, option parsing and folders relative to the terminal, and
   `node src/prompt.test.ts` the echo check and menu ids, including a changed
   path under an option and a changed command above four identical lines.
@@ -232,7 +249,9 @@ exit itself, and the Overview's Stop and `loomctl stop` and `restart` all use it
 - **Knowing an agent's task finished, and how.** `wait` sees states (idle,
   waiting, exited), and Claude reads as idle after a short quiet spell, so a
   controller can't yet tell "done" from "paused" or bind a wait to the send
-  before it. Shells have `commands` and `exit`; agents have nothing like them.
+  before it. Shells have `commands`, `failed` and `exit`, but a count isn't a
+  receipt for one caller's command on a shared pane; agents have nothing like
+  them.
 - **Retrying safely.** No caller request ids or stored results, so after a
   timeout or a dropped connection with `sent: true` a script has to look
   before sending or creating again.

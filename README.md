@@ -521,8 +521,8 @@ change when you rename or reorder.
 
 Text sent to a pane belongs to the session that was running when you sent it.
 If the pane stops or restarts first, the send fails and nothing is typed into
-the new session. `panes` shows each pane's `generation`, which goes up with
-every start; `send`, `keys` and `choose` take `--gen N` to refuse a pane that
+the new session. `panes` shows each pane's `generation`, which goes up
+whenever it stops or starts; `send`, `keys` and `choose` take `--gen N` to refuse a pane that
 restarted since you looked. `send` presses Enter only once the text shows on
 screen, which for a long task can be Claude's `[Pasted text #1 +120 lines]`
 or Codex's `[Pasted Content ...]`. If it never shows, `send` fails but says
@@ -536,14 +536,21 @@ last option's details, and an id for all of it. `choose --menu <id>` refuses
 the question if anything in it changed, a path or command included, but not
 if only the highlight moved.
 
-For a shell pane, `panes --json` also shows how many commands finished
-(`commands`) and the last one's exit code (`exit`), from Loom's PowerShell
-prompt, plus when the pane last drew anything (`lastOutput`).
+For a shell pane, `panes --json` also shows how many commands finished since
+it started (`commands`, the startup command included), whether the last one
+`failed`, and its `exit` code, from Loom's PowerShell prompt, plus when the
+pane last drew anything (`lastOutput`). `exit` is `null` when PowerShell can't
+say which code: after a failing cmdlet, or a native command exiting with the
+same code as the one before. `failed` is still right then. On a pane others
+also type into, `commands` can grow for someone else's command, so check the
+pane is yours or print a marker of your own.
 
 With `--json`, every failure prints one JSON object: `code` (`usage`,
 `not-running`, `busy`, `unreachable`, `version`, `connection`, `timeout` or
 `failed`), `sent` (whether the command reached Loom; if it did, it may have
-run) and `error`.
+run) and `error`. `sent` is `false` only when nothing went out: a connection
+that breaks while the command is being written counts as sent, although Loom
+runs only a request that arrived whole.
 
 Exit codes: 0 done, 1 the command failed, 2 Loom isn't running or is a
 different version than `loomctl`, 3 no answer in time (`--timeout`: 30
