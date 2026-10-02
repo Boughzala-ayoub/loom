@@ -172,7 +172,7 @@ async fn ask(app: &AppHandle, request: Value) -> Value {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     if !pending.ready.load(Ordering::Acquire) {
-        return json!({ "ok": false, "error": "Loom is still starting. Try again in a moment." });
+        return json!({ "ok": false, "starting": true, "error": "Loom is still starting. Try again in a moment." });
     }
     let id = pending.next.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();

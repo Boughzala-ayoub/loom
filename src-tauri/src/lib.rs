@@ -181,6 +181,7 @@ fn pty_spawn(
     rows: u16,
     on_out: tauri::ipc::Channel<String>,
     bus: bool,
+    launch: Option<u64>,
 ) -> Result<(), String> {
     if argv.is_empty() {
         return Err("empty argv".into());
@@ -258,6 +259,11 @@ fn pty_spawn(
     // opencode plugin) drop a marker named after this, and `send_wakes` turns
     // it back into a pane.
     cmd.env("LOOM_PANE", &id);
+    // Which launch of the pane this process is (Pane.generation): every task
+    // report carries it, so a late one from a replaced process moves nothing.
+    if let Some(launch) = launch {
+        cmd.env("LOOM_LAUNCH", launch.to_string());
+    }
     cmd.env("LOOM_SESSION_FILE", data_dir(&app).join("session-marks").join(&id));
     // loomctl from inside a pane reaches the Loom that owns it (control.rs),
     // and finds loomctl.exe beside loom.exe without a PATH of its own.
@@ -407,6 +413,7 @@ fn pty_spawn(
             // A turn that ended just before the exit still rings. Left behind, its
             // marker would wake this pane's next launch, which reuses the id.
             send_wakes(&app, std::slice::from_ref(&id));
+            send_task_events(&app, std::slice::from_ref(&id));
             let _ = app.emit(&format!("pty-exit:{id}"), code);
         }
         // Release the input pipe and console even if the exited pane stays open.
@@ -802,6 +809,71 @@ fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
 fn send_wakes(app: &AppHandle, ids: &[String]) {
     let woke = drain_wakes(&std::env::temp_dir().join("loom-wait"), ids);
     if !woke.is_empty() { let _ = app.emit("wakes", woke); }
+}
+
+/// What the agents reported for loomctl's tasks (helper.rs `task_event`, the
+/// OpenCode plugin), as one `agent-events` event of (pane id, event), oldest
+/// first per pane, consumed as they are read. Only this Loom's panes, as with
+/// the wakes.
+fn send_task_events(app: &AppHandle, ids: &[String]) {
+    let got = drain_task_events(&std::env::temp_dir().join("loom-task"), ids);
+    if !got.is_empty() { let _ = app.emit("agent-events", got); }
+}
+
+/// `<pane>.<ms>.<pid>.json` files: another Loom's are left for it, and dropped
+/// after a day. A `.tmp` is one still being written.
+fn drain_task_events(dir: &std::path::Path, ids: &[String]) -> Vec<(String, serde_json::Value)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut files = Vec::new();
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.split('.').next() else { continue };
+        if !ids.iter().any(|x| x == id) {
+            let stale = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(86_400));
+            if stale { let _ = std::fs::remove_file(e.path()); }
+            continue;
+        }
+        if name.ends_with(".json") { files.push((name.clone(), id.to_string(), e.path())); }
+    }
+    files.sort();
+    files.into_iter().filter_map(|(_, id, path)| {
+        let text = std::fs::read_to_string(&path).ok();
+        let _ = std::fs::remove_file(&path);
+        Some((id, serde_json::from_str(&text?).ok()?))
+    }).collect()
+}
+
+/// loomctl's task journal (task.ts), beside the state file it belongs to:
+/// `workspaces.tasks.jsonl`, or `<profile>.tasks.jsonl`.
+fn task_journal_file(app: &AppHandle) -> PathBuf {
+    state_file(app).with_extension("tasks.jsonl")
+}
+
+/// The journal's text: empty when there's none yet, an error when it can't
+/// be read (never an empty journal: that would forget every task's --key).
+/// Lossy, because an append cut off inside a UTF-8 character leaves bytes
+/// that aren't text, and that must cost only the torn last line, which
+/// task.ts skips, not every line before it.
+fn read_task_journal(path: &std::path::Path) -> Result<String, String> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+fn task_journal_write(app: AppHandle, text: String, append: bool) -> Result<(), String> {
+    use std::io::Write;
+    let path = task_journal_file(&app);
+    if append {
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
+        return f.write_all(text.as_bytes()).map_err(|e| e.to_string());
+    }
+    // A rewrite (on load, and when appends pile up) replaces the file whole, as save_state does.
+    let pending = path.with_extension("jsonl.pending");
+    std::fs::write(&pending, text).map_err(|e| e.to_string())?;
+    std::fs::rename(pending, path).map_err(|e| e.to_string())
 }
 
 /// `(pane id, session id)` for every pane in `ids` whose codex notify script
@@ -1213,8 +1285,8 @@ mod commands {
     #[tauri::command]
     #[allow(clippy::too_many_arguments)]
     pub async fn pty_spawn(app: AppHandle, id: String, cwd: Option<String>, argv: Vec<String>, codex_state_id: Option<String>,
-        cols: u16, rows: u16, on_out: tauri::ipc::Channel<String>, bus: Option<bool>) -> Result<(), String> {
-        blocking(move || super::pty_spawn(app.clone(), app.state(), id, cwd, argv, codex_state_id, cols, rows, on_out, bus == Some(true))).await
+        cols: u16, rows: u16, on_out: tauri::ipc::Channel<String>, bus: Option<bool>, launch: Option<u64>) -> Result<(), String> {
+        blocking(move || super::pty_spawn(app.clone(), app.state(), id, cwd, argv, codex_state_id, cols, rows, on_out, bus == Some(true), launch)).await
     }
     #[tauri::command]
     pub async fn pty_kill(app: AppHandle, id: String) -> Result<(), String> {
@@ -1267,6 +1339,15 @@ mod commands {
     #[tauri::command]
     pub async fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> Result<HashMap<String, LastMessages>, String> {
         blocking(move || super::last_messages(app, panes)).await
+    }
+    #[tauri::command]
+    pub async fn task_journal_read(app: AppHandle) -> Result<String, String> {
+        blocking(move || super::read_task_journal(&super::task_journal_file(&app))).await
+    }
+    /// The page chains these, so appends land in order.
+    #[tauri::command]
+    pub async fn task_journal_write(app: AppHandle, text: String, append: bool) -> Result<(), String> {
+        blocking(move || super::task_journal_write(app, text, append)).await
     }
     /// Off the main thread too; the frontend's saveQueue keeps saves in order.
     #[tauri::command]
@@ -1335,6 +1416,7 @@ pub fn run() {
         Some("--statusline") => std::process::exit(helper::statusline()),
         Some("--session-start") => std::process::exit(helper::session_start()),
         Some("--codex-notify") => std::process::exit(helper::codex_notify(args.get(1).map(String::as_str))),
+        Some("--claude-hook") => std::process::exit(helper::claude_hook()),
         _ => {}
     }
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V")) {
@@ -1433,7 +1515,7 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_millis(250));
                 // Copied out: file reads never hold the lock keystrokes wait on.
                 let ids: Vec<String> = handle.state::<Ptys>().0.lock().unwrap().keys().cloned().collect();
-                if !ids.is_empty() { send_wakes(&handle, &ids); }
+                if !ids.is_empty() { send_wakes(&handle, &ids); send_task_events(&handle, &ids); }
             });
             app.state::<WindowStateReady>().0.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
@@ -1465,6 +1547,7 @@ pub fn run() {
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
+            commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,
             commands::dictate_stop,
             dictate::dictate_level
@@ -1791,6 +1874,64 @@ mod tests {
         assert!(drain_wakes(&dir, &mine).is_empty(), "markers must not fire twice");
         assert!(dir.join("other").exists(), "another Loom's marker is left for it");
         assert_eq!(drain_wakes(&dir, &["other".to_string()]), vec![pair("other", "")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_torn_journal_keeps_every_line_before_the_tear() {
+        let dir = std::env::temp_dir().join(format!("loom-journal-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("w.tasks.jsonl");
+        assert_eq!(super::read_task_journal(&path).unwrap(), "", "no journal yet: an empty one");
+        // An append cut off after the first byte of "é" (C3 A9), as the follow-up review reproduced.
+        let mut bytes = b"{\"seq\":2,\"pruned\":0}\n{\"task\":{\"id\":\"k1\",\"key\":\"review-torn\"}}\n{\"event\":{\"seq\":3,\"detail\":\"caf".to_vec();
+        bytes.push(0xC3);
+        std::fs::write(&path, &bytes).unwrap();
+        let text = super::read_task_journal(&path).unwrap();
+        assert!(text.contains("\"key\":\"review-torn\""), "the lines before the tear survive: {text}");
+        assert!(text.ends_with("caf\u{fffd}"), "only the torn character is lost");
+        // A folder where the file should be: an error, not an empty journal.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(super::read_task_journal(&path).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn claude_reports_a_prompt_before_its_turn_can_end() {
+        // UserPromptSubmit must hold the prompt until its report is written: run
+        // async beside an async Stop, the Stop's file could land first and the
+        // task would never see its turn end (LOOM_CLI_TASK_TRACKING review, P2).
+        let hooks: serde_json::Value = serde_json::from_str(super::CLAUDE_HOOKS).unwrap();
+        let hook = |event: &str| hooks["hooks"][event][0]["hooks"][0].clone();
+        assert_eq!(hook("UserPromptSubmit")["async"], serde_json::Value::Null, "the prompt hook runs before the turn");
+        assert!(hook("UserPromptSubmit")["command"].as_str().unwrap().ends_with("--claude-hook"));
+        for event in ["Stop", "StopFailure"] {
+            assert_eq!(hook(event)["async"], true, "{event} needn't hold Claude");
+        }
+    }
+
+    #[test]
+    fn task_events_come_once_in_order_and_whole() {
+        use super::drain_task_events;
+        let dir = std::env::temp_dir().join(format!("loom-task-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mine = ["p-1".to_string()];
+        assert!(drain_task_events(&dir, &mine).is_empty(), "missing folder is not an error");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Written out of order; the name's time puts them back.
+        std::fs::write(dir.join("p-1.1700000000200.9.json"), r#"{"kind":"end"}"#).unwrap();
+        std::fs::write(dir.join("p-1.1700000000100.9.json"), r#"{"kind":"start","match":"ab"}"#).unwrap();
+        std::fs::write(dir.join("p-1.1700000000300.9.tmp"), r#"{"kind":"fai"#).unwrap(); // still being written
+        std::fs::write(dir.join("p-1.1700000000050.9.json"), "not json").unwrap();
+        std::fs::write(dir.join("q-2.1700000000100.9.json"), r#"{"kind":"end"}"#).unwrap(); // another Loom's pane
+        let got = drain_task_events(&dir, &mine);
+        let kinds: Vec<_> = got.iter().map(|(id, v)| (id.as_str(), v["kind"].as_str().unwrap_or(""))).collect();
+        assert_eq!(kinds, [("p-1", "start"), ("p-1", "end")]);
+        assert!(drain_task_events(&dir, &mine).is_empty(), "events must not come twice");
+        assert!(dir.join("q-2.1700000000100.9.json").exists(), "another Loom's event is left for it");
+        assert!(dir.join("p-1.1700000000300.9.tmp").exists(), "a half-written event waits for its rename");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

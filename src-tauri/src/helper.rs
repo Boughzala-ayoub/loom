@@ -86,26 +86,143 @@ fn chain(cmd: &str, input: &[u8]) -> i32 {
 
 /// `loom.exe --codex-notify <event json>`, Codex's `notify` program (agent.ts:
 /// CODEX_NOTIFY). Codex runs it after every completed turn; the thread id in
-/// the event is what `codex resume` takes, so it is recorded for this pane.
-/// Internal and ephemeral agents inherit notify too, so only a real root
-/// rollout is recorded. Always exits 0: session tracking must never get in
-/// the agent's way.
+/// the event is what `codex resume` takes, so it is recorded for this pane,
+/// and the turn's prompts go to loomctl's tasks. Internal and ephemeral agents
+/// inherit notify too, so only a real root rollout counts for either. Always
+/// exits 0: session tracking must never get in the agent's way.
 pub fn codex_notify(event: Option<&str>) -> i32 {
-    let Some(file) = std::env::var_os("LOOM_SESSION_FILE") else { return 0 };
     let Some(home) = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".codex")))
     else {
         return 0;
     };
-    if let Some(id) = event.and_then(|e| root_thread(&home, e)) {
-        let file = PathBuf::from(file);
+    let Some((event, id)) = event.and_then(|e| Some((e, root_thread(&home, e)?))) else { return 0 };
+    // Codex names the turn's prompts, so a task completes only on the turn that carried it.
+    if let (Some(pane), Some(task)) = (loom_pane(), codex_event(event)) {
+        task_event(&pane, "codex", task);
+    }
+    if let Some(file) = std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from) {
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let _ = std::fs::write(file, id);
     }
     0
+}
+
+/// A finished Codex turn as a task event: the end of the turn that carried
+/// these prompts (`input-messages`, codex-cli 0.159), with the turn's and
+/// thread's ids, so the same turn reported twice counts once.
+fn codex_event(event: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(event).ok()?;
+    (v["type"] == "agent-turn-complete").then(|| {
+        let matches: Vec<String> = v["input-messages"].as_array().into_iter().flatten().filter_map(|m| m.as_str()).map(prompt_match).collect();
+        serde_json::json!({ "kind": "end", "matches": matches, "turn": v["turn-id"], "thread": v["thread-id"] })
+    })
+}
+
+fn loom_pane() -> Option<String> {
+    std::env::var("LOOM_PANE").ok().filter(|p| pane_id(p))
+}
+
+/// `loom.exe --claude-hook`, Claude Code's prompt, turn and permission hooks
+/// (claude-hooks.json), for loomctl's tasks (task.ts). UserPromptSubmit
+/// starts a prompt, named by `prompt_match`, never by its text; Stop says the
+/// turn stopped, which another Stop hook may overrule (Loom waits to see
+/// Claude idle); StopFailure fails it with Claude's error; PermissionRequest
+/// asks. Prints nothing and always exits 0: a UserPromptSubmit hook's output
+/// would join the prompt, and exit 2 would block it.
+pub fn claude_hook() -> i32 {
+    let Some(pane) = loom_pane() else { return 0 };
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let Ok(p) = serde_json::from_str::<serde_json::Value>(input.trim_start_matches('\u{feff}')) else { return 0 };
+    if let Some(event) = claude_event(&p) {
+        task_event(&pane, "claude", event);
+    }
+    0
+}
+
+fn claude_event(p: &serde_json::Value) -> Option<serde_json::Value> {
+    let text = |v: &serde_json::Value| v.as_str().map(|s| s.chars().take(200).collect::<String>());
+    Some(match p["hook_event_name"].as_str()? {
+        "UserPromptSubmit" => serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?) }),
+        "Stop" => serde_json::json!({ "kind": "stop" }),
+        "StopFailure" => {
+            let error = text(&p["error"]).unwrap_or_else(|| "unknown".into());
+            let detail = match text(&p["error_details"]) {
+                Some(more) => format!("{error}: {more}"),
+                None => error,
+            };
+            serde_json::json!({ "kind": "fail", "detail": detail })
+        }
+        "PermissionRequest" => serde_json::json!({ "kind": "approval", "detail": text(&p["tool_name"]) }),
+        _ => return None,
+    })
+}
+
+/// How the agents' reports name a prompt, as task.ts `promptMatch` does:
+/// FNV-1a 64 of the UTF-8 with each run of ASCII whitespace made one space
+/// and the ends trimmed (Claude turns CRLF into LF and tabs into spaces, but
+/// "edit foo bar" isn't "edit foobar"), and the tags Claude wraps a collapsed
+/// paste in counted as spacing, in hex.
+pub fn prompt_match(text: &str) -> String {
+    let bare = without_paste_tags(text);
+    let words: Vec<&str> = bare.split(|c| matches!(c, '\t' | '\n' | '\x0b' | '\x0c' | '\r' | ' ')).filter(|w| !w.is_empty()).collect();
+    let h = words.join(" ").bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+    format!("{h:016x}")
+}
+
+/// `text` with `<pasted_content id="8e95">` and `</pasted_content id="8e95">`
+/// (four hex digits), which Claude Code 2.1.287 puts around a paste it
+/// collapsed, made spaces.
+fn without_paste_tags(text: &str) -> String {
+    let (b, mut out, mut i) = (text.as_bytes(), String::with_capacity(text.len()), 0);
+    while i < b.len() {
+        let tag = ["<pasted_content id=\"", "</pasted_content id=\""].iter().find_map(|open| {
+            let id = i + open.len();
+            let hex = |c: &u8| c.is_ascii_digit() || (b'a'..=b'f').contains(c);
+            (b[i..].starts_with(open.as_bytes()) && b.len() >= id + 6 && b[id..id + 4].iter().all(hex) && &b[id + 4..id + 6] == b"\">").then_some(id + 6)
+        });
+        match tag {
+            Some(end) => {
+                out.push(' ');
+                i = end;
+            }
+            None => {
+                let c = text[i..].chars().next().unwrap_or_default();
+                out.push(c);
+                i += c.len_utf8().max(1);
+            }
+        }
+    }
+    out
+}
+
+/// One agent event for `send_task_events` (lib.rs), from the pane launch in
+/// LOOM_LAUNCH; a process started without one reports nothing.
+fn task_event(pane: &str, src: &str, event: serde_json::Value) {
+    let launch = std::env::var("LOOM_LAUNCH").ok().and_then(|l| l.parse().ok());
+    write_task_event(&std::env::temp_dir().join("loom-task"), pane, launch, src, event);
+}
+
+/// `<dir>\<pane>.<µs>.<pid>.json`, written beside and renamed in, so the drain
+/// never reads half of one, and named so a pane's events sort in the order
+/// they were written. Claude's prompt hook runs in step (claude-hooks.json),
+/// so its report is written before that turn's Stop can be.
+fn write_task_event(dir: &Path, pane: &str, launch: Option<u64>, src: &str, mut event: serde_json::Value) {
+    let Some(launch) = launch else { return };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    event["src"] = src.into();
+    event["t"] = (now.as_millis() as u64).into();
+    event["launch"] = launch.into();
+    let _ = std::fs::create_dir_all(dir);
+    let name = format!("{pane}.{:016}.{}", now.as_micros(), std::process::id());
+    let tmp = dir.join(format!("{name}.tmp"));
+    if std::fs::write(&tmp, event.to_string()).is_ok() {
+        let _ = std::fs::rename(&tmp, dir.join(format!("{name}.json")));
+    }
 }
 
 /// The event's thread id, if it names a saved root conversation.
@@ -288,6 +405,67 @@ mod tests {
         assert_eq!(root_thread(&home, &ev("../x")), None, "not an id");
         assert_eq!(root_thread(&home, "not json"), None);
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn prompts_are_named_as_task_ts_names_them() {
+        // The same values src/task.test.ts pins for promptMatch.
+        assert_eq!(prompt_match("Reply with exactly the word ALPHA.\r\nLine two  \r\n\tline three with a tab"), "45f3880110629eda");
+        assert_eq!(prompt_match("Reply with exactly the word ALPHA.\nLine two  \n    line three with a tab"), "45f3880110629eda");
+        assert_eq!(prompt_match("héllo wörld ✓"), "4aee6004cebc55b9");
+        // Where spacing falls counts (the review's collision), and only ASCII spacing is spacing.
+        assert_eq!((prompt_match("edit foo bar").as_str(), prompt_match("edit foobar").as_str()), ("5614147f87873c08", "150936de3eb42a92"));
+        assert_eq!(prompt_match("\u{a0}x\u{a0}"), "9baab6eab24e743f");
+        // A collapsed paste, as Claude Code 2.1.287 reported it in a live session.
+        let lines: Vec<String> = (0..40).map(|i| format!("    filler line {i}  ")).collect();
+        let hook = format!("\n\n<pasted_content id=\"8e95\">\nReply with exactly the word LINES.\n{}\n</pasted_content id=\"8e95\">\n", lines.join("\n"));
+        assert_eq!(prompt_match(&hook), "99f2aa029a84bdb5");
+        assert_ne!(prompt_match("<pasted_content id=\"zz\">x"), prompt_match("x"), "only Claude's own tag shape");
+        assert_eq!(without_paste_tags("é<pasted_content id=\"0a1f\">ü</pasted_content id=\"0a1f\">"), "é ü ");
+    }
+
+    #[test]
+    fn claude_hooks_become_task_events() {
+        use serde_json::json;
+        let ev = |v: serde_json::Value| claude_event(&v);
+        // Payload shapes as Claude Code 2.1.287 sends them.
+        assert_eq!(ev(json!({ "hook_event_name": "UserPromptSubmit", "prompt": "run the tests" })), Some(json!({ "kind": "start", "match": prompt_match("run the tests") })));
+        assert_eq!(ev(json!({ "hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": "done" })), Some(json!({ "kind": "stop" })), "a Stop another hook may overrule");
+        assert_eq!(ev(json!({ "hook_event_name": "StopFailure", "error": "rate_limit", "error_details": "429" })), Some(json!({ "kind": "fail", "detail": "rate_limit: 429" })));
+        assert_eq!(ev(json!({ "hook_event_name": "StopFailure" })), Some(json!({ "kind": "fail", "detail": "unknown" })));
+        assert_eq!(ev(json!({ "hook_event_name": "PermissionRequest", "tool_name": "Write" })), Some(json!({ "kind": "approval", "detail": "Write" })));
+        assert_eq!(ev(json!({ "hook_event_name": "SessionEnd" })), None);
+        assert_eq!(ev(json!({ "hook_event_name": "UserPromptSubmit" })), None, "no prompt, no start");
+        // The prompt's text never leaves the hook: only its match does.
+        assert!(!ev(json!({ "hook_event_name": "UserPromptSubmit", "prompt": "secret-token-123" })).unwrap().to_string().contains("secret"));
+    }
+
+    #[test]
+    fn a_codex_turn_names_its_prompts() {
+        // What codex-cli 0.159.3's notify sent for `codex exec` with a two-line prompt.
+        let real = r#"{"type":"agent-turn-complete","thread-id":"01a0f9f2-5116-7ca3-981e-f2988675d53e","turn-id":"01a0f9f2-6368-77d3-b0b9-e0b499cc8f4c","cwd":"C:\\x","client":"codex_exec","input-messages":["Reply with exactly the word OK.\nSecond line\twith a tab."],"last-assistant-message":"OK"}"#;
+        let sent = "Reply with exactly the word OK.\r\nSecond line\twith a tab.";
+        let turn = "01a0f9f2-6368-77d3-b0b9-e0b499cc8f4c";
+        assert_eq!(codex_event(real), Some(serde_json::json!({ "kind": "end", "matches": [prompt_match(sent)], "turn": turn, "thread": "01a0f9f2-5116-7ca3-981e-f2988675d53e" })));
+        assert_eq!(codex_event(r#"{"type":"approval-requested"}"#), None);
+        assert_eq!(codex_event("not json"), None);
+    }
+
+    #[test]
+    fn a_task_event_names_its_launch_or_isnt_written() {
+        let dir = std::env::temp_dir().join(format!("loom-task-event-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_task_event(&dir, "p-1", None, "claude", serde_json::json!({ "kind": "stop" }));
+        assert!(!dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none(), "no launch, no report");
+        write_task_event(&dir, "p-1", Some(7), "claude", serde_json::json!({ "kind": "start", "match": "ab" }));
+        write_task_event(&dir, "p-1", Some(7), "claude", serde_json::json!({ "kind": "stop" }));
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names.len(), 2);
+        assert!(names.iter().all(|n| n.starts_with("p-1.") && n.ends_with(".json") && n.split('.').nth(1).unwrap().len() == 16), "{names:?}");
+        let first: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(&names[0])).unwrap()).unwrap();
+        assert_eq!((first["kind"].as_str(), first["launch"].as_u64(), first["src"].as_str()), (Some("start"), Some(7), Some("claude")), "written first, sorted first");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Against this machine's own npm codex: `cargo test -- --ignored codex_direct_real`.

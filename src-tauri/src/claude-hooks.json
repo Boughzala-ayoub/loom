@@ -1,5 +1,5 @@
 {
-  "_comment": "Loaded per pane via `claude --settings` (see session.ts). Additive — the user's own settings still apply. SessionStart fires on startup, resume, /clear and compact, which is every moment a pane's session id can change, so this marker is the only reliable answer to 'which transcript is this pane on'. Same shape as the wake markers in %TEMP%\\loom-wait. Both entries are loom.exe helper modes (helper.rs; path templated in by pty_spawn): `--session-start` writes that marker, and the statusLine, `--statusline`, is a tee: Claude Code pushes fresh model/effort into it on every state change, the tee drops that in %TEMP%\\loom-status and then chains to the user's own statusline so their bar still draws.",
+  "_comment": "Loaded per pane via `claude --settings` (see session.ts). Additive — the user's own settings still apply. SessionStart fires on startup, resume, /clear and compact, which is every moment a pane's session id can change, so this marker is the only reliable answer to 'which transcript is this pane on'. Same shape as the wake markers in %TEMP%\\loom-wait. Both entries are loom.exe helper modes (helper.rs; path templated in by pty_spawn): `--session-start` writes that marker, and the statusLine, `--statusline`, is a tee: Claude Code pushes fresh model/effort into it on every state change, the tee drops that in %TEMP%\\loom-status and then chains to the user's own statusline so their bar still draws. The prompt, turn and permission hooks run `--claude-hook`, which tells loomctl's tasks (task.ts) that a prompt started (named by a hash, never its text), a turn ended or failed, or Claude asked for permission. UserPromptSubmit runs in step, so its report is written before the turn it starts can end (run async, a fast turn's Stop report could land first); it prints nothing, so the prompt goes on as typed. Stop and StopFailure run async. PermissionRequest can't, and prints nothing, so Claude's own dialog still shows.",
   "statusLine": {
     "type": "command",
     "command": "\"__LOOM_EXE__\" --statusline"
@@ -12,6 +12,52 @@
             "type": "command",
             "timeout": 10,
             "command": "\"__LOOM_EXE__\" --session-start"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "\"__LOOM_EXE__\" --claude-hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "async": true,
+            "timeout": 10,
+            "command": "\"__LOOM_EXE__\" --claude-hook"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "async": true,
+            "timeout": 10,
+            "command": "\"__LOOM_EXE__\" --claude-hook"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "\"__LOOM_EXE__\" --claude-hook"
           }
         ]
       }

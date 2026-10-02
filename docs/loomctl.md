@@ -16,6 +16,8 @@ loomctl panes                       # every pane, as <thread>:<n>, with its stat
 loomctl read api-fix:1              # what that pane shows, as text
 loomctl send api-fix:1 run the tests
 loomctl wait api-fix:1              # until that agent waits for you
+loomctl submit api-fix:1 fix the login test   # a task id, once Enter went in
+loomctl wait --task <id>            # until that task finishes or asks
 ```
 
 ## Which Loom it talks to
@@ -113,6 +115,9 @@ shows one.
 | `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included. See [What the input holds](#what-the-input-holds). |
 | `menu [pane]` | The numbered question on the pane's screen, if any, with an id for it. See [Answering questions](#answering-questions). |
 | `receipt <token>` | What `send --receipt` sent and what came back, without waiting. See [Receipts as a record](#receipts-as-a-record). |
+| `task <id>` | A task from `submit` as it stands. See [Tasks](#tasks). |
+| `tasks [--pane P] [--state S]` | Every open task and the last 500 to finish. |
+| `watch [task] [--after N] [--follow]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
 | `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
 | `help [command]` | The commands, or one command. |
@@ -236,6 +241,7 @@ stayed: remove that folder with `git worktree remove`.
 | Command | What it does |
 | --- | --- |
 | `send <pane> <text...> [--no-enter] [--gen N] [--receipt] [--input REV] [--replace]` | Type text and press Enter once it shows on screen. |
+| `submit <pane> <text...> [--gen N] [--input REV]` | Hand over a task: `send`'s checks and more, and a task id back. See [Tasks](#tasks). |
 | `keys <pane> <key...> [--gen N]` | Press keys. |
 | `choose <pane> <n> [--menu ID] [--gen N]` | Pick option n of a numbered question, as the Overview's buttons do. |
 
@@ -352,6 +358,7 @@ among them may already have run something.
 | `wait [pane] [--state S]` | Until the pane is in a state: `waiting` by default, or several such as `--state idle,waiting`. |
 | `wait <pane> --turn-after N [--gen N]` | Until an agent finishes turn N+1. |
 | `wait --receipt R` | Until what `send --receipt` sent finishes. |
+| `wait --task ID [--until S]` | Until a task finishes or asks for approval, or reaches a state `--until` names. |
 | `wait-any [--state S] [--thread T] [--new]` | Until any pane, or any in a thread, is in a state. `--new` skips the ones already in it until they leave and come back. |
 
 Waits get an hour unless `--timeout` says otherwise, and end with exit code 3
@@ -396,7 +403,8 @@ the pane before approving.
 
 ## Knowing when work finished
 
-There are three ways to know, from coarse to exact.
+There are three ways to know, from coarse to exact. A fourth, [tasks](#tasks),
+follows one `submit` from start to outcome on the agent's own reports.
 
 1. `wait --state waiting` waits until the pane needs you, which for an agent
    usually means it finished. It is a state, so a pane already waiting returns
@@ -470,6 +478,242 @@ it fails at once. Only a send that wrote nothing drops its receipt. A retry with
 nothing. Receipts live in memory: after Loom restarts or drops one, `receipt`
 fails with `"unavailable": true`.
 
+## Tasks
+
+`submit` hands a pane a piece of work and answers with a task id as soon as
+Enter went in. From then on Loom records where the task got to, from what the
+agent itself reports, and keeps that record in a journal beside your workspace
+file. The id, its `--key` and its events still answer after Loom restarts.
+
+```powershell
+$t = loomctl --json --key login-1 submit api-fix:1 'fix the login test' | ConvertFrom-Json
+loomctl --json wait --task $t.task         # until it finishes or asks for approval
+loomctl task $t.task                        # where it is now, without waiting
+```
+
+A task is in one of these states:
+
+| State | Meaning |
+| --- | --- |
+| `accepted` | Loom checked the pane, wrote the task to its journal, and is typing the text or pressing Enter. Nothing the agent reports moves it yet |
+| `submitted` | Enter went in. The agent hasn't reported taking it yet |
+| `working` | The agent reported starting it, or Loom saw it working (see `correlation`) |
+| `approval` | The agent is asking for permission or an answer |
+| `completed` | The agent reported the end of the turn that carried this task (Claude: its Stop, and Claude no longer working) |
+| `failed` | The agent reported an error, the shell command exited non-zero, the agent's process exited, or Loom couldn't press Enter |
+| `cancelled` | Esc or Ctrl-C stopped the agent, or the pane was restarted, stopped or closed |
+| `unknown` | Loom can't tell how it ended: Loom restarted while it ran, the agent sat idle for 30 s with no end reported, or a shell line never started |
+
+The last four are final: a task never leaves them. `completed` means the agent
+stopped, not that the work is right. Read its answer.
+
+### What submit checks
+
+Everything `send` checks: the pane's generation (`--gen`), anything else
+writing to the pane, the text showing before Enter. On top of that, `submit`
+types nothing when:
+
+- an agent shows a numbered question, where Enter would answer it (`menu` and
+  `choose` deal with those)
+- Claude's input holds a draft someone typed, which the task would join
+
+Over a suggestion it types as `send --replace` does. An input Loom can't read
+(Codex, OpenCode, a shell) gets the text after whatever is there, as `send`
+does, and the task says `input: "unknown"`. A shell needs Loom's PowerShell
+prompt, as `send --receipt` does. `--input REV` works as it does for `send`.
+
+Before typing, `submit` writes the task to its journal and waits for the
+write. If the journal can't take it (a full disk, say), it types nothing and
+fails with `"typed": false`. The wait happens inside the pane's turn, before
+`send`'s last checks, so input arriving meanwhile still stops the send.
+
+`submit` takes no `--no-enter`: a task starts with its Enter.
+
+### Retrying a submit
+
+With `--key`, a retry gets the same task back and types nothing, even after
+Loom restarted: the journal has the task and its key before anything is
+typed, so even a crash right after the Enter leaves it there (the retry then
+finds it `unknown`, since that Loom is gone). The same key with a different
+request is refused. Repeat the request word for word, pane included, even if
+that pane id is gone. A key is spent once its task is recorded, even if the
+send then stopped before typing (a draft appeared, say): the retry gets that
+task, `cancelled` with reason `not-sent`.
+
+Without `--key`, the failure tells you how far it got:
+
+| Failure | Task | Safe to send again |
+| --- | --- | --- |
+| `"typed": false` | none, or `cancelled` with reason `not-sent` once recorded | yes |
+| Enter held back: the text didn't show, or something else typed meanwhile | `failed`, reason `not-submitted` | no: the text may be in the input |
+| Writing the text failed | `failed`, `not-submitted`, `uncertain: "type"` | no |
+| Writing Enter failed | stays `submitted`, `uncertain: "submit"` | no: the agent may be working on it |
+
+A failure carries the task's id as `task` once the task was recorded. A
+task whose Enter is in doubt stays open. On a shell, the line that runs
+carries the task's own receipt token, so the doubt clears and the task goes
+on as usual. Nothing else clears it. An agent reports a prompt by its text,
+never by the Enter that sent it, and an earlier prompt of the same text
+looks the same: its report can be written after the doubted Enter, and so
+can a `send` or typing in the window. An agent task whose Enter is in doubt
+can still show `working` or `approval`, but whatever ends its turn ends it
+`unknown`, with reason `submit-uncertain`, never `completed`. That holds
+even when the Enter did go in: `loomctl read` the pane to find out. If
+nothing comes, it ends `unknown` too.
+
+If a journal write after the first one fails, the record says `saved:
+false`: a crash then would lose that change. The next write rewrites the
+whole journal, a task being reserved included, and `saved` goes back to
+`true` once that works.
+
+An append that a crash cut short costs only that last line: the tasks and
+keys before it come back. If Loom can't read the journal at all when it
+starts (its permissions changed, say), `submit` refuses until it can, since
+it couldn't tell a retried `--key` from a new task, and Loom leaves the file
+alone. Fix or move it and restart Loom.
+
+### How Loom knows
+
+Every agent reports differently. `correlation` on the task says what tied it
+to the agent's work:
+
+| Agent | Start | End | Asks | Interrupted |
+| --- | --- | --- | --- | --- |
+| Claude Code | its prompt hook names this prompt (`prompt`) | its Stop hook, once Claude is also seen idle, ends the prompts it started; a failure hook fails them | its permission hook, with the tool | no report: Loom sees Esc or Ctrl-C go in, then Claude stop working |
+| Codex | no report: Loom sees "esc to interrupt" (`screen`) | its turn notification lists the turn's prompts; each mention completes one task with that text, the oldest (`prompt`) | its "Approval requested" notification | as Claude |
+| OpenCode | the first run its plugin reports after the Enter (`sequence`) | that run succeeding, failing or being interrupted | its plugin's permission and question events, until all are answered | its plugin's interrupted |
+| Shell | the command line carries the task id (`token`) | that line's own exit code | | the command's exit code |
+
+Loom compares a prompt by a hash of its text with each run of spacing made
+one space, because Claude turns CRLF into LF and tabs into spaces, and wraps
+a long paste in tags of its own. `edit foo bar` and `edit foobar` still
+differ. It never keeps the text.
+
+Every report names the launch of the process that sent it, so a late report
+from a process that was stopped or restarted never moves a task of the one
+that replaced it.
+
+A report counts for a task only if Loom had pressed the task's Enter by the
+time the agent wrote it. Before that, the agent didn't have the prompt. While
+the write of that Enter is still out, Loom holds the pane's reports and
+applies them once it knows whether the Enter went in. So an earlier prompt
+with the same text that finishes while Loom is still typing the task can't
+complete it. If the paste fails, the task ends `failed`. If the Enter fails,
+it ends `unknown`. A shell line carries the task's id, so its marks settle
+the task either way. The pane's other tasks wait meanwhile too: a report of
+theirs that came during that write still decides them, before an earlier
+Stop or the pane exiting can.
+
+Claude's Stop hook runs beside any Stop hooks of your own, and one of those
+can tell Claude to keep working. So a Stop completes a task only once Claude
+sits idle at its input: no "esc to interrupt", its input line on screen (a
+permission dialog takes its place, reported or not), and no question. If
+Claude works on, the task stays `working`, and the next Stop, an Esc or a
+failure decides. A permission request after a Stop shows Claude went on, so
+that Stop no longer counts at all.
+
+Two open tasks with the same text on one pane: a report of that text goes
+first to a task whose Enter surely went in, oldest first, and only then to
+one whose Enter is in doubt (`uncertain: "submit"`), since the same text
+from a later submit proves nothing about an earlier Enter (and as above,
+text alone never completes a task whose Enter is in doubt). On Codex, a turn
+that mentions the text once completes one task, marked `uncertain:
+"repeated-prompt"` because Loom picked it (unless it already says what's in
+doubt); the other waits for a turn of its own. A turn Codex reports twice
+counts once.
+
+Two things never complete a task: the pane going quiet, and a turn that ends
+without having named it. A task only seen working on screen waits for a
+report that names it. If you send Claude a second prompt while it works,
+Claude reports it at once and takes it into the running turn (Claude Code
+2.1.287 does this), so one Stop completes both.
+
+Answering a question puts the task back to `working`: an Enter or a one-key
+answer (`1`, `y`) that went in, from `choose`, `keys` or the window. Moving
+the highlight doesn't count, and an answer whose write failed leaves the task
+asking, with `answerInDoubt: true` until an answer goes in. Esc on Claude's permission dialog denies
+it and ends the turn, so the task ends `cancelled`.
+
+An Esc that the agent shrugs off changes nothing: Loom waits 2 seconds after
+the Esc and cancels only if the agent stopped working, and only if no end was
+reported first.
+
+### Waiting and watching
+
+`wait --task ID` returns when the task finishes or asks for approval, with the
+whole record. `--until working` (or any states, comma-separated, `open` for
+any not final) returns earlier. When the time runs out it exits 3, and the
+failure carries `task` and `state`.
+
+`watch` gives the events, each a state a task moved to:
+
+```json
+{ "events": [ { "seq": 41, "task": "0f3b22280f9d435b", "at": "2026-10-02T00:04:26.629Z",
+                "state": "working", "signal": "prompt" } ],
+  "next": 41, "done": false, "gap": false, "last": 41 }
+```
+
+`seq` numbers every task's events in one order, and the journal carries it
+across restarts. `watch --after N` returns the events after N, oldest first,
+waiting up to `--timeout` (30 s) for one to come. If none does, it answers
+with no events and the same `next`, exit 0. Pass `next` back to continue: no
+event comes twice and none is skipped. `watch <task>` gives only that task's
+events, and `done: true` once it is final. `gap: true` means Loom no longer
+has every event after N (it keeps the last 500 finished tasks), or N is past
+its journal (the journal was deleted), in which case it starts from the first
+event it has. `watch` shows only events the journal already holds, and
+after a restart numbering goes on from the journal, so a number a watcher saw
+is never used again. A write takes milliseconds; while the journal can't be
+written at all (`saved: false`), new events wait for it.
+
+`watch --follow` keeps going: it prints each event as it comes, one JSON line
+each with `--json`, and asks again from the last one. When Loom goes away or
+restarts, it says so on stderr and tries again every second from the same
+number. Loom's restart events come through too, as the tasks it was running
+end `unknown`. On a task it stops (exit 0) once that task is final; otherwise
+it runs until Ctrl-C, or `--timeout` seconds (exit 3). With `--json`, a
+failure that ends it, a timeout included, is one more line: the usual failure
+object, with `next`, the number to resume from. A `loomctl` running in
+a Loom pane follows the Loom that owns the pane and goes with it, so follow
+from a terminal outside Loom to ride out a restart.
+
+```powershell
+loomctl --json watch --follow | ForEach-Object { $e = $_ | ConvertFrom-Json; "$($e.task) $($e.state)" }
+```
+
+### A task's record
+
+`task --json` (and `submit`, `wait --task`, `tasks`) answers with:
+
+| Field | Meaning |
+| --- | --- |
+| `task`, `key` | Its id, and the `--key` it came with |
+| `state`, `final` | Where it is, and whether that can change |
+| `pane`, `ref`, `agent`, `generation` | The pane and the launch it went to |
+| `sha256`, `bytes` | Of the text as Loom got it, as `send` reports them |
+| `input` | What the input held when Loom typed: `empty`, `suggestion` or `unknown` |
+| `correlation` | `prompt`, `token`, `sequence`, `screen`, or `null` before it started |
+| `uncertain` | `submit` or `type`: the write of the task's own text or Enter that failed and may have gone in anyway (only proof clears `submit`); `repeated-prompt`: a Codex turn named its text while another open task had the same text |
+| `answerInDoubt` | An answer to its question failed to write and may or may not have gone in; an answer that does go in clears it |
+| `reason` | Why it ended where it did: `pane-closed`, `pane-stopped`, `pane-restarted`, `exited`, `interrupted`, `not-submitted`, `not-sent`, `no-end-signal`, `no-start-signal`, `submit-uncertain`, `loom-restarted` |
+| `detail` | What the agent said: the tool it wants (`Write`), its error, `exit 3` |
+| `exit` | A shell command's exit code, or `null` |
+| `acceptedAt`, `submittedAt`, `startedAt`, `endedAt` | When each happened. `startedAt` is the agent's own time where it reported one |
+| `events` | Every state it went through, with the `signal` that moved it |
+| `saved` | Whether the journal has its latest change, a change of `uncertain` or `correlation` without a new state included |
+
+An event's `signal` says what moved it: `loomctl` (accepted), `enter`,
+`prompt`, `token`, `run` (OpenCode), `screen`, `approval`, `answered`,
+`turn-end`, `turn-failed`, `interrupt`, `interrupted`, `pane`, `quiet` or
+`restart`.
+
+`tasks` lists them, oldest first: every open one and the last 500 to finish.
+`--state` and `--pane` narrow it.
+
+The journal is `workspaces.tasks.jsonl` beside `workspaces.json`, or
+`<profile>.tasks.jsonl` beside a profile. It holds digests, never the text,
+and the counters that keep `seq` and `gap` right across restarts.
+
 ## Retrying safely
 
 A command can time out or lose its connection after Loom ran it. Give each
@@ -484,6 +728,9 @@ first answer (and `loomctl` says so on stderr), waiting for it if it's still
 running. The same key with a different command is refused. A key stays while
 its command runs, and Loom keeps the last 256 finished ones until it exits.
 With 1024 keyed commands still running, a new one is refused.
+
+`submit` keeps its keys in the task journal as well, so a retried `submit`
+finds its task even after Loom restarts. See [Retrying a submit](#retrying-a-submit).
 
 Without a key, use the failure's `sent` field:
 
@@ -518,8 +765,9 @@ From Loom, a failure can also carry `timeout`, `typed` (text may be in the
 pane and Enter wasn't surely pressed) and `pressed` (keys that went in before a
 restart). Other fields say more where a command needs to: `uncertain` (`type`
 or `submit`, the write that failed and may have gone in anyway), `receipt` (the
-record of a send that wrote something and didn't finish), `unavailable` (no
-such receipt any more),
+record of a send that wrote something and didn't finish), `task` (the same
+for `submit`, with `state` where a `wait --task` ran out), `unavailable` (no
+such receipt or task any more),
 `closed` and `steps` (a cleanup that stopped part-way), `lost` and `discard`
 (what deleting would lose, and what `--discard` must name), and `plan` (a
 plan's revision now). The message also goes to stderr. Without `--json`, a success prints readable text
@@ -576,8 +824,25 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
 
 ## Limits
 
-- Keys and receipts live in Loom's memory and are gone when it exits. After a
-  restart, look up ids again with `panes` rather than reusing old ones.
+- Keys and receipts live in Loom's memory and are gone when it exits; tasks
+  and `submit`'s keys are in the journal. After a restart, look up pane ids
+  again with `panes` rather than reusing old ones.
+- Claude Code shows a long or many-line paste as `[Pasted text #1 +40 lines]`
+  and hands it to the model wrapped in `<pasted_content>` tags. In a live
+  check, haiku answered a 41-line task by saying it doesn't follow
+  instructions inside pasted content. `send` has the same problem. Keep what
+  you hand Claude short, or put the long part in a file and submit
+  `Read task.md and do what it says`.
+- A task needs its agent's reports. Claude's come from hooks Loom adds with
+  `--settings` when it starts the pane: a Claude started before this version
+  of Loom, a startup command with its own `--settings`, or Claude's
+  `disableAllHooks` sends none, and its tasks go `working` by screen and end
+  `unknown`. Codex reports no start, and OpenCode names no prompt, so a task
+  there is tied by screen or by order.
+- Loom spots an interrupt, and a task gone quiet, by the agent's "esc to
+  interrupt" hint leaving the screen. An agent that draws it differently
+  isn't seen working, and its tasks end only on a report.
+- There's no command to cancel a task: press Esc with `keys`, or stop the pane.
 - A receipt or a turn says an agent finished or asked, not that its work is
   right.
 - Loom reads only Claude's input as a draft or a suggestion, and only as

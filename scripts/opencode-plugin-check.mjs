@@ -1,20 +1,25 @@
 // No model calls. Exercise both real plugin entrypoints and their marker files.
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, unlinkSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import plugin, { Loom } from '../src-tauri/src/loom-opencode.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'loom-opencode-plugin-'));
-const previous = { pane: process.env.LOOM_PANE, session: process.env.LOOM_SESSION_FILE };
+const previous = { pane: process.env.LOOM_PANE, session: process.env.LOOM_SESSION_FILE, launch: process.env.LOOM_LAUNCH };
 const pane = `opencode-check-${process.pid}`;
 const marker = join(tmpdir(), 'loom-wait', pane);
 const sessionFile = join(dir, 'session');
 const read = () => existsSync(marker) ? readFileSync(marker, 'utf8') : '';
+// The task reports since the last call, in the order Loom drains them (by name), consumed.
+const tasks = join(tmpdir(), 'loom-task');
+const reports = () => (existsSync(tasks) ? readdirSync(tasks) : []).filter(f => f.startsWith(`${pane}.`) && f.endsWith('.json')).sort()
+  .map(f => { const v = JSON.parse(readFileSync(join(tasks, f), 'utf8')); unlinkSync(join(tasks, f)); assert.equal(v.launch, 3, 'Each report names its launch'); return v.kind; });
 try {
   for (const version of [1, 2]) {
     process.env.LOOM_PANE = pane;
     process.env.LOOM_SESSION_FILE = sessionFile;
+    process.env.LOOM_LAUNCH = '3';
     if (existsSync(marker)) unlinkSync(marker);
     let hook, dispose, event, release, aborted = false;
     let gate;
@@ -49,9 +54,11 @@ try {
     const status = (state, sessionID = 'ses_main') => version === 1
       ? event('session.status', { sessionID, status: { type: state } })
       : event(state === 'busy' ? 'session.execution.started' : state === 'retry' ? 'session.retry.scheduled' : 'session.execution.succeeded', { sessionID });
+    reports();
     await status('busy');
     assert.equal(read(), 'opencode:busy');
     assert.equal(readFileSync(sessionFile, 'utf8'), 'ses_main', 'Resume recovers the root session');
+    assert.deepEqual(reports(), ['start'], 'A run starting is a task start');
     await status('idle', 'ses_child');
     assert.equal(read(), 'opencode:busy', 'Child completion cannot finish the root');
     await event('session.created', { sessionID: 'ses_child', parentID: 'ses_main' });
@@ -61,12 +68,21 @@ try {
     await event('permission.asked', { sessionID: 'ses_child', id: 'p1' });
     await event('permission.asked', { sessionID: 'ses_main', id: 'p2' });
     assert.equal(read(), 'opencode:waiting', 'A child approval needs the user too');
+    assert.deepEqual(reports(), ['approval', 'approval'], "Approvals ask, the unrelated session's too is left out");
     await status('retry');
     assert.equal(read(), 'opencode:waiting', 'Busy cannot erase an unanswered approval');
     await event('permission.replied', { sessionID: 'ses_child', requestID: 'p1' });
     assert.equal(read(), 'opencode:waiting', 'Another approval is still pending');
+    assert.deepEqual(reports(), [], 'The child answered while the root still asks: the task still asks too (review P2)');
     await event('permission.replied', { sessionID: 'ses_main', requestID: 'p2' });
     assert.equal(read(), 'opencode:busy');
+    assert.deepEqual(reports(), ['resume'], 'The last answer resumes; a retry is not a new run');
+    delete process.env.LOOM_LAUNCH;
+    await event('permission.asked', { sessionID: 'ses_main', id: 'p3' });
+    assert.deepEqual(reports(), [], 'A process with no launch to name reports nothing');
+    process.env.LOOM_LAUNCH = '3';
+    await event('permission.replied', { sessionID: 'ses_main', requestID: 'p3' });
+    reports();
     const ask = version === 1 ? 'question.asked' : 'form.created';
     const askData = { sessionID: 'ses_main', id: 'q1' };
     for (const reply of version === 1 ? ['question.replied', 'question.rejected'] : ['form.replied', 'form.cancelled']) {
@@ -83,6 +99,10 @@ try {
       assert.equal(read(), '', 'Repeated completion does not ring twice');
       await status('busy');
     }
+    assert.deepEqual(reports(), version === 1
+      ? ['approval', 'resume', 'approval', 'resume', 'end', 'end', 'start', 'fail', 'fail', 'start']
+      : ['approval', 'resume', 'approval', 'resume', 'end', 'end', 'start', 'fail', 'fail', 'start', 'interrupt', 'interrupt', 'start'],
+      'Each run reports its start and outcome');
     // Selection and event delivery share one queue, including failed lookups.
     await hook({ sessionID: 'ses_missing' });
     gate = new Promise(resolve => release = resolve);
@@ -104,12 +124,13 @@ try {
     const noLoom = await Loom({ client: {} });
     await noLoom.event({ event: { type: 'session.created', properties: { info: { id: 'ses_external' } } } });
     assert.equal(readFileSync(sessionFile, 'utf8'), 'ses_next');
-    console.log(`PASS OpenCode ${version}: session identity, states, prompts, child isolation, event order, cleanup, no-op outside Loom`);
+    console.log(`PASS OpenCode ${version}: session identity, states, prompts, child isolation, event order, task reports, cleanup, no-op outside Loom`);
   }
 } finally {
   if (existsSync(marker)) unlinkSync(marker);
+  reports();
   rmSync(dir, { recursive: true, force: true });
-  for (const [key, value] of [['LOOM_PANE', previous.pane], ['LOOM_SESSION_FILE', previous.session]]) {
+  for (const [key, value] of [['LOOM_PANE', previous.pane], ['LOOM_SESSION_FILE', previous.session], ['LOOM_LAUNCH', previous.launch]]) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
 }

@@ -10,6 +10,10 @@ const WAKES = new Set(["question.asked", "form.created", "permission.asked"]);
 const REPLIES = new Set(["question.replied", "question.rejected", "form.replied", "form.cancelled", "permission.replied"]);
 const BUSY = new Set(["session.execution.started", "session.retry.scheduled"]);
 const IDLE = new Set(["session.execution.succeeded", "session.execution.failed", "session.execution.interrupted", "session.error"]);
+// What loomctl's tasks (Loom's task.ts) hear of a run. OpenCode names no
+// prompt, so Loom ties a task to the first run that starts after its Enter.
+const TASK = { "session.execution.started": "start", "session.execution.succeeded": "end", "session.execution.failed": "fail", "session.execution.interrupted": "interrupt" };
+let reports = 0;
 
 function loomPane(lookup) {
   let selected, state, stopped = false, queue = Promise.resolve();
@@ -23,6 +27,22 @@ function loomPane(lookup) {
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, id);
+    } catch {}
+  };
+  // One file per report in %TEMP%\loom-task, named so a pane's sort in order
+  // (16 digits, as loom.exe names Claude's and Codex's), written beside and
+  // renamed in. Each names the pane launch it came from (LOOM_LAUNCH), so a
+  // late one from a replaced process moves nothing; without one, none is sent.
+  const report = (kind, detail) => {
+    const launch = /^\d+$/.test(process.env.LOOM_LAUNCH ?? "") ? Number(process.env.LOOM_LAUNCH) : undefined;
+    if (stopped || launch === undefined) return;
+    try {
+      const dir = path.join(os.tmpdir(), "loom-task");
+      fs.mkdirSync(dir, { recursive: true });
+      const t = Date.now(), n = ++reports;
+      const name = path.join(dir, `${process.env.LOOM_PANE}.${String(t).padStart(13, "0")}${String(n % 1000).padStart(3, "0")}.${process.pid}-${n}`);
+      fs.writeFileSync(`${name}.tmp`, JSON.stringify({ kind, t, launch, src: "opencode", ...(detail ? { detail: String(detail).slice(0, 200) } : {}) }));
+      fs.renameSync(`${name}.tmp`, `${name}.json`);
     } catch {}
   };
   const signal = (next) => {
@@ -70,13 +90,24 @@ function loomPane(lookup) {
         const key = `${id}:${form.id || form.requestID || type.split('.')[0]}`;
         if (WAKES.has(type)) pending.add(key); else pending.delete(key);
         signal(pending.size ? "waiting" : "busy");
+        // Working again only once nothing is left to answer, as the pane marker says.
+        if (WAKES.has(type)) report("approval", type);
+        else if (!pending.size) report("resume", type);
         return;
       }
       const status = BUSY.has(type) ? "busy" : IDLE.has(type) || type === "session.idle" ? "idle"
         : type === "session.status" ? data.status?.type : undefined;
       if (!status || !await selectedSession(data.sessionID)) return;
+      const was = state;
       if (status === "idle") { pending.clear(); signal("waiting"); }
       else if (status === "busy" || status === "retry") signal(pending.size ? "waiting" : "busy");
+      // 2.x reports each run's start and outcome; 1.x only its status, so a
+      // start is the move to busy and an end the move to idle.
+      const error = type === "session.error" ? data.error?.name || "error" : undefined;
+      const task = TASK[type] ?? (error ? (/abort/i.test(error) ? "interrupt" : "fail")
+        : type === "session.idle" || (type === "session.status" && status === "idle") ? "end"
+        : type === "session.status" && status === "busy" && was !== "busy" ? "start" : undefined);
+      if (task) report(task, error);
     }),
   };
 }

@@ -505,6 +505,9 @@ loomctl close login:2 --yes             # stop it and close the pane
 loomctl --json panes                    # the same answers as JSON
 loomctl info                            # which Loom answers: version, process, its own pipe
 loomctl send api-fix:1 --receipt 'npm test'   # a token for wait --receipt
+loomctl --key fix-1 submit api-fix:1 fix the login test   # a task id, once Enter went in
+loomctl wait --task <id>                # until it finishes or asks for approval
+loomctl watch --follow                  # every task's state changes as they happen
 loomctl --key job-7 new C:\code\app --name login   # retried with the same key, runs once
 loomctl help                            # every command the running Loom knows
 ```
@@ -581,6 +584,15 @@ true` if it stopped on a question; two callers sending to one agent at once
 can't be told apart there, since it may answer both in one turn. A receipt
 whose pane restarts, exits or closes before the outcome fails; one that
 finished first keeps its outcome.
+
+`submit` is `send` for handing over work: it refuses a draft or a question
+on screen, answers with a task id once Enter went in, and the task moves from
+`accepted` through `working` and `approval` to `completed`, `failed`,
+`cancelled` or `unknown` on the agent's own reports (Claude's prompt, Stop
+and permission hooks, Codex's turn notification naming the prompt, OpenCode's
+plugin, a shell's exit code). Going quiet never completes a task. Loom keeps
+tasks in a journal beside the workspace file, so ids, `--key` retries and
+`watch` numbers survive a restart. `docs/loomctl.md` has the details.
 
 `--key NAME` makes a retry safe: Loom runs each key once, and the same command
 with the same key gets the first answer, waiting for it if it's still
