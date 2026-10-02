@@ -36,6 +36,15 @@ const setup = () => {
   qa.draw = (id) => {
     const a = qa.agents[id], rule = '─'.repeat(60);
     if (a.dialog) return out(id).onmessage(`\x1b[2J\x1b[H ${a.dialog}\r\n  Enter to allow · Esc to deny\r\n`); // unnumbered, no hint
+    // a.codexShape: Codex 0.160's composer as captured (src/fixtures/codex-composer.json): "›"
+    // in column 0, the input from column 2 (dim placeholder; a multi-line paste collapsed and
+    // colored), a blank row, its status lines, and the real cursor at the insertion point.
+    if (a.codexRaw) return out(id).onmessage(a.codexRaw); // a Codex screen exactly as given
+    if (a.codexShape) {
+      const body = !a.input ? '\x1b[2mAsk Codex to do anything\x1b[0m' : a.input.includes('\n') ? `\x1b[36m[Pasted Content ${a.input.length} chars]\x1b[0m` : a.input;
+      const x = !a.input ? 2 : 2 + (a.input.includes('\n') ? `[Pasted Content ${a.input.length} chars]` : a.input).length;
+      return out(id).onmessage(`\x1b[2J\x1b[H• Ran the tests\r\n\r\n\x1b[1m›\x1b[0m ${body}\r\n\r\n  gpt-5 high · ~\\work\r\n  ${a.busy ? 'esc to interrupt' : '? for shortcuts'}\x1b[3;${x + 1}H\x1b[?25${a.hidden ? 'l' : 'h'}`);
+    }
     const top = a.menu ? ` ${a.menu}\r\n ❯ 1. Yes\r\n   2. No (esc)` : ' Agent';
     out(id).onmessage(`\x1b[2J\x1b[H${top}\r\n${rule}\r\n❯ ${a.input}\r\n${rule}\r\n  ${a.busy ? 'esc to interrupt' : '? for shortcuts'}\r\n`);
   };
@@ -1103,6 +1112,62 @@ try {
     assert.deepEqual([again.data.gap, again.data.events[0].seq], [true, 3], 'The rewritten journal still knows what it pruned');
     assert.equal((await cli('watch', '--after', '2')).data.gap, false, 'From past the pruned events, no gap');
     ok('The pruned-event mark survives the journal rewrite and a restart');
+  }
+
+  // Codex's composer, read in its own shape: submit goes in over the placeholder, a draft
+  // someone typed stops it, and an input Loom can't read is treated as before.
+  {
+    await page.evaluate(() => localStorage.removeItem('qa-journal'));
+    await reboot();
+    await agent(codex, { codexShape: true, busy: false, input: '' });
+    const input = async () => (await cli('read', 'work:2')).data.input;
+    assert.deepEqual([(await input()).kind, (await input()).text], ['suggestion', 'Ask Codex to do anything'], 'The placeholder, read as typing replaces it');
+    const before = (await prompts(codex)).length;
+    const first = await cli('submit', 'work:2', 'run the codex task');
+    assert.equal(first.ok, true, JSON.stringify(first));
+    assert.deepEqual((await prompts(codex)).slice(before), ['run the codex task'], 'Submitted once, nothing else with it');
+    await report(codex, { kind: 'end', matches: [promptMatch('run the codex task')], turn: 'turn-codex-shape-1' });
+    assert.equal((await until(first.text, 'completed')).state, 'completed');
+    // Someone's own draft: submit types nothing and leaves it.
+    await agent(codex, { busy: false, input: 'my own draft' });
+    assert.deepEqual([(await input()).kind, (await input()).text], ['draft', 'my own draft']);
+    const pasted = await pastes(codex);
+    const refused = await cli('submit', 'work:2', 'another task');
+    assert.deepEqual([refused.ok, refused.typed], [false, false], JSON.stringify(refused));
+    assert.match(refused.error, /holds a draft someone typed, so submit typed nothing/);
+    assert.deepEqual([await pastes(codex), await page.evaluate((id) => window.qa.agents[id].input, codex)], [pasted, 'my own draft'], 'Nothing typed, the draft kept');
+    // A long task over the placeholder collapses as Codex shows it, and still submits once.
+    await agent(codex, { input: '' });
+    const long = await call('submit', ['work:2', '-'], 'line one\nline two\nline three\n');
+    assert.equal(long.ok, true, JSON.stringify(long));
+    assert.equal((await prompts(codex)).at(-1), 'line one\nline two\nline three');
+    await report(codex, { kind: 'end', matches: [promptMatch('line one\nline two\nline three')], turn: 'turn-codex-shape-2' });
+    await until(long.text, 'completed');
+    // Review 2026-10-02 19:08 (P1): a draft whose first line is blank, the cursor on it.
+    // The blank row under the cursor is part of the draft, so both guards refuse,
+    // with the cursor on its first line or its last.
+    for (const [x, y] of [[2, 2], [12, 4]]) {
+      const raw = `\x1b[2J\x1b[H• Ran the tests\r\n\r\n\x1b[1m›\x1b[0m \r\n\r\n  third line\r\n\r\n  gpt-5 high · ~\\work\r\n  ? for shortcuts\x1b[${y + 1};${x + 1}H\x1b[?25h`;
+      await agent(codex, { codexRaw: raw, busy: false, input: '\n\nthird line' });
+      assert.deepEqual([(await input()).kind, (await input()).text], ['draft', '\n\nthird line'], `cursor at ${x},${y}`);
+      const pastesBefore = await pastes(codex), promptsBefore = (await prompts(codex)).length;
+      const viaSubmit = await cli('submit', 'work:2', 'new task');
+      assert.deepEqual([viaSubmit.ok, viaSubmit.typed], [false, false], JSON.stringify(viaSubmit));
+      assert.match(viaSubmit.error, /holds a draft someone typed, so submit typed nothing/);
+      const viaReplace = await cli('send', 'work:2', '--replace', 'new task');
+      assert.deepEqual([viaReplace.ok, viaReplace.typed], [false, false], JSON.stringify(viaReplace));
+      assert.match(viaReplace.error, /holds a draft someone typed/);
+      assert.deepEqual([await pastes(codex), (await prompts(codex)).length], [pastesBefore, promptsBefore], `Nothing typed or submitted, cursor at ${x},${y}`);
+    }
+    await agent(codex, { codexRaw: null, input: '' });
+    // The cursor hidden: unknown. --replace still refuses; submit keeps its rule for an unread input.
+    await agent(codex, { busy: false, input: '', hidden: true });
+    assert.equal((await input()).kind, 'unknown');
+    const replace = await cli('send', 'work:2', '--replace', 'not over an unread input');
+    assert.deepEqual([replace.ok, replace.typed], [false, false], JSON.stringify(replace));
+    assert.match(replace.error, /can't be read: Codex's cursor is hidden/);
+    await agent(codex, { codexShape: false, hidden: false });
+    ok("Codex's composer: submit over its placeholder, a draft kept (a blank first line too), a hidden cursor unread");
   }
 
   assert.deepEqual(errors, []);

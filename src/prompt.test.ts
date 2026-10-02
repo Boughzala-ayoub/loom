@@ -1,5 +1,6 @@
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, readInput, echoes, echoed, menuRev, type Cell, type Menu } from "./prompt.ts";
+import { readMenu, readInput, echoes, echoed, menuRev, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 
 let fails = 0;
 // The summary fields; `prompt` gets checks of its own.
@@ -206,7 +207,9 @@ check("Claude 1's boxed input", readInput(boxedInput, "claude"), { kind: "draft"
 check("Bash mode's ! prompt", readInput([cells([rule]), cells(["! ls -la"]), cells([rule])].map(pad), "claude"), { kind: "draft", text: "ls -la" });
 check("A menu instead of the input is unknown", readInput(claude.split("\n").map((l) => pad(cells([l]))), "claude").kind, "unknown");
 check("An input cut off before its rule is unknown", readInput(claudeScreen(cells(["text"])).slice(0, 4), "claude").kind, "unknown");
-check("Other agents' inputs are unknown", readInput(claudeScreen(cells([words])), "codex").kind, "unknown");
+check("Codex with no cursor is unknown", readInput(claudeScreen(cells([words])), "codex").kind, "unknown");
+check("OpenCode's input is unknown", readInput(claudeScreen(cells([words])), "opencode", { x: 2, y: 3, hidden: false }).kind, "unknown");
+check("Claude's reading ignores the cursor", readInput(claudeScreen(cells([words])), "claude", { x: 0, y: 0, hidden: true }), readInput(claudeScreen(cells([words])), "claude"));
 
 // Claude 2.1 on this PC puts a no-break space after ❯. The last seven lines of
 // pane 7's read-back (loomctl read, 2026-10-01), as they were.
@@ -220,6 +223,78 @@ check("After ❯ and a no-break space: an unfocused suggestion", nbsp(...cells([
 for (const [name, sep] of [["an em space", " "], ["a tab", "\t"]]) {
   check(`After ❯ and ${name}: still unknown`, readInput([cells([rule]), cells([`❯${sep}text`]), cells([rule])].map(pad), "claude").kind, "unknown");
 }
+
+// Codex 0.160's composer, captured live (src/fixtures/codex-composer.json): "›"
+// in column 0, the input from column 2, the real cursor at the insertion point.
+// A captured row marks styles: {d} dim, {i} inverse, {c} colored, {-} plain.
+const styled = (row: string): Cell[] => {
+  const out: Cell[] = [];
+  let style = "";
+  for (const part of row.split(/(\{[dic-]+\})/)) {
+    if (/^\{[dic-]+\}$/.test(part)) style = part;
+    else for (const ch of part) out.push({ ch, dim: style.includes("d"), inverse: style.includes("i") });
+  }
+  return out;
+};
+const shot = (name: string) => (codexCapture.screens as Record<string, { cursor: Cursor; rows: string[] }>)[name];
+const codexRead = (rows: string[], cursor?: Cursor) => readInput(rows.map(styled), "codex", cursor);
+const placeholder = "Ask Codex to do anything";
+for (const name of ["empty", "cleared", "cleared2"]) {
+  check(`Codex ${name}: its dim placeholder`, codexRead(shot(name).rows, shot(name).cursor), { kind: "suggestion", text: placeholder });
+}
+check("Codex draft", codexRead(shot("draft").rows, shot("draft").cursor), { kind: "draft", text: "fix the sign-up form fields too" });
+check("Codex wrapped draft", codexRead(shot("wrapped").rows, shot("wrapped").cursor),
+  { kind: "draft", text: "fix the sign-up form fields too and keep each error message right under its field when the window\nis narrow, then add tests" });
+check("Codex collapsed paste (colored, not dim)", codexRead(shot("pasted").rows, shot("pasted").cursor), { kind: "draft", text: "[Pasted Content 2509 chars]" });
+const blank = shot("empty"), draftShot = shot("draft"), y = blank.cursor.y;
+const swap = (rows: string[], edits: Record<number, string>) => rows.map((r, i) => edits[i] ?? r);
+const samePlain = swap(blank.rows, { [y]: `› ${placeholder}` });
+check("The placeholder's words typed plain are a draft", codexRead(samePlain, { ...blank.cursor, x: 2 + placeholder.length }), { kind: "draft", text: placeholder });
+check("... with the cursor moved back to their start too", codexRead(samePlain, blank.cursor), { kind: "draft", text: placeholder });
+check("Dim words the cursor isn't in front of: unknown", codexRead(blank.rows, { ...blank.cursor, x: 2 + placeholder.length }).kind, "unknown");
+check("Blank without its placeholder: unknown, never empty", codexRead(swap(blank.rows, { [y]: "›" }), blank.cursor).kind, "unknown");
+// Review 2026-10-02 19:08 (P1): a blank row under the cursor can be a blank line
+// in the draft. The composer runs to the blank row above the status lines.
+const review = ["› ", "", "  third line", "", "  model status"];
+check("Review case, cursor on the blank first line: the whole draft", codexRead(review, { x: 2, y: 0, hidden: false }), { kind: "draft", text: "\n\nthird line" });
+check("Review case, cursor on its last line: the same draft", codexRead(review, { x: 12, y: 2, hidden: false }), { kind: "draft", text: "\n\nthird line" });
+const lines3 = swap(blank.rows, { [y - 2]: "› first line", [y - 1]: "", [y]: "  third line" });
+for (const [where, at] of [["above the blank line", { x: 12, y: y - 2 }], ["on the blank line", { x: 2, y: y - 1 }], ["below it", { x: 12, y }]] as const) {
+  check(`A blank line in a draft, the cursor ${where}`, codexRead(lines3, { ...at, hidden: false }), { kind: "draft", text: "first line\n\nthird line" });
+}
+check("Two blank lines first, the cursor at the top", codexRead(swap(blank.rows, { [y - 3]: "› ", [y - 2]: "", [y - 1]: "", [y]: "  third line" }), { x: 2, y: y - 3, hidden: false }),
+  { kind: "draft", text: "\n\n\nthird line" });
+const wrappedRows = shot("wrapped").rows, wy = shot("wrapped").cursor.y; // its draft wraps over rows wy-1 and wy
+check("A wrapped first line, a blank line, more, the cursor at the top",
+  codexRead(swap(wrappedRows, { [wy - 3]: wrappedRows[wy - 1], [wy - 2]: wrappedRows[wy], [wy - 1]: "", [wy]: "  last line" }), { x: 2, y: wy - 3, hidden: false }),
+  { kind: "draft", text: "fix the sign-up form fields too and keep each error message right under its field when the window\nis narrow, then add tests\n\nlast line" });
+check("The placeholder's words typed on a later line: a draft", codexRead(swap(blank.rows, { [y - 2]: "› ", [y - 1]: "", [y]: `  ${placeholder}` }), { x: 2, y: y - 2, hidden: false }),
+  { kind: "draft", text: `\n\n${placeholder}` });
+check("Dim words below a blank first line aren't the placeholder: unknown", codexRead(swap(blank.rows, { [y - 2]: "› ", [y - 1]: "", [y]: `  {d}${placeholder}` }), { x: 2, y: y - 2, hidden: false }).kind, "unknown");
+check("A pasted block after a blank line, the cursor at the top", codexRead(swap(shot("pasted").rows, { [y - 2]: "› ", [y - 1]: "", [y]: "  {c}[Pasted Content 2509 chars]" }), { x: 2, y: y - 2, hidden: false }),
+  { kind: "draft", text: "\n\n[Pasted Content 2509 chars]" });
+check("No status lines under it: a blank first line is unknown, never empty", codexRead(["› ", "", "  third line", "", ""], { x: 2, y: 0, hidden: false }).kind, "unknown");
+check("An approval under blank rows: unknown", codexRead(["› ", "", ...codex.split("\n").slice(1, 10), ""], { x: 2, y: 0, hidden: false }).kind, "unknown");
+check("A hidden cursor: unknown", codexRead(blank.rows, { ...blank.cursor, hidden: true }).kind, "unknown");
+check("No cursor: unknown", codexRead(blank.rows).kind, "unknown");
+check("The cursor under the glyph: unknown", codexRead(blank.rows, { ...blank.cursor, x: 0 }).kind, "unknown");
+check("The cursor on the status line: unknown", codexRead(blank.rows, { ...blank.cursor, y: y + 2 }).kind, "unknown");
+check("The cursor past an empty composer: unknown", codexRead(swap(blank.rows, { [y]: "›" }), { ...blank.cursor, x: 9 }).kind, "unknown");
+// An approval where the composer was puts the same "›" on its first option.
+const approval = [...blank.rows.slice(0, 20), ...codex.split("\n").slice(1, 10), ""];
+const option = approval.findIndex((r) => r.startsWith("› 1."));
+check("An approval's highlighted option isn't the composer", codexRead(approval, { x: 2, y: option, hidden: false }).kind, "unknown");
+check("... nor with its cursor hidden", codexRead(approval, { x: 2, y: option, hidden: true }).kind, "unknown");
+check("A typed numbered list reads as a question: unknown", codexRead(swap(blank.rows, { [y - 1]: "› 1. fix the tests", [y]: "  2. then lint" }), { x: 15, y, hidden: false }).kind, "unknown");
+check("An earlier prompt in the transcript doesn't count", codexRead(swap(draftShot.rows, { 10: "› run the tests" }), draftShot.cursor), { kind: "draft", text: "fix the sign-up form fields too" });
+check("A draft with a blank line in it", codexRead(swap(blank.rows, { [y - 2]: "› first line", [y - 1]: "", [y]: "  third line" }), { x: 12, y, hidden: false }),
+  { kind: "draft", text: "first line\n\nthird line" });
+check("Something drawn right under the composer: unknown", codexRead(swap(draftShot.rows, { [y + 1]: "Working (3s)" }), draftShot.cursor).kind, "unknown");
+check("... even with a blank row further down", codexRead(swap(draftShot.rows, { [y + 1]: "Working (3s)", [y + 2]: "" }), draftShot.cursor).kind, "unknown");
+check("The cursor on a row that isn't the composer's: unknown", codexRead(swap(blank.rows, { [y - 2]: "› fix the tests", [y - 1]: "", [y]: "Esc to interrupt", [y + 1]: "", [y + 2]: "", [y + 3]: "" }), { x: 5, y, hidden: false }).kind, "unknown");
+check("No blank row under the composer: unknown", codexRead(draftShot.rows.slice(0, y + 1), draftShot.cursor).kind, "unknown");
+check("Plain and dim mixed: unknown", codexRead(swap(blank.rows, { [y]: "› fix {d}the tests" }), { ...blank.cursor, x: 6 }).kind, "unknown");
+check("Inverse text, which Codex doesn't draw: unknown", codexRead(swap(draftShot.rows, { [y]: "› fix {i}t{-}he tests" }), draftShot.cursor).kind, "unknown");
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

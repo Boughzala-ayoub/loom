@@ -3102,7 +3102,8 @@ function screenCells(p: Pane): Cell[][] {
  * the launch, every input write Loom made to the pane, and any draft text it
  * can see. A suggestion coming or going isn't a change: typing replaces it. */
 function inputState(p: Pane) {
-  const input = readInput(screenCells(p), p.agent);
+  const buf = p.term.buffer.active;
+  const input = readInput(screenCells(p), p.agent, { x: buf.cursorX, y: buf.cursorY, hidden: p.cursorHidden });
   const seen = input.kind === "draft" ? `draft\0${input.text}` : input.kind === "unknown" ? "unknown" : "clear";
   return { ...input, rev: `${p.generation}.${p.inputSeq}.${hash32(seen)}` };
 }

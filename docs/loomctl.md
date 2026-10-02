@@ -304,11 +304,31 @@ $r.input.rev      # what send --input takes
 | `empty` | Nothing in the input. |
 | `unknown` | Loom can't tell. Treat any text there as a draft. |
 
-Only Claude's input is read, from how Claude Code 2.1 draws it: `❯` (or `>`)
-and a space or a no-break space before the input, typed text plain, its
-placeholder and suggestion dim. Codex, OpenCode and shells are
-always `unknown`, and so is Claude when its input isn't on screen (a question
-is up) or is drawn some other way. `input.why` says which.
+Claude's and Codex's inputs are read. OpenCode and shells are always
+`unknown`.
+
+- **Claude**, as Claude Code 2.1 draws it: `❯` (or `>`) and a space or a
+  no-break space before the input, between two rules, typed text plain, its
+  placeholder and suggestion dim.
+- **Codex**, as Codex 0.160 draws it (captured from the real program,
+  `src/fixtures/codex-composer.json`): `›` in the first column and the input
+  from the third, wrapped rows and the draft's own lines indented to it, then
+  a blank row and its status lines at the bottom. A draft can hold blank
+  lines, so Loom reads the input from `›` down to the blank row above the
+  status lines, wherever the cursor is in it. Typed text is plain, and a long
+  paste shows as `[Pasted Content N chars]`. Its dim placeholder,
+  `Ask Codex to do anything`, which Codex shows only while the input is empty,
+  reads as a `suggestion`. Codex draws no caret, so Loom also needs the
+  terminal cursor at the insertion point: the placeholder counts only with the
+  cursor right in front of it. Codex's input never reads as `empty`: blank
+  without its placeholder, it may hold blank lines, so it's `unknown`.
+
+Either is `unknown` when its input isn't on screen, a question is up (an
+approval draws `›` on its first option), the cursor is hidden or outside the
+input (Codex), Codex's status lines aren't below the cursor (so its end can't
+be found), plain and dim text are mixed, or the screen is drawn some other
+way. `input.why` says which. A draft that is a numbered list can look like a
+question, and reads as `unknown` too.
 
 `read --json` also gives the terminal `cursor` (`x`, `y` on the screen, and
 `hidden` when the program hid it; Claude hides it and draws its own caret).
@@ -515,11 +535,14 @@ types nothing when:
 
 - an agent shows a numbered question, where Enter would answer it (`menu` and
   `choose` deal with those)
-- Claude's input holds a draft someone typed, which the task would join
+- Claude's or Codex's input holds a draft someone typed, which the task would
+  join
 
-Over a suggestion it types as `send --replace` does. An input Loom can't read
-(Codex, OpenCode, a shell) gets the text after whatever is there, as `send`
-does, and the task says `input: "unknown"`. A shell needs Loom's PowerShell
+Over a suggestion (Codex's placeholder included) it types as `send --replace`
+does. An input Loom can't read (OpenCode, a shell, or Claude or Codex when
+their input reads as `unknown`, say Codex with its cursor hidden) gets the
+text after whatever is there, as `send` does, and the task says
+`input: "unknown"`. A shell needs Loom's PowerShell
 prompt, as `send --receipt` does. `--input REV` works as it does for `send`.
 
 Before typing, `submit` writes the task to its journal and waits for the
@@ -845,9 +868,9 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
 - There's no command to cancel a task: press Esc with `keys`, or stop the pane.
 - A receipt or a turn says an agent finished or asked, not that its work is
   right.
-- Loom reads only Claude's input as a draft or a suggestion, and only as
-  Claude Code 2.1 draws it. Everything else is `unknown`. Loom never clears a
-  draft.
+- Loom reads only Claude's and Codex's inputs as a draft or a suggestion, and
+  only as Claude Code 2.1 and Codex 0.160 draw them. Everything else is
+  `unknown`. Loom never clears a draft.
 - Receipts keep a digest of the text, not the text. Keep your own copy.
 - Restarting a Codex or OpenCode pane that has no saved session to resume needs
   a choice in the window.

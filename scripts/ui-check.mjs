@@ -1055,9 +1055,50 @@ try {
         assert.deepEqual([acked.outcome, acked.wrote.stage, acked.wrote.uncertain, acked.wrote.submittedAt], ['acknowledged', 'typed', 'submit', null], JSON.stringify(acked));
         assert.ok(!(await page.evaluate(() => window.qa.submitted.some(s => s.includes('never reached')))), 'The agent never got it');
       }
+      {
+        // Codex 0.160 itself: its output captured live (src/fixtures/codex-composer.json),
+        // replayed into the Codex pane, read through Loom's own cells and cursor.
+        const fixture = JSON.parse(readFileSync('src/fixtures/codex-composer.json', 'utf8'));
+        const codexPane = (await cli('panes')).data.find(p => p.agent === 'codex');
+        assert.equal((await cli('restart', codexPane.id, '--yes')).ok, true);
+        assert.equal((await cli('show', codexPane.id)).ok, true);
+        assert.equal((await cli('zoom', codexPane.id)).data.zoomed, true);
+        await page.waitForTimeout(300);
+        const size = await page.evaluate(id => window.qa.calls.filter(c => c.cmd === 'pty_resize' && c.args.id === id).at(-1)?.args, codexPane.id);
+        assert.ok(size && size.cols >= fixture.cols && size.rows >= fixture.rows, `The zoomed pane holds the ${fixture.cols}x${fixture.rows} capture: ${JSON.stringify(size)}`);
+        const replay = async step => {
+          await out(codexPane.id, '\x1bc' + fixture.raw[step]);
+          return (await cli('read', codexPane.id)).data;
+        };
+        const empty = await replay('empty');
+        assert.deepEqual([empty.input.kind, empty.input.text, empty.cursor], ['suggestion', 'Ask Codex to do anything', fixture.screens.empty.cursor], JSON.stringify(empty.input));
+        const draft = await replay('draft');
+        assert.deepEqual([draft.input.kind, draft.input.text, draft.cursor], ['draft', 'fix the sign-up form fields too', fixture.screens.draft.cursor], JSON.stringify(draft.input));
+        const wrapped = await replay('wrapped');
+        assert.deepEqual([wrapped.input.kind, wrapped.input.text], ['draft', 'fix the sign-up form fields too and keep each error message right under its field when the window\nis narrow, then add tests'], JSON.stringify(wrapped.input));
+        assert.notEqual(empty.input.rev.split('.')[2], draft.input.rev.split('.')[2], 'A draft moves the revision; the placeholder does not count as one');
+        // The guard reads it too: --replace types nothing over Codex's draft.
+        const writesBefore = (await writes(codexPane.id)).length;
+        const refused = await cli('send', codexPane.id, '--replace', 'over the draft');
+        assert.deepEqual([refused.ok, refused.typed], [false, false], JSON.stringify(refused));
+        assert.match(refused.error, /holds a draft someone typed/);
+        assert.equal((await writes(codexPane.id)).length, writesBefore, 'Nothing typed');
+        // Review 2026-10-02 19:08 (P1): a draft whose first line is blank, the cursor on it.
+        await out(codexPane.id, '\x1bc\x1b[2J\x1b[H• Ran the tests\r\n\r\n\x1b[1m›\x1b[0m \r\n\r\n  third line\r\n\r\n  gpt-5 high · ~\\work\r\n  ? for shortcuts\x1b[3;3H\x1b[?25h');
+        const blankFirst = (await cli('read', codexPane.id)).data;
+        assert.deepEqual([blankFirst.input.kind, blankFirst.input.text, blankFirst.cursor], ['draft', '\n\nthird line', { x: 2, y: 2, hidden: false }], JSON.stringify(blankFirst.input));
+        const writesBlank = (await writes(codexPane.id)).length;
+        const overBlank = await cli('send', codexPane.id, '--replace', 'new task');
+        assert.deepEqual([overBlank.ok, overBlank.typed], [false, false], JSON.stringify(overBlank));
+        assert.match(overBlank.error, /holds a draft someone typed/);
+        assert.equal((await writes(codexPane.id)).length, writesBlank, 'Nothing typed into the draft');
+        await out(codexPane.id, '\x1b[?25l');
+        assert.equal((await cli('read', codexPane.id)).data.input.kind, 'unknown', 'A hidden cursor leaves it unread');
+        assert.equal((await cli('zoom', codexPane.id)).data.zoomed, false);
+      }
       assert.deepEqual(errors, []);
       checks++;
-      console.log(`PASS loomctl input kinds and guarded sends, receipt records, worktree deletion plans and steps, no-break prompt, paste-to-Enter writers, receipts on failed writes, pre-paste writer sweep, unrelated turns after a failed Enter ${width}px`);
+      console.log(`PASS loomctl input kinds and guarded sends, receipt records, worktree deletion plans and steps, no-break prompt, paste-to-Enter writers, receipts on failed writes, pre-paste writer sweep, unrelated turns after a failed Enter, Codex composer replay ${width}px`);
       // In memory only: after a restart, a receipt says it's unavailable rather than pending.
       await page.reload();
       await page.waitForFunction(() => window.qa?.calls.some(c => c.cmd === 'cli_ready'));

@@ -91,16 +91,26 @@ export type Input = { kind: "empty" | "suggestion" | "draft" | "unknown"; text: 
 const PROMPT = /^[>❯!](?:[  ]|$)/;
 const BORDER = /^[\s│┃║]$/;
 
+/** The terminal cursor on the rows readInput gets: column, row, and whether
+ * the program hid it. */
+export type Cursor = { x: number; y: number; hidden: boolean };
+
+/** What an agent's input holds, from the screen's cells: Claude's (below) and
+ * Codex's (readCodexInput). Every other agent's is `unknown`: never checked. */
+export function readInput(rows: Cell[][], agent: string, cursor?: Cursor): Input {
+  if (agent === "codex") return readCodexInput(rows, cursor);
+  if (agent !== "claude") return { kind: "unknown", text: null, why: `Loom can't tell a draft from a suggestion in ${agent}'s input.` };
+  return readClaudeInput(rows);
+}
+
 /** What Claude Code's input line holds, from its cells. Claude 2.1 (read off
  * 2.1.286's renderer) draws typed text plain, and its placeholder and prompt
  * suggestion, shown only while the input is empty, dim: with the first
  * character inverse as the caret when the terminal has focus, all dim when it
  * doesn't. A draft can end in a dim hint ("/review [pr]"). The same words
- * plain or dim are a draft or a suggestion; anything else is `unknown`, and so
- * is every other agent: their inputs were never checked. */
-export function readInput(rows: Cell[][], agent: string): Input {
+ * plain or dim are a draft or a suggestion; anything else is `unknown`. */
+function readClaudeInput(rows: Cell[][]): Input {
   const unknown = (why: string): Input => ({ kind: "unknown", text: null, why });
-  if (agent !== "claude") return unknown(`Loom can't tell a draft from a suggestion in ${agent}'s input.`);
   const lines = rows.map((r) => unbox(r.map((c) => c.ch || "").join("")));
   // The last prompt line on screen right under a rule: earlier prompts in the
   // transcript have no rule above them.
@@ -131,6 +141,61 @@ export function readInput(rows: Cell[][], agent: string): Input {
   const lastPlain = shown.length - 1 - [...shown].reverse().findIndex((c) => !c.dim), firstDim = shown.findIndex((c) => c.dim);
   if (lastPlain < firstDim && lastPlain >= 1) return { kind: "draft", text: text((c) => !c.dim) };
   return unknown("Claude's input mixes plain and dim text in a way Loom doesn't recognize.");
+}
+
+const CODEX_PROMPT = /^›(?: |$)/;
+
+/** What Codex's composer holds. Codex 0.160 (captured live: src/fixtures/
+ * codex-composer.json) draws "›" in column 0 and the input from column 2,
+ * wrapped rows and the draft's own lines indented to it, blank lines included,
+ * then a blank row and its status lines at the bottom. Typed text is plain (a
+ * collapsed paste colored, not dim); "Ask Codex to do anything" is dim, and
+ * shows only while the input is empty. There is no drawn caret: the terminal
+ * cursor shows at the insertion point, so it places the input. A hidden or
+ * missing cursor, a cursor outside the composer, a question on screen, an end
+ * Loom can't find, or dim text the cursor doesn't sit in front of, and Loom
+ * doesn't guess. */
+function readCodexInput(rows: Cell[][], cursor: Cursor | undefined): Input {
+  const unknown = (why: string): Input => ({ kind: "unknown", text: null, why });
+  if (!cursor || cursor.hidden) return unknown(`Codex's cursor is ${cursor ? "hidden" : "unknown"}, so Loom can't place its input.`);
+  const lines = rows.map((r) => r.map((c) => c.ch || "").join(""));
+  // Approvals and other choices draw "› 1. ..." where the composer was.
+  if (readMenu(lines.join("\n"))) return unknown("Codex is asking a question, not showing its input.");
+  if (cursor.x < 2 || cursor.y < 0 || cursor.y >= lines.length) return unknown("Codex's cursor isn't in its composer.");
+  // The composer's first row: the nearest "› " at or above the cursor.
+  let at = cursor.y;
+  while (at >= 0 && !CODEX_PROMPT.test(lines[at])) at--;
+  if (at < 0) return unknown("Codex's composer isn't on screen.");
+  // Its end, found from the bottom up: Codex's status lines are the last rows
+  // with anything on them, one blank row above them. A blank row nearer the
+  // cursor can be a blank line in the draft, with more of it below.
+  let end = lines.length - 1;
+  while (end >= 0 && !lines[end].trim()) end--;
+  while (end >= 0 && lines[end].trim()) end--;
+  if (end <= cursor.y) return unknown("Codex's status lines aren't below the cursor, so Loom can't tell where its input ends.");
+  // Everything in between is the input: rows indented to it, or blank.
+  for (let y = at + 1; y < end; y++) {
+    if (lines[y].trim() && !lines[y].startsWith("  ")) return unknown("Something other than Codex's input is drawn in its composer.");
+  }
+  const cells: Cell[] = [];
+  for (let y = at; y < end; y++) {
+    const row = rows[y].slice(2).filter((c) => c.ch !== "");
+    while (row.length && !row[row.length - 1].ch.trim()) row.pop();
+    if (y > at) cells.push({ ch: "\n", dim: false, inverse: false });
+    cells.push(...row);
+  }
+  const shown = cells.filter((c) => c.ch.trim());
+  const text = cells.map((c) => c.ch).join("").replace(/\s+$/, "");
+  const atStart = cursor.y === at && cursor.x === 2;
+  if (shown.some((c) => c.inverse)) return unknown("Codex's composer has inverse text, which it doesn't draw.");
+  // Empty, Codex shows its placeholder. Blank without it, the input holds
+  // blank lines (more text past the screen, perhaps) or is in a state never
+  // seen: never "empty".
+  if (!shown.length) return unknown("Codex's composer is blank without its placeholder, so it may hold blank lines.");
+  if (shown.every((c) => !c.dim)) return { kind: "draft", text };
+  // Its placeholder: one dim row, the cursor in front of it.
+  if (shown.every((c) => c.dim) && end === at + 1 && atStart) return { kind: "suggestion", text };
+  return unknown("Codex's composer mixes plain and dim text, or the cursor isn't where its placeholder puts it.");
 }
 
 // Long pastes show as one of these instead of the text: Claude's and Codex's.
