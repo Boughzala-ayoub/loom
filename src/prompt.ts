@@ -214,3 +214,12 @@ export function echoes(screen: string, text: string): number[] {
   return [count(typed.slice(0, 24)), count(typed.slice(-24)), typed ? (shown.match(PASTED) ?? []).length : 0];
 }
 export const echoed = (before: number[], after: number[]) => after.some((n, i) => n > before[i]);
+
+/** Claude Code's working line, as a screen of text shows it: a spinner frame
+ * in the first column, the verb with "…", then its timer, "✢ Topsy-turvying…
+ * (22m 17s · ↓ 98.5k tokens · thought for 8s)". 2.1.288 dropped "esc to
+ * interrupt" from it (only its API retry banner keeps that). The frames are
+ * · ✢ * ✶ ✻ ✽ on Windows, ✳ for * elsewhere. The line a turn leaves behind,
+ * "✻ Worked for 3m 2s", has no "…", and tool lines ("⎿  Running…") are
+ * indented. */
+export const claudeWorking = (screen: string) => /^[·✢✳*✶✻✽] [^\n]*…(?: \(|$)/m.test(screen);

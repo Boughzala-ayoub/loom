@@ -25,8 +25,11 @@ export type Correlation = "prompt" | "token" | "sequence" | "screen";
 
 /** One change of a task's state. `seq` counts every task's events in one
  * order that outlives Loom (the journal keeps it), so a watcher resumes after
- * the last one it saw and never sees one twice. */
-export type TaskEvent = { seq: number; task: string; at: number; state: TaskState; signal: string; detail?: string };
+ * the last one it saw and never sees one twice. A completed one carries
+ * `response`, the agent's own report of its final message named as a prompt
+ * is (promptMatch), never its text: two observations of one answer name the
+ * same, so a relay can tell a repeat from a new answer. */
+export type TaskEvent = { seq: number; task: string; at: number; state: TaskState; signal: string; detail?: string; response?: string };
 
 export type Task = {
   id: string;
@@ -47,8 +50,10 @@ export type Task = {
   state: TaskState;
   correlation: Correlation | null;
   /** What Loom can't tell about the task itself: its own Enter (`submit`) or
-   * text (`type`) may not have gone in, or which of two tasks with its text
-   * a turn was (`repeated-prompt`). Only proof clears `submit` (changeFields). */
+   * text (`type`) may not have gone in, its text may be waiting for an Enter
+   * Loom held back (`enter`, main.ts heldEnter), or which of two tasks with
+   * its text a turn was (`repeated-prompt`). Only proof clears `submit`
+   * (changeFields). */
   uncertain: string | null;
   /** An answer to its question failed to write, so it may or may not have gone
    * in. Apart from `uncertain`: an answer going in says nothing about whether
@@ -70,11 +75,12 @@ export type Task = {
  * own OSC marks put it. `at` is when the agent reported it, in ms. `launch`
  * is the pane launch (Pane.generation) whose process reported it: a report
  * from a process that has since been replaced must not move the next one's
- * tasks. The pane's own marks come from its running launch. */
+ * tasks. The pane's own marks come from its running launch. A turn's end or
+ * Claude's Stop names its final message as `response` (TaskEvent). */
 export type Signal = { at: number; launch?: number } & (
   | { kind: "start"; match?: string; token?: string }
-  | { kind: "end"; matches?: string[]; turn?: string; token?: string; failed?: boolean | null; exit?: number | null }
-  | { kind: "stop" }
+  | { kind: "end"; matches?: string[]; turn?: string; token?: string; failed?: boolean | null; exit?: number | null; response?: string }
+  | { kind: "stop"; response?: string }
   | { kind: "fail"; detail?: string }
   | { kind: "approval"; detail?: string }
   | { kind: "resume" }
@@ -87,14 +93,14 @@ export type Signal = { at: number; launch?: number } & (
  * text alone, never by the Enter that sent it, so it is never proof: an
  * earlier prompt of the same text whose report was written late (helper.rs
  * stamps the time it writes, not when the prompt went in) looks the same. */
-export type Change = Partial<Pick<Task, "correlation" | "uncertain" | "answerInDoubt" | "reason" | "detail" | "exit" | "input">> & { state: TaskState; signal: string; proof?: true };
+export type Change = Partial<Pick<Task, "correlation" | "uncertain" | "answerInDoubt" | "reason" | "detail" | "exit" | "input">> & { state: TaskState; signal: string; proof?: true; response?: string };
 
 /** The fields a change sets on a task, keeping one rule wherever the change
  * came from: a doubt about the task's own Enter clears only on proof it went
  * in. Not an answer to a question going in (that doubt is `answerInDoubt`),
  * not a report of its text, not a turn ending. */
 export function changeFields(t: Task, c: Change): Partial<Task> {
-  const { state: _state, signal: _signal, proof, ...fields } = c;
+  const { state: _state, signal: _signal, proof, response: _response, ...fields } = c;
   if (t.uncertain === "submit" && "uncertain" in fields && fields.uncertain !== "submit" && !proof) delete fields.uncertain;
   return fields;
 }
@@ -170,6 +176,7 @@ export function route(open: Task[], s: Signal): [Task, Change][] {
   const active = (t: Task) => t.state === "working" || t.state === "approval";
   const entered = (t: Task) => t.submittedAt !== null && t.submittedAt <= s.at;
   const byDelivery = (ts: Task[]) => [...ts.filter((t) => t.uncertain !== "submit"), ...ts.filter((t) => t.uncertain === "submit")];
+  const said = s.kind === "end" && s.response ? { response: s.response } : {};
   switch (s.kind) {
     case "start": {
       if (s.token) {
@@ -197,11 +204,11 @@ export function route(open: Task[], s: Signal): [Task, Change][] {
           const candidates = byDelivery(open.filter((t) => t.match === m && entered(t)));
           const repeated = candidates.length > mentions;
           for (const t of candidates.slice(0, mentions)) {
-            out.push([t, { state: "completed", signal: "prompt", correlation: "prompt", ...(repeated && !t.uncertain ? { uncertain: "repeated-prompt" } : {}) }]);
+            out.push([t, { state: "completed", signal: "prompt", correlation: "prompt", ...(repeated && !t.uncertain ? { uncertain: "repeated-prompt" } : {}), ...said }]);
           }
         }
       } else {
-        for (const t of open) if (active(t) && started(t)) out.push([t, { state: "completed", signal: "turn-end" }]);
+        for (const t of open) if (active(t) && started(t)) out.push([t, { state: "completed", signal: "turn-end", ...said }]);
       }
       break;
     }
@@ -235,6 +242,7 @@ export function parseSignal(ev: unknown): Signal | null {
   const at = typeof e.t === "number" && Number.isFinite(e.t) ? e.t : Date.now();
   const base = { at, launch: e.launch };
   const detail = typeof e.detail === "string" && e.detail ? { detail: e.detail.slice(0, 200) } : {};
+  const response = typeof e.response === "string" && /^[0-9a-f]{16}$/.test(e.response) ? { response: e.response } : {};
   switch (e.kind) {
     case "start":
       return { ...base, kind: "start", ...(typeof e.match === "string" ? { match: e.match } : {}) };
@@ -243,11 +251,13 @@ export function parseSignal(ev: unknown): Signal | null {
         ...base, kind: "end",
         ...(Array.isArray(e.matches) ? { matches: e.matches.filter((m): m is string => typeof m === "string") } : {}),
         ...(typeof e.turn === "string" && e.turn ? { turn: e.turn } : {}),
+        ...response,
       };
     case "fail":
     case "approval":
       return { ...base, kind: e.kind, ...detail };
     case "stop":
+      return { ...base, kind: "stop", ...response };
     case "resume":
     case "interrupt":
       return { ...base, kind: e.kind };

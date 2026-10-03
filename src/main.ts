@@ -18,9 +18,10 @@ import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { readMenu, readInput, hash32, echoes, echoed, menuRev, type Cell, type Menu as AgentMenu } from "./prompt";
+import { readMenu, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { changeFields, codexAsks, eventsAfter, isFinal, parseSignal, promptMatch, readJournal, route, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type Signal, type Task, type TaskEvent, type TaskState } from "./task";
+import { TaskEventGate } from "./task_event_gate";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
@@ -3518,11 +3519,12 @@ function sendReply(p: Pane, text: string, { gen, beforePaste, check, beforeEnter
     steps.typed = Date.now();
     await p.settle(150, 1000);
     live(true);
-    if (!echoed(before, echoes(liveScreen(p), text))) {
-      throw new NotShown(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
-    }
+    // Other input first: a NotShown means Loom's paste is all that went in (a held task's Enter, sendText).
     if (p.inputSeq !== own) {
       throw new NotSubmitted(`Something else was typed into ${p.agent} while Loom was pasting, so it didn't press Enter: its input holds both. Open the session and check it before sending anything.`, true);
+    }
+    if (!echoed(before, echoes(liveScreen(p), text))) {
+      throw new NotShown(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
     }
     beforeEnter?.();
     steps.entering = Date.now();
@@ -3593,8 +3595,9 @@ let taskSeq = 0;
 let taskPruned = 0;
 /** What the sweep remembers per open task, never saved: since when the agent
  * looked idle, the last Esc it judged, and when Claude's Stop hook said the
- * turn ended (the task completes once Claude is seen idle too). */
-const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number }>();
+ * turn ended (the task completes once Claude is seen idle too) and the final
+ * message that Stop named. */
+const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number; response?: string }>();
 const watched = (t: Task) => taskWatch.get(t.id) ?? taskWatch.set(t.id, {}).get(t.id)!;
 const paneById = (id: string) => threads.flatMap((t) => t.panes).find((p) => p.id === id);
 
@@ -3610,6 +3613,9 @@ let journalCalls = 0, snapshotCalls = 0;
  * append runs only after every write before it landed (a failed one makes
  * the next a whole rewrite), so landing one makes all before it durable. */
 let writtenSeq = 0;
+/** Wakes `watch` when a journal write lands (and when a reservation joins
+ * its task, after its write), instead of a timer. */
+const taskEventGate = new TaskEventGate();
 /** Tasks whose latest change the journal may not have, because a write
  * failed. While any are, the next write rewrites the journal whole, which
  * puts them back. `task` shows them as `saved: false`. */
@@ -3637,10 +3643,12 @@ function journal(lines: object[], ids: string[]): Promise<void> {
     return invoke("task_journal_write", { text, append: !whole }).then(
       () => {
         writtenSeq = Math.max(writtenSeq, whole ? seenSeq : upTo);
-        if (!whole) return;
-        snapshotCalls = seenCalls;
-        unsaved.clear();
-        journalLines = 0;
+        if (whole) {
+          snapshotCalls = seenCalls;
+          unsaved.clear();
+          journalLines = 0;
+        }
+        taskEventGate.notify();
       },
       (e) => {
         ids.forEach((id) => unsaved.add(id));
@@ -3669,6 +3677,7 @@ async function reserveTask(t: Task) {
     throw new NotSubmitted(`Loom couldn't record the task in its journal (${e instanceof Error ? e.message : String(e)}), so it typed nothing.`, false);
   }
   t.events.push(accepted);
+  taskEventGate.notify();
   sweepSoon();
 }
 
@@ -3687,12 +3696,21 @@ function moveTask(t: Task, c: TaskChange, at = Date.now()): Promise<boolean> {
   if (state === "working") t.startedAt ??= at;
   if (isFinal(state)) t.endedAt = at;
   const detail = c.detail ?? c.reason ?? undefined;
-  const event: TaskEvent = { seq: ++taskSeq, task: t.id, at, state, signal, ...(detail ? { detail } : {}) };
+  const response = state === "completed" && c.response ? { response: c.response } : {};
+  const event: TaskEvent = { seq: ++taskSeq, task: t.id, at, state, signal, ...(detail ? { detail } : {}), ...response };
   t.events.push(event);
   const saved = journal([{ event, set: taskFields(t) }], [t.id]).then(() => true, () => false);
   if (isFinal(state)) {
     t.settledAt = event.seq;
     taskWatch.delete(t.id);
+    // Ended with its Enter still held (another write, the pane gone or
+    // restarted): that Enter will never be pressed, so its receipt settles.
+    const held = heldEnter.get(t.id);
+    if (held) {
+      heldEnter.delete(t.id);
+      held.receipt.unsent = true;
+      keepReceipts();
+    }
     keepTasks();
   }
   return saved;
@@ -3725,6 +3743,63 @@ function releaseSignals(p: Pane) {
   held?.forEach((s) => taskSignal(p, s));
 }
 
+/** Tasks whose text Loom typed and then didn't press Enter for, because the
+ * text didn't show (sendText), with the pane's input count right after: the
+ * paste was the only input of that turn, so the text may be waiting there,
+ * alone. They stay `accepted`, `uncertain: "enter"`. `keys <pane> enter`
+ * with nothing written since presses that Enter for the task (enterTask), and
+ * it goes on as if submit had. Anything else written first may have sent the
+ * text or changed it, so the task ends unknown (sweepTasks). Not kept across
+ * restarts: an open task ends unknown then anyway. Each holds its receipt
+ * too, unsettled (so the last-500 history never prunes it) until the Enter
+ * goes in or the task ends (moveTask), and recovery updates that one. */
+const heldEnter = new Map<string, { seq: number; receipt: Receipt }>();
+
+/** The task whose held Enter `keys <pane> enter` presses: task `id`, or the
+ * pane's one whose text nothing has been written after. Without `id`, none
+ * (a plain Enter) when it can't be; with it, an error and nothing pressed. */
+function heldTask(p: Pane, id?: string): Task | undefined {
+  const t = id === undefined ? [...tasks.values()].find((t) => t.pane === p.id && heldEnter.get(t.id)?.seq === p.inputSeq) : tasks.get(id);
+  const kind = (p.agent === "claude" || p.agent === "codex") && inputState(p).kind;
+  const why =
+    !t ? `there's no task ${id}`
+    : !heldEnter.has(t.id) ? `task ${t.id} isn't waiting for its Enter (it's ${t.state})`
+    : t.pane !== p.id ? `task ${t.id} is on another pane (${t.ref})`
+    : t.gen !== p.generation ? `${paneName(p)} restarted since task ${t.id} was typed`
+    : heldEnter.get(t.id)!.seq !== p.inputSeq ? `something else was written to ${paneName(p)} after task ${t.id}'s text`
+    : p.agent !== "shell" && readMenu(liveScreen(p, false)) ? `${paneName(p)} is asking a question, which Enter would answer`
+    : kind && kind !== "draft" ? `${paneName(p)}'s input reads as ${kind}, not the task's text`
+    : "";
+  if (!why) return t;
+  if (id !== undefined) throw new NotSubmitted(`${why}, so Loom pressed nothing.`, false);
+}
+
+/** A held task's Enter (heldTask), pressed as sendText presses one: what
+ * the pane reports meanwhile waits (enterHeld), and from the Enter on a
+ * report of the task's text may be its (submittedAt). */
+async function enterTask(p: Pane, t: Task) {
+  const r = heldEnter.get(t.id)!.receipt;
+  heldEnter.delete(t.id);
+  enterHeld.set(p.id, []);
+  if (p.agent !== "shell") r.turnsAt = p.turns;
+  const entering = Date.now();
+  r.steps.entering = entering;
+  try {
+    await submit(p);
+  } catch (e) {
+    r.uncertain = "submit";
+    t.submittedAt = entering;
+    moveTask(t, { state: "submitted", signal: "enter", uncertain: "submit", detail: null }, entering);
+    releaseSignals(p);
+    throw Object.assign(new NotSubmitted(`Writing Enter into ${paneName(p)} failed (${e instanceof Error ? e.message : String(e)}), so it may or may not have gone in. Don't press it again: loomctl read ${paneName(p)} shows whether the text still waits.`, true), { details: { task: t.id, uncertain: "submit" } });
+  }
+  r.steps.submitted = Date.now();
+  t.submittedAt = entering;
+  const saved = moveTask(t, { state: "submitted", signal: "enter", uncertain: null, detail: null }, entering);
+  releaseSignals(p);
+  await saved;
+}
+
 /** What an agent or the pane's own marks reported: it moves the tasks that
  * it concerns (task.ts route), only those on the launch that reported it. A
  * Stop is held until Claude is seen idle (sweepTasks). */
@@ -3739,10 +3814,11 @@ function taskSignal(p: Pane, s: Signal) {
   // changeFields keeps the doubt; only a shell's token, which is this task's
   // own, clears it).
   for (const [t, c] of route(open, s)) {
-    if (c.signal === "stop") watched(t).stopAt = Date.now();
+    // The latest Stop's final message is the one its completion names.
+    if (c.signal === "stop") Object.assign(watched(t), { stopAt: Date.now(), response: s.kind === "stop" ? s.response : undefined });
     else {
       // Asking after a Stop: another Stop hook sent Claude on, so that Stop ended nothing.
-      if (c.state === "approval") watched(t).stopAt = undefined;
+      if (c.state === "approval") Object.assign(watched(t), { stopAt: undefined, response: undefined });
       moveTask(t, c, s.at);
     }
   }
@@ -3783,7 +3859,7 @@ function sweepTasks() {
   const now = Date.now();
   let open = 0;
   for (const t of tasks.values()) {
-    if (isFinal(t.state) || t.state === "accepted") {
+    if (isFinal(t.state) || (t.state === "accepted" && !heldEnter.has(t.id))) {
       if (t.state === "accepted") open++; // its send decides; the sweep waits for it
       continue;
     }
@@ -3809,13 +3885,21 @@ function sweepTasks() {
       continue;
     }
     open++;
+    if (heldEnter.has(t.id)) {
+      // Written to since its text was typed, by anything but its own Enter
+      // (enterTask): that may have sent the text, or changed it.
+      if (p.inputSeq !== heldEnter.get(t.id)!.seq) moveTask(t, { state: "unknown", signal: "pane", reason: "not-submitted", detail: "something else was written to the pane while its text waited for Enter, so Loom can't tell whether it was sent" });
+      continue;
+    }
     if (p.agent === "shell") {
       // OSC 133 reports the rest of a shell's command; an Enter that never took leaves no mark.
       if (t.state === "submitted" && now - (t.submittedAt ?? now) >= QUIET_MS) moveTask(t, { state: "unknown", signal: "quiet", reason: "no-start-signal" });
       continue;
     }
     const w = watched(t);
-    const busy = INTERRUPT_HINT.test(p.screen(true));
+    // Claude Code 2.1.288 draws no hint while it works: its working line says so instead.
+    const screen = p.screen(true);
+    const busy = INTERRUPT_HINT.test(screen) || (p.agent === "claude" && claudeWorking(screen));
     // Esc or Ctrl-C after the Enter and after any Stop, judged once, 2 s on.
     const esc = p.interruptAt;
     const escNew = esc > (t.submittedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;
@@ -3833,7 +3917,7 @@ function sweepTasks() {
     // and route gives it no Stop.
     const idleInput = () => readInput(screenCells(p), "claude").kind !== "unknown" && !readMenu(liveScreen(p, false));
     if (w.stopAt !== undefined && !busy && now - w.stopAt >= 500 && !(escNew && w.escSeen !== esc) && idleInput()) {
-      moveTask(t, unproven(t, { state: "completed", signal: "turn-end" }));
+      moveTask(t, unproven(t, { state: "completed", signal: "turn-end", ...(w.response ? { response: w.response } : {}) }));
       continue;
     }
     if (t.state === "approval") continue; // an answer delivered moves it on (Pane.wrote)
@@ -6941,6 +7025,8 @@ function receiptRecord(token: string, r: Receipt) {
     },
     acknowledged: !res ? null : "turn" in res ? { turn: res.turn, at: at(r.resultAt) } : { failed: res.failed, exit: res.exit, at: at(r.resultAt) },
     outcome: res ? "acknowledged" : receiptSettled(r) ? "none" : "pending",
+    // Its task's Enter is held back: `keys <pane> enter` may still press it.
+    held: heldEnter.has(token),
   };
 }
 
@@ -7072,7 +7158,10 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
       throw e;
     }
     const uncertain = steps.entering && !steps.submitted ? "submit" : !steps.typed ? "type" : undefined;
-    if (receipt) Object.assign(receipt, { unsent: !steps.entering, uncertain }), keepReceipts();
+    // Its text, alone, may be waiting for Enter: the task stays open (heldTask),
+    // its receipt pending with it. Held before the receipts are pruned below.
+    if (task && receipt && e instanceof NotShown) heldEnter.set(task.id, { seq: p.inputSeq, receipt });
+    if (receipt) Object.assign(receipt, { unsent: !steps.entering && !heldEnter.has(token!), uncertain }), keepReceipts();
     const details = { ...(token && { receipt: token }), ...(task && { task: task.id }), ...(uncertain && { uncertain }) };
     const why = e instanceof Error ? e.message : String(e);
     if (task) {
@@ -7085,13 +7174,14 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
         task.submittedAt = steps.entering ?? Date.now();
         moveTask(task, { state: "submitted", signal: "enter", uncertain }, task.submittedAt);
       }
+      else if (heldEnter.has(task.id)) moveTask(task, { state: "accepted", signal: "loomctl", uncertain: "enter", detail: why.slice(0, 200) });
       else moveTask(task, { state: "failed", signal: "loomctl", reason: "not-submitted", uncertain: uncertain ?? null, detail: why.slice(0, 200) });
       releaseSignals(p);
     }
     // A pane that restarted or closed took the text with it, so a retry is safe.
     if (e instanceof NotSubmitted && !e.typed) throw Object.assign(e, { details: { ...e.details, ...details } });
     const err =
-      e instanceof NotShown ? new NotSubmitted(`${p.agent} didn't show the text on its screen, so Loom didn't press Enter. The text went to ${ref} and may be waiting there, so don't send it again: loomctl read ${ref} shows it, and loomctl keys ${ref} enter submits it.`, true)
+      e instanceof NotShown ? new NotSubmitted(`${p.agent} didn't show the text on its screen, so Loom didn't press Enter. The text went to ${ref} and may be waiting there, so don't send it again: loomctl read ${ref} shows it, and loomctl keys ${ref} enter${task ? ` --task ${task.id}` : ""} submits it${task ? ", and the task goes on from there. Anything else written there first ends the task unknown" : ""}.`, true)
       : e instanceof NotSubmitted ? e
       : uncertain === "submit" ? new NotSubmitted(`Loom typed the text into ${ref}, then writing Enter failed (${why}), so it may or may not have gone in. Don't send it again: loomctl read ${ref} shows whether it's still waiting in the input.`, true)
       : new NotSubmitted(`Writing the text into ${ref} failed (${why}), maybe part-way, so some of it may be in the input. Don't send it again before loomctl read ${ref} shows what's there.`, true);
@@ -7390,13 +7480,15 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   keys: {
-    usage: "keys <pane> <key...> [--gen N]",
-    help: "Press keys in a pane: enter, esc, tab, shift-tab, up, down, left, right, backspace, ctrl-c, or a single character. --gen N refuses a pane that restarted since.",
-    options: { gen: "int" },
+    usage: "keys <pane> <key...> [--gen N] [--task ID]",
+    help: "Press keys in a pane: enter, esc, tab, shift-tab, up, down, left, right, backspace, ctrl-c, or a single character. --gen N refuses a pane that restarted since. A lone enter on a pane where submit typed a task's text but held back its Enter, with nothing written there since, is that task's Enter: the task goes on from there. --task ID insists on it, and presses nothing if it can't be.",
+    options: { gen: "int", task: "string" },
     run: async (a) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
       const names = a._.slice(1);
       if (!names.length) throw new Error("Name the keys to press.");
+      const enter = names.length === 1 && names[0] === "enter", id = str(a, "task");
+      if (id !== undefined && !enter) throw new Error("--task goes with a lone enter: loomctl keys <pane> enter --task ID.");
       const bytes = names.map((n) => {
         const b = keyBytes(n, p.term.modes.applicationCursorKeysMode);
         if (b === null) throw new Error(`Unknown key "${n}". To type text, use loomctl send --no-enter.`);
@@ -7404,9 +7496,11 @@ const CLI: Record<string, CliCommand> = {
       });
       if (p.dead) throw new Error(`${paneName(p)} has exited.`);
       const gen = cliGen(a) ?? p.generation;
-      let pressed = 0;
+      let pressed = 0, task: Task | undefined;
       try {
         await inTurn(p, async (live) => {
+          // Checked in the pane's turn, with nothing awaited before the Enter's write.
+          if (enter && (task = heldTask(p, id))) return enterTask(p, task);
           for (const b of bytes) {
             live(pressed > 0);
             await keys(p, b);
@@ -7419,7 +7513,7 @@ const CLI: Record<string, CliCommand> = {
         if (!(e instanceof NotSubmitted) || !pressed) throw e;
         throw new NotSubmitted(`${p.agent} ${changed(p, gen)} after ${pressed} of ${names.length} keys (${names.slice(0, pressed).join(" ")}); the rest weren't pressed.`, false, pressed);
       }
-      return { data: { pane: p.id, keys: names }, text: "" };
+      return { data: { pane: p.id, keys: names, ...(task ? { task: task.id } : {}) }, text: task ? task.id : "" };
     },
   },
   choose: {
@@ -7495,11 +7589,12 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   watch: {
-    usage: "watch [task] [--after N] [--follow]",
-    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away.",
-    options: { after: "int" },
+    usage: "watch [task] [--after N] [--follow] [--metadata]",
+    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2.",
+    options: { after: "int", metadata: "bool" },
     run: async (a, ctx) => {
       const one = a._[0] ? cliTask(a._[0]) : undefined;
+      const meta = flag(a, "metadata");
       let after = num(a, "after", 0, 0, Number.MAX_SAFE_INTEGER);
       // A number from beyond this journal (it was lost or reset): start over.
       // Only events the journal holds (writtenSeq), so a number never comes twice across restarts.
@@ -7508,13 +7603,21 @@ const CLI: Record<string, CliCommand> = {
       const pick = () => eventsAfter(one ? [one] : tasks.values(), after).filter((e) => e.seq <= writtenSeq);
       const finished = () => !!one && isFinal(one.state) && (one.events[one.events.length - 1]?.seq ?? 0) <= writtenSeq;
       const end = Date.now() + Math.max(0, ctx.seconds - 1) * 1000;
-      while (!pick().length && !finished() && Date.now() < end) await new Promise((r) => setTimeout(r, 100));
+      // A gap alone doesn't end the wait: one that stays (a task's events all
+      // before a pruned one) would have `watch <task> --follow` ask again at once, forever.
+      await taskEventGate.waitUntil(() => pick().length > 0 || finished(), Math.max(0, end - Date.now()));
       const events = pick();
       const at = (n: number) => new Date(n).toISOString();
       const done = finished();
+      // `one`, not tasks.get: it may have been pruned while this waited.
+      const owner = (id: string) => one ?? tasks.get(id)!;
       return {
-        data: { events: events.map((e) => ({ ...e, at: at(e.at) })), next: events[events.length - 1]?.seq ?? after, done, gap, last: writtenSeq },
-        text: events.map((e) => `${e.seq}  ${at(e.at)}  ${e.task}  ${e.state}  ${e.signal}${e.detail ? `  ${e.detail}` : ""}`).join("\n"),
+        data: {
+          events: events.map((e) => (meta ? { seq: e.seq, task: e.task, pane: owner(e.task).pane, generation: owner(e.task).gen, state: e.state, at: at(e.at), response: e.response ?? null } : { ...e, at: at(e.at) })),
+          next: events[events.length - 1]?.seq ?? after, done, gap: gap || after < taskPruned, last: writtenSeq,
+          ...(meta ? { source: "loom-durable-events-v2" } : {}),
+        },
+        text: events.map((e) => `${e.seq}  ${at(e.at)}  ${e.task}  ${e.state}` + (meta ? "" : `  ${e.signal}${e.detail ? `  ${e.detail}` : ""}`)).join("\n"),
       };
     },
   },

@@ -170,6 +170,17 @@ check("only Claude's own tag shape is dropped", promptMatch('<pasted_content id=
   const e = task("go", "submitted", { acceptedAt: 4000, submittedAt: 9000 });
   eq("a turn that ended before the task's Enter isn't its", apply([e], { kind: "end", at, matches: [promptMatch("go")] }), []);
 }
+// A turn's end names its final message: each task it completes carries it, never another outcome.
+{
+  const said = promptMatch("Done."), a = task("go"), b = task("go"), w = task("other", "working", { correlation: "sequence" });
+  eq("one Codex turn completing two tasks names its answer on both", route([a, b], { kind: "end", at, matches: [promptMatch("go"), promptMatch("go")], response: said }).map(([t, c]) => [t.id, c.state, c.response]), [[a.id, "completed", said], [b.id, "completed", said]]);
+  eq("an unnamed end (OpenCode) names it too", route([w], { kind: "end", at, response: said }).map(([, c]) => c.response), [said]);
+  const d = task("go", "submitted", { uncertain: "submit" });
+  eq("an unproven end is unknown and names nothing", route([d], { kind: "end", at, matches: [promptMatch("go")], response: said }).map(([, c]) => [c.state, c.response]), [["unknown", undefined]]);
+  eq("never a task field", changeFields(a, { state: "completed", signal: "prompt", response: said }), {});
+  const f = task("fail", "working", { correlation: "prompt" });
+  eq("a failure names none", route([f], { kind: "fail", at }).map(([, c]) => c.response), [undefined]);
+}
 // Sixth review: accepted, its paste or Enter still being written. Nothing the
 // agent reports by text or order can be this task's yet (main.ts holds what
 // comes while its Enter is written, and sets submittedAt once that has an outcome).
@@ -215,6 +226,9 @@ eq("no launch, no signal (review P1: a replaced process's report)", [parseSignal
 eq("a token in a file is ignored", parseSignal({ kind: "end", t: 7, launch: 3, token: "x", failed: false }), { at: 7, launch: 3, kind: "end" });
 eq("Codex's prompts and turn", parseSignal({ kind: "end", t: 7, launch: 3, matches: ["a", 3, "b"], turn: "u1", thread: "th" }), { at: 7, launch: 3, kind: "end", matches: ["a", "b"], turn: "u1" });
 eq("Claude's Stop", parseSignal({ kind: "stop", t: 7, launch: 3 }), { at: 7, launch: 3, kind: "stop" });
+eq("Claude's Stop naming its final message", parseSignal({ kind: "stop", t: 7, launch: 3, response: "0123456789abcdef" }), { at: 7, launch: 3, kind: "stop", response: "0123456789abcdef" });
+eq("a turn's end naming its final message", parseSignal({ kind: "end", t: 7, launch: 3, matches: ["a"], response: "0123456789abcdef" }), { at: 7, launch: 3, kind: "end", matches: ["a"], response: "0123456789abcdef" });
+eq("a response that isn't a match is dropped, text above all", [parseSignal({ kind: "stop", t: 7, launch: 3, response: "the answer" }), parseSignal({ kind: "stop", t: 7, launch: 3, response: 5 })], [{ at: 7, launch: 3, kind: "stop" }, { at: 7, launch: 3, kind: "stop" }]);
 eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", launch: 1 })], [null, null, null]);
 
 // The journal: tasks and their events come back as they were; a torn last line is skipped.

@@ -117,7 +117,7 @@ shows one.
 | `receipt <token>` | What `send --receipt` sent and what came back, without waiting. See [Receipts as a record](#receipts-as-a-record). |
 | `task <id>` | A task from `submit` as it stands. See [Tasks](#tasks). |
 | `tasks [--pane P] [--state S]` | Every open task and the last 500 to finish. |
-| `watch [task] [--after N] [--follow]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
+| `watch [task] [--after N] [--follow] [--metadata]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
 | `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
 | `help [command]` | The commands, or one command. |
@@ -242,7 +242,7 @@ stayed: remove that folder with `git worktree remove`.
 | --- | --- |
 | `send <pane> <text...> [--no-enter] [--gen N] [--receipt] [--input REV] [--replace]` | Type text and press Enter once it shows on screen. |
 | `submit <pane> <text...> [--gen N] [--input REV]` | Hand over a task: `send`'s checks and more, and a task id back. See [Tasks](#tasks). |
-| `keys <pane> <key...> [--gen N]` | Press keys. |
+| `keys <pane> <key...> [--gen N] [--task ID]` | Press keys. A lone `enter` can be a task's held-back Enter: see [Retrying a submit](#retrying-a-submit). |
 | `choose <pane> <n> [--menu ID] [--gen N]` | Pick option n of a numbered question, as the Overview's buttons do. |
 
 How `send` works:
@@ -488,7 +488,9 @@ is what the pane signaled back: an agent's turn ending (`turn`), or a shell
 command's `failed` and `exit`. It is `null` until then. `outcome` is `pending`,
 `acknowledged`, or `none` when nothing will come (the pane restarted, exited or
 closed, or Enter was never pressed). A turn ending means the agent stopped,
-not that the job is done: read its answer.
+not that the job is done: read its answer. `held` is `true` while its task's
+Enter is held back and can still be pressed (see [Retrying a submit](#retrying-a-submit));
+such a receipt stays `pending` and is never pruned from the history meanwhile.
 
 Loom keeps the digest, never the text, since prompts can hold secrets. Save the
 prompt on your side and hash its UTF-8 to compare. When `send --receipt` fails
@@ -515,14 +517,14 @@ A task is in one of these states:
 
 | State | Meaning |
 | --- | --- |
-| `accepted` | Loom checked the pane, wrote the task to its journal, and is typing the text or pressing Enter. Nothing the agent reports moves it yet |
+| `accepted` | Loom checked the pane, wrote the task to its journal, and is typing the text or pressing Enter, or held Enter back (`uncertain: "enter"`). Nothing the agent reports moves it yet |
 | `submitted` | Enter went in. The agent hasn't reported taking it yet |
 | `working` | The agent reported starting it, or Loom saw it working (see `correlation`) |
 | `approval` | The agent is asking for permission or an answer |
 | `completed` | The agent reported the end of the turn that carried this task (Claude: its Stop, and Claude no longer working) |
 | `failed` | The agent reported an error, the shell command exited non-zero, the agent's process exited, or Loom couldn't press Enter |
 | `cancelled` | Esc or Ctrl-C stopped the agent, or the pane was restarted, stopped or closed |
-| `unknown` | Loom can't tell how it ended: Loom restarted while it ran, the agent sat idle for 30 s with no end reported, or a shell line never started |
+| `unknown` | Loom can't tell how it ended: Loom restarted while it ran, the agent sat idle for 30 s with no end reported, a shell line never started, or something else was written to the pane while its text waited for Enter |
 
 The last four are final: a task never leaves them. `completed` means the agent
 stopped, not that the work is right. Read its answer.
@@ -568,11 +570,32 @@ Without `--key`, the failure tells you how far it got:
 | Failure | Task | Safe to send again |
 | --- | --- | --- |
 | `"typed": false` | none, or `cancelled` with reason `not-sent` once recorded | yes |
-| Enter held back: the text didn't show, or something else typed meanwhile | `failed`, reason `not-submitted` | no: the text may be in the input |
+| Enter held back: the text didn't show | stays `accepted`, `uncertain: "enter"` | no: the text may be in the input (see below) |
+| Enter held back: something else typed meanwhile | `failed`, reason `not-submitted` | no: the input holds both |
 | Writing the text failed | `failed`, `not-submitted`, `uncertain: "type"` | no |
 | Writing Enter failed | stays `submitted`, `uncertain: "submit"` | no: the agent may be working on it |
 
-A failure carries the task's id as `task` once the task was recorded. A
+A failure carries the task's id as `task` once the task was recorded.
+
+When the text didn't show, Loom's paste was all that went into the pane, so
+the text may be sitting in the input, alone. The task stays open, `accepted`
+with `uncertain: "enter"`. `loomctl read` the pane, and if the text is there,
+`loomctl keys <pane> enter --task <id>` presses its Enter for it: the task
+goes on from there exactly as if `submit` had pressed it, to `submitted` and
+on to its outcome, and `wait --task` and `watch` follow it. That Enter counts
+for the task only on its own pane and launch, with nothing written there since
+the text (a key, dictation, another send), no question on screen, and
+Claude's or Codex's input reading as a draft. Otherwise `--task` presses
+nothing and fails with `"typed": false`. A plain `keys <pane> enter` is the
+task's Enter when all of that holds, and an ordinary key when it doesn't.
+Anything else written to the pane first may have sent the text or changed it,
+so the task ends `unknown`, reason `not-submitted`. Restarting or closing the
+pane cancels it, its process exiting fails it, and a Loom restart ends it
+`unknown`. The task's receipt (its id) goes with it: `pending` with `held:
+true` while the Enter can still be pressed, then the Enter's own record once
+it is, or `none` when the task ended without it.
+
+A
 task whose Enter is in doubt stays open. On a shell, the line that runs
 carries the task's own receipt token, so the doubt clears and the task goes
 on as usual. Nothing else clears it. An agent reports a prompt by its text,
@@ -689,6 +712,20 @@ after a restart numbering goes on from the journal, so a number a watcher saw
 is never used again. A write takes milliseconds; while the journal can't be
 written at all (`saved: false`), new events wait for it.
 
+`watch --metadata` gives each event as `seq`, `task`, `pane` (its id),
+`generation`, `state`, `at` and `response`, nothing a prompt or report said,
+and adds `"source": "loom-durable-events-v2"` to the answer. `response` is
+`null` except on a `completed` event, where it names the agent's final message
+the way a prompt is named (16 hex digits of a hash of its words, never the
+text), from the agent's own report: Claude's Stop hook, Codex's turn
+notification, OpenCode 2.x's last text of the run. It is `null` there too when
+the agent named none (a shell, OpenCode 1.x). The same answer observed twice
+names the same, so a relay can send one notice per task and answer, and still
+one per task when two tasks both answer "Done.". A program that relays events
+elsewhere can rely on that shape, and on each event being flushed to disk
+before `watch` shows it. `watch` wakes when a journal write lands, not on a
+timer.
+
 `watch --follow` keeps going: it prints each event as it comes, one JSON line
 each with `--json`, and asks again from the last one. When Loom goes away or
 restarts, it says so on stderr and tries again every second from the same
@@ -716,7 +753,7 @@ loomctl --json watch --follow | ForEach-Object { $e = $_ | ConvertFrom-Json; "$(
 | `sha256`, `bytes` | Of the text as Loom got it, as `send` reports them |
 | `input` | What the input held when Loom typed: `empty`, `suggestion` or `unknown` |
 | `correlation` | `prompt`, `token`, `sequence`, `screen`, or `null` before it started |
-| `uncertain` | `submit` or `type`: the write of the task's own text or Enter that failed and may have gone in anyway (only proof clears `submit`); `repeated-prompt`: a Codex turn named its text while another open task had the same text |
+| `uncertain` | `submit` or `type`: the write of the task's own text or Enter that failed and may have gone in anyway (only proof clears `submit`); `enter`: Loom held its Enter back, and its text may be waiting in the input; `repeated-prompt`: a Codex turn named its text while another open task had the same text |
 | `answerInDoubt` | An answer to its question failed to write and may or may not have gone in; an answer that does go in clears it |
 | `reason` | Why it ended where it did: `pane-closed`, `pane-stopped`, `pane-restarted`, `exited`, `interrupted`, `not-submitted`, `not-sent`, `no-end-signal`, `no-start-signal`, `submit-uncertain`, `loom-restarted` |
 | `detail` | What the agent said: the tool it wants (`Write`), its error, `exit 3` |

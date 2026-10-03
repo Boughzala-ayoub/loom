@@ -46,7 +46,9 @@ const setup = () => {
       return out(id).onmessage(`\x1b[2J\x1b[H• Ran the tests\r\n\r\n\x1b[1m›\x1b[0m ${body}\r\n\r\n  gpt-5 high · ~\\work\r\n  ${a.busy ? 'esc to interrupt' : '? for shortcuts'}\x1b[3;${x + 1}H\x1b[?25${a.hidden ? 'l' : 'h'}`);
     }
     const top = a.menu ? ` ${a.menu}\r\n ❯ 1. Yes\r\n   2. No (esc)` : ' Agent';
-    out(id).onmessage(`\x1b[2J\x1b[H${top}\r\n${rule}\r\n❯ ${a.input}\r\n${rule}\r\n  ${a.busy ? 'esc to interrupt' : '? for shortcuts'}\r\n`);
+    // a.v288: Claude Code 2.1.288, whose working line replaced the footer's "esc to interrupt".
+    const working = a.v288 ? (a.busy ? '\r\n✢ Topsy-turvying… (12s · ↓ 1.2k tokens)' : '\r\n✻ Worked for 12s') : '';
+    out(id).onmessage(`\x1b[2J\x1b[H${top}${working}\r\n${rule}\r\n❯ ${a.input}\r\n${rule}\r\n  ${a.busy && !a.v288 ? 'esc to interrupt' : '? for shortcuts'}\r\n`);
   };
   const shellPrompt = '\x1b]133;A\x07PS> \x1b]133;B\x07';
   const mockAudio = { connect() { return mockAudio; }, start() {}, stop() {}, frequency: { setValueAtTime() {} }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } };
@@ -91,7 +93,10 @@ const setup = () => {
         if (lost) throw new Error('Test: the terminal took it, and its answer was lost');
         return;
       }
-      if (data.startsWith('\x1b[200~')) { if (!qa.noEcho) a.input += data.slice(6, -6); }
+      if (data.startsWith('\x1b[200~')) {
+        if (!qa.noEcho) a.input += data.slice(6, -6);
+        if (qa.unseenPaste) return; // in the input, not on screen yet: the echo check misses it
+      }
       else if (data === '\r') { if (a.input) { qa.prompts.push([args.id, a.input]); a.input = ''; a.busy = !qa.idleAfterEnter; } }
       else if (data === '\x1b') { if (!qa.ignoreEsc) a.busy = false; }
       else if (data === '\x15') a.input = ''; // Ctrl-U clears the input
@@ -103,7 +108,9 @@ const setup = () => {
     if (cmd === 'plugin:window|is_focused') return true;
     if (cmd === 'plugin:path|resolve_directory') return 'C:\\Users\\test';
     if (cmd === 'plugin:path|join') return args.paths.join('\\');
-    if (cmd === 'take_sessions' || cmd === 'model_options') return [];
+    // Codex's notify and OpenCode's plugin hand a pane its session id (lib.rs take_sessions): qa.sessions, once.
+    if (cmd === 'take_sessions') return (qa.sessions ?? []).splice(0).filter(([id]) => args.ids.includes(id));
+    if (cmd === 'model_options') return [];
     if (cmd === 'session_usage' || cmd === 'last_messages') return {};
     if (cmd === 'has_session' || cmd === 'pane_booted' || cmd === 'has_codex_session') return true;
     if (cmd === 'git_run') return args.args.includes('--show-toplevel') ? args.dir : args.args[0] === 'rev-parse' ? 'main' : '';
@@ -814,8 +821,18 @@ try {
     await qa({ noEcho: false });
     assert.deepEqual([unseen.ok, unseen.typed], [false, true]);
     const held = await state(unseen.task);
-    assert.deepEqual([held.state, held.reason], ['failed', 'not-submitted']);
-    ok('An Enter in doubt stays open with uncertain: submit; a held Enter fails as not-submitted');
+    assert.deepEqual([held.state, held.final, held.uncertain], ['accepted', false, 'enter'], 'Held back: open, its text maybe waiting');
+    // Nothing went in, so the input reads empty: its Enter can't be pressed for it.
+    const pasted = await pastes(claude);
+    const refused = await call('keys', ['work:1', 'enter', '--task', unseen.task]);
+    assert.deepEqual([refused.ok, refused.typed], [false, false], JSON.stringify(refused));
+    assert.match(refused.error, /input reads as empty, not the task's text, so Loom pressed nothing/);
+    // A plain Enter isn't the task's then, and writing to the pane ends it unknown, never submitted.
+    const plain = await cli('keys', 'work:1', 'enter');
+    assert.deepEqual([plain.ok, plain.data.task, await pastes(claude)], [true, undefined, pasted]);
+    const gone = await until(unseen.task, 'unknown');
+    assert.deepEqual([gone.reason, gone.submittedAt, gone.events.map((e) => e.state)], ['not-submitted', null, ['accepted', 'unknown']], JSON.stringify(gone));
+    ok('An Enter in doubt stays open with uncertain: submit; a held Enter stays open, and other input ends it unknown');
   }
 
   // Review P1: the task is in the journal before anything is typed, and a journal that can't take it stops the send.
@@ -1168,6 +1185,375 @@ try {
     assert.match(replace.error, /can't be read: Codex's cursor is hidden/);
     await agent(codex, { codexShape: false, hidden: false });
     ok("Codex's composer: submit over its placeholder, a draft kept (a blank first line too), a hidden cursor unread");
+  }
+
+  // watch waits on the journal's writes, not a timer, and --metadata gives IDs and state only.
+  {
+    await agent(claude, { busy: false, input: '' });
+    await qa({ idleAfterEnter: true }); // no "esc to interrupt": the sweep can't move it to working first
+    const r = await cli('submit', 'work:1', 'relayed by metadata');
+    await qa({ idleAfterEnter: false });
+    await page.waitForTimeout(200);
+    const from = (await cli('watch', '--after', '0')).data.last;
+    const t0 = Date.now();
+    const woken = call('watch', ['--after', String(from), '--metadata'], null, null, 20);
+    await page.waitForTimeout(300);
+    await report(claude, { kind: 'start', match: promptMatch('relayed by metadata') });
+    const w = await woken;
+    assert.ok(Date.now() - t0 < 5000, `Woken by the write, not its 20 s deadline (${Date.now() - t0} ms)`);
+    assert.deepEqual(Object.keys(w.data).sort(), ['done', 'events', 'gap', 'last', 'next', 'source'], JSON.stringify(w.data));
+    assert.deepEqual([w.data.source, w.data.gap, w.data.events.length > 0], ['loom-durable-events-v2', false, true]);
+    const mine = (await cli('watch', '--after', String(from), '--metadata')).data.events.find((e) => e.task === r.text);
+    assert.deepEqual(Object.keys(mine).sort(), ['at', 'generation', 'pane', 'response', 'seq', 'state', 'task']);
+    assert.deepEqual([mine.state, mine.pane, mine.generation], ['working', r.data.pane, r.data.generation]);
+    await stops(claude);
+    await until(r.text, 'completed');
+    ok('watch wakes on the journal write; --metadata carries pane and generation, nothing else');
+  }
+
+  // Claude Code 2.1.288 draws no "esc to interrupt" while it works (seen live 2026-10-03, where a working
+  // task ended unknown/no-end-signal after 30 s): its working line keeps a Stop and the quiet rule off.
+  {
+    await agent(claude, { busy: false, input: '', v288: true });
+    const r = await cli('submit', 'work:1', 'a long turn on 2.1.288');
+    await report(claude, { kind: 'start', match: promptMatch('a long turn on 2.1.288') });
+    await until(r.text, 'working');
+    await report(claude, { kind: 'stop' }); // another Stop hook sends Claude on: still at work
+    await page.waitForTimeout(1500);
+    assert.equal((await state(r.text)).state, 'working', 'Its working line on screen: the Stop waits');
+    if (!process.env.TASK_QUICK) {
+      await page.waitForTimeout(31000);
+      assert.equal((await state(r.text)).state, 'working', 'Working past 30 s is not quiet');
+    }
+    await agent(claude, { busy: false }); // "✻ Worked for 12s"
+    assert.equal((await until(r.text, 'completed')).correlation, 'prompt');
+    await agent(claude, { v288: false });
+    ok("Claude 2.1.288's working line, with no esc hint, keeps its task working past a Stop and 30 s; it completes once gone");
+  }
+
+  // A held Enter pressed later for its task (the 2026-10-02 pane case): the same task goes on to completed.
+  {
+    await agent(claude, { busy: false, input: '' });
+    const text = 'held then entered for its task';
+    const from = (await cli('watch', '--after', '0')).data.last;
+    await qa({ unseenPaste: true });
+    const held = await cli('submit', 'work:1', text);
+    await qa({ unseenPaste: false });
+    assert.deepEqual([held.ok, held.typed], [false, true], JSON.stringify(held));
+    assert.match(held.error, /loomctl keys work:1 enter --task [0-9a-f]{16} submits it, and the task goes on/);
+    const t = held.task;
+    const open = await state(t);
+    assert.deepEqual([open.state, open.final, open.uncertain, open.reason, open.submittedAt], ['accepted', false, 'enter', null, null], JSON.stringify(open));
+    for (let i = 0; i < 40 && (await saved(t))?.uncertain !== 'enter'; i++) await page.waitForTimeout(50);
+    assert.equal((await saved(t))?.uncertain, 'enter', 'Journaled as held');
+    // Before its Enter, a start of its text is another prompt's, and a sweep with nothing written leaves it.
+    await report(claude, { kind: 'start', match: promptMatch(text) });
+    await page.waitForTimeout(700);
+    assert.equal((await state(t)).state, 'accepted', "A start before the task's Enter isn't its");
+    await agent(claude, {}); // the text shows now, as Claude's did a moment late
+    const pasted = await pastes(claude);
+    const elsewhere = await call('keys', ['work:2', 'enter', '--task', t]);
+    assert.deepEqual([elsewhere.ok, elsewhere.typed], [false, false], JSON.stringify(elsewhere));
+    assert.match(elsewhere.error, /is on another pane/);
+    // Delayed start: the agent's report comes while the Enter's write is still out, and waits for it.
+    await qa({ holdWriteIf: "fn:return d === '\\r'" });
+    const entering = call('keys', ['work:1', 'enter']);
+    await page.waitForFunction(() => window.qa.heldWrites.length === 1);
+    await qa({ holdWriteIf: null });
+    await report(claude, { kind: 'start', match: promptMatch(text) });
+    await page.waitForTimeout(300);
+    assert.equal((await state(t)).state, 'accepted', 'Nothing moves it while its Enter is written');
+    await page.evaluate(() => window.qa.heldWrites.splice(0).forEach((w) => w.resolve()));
+    const entered = await entering;
+    assert.deepEqual([entered.ok, entered.data.task, await pastes(claude)], [true, t, pasted], JSON.stringify(entered));
+    const working = await until(t, 'working');
+    assert.deepEqual([working.correlation, working.uncertain, working.detail, !!working.submittedAt], ['prompt', null, null, true], JSON.stringify(working));
+    // Duplicates and another launch's report move nothing; one Stop (twice) completes it once.
+    await report(claude, { kind: 'start', match: promptMatch(text) });
+    await report(claude, { kind: 'stop', launch: (await gen(claude)) + 1 });
+    await page.waitForTimeout(800);
+    assert.equal((await state(t)).state, 'working', "Another launch's Stop isn't this one's");
+    await stops(claude);
+    await report(claude, { kind: 'stop' });
+    const done = await cli('wait', '--task', t);
+    assert.deepEqual([done.ok, done.data.state, done.data.uncertain, done.data.reason], [true, 'completed', null, null], JSON.stringify(done));
+    await report(claude, { kind: 'stop' });
+    await page.waitForTimeout(300);
+    const one = await cli('watch', t, '--after', '0');
+    assert.deepEqual([one.data.events.map((e) => e.state), one.data.done], [['accepted', 'submitted', 'working', 'completed'], true], JSON.stringify(one.data));
+    const all = (await cli('watch', '--after', String(from), '--metadata')).data.events.filter((e) => e.task === t);
+    assert.deepEqual(all.map((e) => [e.state, e.pane, e.generation]), ['accepted', 'submitted', 'working', 'completed'].map((s) => [s, claude, open.generation]));
+    const receipt = (await cli('receipt', t)).data;
+    assert.deepEqual([receipt.wrote.stage, receipt.outcome === 'none'], ['submitted', false], JSON.stringify(receipt));
+    ok('A held Enter pressed later is its task\'s: a delayed start, duplicates and another launch\'s Stop counted right, completed once');
+  }
+
+  // A key typed in the window while the paste was out: the input holds both, so the task isn't held for its Enter.
+  {
+    await agent(claude, { busy: false, input: '' });
+    await qa({ holdWriteIf: "fn:return d.startsWith('\\x1b[200~')" });
+    const sending = call('submit', ['work:1', 'joined by a keypress']);
+    await page.waitForFunction(() => window.qa.heldWrites.length === 1);
+    await qa({ holdWriteIf: null });
+    await page.locator(`.pane[data-id="${claude}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('x');
+    await page.evaluate(() => { document.activeElement?.blur(); window.qa.heldWrites.splice(0).forEach((w) => w.resolve()); });
+    const r = await sending;
+    assert.deepEqual([r.ok, r.typed], [false, true], JSON.stringify(r));
+    assert.match(r.error, /Something else was typed into claude while Loom was pasting/);
+    const t = await state(r.task);
+    assert.deepEqual([t.state, t.reason, t.uncertain], ['failed', 'not-submitted', null], JSON.stringify(t));
+    ok("Typing in the window during the paste still fails the task: its Enter isn't held for it");
+  }
+
+  // A held task whose pane restarts is cancelled, and its Enter can't be pressed for it after.
+  {
+    await agent(claude, { busy: false, input: '' });
+    await qa({ unseenPaste: true });
+    const held = await cli('submit', 'work:1', 'held then restarted');
+    await qa({ unseenPaste: false });
+    assert.equal((await state(held.task)).uncertain, 'enter');
+    const g = await gen(claude);
+    assert.equal((await cli('restart', 'work:1', '--yes')).ok, true);
+    assert.equal((await until(held.task, 'cancelled')).reason, 'pane-restarted');
+    const late = await call('keys', ['work:1', 'enter', '--task', held.task]);
+    assert.deepEqual([late.ok, late.typed], [false, false], JSON.stringify(late));
+    assert.match(late.error, /isn't waiting for its Enter \(it's cancelled\)/);
+    await report(claude, { kind: 'start', match: promptMatch('held then restarted'), launch: g });
+    await page.waitForTimeout(300);
+    assert.equal((await state(held.task)).state, 'cancelled', 'An old launch reporting its text changes nothing');
+    ok('A held task cancels with its pane, and its Enter is refused after');
+  }
+
+  // Review 2026-10-03 00:28 (P2): a held task's receipt stays pending and linked while its Enter can still be
+  // pressed, so 510 later settled receipts don't prune it; one Enter recovers task and receipt together.
+  {
+    const claude3 = await paneId('work:3');
+    await agent(claude, { busy: false, input: '' });
+    await qa({ unseenPaste: true });
+    const text = 'held past five hundred receipts';
+    const held = await cli('submit', 'work:1', text);
+    await qa({ unseenPaste: false });
+    const t = held.task;
+    let r = (await cli('receipt', t)).data;
+    assert.deepEqual([r.outcome, r.held, r.wrote.stage], ['pending', true, 'typed'], JSON.stringify(r));
+    // 510 later receipts that settle at once: sends to two other panes whose text never shows, so Enter is held
+    // and, with no task to wait for, each ends unsent. Sent from the page in one go; they take turns per pane.
+    await agent(codex, { busy: false, input: '' });
+    await agent(claude3, { busy: false, input: '' });
+    await qa({ noEcho: true });
+    const tokens = await page.evaluate(async ([refs, n]) => {
+      const ids = [];
+      for (let i = 0; i < n; i++) {
+        const id = window.qa.cliIds = (window.qa.cliIds ?? 0) + 1;
+        ids.push(id);
+        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd: 'send', argv: [refs[i % refs.length], '--receipt', `filler ${i}`], stdin: null, cwd: null, timeout: 600, key: null } });
+      }
+      const want = new Set(ids);
+      for (const end = Date.now() + 300000; Date.now() < end; await new Promise((res) => setTimeout(res, 250))) {
+        const got = new Map();
+        for (const c of window.qa.calls) if (c.cmd === 'cli_reply' && want.has(c.args.id)) got.set(c.args.id, c.args.reply);
+        if (got.size === ids.length) return ids.map((id) => got.get(id).receipt);
+      }
+      return null;
+    }, [['work:2', 'work:3'], 510]);
+    await qa({ noEcho: false });
+    assert.equal(tokens?.filter(Boolean).length, 510, 'Every filler send typed and was held');
+    assert.equal((await cli('receipt', tokens[0])).ok, false, 'The oldest filler was pruned: the settled history is full');
+    r = (await cli('receipt', t)).data;
+    assert.deepEqual([r.outcome, r.held, r.wrote.stage], ['pending', true, 'typed'], `Still there, still pending: ${JSON.stringify(r)}`);
+    // One Enter recovers it: no second paste, the same task and the same receipt.
+    await agent(claude, {}); // the text shows now
+    const pasted = await pastes(claude);
+    const entered = await cli('keys', 'work:1', 'enter', '--task', t);
+    assert.deepEqual([entered.ok, entered.data.task, await pastes(claude)], [true, t, pasted], JSON.stringify(entered));
+    assert.equal((await prompts(claude)).filter((p) => p === text).length, 1, 'Its text went in once');
+    await report(claude, { kind: 'start', match: promptMatch(text) });
+    await until(t, 'working');
+    await stops(claude);
+    const done = await cli('wait', '--task', t);
+    assert.deepEqual([done.data.state, done.data.task], ['completed', t]);
+    r = (await cli('receipt', t)).data;
+    assert.deepEqual([r.receipt, r.held, r.wrote.stage, r.outcome === 'none'], [t, false, 'submitted', false], `Linked and queryable after recovery: ${JSON.stringify(r)}`);
+    ok('A held task keeps its receipt past 510 later settled ones; one Enter recovers both, no second paste');
+  }
+
+  // The same receipt settles when its held task ends instead: other input (unknown), or its pane restarting (cancelled).
+  {
+    for (const how of ['input', 'restart']) {
+      await agent(claude, { busy: false, input: '' });
+      await qa({ unseenPaste: true });
+      const held = await cli('submit', 'work:1', `held then ${how}`);
+      await qa({ unseenPaste: false });
+      assert.equal((await cli('receipt', held.task)).data.held, true);
+      if (how === 'input') assert.equal((await cli('keys', 'work:1', 'x')).ok, true);
+      else assert.equal((await cli('restart', 'work:1', '--yes')).ok, true);
+      const end = await until(held.task, how === 'input' ? 'unknown' : 'cancelled');
+      assert.equal(end.reason, how === 'input' ? 'not-submitted' : 'pane-restarted');
+      const r = (await cli('receipt', held.task)).data;
+      assert.deepEqual([r.held, r.outcome, r.wrote.stage], [false, 'none', 'typed'], `${how}: settled, never pressed: ${JSON.stringify(r)}`);
+      const late = await call('keys', ['work:1', 'enter', '--task', held.task]);
+      assert.deepEqual([late.ok, late.typed], [false, false], JSON.stringify(late));
+    }
+    ok("A held task's receipt settles as unsent when other input or a restart ends the task, and recovery is refused");
+  }
+
+  // The fixture matrix behind the email bridge: Claude Code, Codex and OpenCode, as their reports reach Loom, each
+  // through completion, failure, an approval, repeated idle reports, simultaneous panes, a generation change, a new
+  // attempt and a Loom restart. watch --metadata is checked per cell here; TASK_MATRIX_OUT=<file> also writes the
+  // events and cells for the bridge's own tests (its fixtures/loom-metadata-matrix.json).
+  {
+    await agent(claude, { busy: false, input: '' });
+    await agent(codex, { busy: false, input: '' });
+    const oc = (await call('add', ['work', '--cmd=opencode'])).data.id;
+    const ocRef = (await cli('panes')).data.find((p) => p.id === oc).ref;
+    const refs = { claude: 'work:1', codex: 'work:2', opencode: ocRef };
+    const id = async (provider) => (await cli('panes')).data.find((p) => p.ref === refs[provider]).id;
+    await agent(oc, { busy: false, input: '' });
+    // A session for Codex and OpenCode to resume, as their notify and plugin report one, so they can restart.
+    await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b'], [oc, 'ses_matrix']] });
+    await page.waitForFunction(() => !window.qa.sessions.length, null, { timeout: 10000 });
+    await page.waitForTimeout(200);
+    const base = (await cli('watch', '--after', '0')).data.last;
+    let turns = 0;
+    // How each agent's reports reach Loom (helper.rs, the OpenCode plugin): Claude names its prompt on start and
+    // its final message on Stop, then sits idle; Codex reports no start (its screen shows it working) and names
+    // prompt and final message on the turn's end; OpenCode names neither prompt nor start, only its final message.
+    const start = async (provider, text) => {
+      const p = await id(provider);
+      await agent(p, { busy: true });
+      if (provider === 'claude') await report(p, { kind: 'start', match: promptMatch(text) });
+      if (provider === 'opencode') await report(p, { kind: 'start' });
+    };
+    const finish = async (provider, text, answer) => {
+      const p = await id(provider);
+      await agent(p, { busy: false });
+      if (provider === 'claude') await report(p, { kind: 'stop', response: promptMatch(answer) });
+      if (provider === 'codex') await report(p, { kind: 'end', matches: [promptMatch(text)], turn: `matrix-${++turns}`, response: promptMatch(answer) });
+      if (provider === 'opencode') await report(p, { kind: 'end', response: promptMatch(answer) });
+    };
+    const submit = async (provider, text) => {
+      await agent(await id(provider), { busy: false, input: '' });
+      const r = await cli('submit', refs[provider], text);
+      assert.equal(r.ok, true, JSON.stringify(r));
+      return r.text;
+    };
+    const run = async (provider, text, answer) => {
+      const t = await submit(provider, text);
+      await start(provider, text);
+      await until(t, 'working');
+      await finish(provider, text, answer);
+      return t;
+    };
+    const cells = [];
+    const events = async () => (await cli('watch', '--after', String(base), '--metadata')).data.events;
+    const mine = async (t) => (await events()).filter((e) => e.task === t);
+    for (const provider of ['claude', 'codex', 'opencode']) {
+      // Completion: completed, naming the final message by its match.
+      const c = await run(provider, `${provider} matrix completion`, 'All 12 tests pass.');
+      assert.deepEqual((await until(c, 'completed')).state, 'completed');
+      const completedEvent = (await mine(c)).at(-1);
+      assert.deepEqual([completedEvent.state, completedEvent.response], ['completed', promptMatch('All 12 tests pass.')], JSON.stringify(completedEvent));
+      assert.ok((await mine(c)).slice(0, -1).every((e) => e.response === null), 'Only the completed event names a response');
+      cells.push({ provider, scenario: 'completion', tasks: [c], expect: [['finish']] });
+
+      // Failure: Claude's and OpenCode's own reports; Codex reports none, so its process exiting is the failure.
+      const f = await submit(provider, `${provider} matrix failure`);
+      await start(provider, `${provider} matrix failure`);
+      await until(f, 'working');
+      if (provider === 'codex') {
+        await page.evaluate((p) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${p}`, payload: 1 }), await id(provider));
+        assert.equal((await until(f, 'failed')).reason, 'exited');
+        const back = await cli('restart', refs[provider], '--yes');
+        assert.equal(back.ok, true, JSON.stringify(back));
+        await page.waitForTimeout(300);
+      } else {
+        await report(await id(provider), { kind: 'fail', detail: 'rate_limit' });
+        await until(f, 'failed');
+        await agent(await id(provider), { busy: false });
+      }
+      assert.equal((await mine(f)).at(-1).response, null, 'A failure names no response');
+      cells.push({ provider, scenario: 'failure', tasks: [f], expect: [['fail']] });
+
+      // Approval: blocked, answered, then completed: two outcomes of one attempt.
+      const a = await submit(provider, `${provider} matrix approval`);
+      await start(provider, `${provider} matrix approval`);
+      await until(a, 'working');
+      await report(await id(provider), { kind: 'approval', detail: 'Write' });
+      await until(a, 'approval');
+      await report(await id(provider), { kind: 'approval', detail: 'Write' }); // asked again: no second event
+      await report(await id(provider), { kind: 'resume' });
+      await until(a, 'working');
+      await finish(provider, `${provider} matrix approval`, 'Wrote the file.');
+      await until(a, 'completed');
+      assert.deepEqual((await mine(a)).map((e) => e.state), ['accepted', 'submitted', 'working', 'approval', 'working', 'completed']);
+      cells.push({ provider, scenario: 'approval-blocked', tasks: [a], expect: [['blocked', 'finish']] });
+
+      // Repeated idle: the agent reports the same end again (another Stop, the turn again or under a new id, another
+      // idle run end). The task is final, so Loom adds nothing; the bridge must suppress a repeat it ever sees.
+      const i = await run(provider, `${provider} matrix repeated idle`, 'Done.');
+      await until(i, 'completed');
+      const before = (await mine(i)).length;
+      for (let n = 0; n < 2; n++) await finish(provider, `${provider} matrix repeated idle`, 'Done.');
+      await page.waitForTimeout(1200);
+      assert.equal((await mine(i)).length, before, 'Repeated idle reports add no event');
+      cells.push({ provider, scenario: 'repeated-idle', tasks: [i], expect: [['finish']] });
+
+      // A new attempt: the same text again, the same answer: its own task, its own outcome.
+      const n1 = await run(provider, `${provider} matrix same text`, 'Done.');
+      await until(n1, 'completed');
+      const n2 = await run(provider, `${provider} matrix same text`, 'Done.');
+      await until(n2, 'completed');
+      assert.notEqual(n1, n2);
+      assert.deepEqual([(await mine(n1)).at(-1).response, (await mine(n2)).at(-1).response], [promptMatch('Done.'), promptMatch('Done.')]);
+      cells.push({ provider, scenario: 'new-attempt', tasks: [n1, n2], expect: [['finish'], ['finish']] });
+
+      // A generation change: the pane restarts mid-task (cancelled); its old launch's late end moves nothing; the
+      // next launch's task completes under the new generation.
+      const g1 = await submit(provider, `${provider} matrix generation`);
+      await start(provider, `${provider} matrix generation`);
+      await until(g1, 'working');
+      const oldGen = (await state(g1)).generation;
+      assert.equal((await cli('restart', refs[provider], '--yes')).ok, true);
+      assert.equal((await until(g1, 'cancelled')).reason, 'pane-restarted');
+      const late = provider === 'codex' ? { kind: 'end', matches: [promptMatch(`${provider} matrix generation`)], turn: `matrix-${++turns}` } : provider === 'claude' ? { kind: 'stop' } : { kind: 'end' };
+      await report(await id(provider), { ...late, response: promptMatch('Done.'), launch: oldGen });
+      await page.waitForTimeout(300);
+      const g2 = await run(provider, `${provider} matrix generation`, 'Done.');
+      await until(g2, 'completed');
+      const [e1, e2] = [(await mine(g1)).at(-1), (await mine(g2)).at(-1)];
+      assert.deepEqual([e1.state, e1.response, e2.state, e2.generation > e1.generation], ['cancelled', null, 'completed', true], JSON.stringify([e1, e2]));
+      cells.push({ provider, scenario: 'generation-change', tasks: [g1, g2], expect: [[], ['finish']] });
+    }
+
+    // Simultaneous panes: one task on each, all answering the same "Done.": three outcomes, one per pane.
+    const texts = { claude: 'claude matrix together', codex: 'codex matrix together', opencode: 'opencode matrix together' };
+    const together = Object.fromEntries(await Promise.all(Object.keys(texts).map(async (p) => [p, await submit(p, texts[p])])));
+    for (const p of Object.keys(texts)) await start(p, texts[p]);
+    for (const p of Object.keys(texts)) await until(together[p], 'working');
+    await Promise.all(Object.keys(texts).map((p) => finish(p, texts[p], 'Done.')));
+    for (const p of Object.keys(texts)) {
+      await until(together[p], 'completed');
+      cells.push({ provider: p, scenario: 'simultaneous-panes', tasks: [together[p]], expect: [['finish']] });
+    }
+    const last = await Promise.all(Object.keys(texts).map(async (p) => (await mine(together[p])).at(-1)));
+    assert.equal(new Set(last.map((e) => e.pane)).size, 3, 'Three panes');
+    assert.equal(new Set(last.map((e) => e.response)).size, 1, 'One answer text, named alike');
+
+    // A Loom restart: the journal brings back every event as it was, the same numbers and the same responses.
+    const whole = (await cli('watch', '--after', String(base), '--metadata')).data;
+    assert.equal(whole.source, 'loom-durable-events-v2');
+    assert.ok(whole.events.every((e) => Object.keys(e).sort().join() === 'at,generation,pane,response,seq,state,task'), 'Metadata only');
+    await reboot();
+    const again = (await cli('watch', '--after', String(base), '--metadata')).data;
+    assert.deepEqual(again.events.filter((e) => e.seq <= whole.last), whole.events, 'Replayed after a restart exactly as before');
+    for (const p of ['claude', 'codex', 'opencode']) cells.push({ provider: p, scenario: 'restart-replay', tasks: cells.filter((c) => c.provider === p && c.scenario === 'completion')[0].tasks, expect: [['finish']] });
+    if (process.env.TASK_MATRIX_OUT) {
+      const { writeFileSync } = await import('node:fs');
+      const batch = { source: whole.source, events: whole.events, next: whole.last, last: whole.last, gap: false, done: false };
+      writeFileSync(process.env.TASK_MATRIX_OUT, JSON.stringify({ made: 'Loom scripts/task-check.mjs over Tauri mocks; no live agent or mail', baseline: base, batch, cells }, null, 1) + '\n');
+    }
+    ok(`Matrix: ${cells.length} cells across Claude Code, Codex and OpenCode, metadata replayed exactly after a restart`);
   }
 
   assert.deepEqual(errors, []);

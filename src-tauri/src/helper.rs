@@ -113,13 +113,24 @@ pub fn codex_notify(event: Option<&str>) -> i32 {
 
 /// A finished Codex turn as a task event: the end of the turn that carried
 /// these prompts (`input-messages`, codex-cli 0.159), with the turn's and
-/// thread's ids, so the same turn reported twice counts once.
+/// thread's ids, so the same turn reported twice counts once, and its final
+/// message named (`last-assistant-message`, see `response`).
 fn codex_event(event: &str) -> Option<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(event).ok()?;
     (v["type"] == "agent-turn-complete").then(|| {
         let matches: Vec<String> = v["input-messages"].as_array().into_iter().flatten().filter_map(|m| m.as_str()).map(prompt_match).collect();
-        serde_json::json!({ "kind": "end", "matches": matches, "turn": v["turn-id"], "thread": v["thread-id"] })
+        response(serde_json::json!({ "kind": "end", "matches": matches, "turn": v["turn-id"], "thread": v["thread-id"] }), &v["last-assistant-message"])
     })
+}
+
+/// `event` with the agent's final message named as a prompt is (`prompt_match`),
+/// never its text: the same answer seen twice names the same, so the relay
+/// downstream of `watch --metadata` can tell a repeat from a new one.
+fn response(mut event: serde_json::Value, message: &serde_json::Value) -> serde_json::Value {
+    if let Some(text) = message.as_str() {
+        event["response"] = prompt_match(text).into();
+    }
+    event
 }
 
 fn loom_pane() -> Option<String> {
@@ -148,7 +159,8 @@ fn claude_event(p: &serde_json::Value) -> Option<serde_json::Value> {
     let text = |v: &serde_json::Value| v.as_str().map(|s| s.chars().take(200).collect::<String>());
     Some(match p["hook_event_name"].as_str()? {
         "UserPromptSubmit" => serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?) }),
-        "Stop" => serde_json::json!({ "kind": "stop" }),
+        // Claude Code 2.1.288's Stop input has `last_assistant_message`, the text of the turn's last message.
+        "Stop" => response(serde_json::json!({ "kind": "stop" }), &p["last_assistant_message"]),
         "StopFailure" => {
             let error = text(&p["error"]).unwrap_or_else(|| "unknown".into());
             let detail = match text(&p["error_details"]) {
@@ -430,7 +442,9 @@ mod tests {
         let ev = |v: serde_json::Value| claude_event(&v);
         // Payload shapes as Claude Code 2.1.287 sends them.
         assert_eq!(ev(json!({ "hook_event_name": "UserPromptSubmit", "prompt": "run the tests" })), Some(json!({ "kind": "start", "match": prompt_match("run the tests") })));
-        assert_eq!(ev(json!({ "hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": "done" })), Some(json!({ "kind": "stop" })), "a Stop another hook may overrule");
+        assert_eq!(ev(json!({ "hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": "done" })), Some(json!({ "kind": "stop", "response": prompt_match("done") })), "a Stop another hook may overrule, naming its final message");
+        assert_eq!(ev(json!({ "hook_event_name": "Stop", "stop_hook_active": false })), Some(json!({ "kind": "stop" })), "no final message, none named");
+        assert_eq!(prompt_match("Done.\r\n\r\nAll  tests pass."), prompt_match("Done.\nAll tests pass."), "named by its words, not its spacing");
         assert_eq!(ev(json!({ "hook_event_name": "StopFailure", "error": "rate_limit", "error_details": "429" })), Some(json!({ "kind": "fail", "detail": "rate_limit: 429" })));
         assert_eq!(ev(json!({ "hook_event_name": "StopFailure" })), Some(json!({ "kind": "fail", "detail": "unknown" })));
         assert_eq!(ev(json!({ "hook_event_name": "PermissionRequest", "tool_name": "Write" })), Some(json!({ "kind": "approval", "detail": "Write" })));
@@ -438,6 +452,7 @@ mod tests {
         assert_eq!(ev(json!({ "hook_event_name": "UserPromptSubmit" })), None, "no prompt, no start");
         // The prompt's text never leaves the hook: only its match does.
         assert!(!ev(json!({ "hook_event_name": "UserPromptSubmit", "prompt": "secret-token-123" })).unwrap().to_string().contains("secret"));
+        assert!(!ev(json!({ "hook_event_name": "Stop", "last_assistant_message": "secret-answer-456" })).unwrap().to_string().contains("secret"), "nor the answer's");
     }
 
     #[test]
@@ -446,7 +461,7 @@ mod tests {
         let real = r#"{"type":"agent-turn-complete","thread-id":"01a0f9f2-5116-7ca3-981e-f2988675d53e","turn-id":"01a0f9f2-6368-77d3-b0b9-e0b499cc8f4c","cwd":"C:\\x","client":"codex_exec","input-messages":["Reply with exactly the word OK.\nSecond line\twith a tab."],"last-assistant-message":"OK"}"#;
         let sent = "Reply with exactly the word OK.\r\nSecond line\twith a tab.";
         let turn = "01a0f9f2-6368-77d3-b0b9-e0b499cc8f4c";
-        assert_eq!(codex_event(real), Some(serde_json::json!({ "kind": "end", "matches": [prompt_match(sent)], "turn": turn, "thread": "01a0f9f2-5116-7ca3-981e-f2988675d53e" })));
+        assert_eq!(codex_event(real), Some(serde_json::json!({ "kind": "end", "matches": [prompt_match(sent)], "turn": turn, "thread": "01a0f9f2-5116-7ca3-981e-f2988675d53e", "response": prompt_match("OK") })));
         assert_eq!(codex_event(r#"{"type":"approval-requested"}"#), None);
         assert_eq!(codex_event("not json"), None);
     }

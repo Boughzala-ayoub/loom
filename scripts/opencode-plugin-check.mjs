@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, existsSync, unlinkSync, rmSync, readdirSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import plugin, { Loom } from '../src-tauri/src/loom-opencode.js';
+import { promptMatch } from '../src/task.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'loom-opencode-plugin-'));
 const previous = { pane: process.env.LOOM_PANE, session: process.env.LOOM_SESSION_FILE, launch: process.env.LOOM_LAUNCH };
@@ -13,8 +14,8 @@ const sessionFile = join(dir, 'session');
 const read = () => existsSync(marker) ? readFileSync(marker, 'utf8') : '';
 // The task reports since the last call, in the order Loom drains them (by name), consumed.
 const tasks = join(tmpdir(), 'loom-task');
-const reports = () => (existsSync(tasks) ? readdirSync(tasks) : []).filter(f => f.startsWith(`${pane}.`) && f.endsWith('.json')).sort()
-  .map(f => { const v = JSON.parse(readFileSync(join(tasks, f), 'utf8')); unlinkSync(join(tasks, f)); assert.equal(v.launch, 3, 'Each report names its launch'); return v.kind; });
+const reports = (whole = false) => (existsSync(tasks) ? readdirSync(tasks) : []).filter(f => f.startsWith(`${pane}.`) && f.endsWith('.json')).sort()
+  .map(f => { const v = JSON.parse(readFileSync(join(tasks, f), 'utf8')); unlinkSync(join(tasks, f)); assert.equal(v.launch, 3, 'Each report names its launch'); return whole ? v : v.kind; });
 try {
   for (const version of [1, 2]) {
     process.env.LOOM_PANE = pane;
@@ -103,6 +104,22 @@ try {
       ? ['approval', 'resume', 'approval', 'resume', 'end', 'end', 'start', 'fail', 'fail', 'start']
       : ['approval', 'resume', 'approval', 'resume', 'end', 'end', 'start', 'fail', 'fail', 'start', 'interrupt', 'interrupt', 'start'],
       'Each run reports its start and outcome');
+    // 2.x names a run's final text on its end, by match, never the text: the root's last block, not a child's.
+    if (version === 2) {
+      reports();
+      await status('busy');
+      await event('session.next.text.ended', { sessionID: 'ses_main', assistantMessageID: 'm1', textID: 't1', text: 'Looking at the tests.' });
+      await event('session.next.text.ended', { sessionID: 'ses_main', assistantMessageID: 'm2', textID: 't2', text: 'Done.\r\n\r\nAll  tests pass.' });
+      await event('session.next.text.ended', { sessionID: 'ses_child', assistantMessageID: 'm3', textID: 't3', text: 'child notes' });
+      await status('idle');
+      const [start, end] = reports(true);
+      assert.deepEqual([start.kind, start.response, end.kind, end.response], ['start', undefined, 'end', promptMatch('Done.\nAll tests pass.')], JSON.stringify(end));
+      assert.ok(!JSON.stringify(end).includes('tests pass'), 'Never the text');
+      await status('busy');
+      await status('idle');
+      assert.deepEqual(reports(true).map(r => [r.kind, r.response]), [['start', undefined], ['end', undefined]], 'A run with no text of its own names none, not the last run\'s');
+      await status('busy');
+    }
     // Selection and event delivery share one queue, including failed lookups.
     await hook({ sessionID: 'ses_missing' });
     gate = new Promise(resolve => release = resolve);

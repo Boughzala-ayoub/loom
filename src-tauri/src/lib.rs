@@ -868,11 +868,15 @@ fn task_journal_write(app: AppHandle, text: String, append: bool) -> Result<(), 
     let path = task_journal_file(&app);
     if append {
         let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
-        return f.write_all(text.as_bytes()).map_err(|e| e.to_string());
+        f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        return f.sync_all().map_err(|e| e.to_string());
     }
     // A rewrite (on load, and when appends pile up) replaces the file whole, as save_state does.
     let pending = path.with_extension("jsonl.pending");
-    std::fs::write(&pending, text).map_err(|e| e.to_string())?;
+    let mut f = std::fs::File::create(&pending).map_err(|e| e.to_string())?;
+    f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())?;
+    drop(f);
     std::fs::rename(pending, path).map_err(|e| e.to_string())
 }
 

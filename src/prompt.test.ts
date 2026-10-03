@@ -1,5 +1,5 @@
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, readInput, echoes, echoed, menuRev, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import { readMenu, readInput, echoes, echoed, menuRev, claudeWorking, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 
 let fails = 0;
@@ -295,6 +295,25 @@ check("The cursor on a row that isn't the composer's: unknown", codexRead(swap(b
 check("No blank row under the composer: unknown", codexRead(draftShot.rows.slice(0, y + 1), draftShot.cursor).kind, "unknown");
 check("Plain and dim mixed: unknown", codexRead(swap(blank.rows, { [y]: "› fix {d}the tests" }), { ...blank.cursor, x: 6 }).kind, "unknown");
 check("Inverse text, which Codex doesn't draw: unknown", codexRead(swap(draftShot.rows, { [y]: "› fix {i}t{-}he tests" }), draftShot.cursor).kind, "unknown");
+
+// Claude Code 2.1.288 at work and after, as a live pane's screen read (2026-10-03).
+const claudeBusy = [
+  "● Bash(grep -n \"const INTERRUPT_HINT\" src/main.ts)",
+  "  ⎿  Running…",
+  "",
+  "✢ Topsy-turvying… (22m 17s · ↓ 98.5k tokens · thought for 8s)",
+  "",
+  "─".repeat(40),
+  "❯",
+  "─".repeat(40),
+  "  Opus 5.5 | XHIGH | ctx 26% | loom | main*",
+  "  ⏵⏵ auto mode on · 2 shells · ← for agents",
+].join("\n") + "\n";
+check("Claude 2.1.288 working, no esc hint: working", claudeWorking(claudeBusy), true);
+check("Its frame before the timer shows: working", claudeWorking("* Thinking…\n❯\n"), true);
+check("The line a turn leaves: not working", claudeWorking(claudeBusy.replace(/^✢ .*$/m, "✻ Worked for 22m 17s")), false);
+check("A tool still running, indented: not the working line", claudeWorking(claudeBusy.replace(/^✢ .*\n/m, "")), false);
+check("A truncated line ending in …: not working", claudeWorking("● Read(src/main.ts…)\n* a bullet that ends here…ish\n"), false);
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

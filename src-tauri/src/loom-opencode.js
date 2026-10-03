@@ -13,10 +13,21 @@ const IDLE = new Set(["session.execution.succeeded", "session.execution.failed",
 // What loomctl's tasks (Loom's task.ts) hear of a run. OpenCode names no
 // prompt, so Loom ties a task to the first run that starts after its Enter.
 const TASK = { "session.execution.started": "start", "session.execution.succeeded": "end", "session.execution.failed": "fail", "session.execution.interrupted": "interrupt" };
+// 2.x's finished assistant text blocks (`data.text`, OpenCode 2.0.19). A run's
+// end names the last one as its final message; 1.x's server() names none.
+const TEXT = new Set(["session.next.text.ended", "session.text.ended"]);
+// How Loom names a prompt or a final message (task.ts promptMatch, helper.rs
+// prompt_match): FNV-1a 64 of its words, never the text.
+const match = (text) => {
+  let h = 0xcbf29ce484222325n;
+  const bare = text.replace(/<\/?pasted_content id="[0-9a-f]{4}">/g, " ").replace(/[\t\n\v\f\r ]+/g, " ").replace(/^ | $/g, "");
+  for (const b of new TextEncoder().encode(bare)) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
+  return h.toString(16).padStart(16, "0");
+};
 let reports = 0;
 
 function loomPane(lookup) {
-  let selected, state, stopped = false, queue = Promise.resolve();
+  let selected, state, answer, stopped = false, queue = Promise.resolve();
   const pending = new Set();
   const select = (id) => {
     if (stopped || !validID(id)) return;
@@ -33,7 +44,7 @@ function loomPane(lookup) {
   // (16 digits, as loom.exe names Claude's and Codex's), written beside and
   // renamed in. Each names the pane launch it came from (LOOM_LAUNCH), so a
   // late one from a replaced process moves nothing; without one, none is sent.
-  const report = (kind, detail) => {
+  const report = (kind, detail, response) => {
     const launch = /^\d+$/.test(process.env.LOOM_LAUNCH ?? "") ? Number(process.env.LOOM_LAUNCH) : undefined;
     if (stopped || launch === undefined) return;
     try {
@@ -41,7 +52,7 @@ function loomPane(lookup) {
       fs.mkdirSync(dir, { recursive: true });
       const t = Date.now(), n = ++reports;
       const name = path.join(dir, `${process.env.LOOM_PANE}.${String(t).padStart(13, "0")}${String(n % 1000).padStart(3, "0")}.${process.pid}-${n}`);
-      fs.writeFileSync(`${name}.tmp`, JSON.stringify({ kind, t, launch, src: "opencode", ...(detail ? { detail: String(detail).slice(0, 200) } : {}) }));
+      fs.writeFileSync(`${name}.tmp`, JSON.stringify({ kind, t, launch, src: "opencode", ...(detail ? { detail: String(detail).slice(0, 200) } : {}), ...(response ? { response } : {}) }));
       fs.renameSync(`${name}.tmp`, `${name}.json`);
     } catch {}
   };
@@ -83,6 +94,11 @@ function loomPane(lookup) {
         if (!data.parentID) select(data.sessionID);
         return;
       }
+      // The root session's own text only: a child's answer isn't the run's.
+      if (TEXT.has(type)) {
+        if (typeof data.text === "string" && await selectedSession(data.sessionID)) answer = data.text;
+        return;
+      }
       const form = type === "form.created" ? data.form : data;
       const id = form?.sessionID;
       if (WAKES.has(type) || REPLIES.has(type)) {
@@ -107,7 +123,8 @@ function loomPane(lookup) {
       const task = TASK[type] ?? (error ? (/abort/i.test(error) ? "interrupt" : "fail")
         : type === "session.idle" || (type === "session.status" && status === "idle") ? "end"
         : type === "session.status" && status === "busy" && was !== "busy" ? "start" : undefined);
-      if (task) report(task, error);
+      if (task === "start") answer = undefined;
+      if (task) report(task, error, task === "end" && answer !== undefined ? match(answer) : undefined);
     }),
   };
 }
