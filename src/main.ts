@@ -4024,6 +4024,7 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
 
 /** The notification policy's history as the journal keeps it (task.ts notifies), oldest first. */
 let notifyHistory: NotifySnapshot[] = [];
+let notifyOwners: NonNullable<NotifySnapshot["owners"]> = {};
 /** The policy as it stands, including each restored pane's historical ids.
  * Closed panes keep their last setting while their tasks remain. A new pane
  * at the same ref has no aliases to the closed one. */
@@ -4032,6 +4033,7 @@ const currentNotify = (): Omit<NotifySnapshot, "at"> => {
   const kept = new Set([...tasks.values()].map((t) => t.pane));
   return {
     on: notifyPolicy.on, kinds: { ...notifyPolicy.kinds },
+    owners: Object.fromEntries(Object.entries(notifyOwners).filter(([id]) => kept.has(id))),
     panes: {
       ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => kept.has(id) && !live.some((p) => p.notifyIds.includes(id)))),
       ...Object.fromEntries(live.filter((p) => p.notify !== "inherit").flatMap((p) => p.notifyIds.map((id) => [id, p.notify as "on" | "off"]))),
@@ -4080,6 +4082,12 @@ const notifyRow = (p: Pane) => ({
   pane: p.id, ref: paneName(p), notify: p.notify,
   ...Object.fromEntries(NOTIFY_KINDS.map((k) => [k, allows(currentNotify(), p.id, k)])),
 });
+/** A reusable ref is only a hint for a person reviewing an old owner, never identity. */
+const unresolvedNotices = () => Object.entries(notifyOwners).filter(([, v]) => v === "held").flatMap(([owner]) => {
+  const owned = typedTasks().filter((t) => t.pane === owner);
+  return owned.length ? [{ owner, refs: [...new Set(owned.map((t) => t.ref))], tasks: owned.map((t) => t.id) }] : [];
+});
+const unresolvedText = () => unresolvedNotices().map((r) => `held owner ${r.owner} (${r.refs.join(", ")}); review with notify --resolve-owner ${r.owner} release|mute`).join("\n");
 
 async function enterTask(p: Pane, t: Task) {
   const r = heldEnter.get(t.id)!.receipt;
@@ -4267,11 +4275,20 @@ async function loadTasks() {
   const got = readJournal(text);
   journalUnreadable = "";
   notifyHistory = got.notify;
+  const lastPolicy = got.notify[got.notify.length - 1];
+  notifyOwners = { ...lastPolicy?.owners };
   // Numbering goes on from the journal: no watcher saw an event it doesn't hold (writtenSeq).
   taskSeq = writtenSeq = Math.max(taskSeq, got.seq);
   taskPruned = Math.max(taskPruned, got.pruned);
   if (!text && !got.tasks.size) return;
   for (const t of got.tasks.values()) (tasks.set(t.id, t), unsaved.add(t.id)); // the first write is the whole journal
+  if (lastPolicy?.owners === undefined) {
+    const linked = new Set(threads.flatMap((t) => t.panes.flatMap((p) => p.notifyIds)));
+    for (const t of got.tasks.values()) if (!linked.has(t.pane)) notifyOwners[t.pane] = "held";
+    // Persist the migration before any restart event. A hold never guesses
+    // which live pane, if any, owns a legacy task's reused reference.
+    void recordNotify().catch(notifyError);
+  }
   for (const t of got.tasks.values()) if (!isFinal(t.state)) moveTask(t, { state: "unknown", signal: "restart", reason: "loom-restarted" });
   keepTasks();
   void journal([], []).catch(() => {}); // rewritten with only what was kept, even with nothing to move
@@ -7898,10 +7915,22 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   notify: {
-    usage: "notify [pane [inherit|on|off]] [--all on|off] [--finish on|off] [--fail on|off] [--blocked on|off] [--new-panes inherit|on|off] [--check SEQ,...]",
+    usage: "notify [pane [inherit|on|off]] [--all on|off] [--finish on|off] [--fail on|off] [--blocked on|off] [--new-panes inherit|on|off] [--check SEQ,...] | notify --resolve-owner ID release|mute",
     help: "Task notices: what Loom lets a relay send on (watch --metadata --policy). --all turns every pane on or off; a pane's own on or off wins over it, and inherit follows it again. --finish, --fail and --blocked choose the kinds, for every pane. --new-panes is what a pane made from now on starts with. Turning a pane or kind off also stops its notices not sent yet, and turning it back on sends none of them. --check asks for events by number whether they may go out now (null: Loom doesn't have it).",
-    options: { all: "string", finish: "string", fail: "string", blocked: "string", "new-panes": "string", check: "string" },
+    options: { all: "string", finish: "string", fail: "string", blocked: "string", "new-panes": "string", check: "string", "resolve-owner": "string" },
     run: async (a) => {
+      const owner = str(a, "resolve-owner");
+      if (owner !== undefined) {
+        if (a._.length !== 1 || (a._[0] !== "release" && a._[0] !== "mute") || [...NOTIFY_KINDS, "all", "new-panes", "check"].some((k) => a[k] !== undefined))
+          throw new Error("--resolve-owner takes one owner id and release or mute, with no other policy options.");
+        requireJournal();
+        const decision = a._[0] === "release" ? "released" : "muted";
+        if (!typedTasks().some((t) => t.pane === owner) || (notifyOwners[owner] !== "held" && notifyOwners[owner] !== decision))
+          throw new Error(`Notice owner ${owner} is not awaiting that decision. Run notify to list unresolved owners.`);
+        notifyOwners[owner] = decision; // an identical retry can recover a failed write
+        await recordNotify();
+        return { data: { owner, decision: notifyOwners[owner], unresolved: unresolvedNotices() }, text: `owner ${owner}: ${notifyOwners[owner]}` };
+      }
       const check = str(a, "check");
       if (check !== undefined && (a._.length || [...NOTIFY_KINDS, "all", "new-panes"].some((k) => a[k] !== undefined)))
         throw new Error("--check only asks: give it alone.");
@@ -7940,13 +7969,13 @@ const CLI: Record<string, CliCommand> = {
         const p = pane;
         if (own !== undefined) await setPaneNotify(p, own);
         const row = notifyRow(p);
-        return { data: row, text: table(Object.entries(row).map(([k, v]) => [k, String(v)])) };
+        return { data: { ...row, unresolved: unresolvedNotices() }, text: [table(Object.entries(row).map(([k, v]) => [k, String(v)])), unresolvedText()].filter(Boolean).join("\n") };
       }
       const panes = threads.flatMap((t) => t.panes).map(notifyRow);
       return {
-        data: { all: notifyPolicy.on ? "on" : "off", kinds: notifyPolicy.kinds, newPanes: notifyPolicy.newPanes, panes },
+        data: { all: notifyPolicy.on ? "on" : "off", kinds: notifyPolicy.kinds, newPanes: notifyPolicy.newPanes, panes, unresolved: unresolvedNotices() },
         text: `every pane ${notifyPolicy.on ? "on" : "off"}; ${NOTIFY_KINDS.map((k) => `${k} ${notifyPolicy.kinds[k] ? "on" : "off"}`).join(", ")}; new panes ${notifyPolicy.newPanes}\n` +
-          table(panes.map((r) => [r.ref, r.notify, ...NOTIFY_KINDS.map((k) => (r[k as keyof typeof r] ? k : "-"))])),
+          [table(panes.map((r) => [r.ref, r.notify, ...NOTIFY_KINDS.map((k) => (r[k as keyof typeof r] ? k : "-"))])), unresolvedText()].filter(Boolean).join("\n"),
       };
     },
   },

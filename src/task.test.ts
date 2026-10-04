@@ -303,6 +303,23 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   eq("a line read twice is still one change each time: replay is the file, line by line", readJournal(writeJournal([], 11, 0, history)).notify.length, 4);
 }
 
+// Legacy ownership holds are separate from policy mutes: review can release
+// an identity hold, but never a policy mute that already applied to the event.
+{
+  const event = { seq: 5, state: "completed" as TaskState };
+  const held: NotifySnapshot = { at: 10, ...DEFAULT_NOTIFY, owners: { old: "held" } };
+  const released: NotifySnapshot = { ...held, owners: { old: "released" } };
+  eq("an unresolved owner is held", notifies(event, "old", [held]), false);
+  eq("another owner is independent", notifies(event, "other", [held]), true);
+  eq("an explicit release lifts only the ownership hold", notifies(event, "old", [held, released]), true);
+  const muted: NotifySnapshot = { ...held, panes: { old: "off" } };
+  eq("release never undoes an earlier policy mute", notifies(event, "old", [muted, released]), false);
+  eq("an explicit owner mute stays suppressed", notifies(event, "old", [{ ...held, owners: { old: "muted" } }]), false);
+  const replay = readJournal(writeJournal([], 10, 0, [held, released])).notify;
+  eq("owner decisions survive compaction and replay", replay.map((n) => n.owners), [{ old: "held" }, { old: "released" }]);
+  eq("the replayed release still permits the event", notifies(event, "old", replay), true);
+}
+
 // A person's Enter waits for the agent's report of its turn (main.ts manualEnter, adoptManual).
 {
   const m = (at: number, match: string | null, launch = 1) => ({ at, launch, match });

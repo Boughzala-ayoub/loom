@@ -78,9 +78,24 @@ events.
 
 An event may go out (`notifies`) only if its kind was allowed for its pane by
 the snapshot in force when it happened and by every snapshot since. The answer
-only ever turns from true to false. Turning a pane or kind off therefore also
+only ever turns from true to false through policy changes. Turning a pane or kind off therefore also
 holds back events from before that weren't sent, and turning it on again
 releases none of them.
+
+Saved pane slots now retain `notifyIds`, the historical runtime owners of their
+retained tasks. Before ownership migration has been recorded, owners not linked
+by an explicit alias are held separately, never matched by reference. This also
+keeps the hold if the workspace saves new slots but the migration write fails.
+The policy snapshot's `owners` map records `held`, `released` or `muted` decisions.
+Its presence, including an empty map, marks the migration complete so later
+closed panes are not mistaken for legacy owners. Replay and compaction retain it.
+
+`notifies` checks the latest owner decision before the ordinary policy history.
+An explicit `notify --resolve-owner ID release` removes only an ownership hold;
+it cannot undo a historical policy mute. `mute` permanently suppresses that
+owner. `notify` exposes unresolved owners and their historical references and
+task IDs for review. A relay may already have discarded a held notice, so release
+does not promise delivery or recreate its outbox entry.
 
 Every change is its own journal line, in the order made. Changes between two
 events share a number, so off, on and off again are three lines, and replay
@@ -263,4 +278,3 @@ already in flight or accepted.
   v3 with `--after-review` is the user's step; its held rows stay unsent.
 - `--after-review` takes the old runner lock only while it reads the old
   outbox. Starting the v2 sender again afterwards isn't prevented.
-

@@ -306,7 +306,8 @@ export function readJournal(text: string): { tasks: Map<string, Task>; seq: numb
     // events share a number, so off, on, off again is three, never two.
     const n = rec?.notify as NotifySnapshot | undefined;
     if (n && typeof rec.at === "number" && typeof n.on === "boolean" && n.kinds && n.panes)
-      notify.push({ at: rec.at, on: n.on, kinds: { ...DEFAULT_NOTIFY.kinds, ...n.kinds }, panes: { ...n.panes } });
+      notify.push({ at: rec.at, on: n.on, kinds: { ...DEFAULT_NOTIFY.kinds, ...n.kinds }, panes: { ...n.panes },
+        ...(n.owners && typeof n.owners === "object" ? { owners: Object.fromEntries(Object.entries(n.owners).filter(([, v]) => v === "held" || v === "released" || v === "muted")) } : {}) });
     if (rec?.task && typeof rec.task === "object") {
       const t = rec.task as Task;
       tasks.set(t.id, t);
@@ -342,11 +343,14 @@ export const notifyKind = (state: TaskState): NotifyKind | null =>
  * before it changed): every pane on or off (`on`), each kind on or off, and
  * the panes that override `on` with their own on or off. A pane absent from
  * `panes` inherits. Loom journals one each time the policy changes. */
-export type NotifySnapshot = { at: number; on: boolean; kinds: Record<NotifyKind, boolean>; panes: Record<string, "on" | "off"> };
+export type NotifySnapshot = { at: number; on: boolean; kinds: Record<NotifyKind, boolean>; panes: Record<string, "on" | "off">;
+  /** Legacy owners without a proven pane identity. Presence marks migration complete. */
+  owners?: Record<string, "held" | "released" | "muted"> };
 /** Everything on: Loom's behavior before there was a policy. */
 export const DEFAULT_NOTIFY: Omit<NotifySnapshot, "at"> = { on: true, kinds: { finish: true, fail: true, blocked: true }, panes: {} };
 export const sameNotify = (a: Omit<NotifySnapshot, "at">, b: Omit<NotifySnapshot, "at">) =>
-  a.on === b.on && NOTIFY_KINDS.every((k) => a.kinds[k] === b.kinds[k]) && JSON.stringify(Object.entries(a.panes).sort()) === JSON.stringify(Object.entries(b.panes).sort());
+  a.on === b.on && NOTIFY_KINDS.every((k) => a.kinds[k] === b.kinds[k]) && JSON.stringify(Object.entries(a.panes).sort()) === JSON.stringify(Object.entries(b.panes).sort()) &&
+  JSON.stringify(a.owners ? Object.entries(a.owners).sort() : null) === JSON.stringify(b.owners ? Object.entries(b.owners).sort() : null);
 
 /** Whether `policy` lets `pane` send `kind`. The pane's own on or off wins
  * over every pane's; the kind applies either way. */
@@ -360,6 +364,8 @@ export const allows = (policy: Omit<NotifySnapshot, "at">, pane: string, kind: N
 export function notifies(e: { seq: number; state: TaskState }, pane: string, history: NotifySnapshot[]): boolean {
   const kind = notifyKind(e.state);
   if (!kind) return false;
+  const owner = history[history.length - 1]?.owners?.[pane];
+  if (owner === "held" || owner === "muted") return false;
   let from = history.length;
   while (from > 0 && history[from - 1].at >= e.seq) from--;
   // `from - 1` was in force when it happened (none: everything was on), and all from `from` came after.

@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|all runs the 2026-10-04 regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -68,7 +68,7 @@ const setup = () => {
       return localStorage.getItem('qa-journal') ?? '';
     }
     if (cmd === 'task_journal_write') {
-      if (qa.journalFail || qa.journalFailIf?.(args.text)) throw new Error('Test: the disk is full');
+      if (qa.journalFail || localStorage.getItem('qa-journal-write-fail') || qa.journalFailIf?.(args.text)) throw new Error('Test: the disk is full');
       const write = () => localStorage.setItem('qa-journal', (args.append ? localStorage.getItem('qa-journal') ?? '' : '') + args.text);
       if (qa.journalHold?.(args.text)) return new Promise((resolve) => qa.journalHeld.push(() => (write(), resolve())));
       return void write();
@@ -305,6 +305,70 @@ try {
     assert.equal((await cli('notify', '--check', String(closed))).data[closed], true);
     await page.evaluate(() => localStorage.removeItem('qa-use-state'));
     ok('Restored-pane mutes reach historical notices across two restarts and leave closed panes independent');
+  }
+
+  if (review('legacy-owners')) {
+    await resetReview();
+    await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b']] });
+    await page.waitForFunction(() => !window.qa.sessions.length);
+    const finish = async (ref, text) => {
+      const owner = await paneId(ref), sent = await cli('submit', ref, text);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      await report(owner, { kind: 'start', match: promptMatch(text) });
+      await stops(owner);
+      return { owner, seq: (await until(sent.text, 'completed')).events.at(-1).seq };
+    };
+    const restored = await finish('work:1', 'legacy restored conversation');
+    const closed = await finish('work:3', 'legacy closed conversation');
+    assert.equal((await cli('close', 'work:3', '--yes')).ok, true);
+    assert.equal((await cli('add', 'work', '--cmd=claude')).ok, true);
+    await page.waitForTimeout(700);
+    // The old slot format and old journal contain neither aliases nor an ownership migration decision.
+    await page.evaluate(() => {
+      const saved = JSON.parse(localStorage.getItem('qa-state'));
+      for (const thread of saved.threads) for (const pane of thread.panes) delete pane.notifyIds;
+      localStorage.setItem('qa-state', JSON.stringify(saved));
+      const lines = localStorage.getItem('qa-journal').trim().split('\n').map(JSON.parse);
+      for (const line of lines) if (line.notify) delete line.notify.owners;
+      localStorage.setItem('qa-journal', lines.map(JSON.stringify).join('\n') + '\n');
+      localStorage.setItem('qa-use-state', '1');
+      localStorage.setItem('qa-journal-write-fail', '1');
+    });
+    await reboot();
+    const check = async (seq) => (await cli('notify', '--check', String(seq))).data[seq];
+    assert.equal(await check(restored.seq), false, 'Legacy owners without a proven pane identity must be held at startup');
+    assert.equal(await check(closed.seq), false, 'An unlinked closed owner needs its own decision too');
+    await page.waitForTimeout(700);
+    await reboot();
+    assert.equal(await check(restored.seq), false, 'A failed migration write stays held even after the workspace saved new aliases');
+    await page.evaluate(() => localStorage.removeItem('qa-journal-write-fail'));
+    const unresolved = (await cli('notify')).data.unresolved;
+    assert.deepEqual(unresolved.map((r) => r.owner).sort(), [restored.owner, closed.owner].sort());
+    assert.deepEqual(unresolved.find((r) => r.owner === closed.owner).refs, ['work:3']);
+    assert.equal((await cli('notify', 'work:1', 'off')).ok, true);
+    assert.equal((await cli('notify', 'work:3', 'off')).ok, true);
+    assert.equal(await check(restored.seq), false);
+    assert.equal(await check(closed.seq), false);
+    const before = await page.evaluate(() => localStorage.getItem('qa-journal'));
+    for (const args of [['--resolve-owner', 'missing', 'release'], ['--resolve-owner', closed.owner, 'maybe'], ['--resolve-owner', closed.owner, 'release', '--all', 'off']])
+      assert.equal((await cli('notify', ...args)).ok, false);
+    assert.equal(await page.evaluate(() => localStorage.getItem('qa-journal')), before, 'Invalid decisions mutate nothing');
+    await page.waitForTimeout(700);
+    await reboot();
+    assert.equal(await check(restored.seq), false, 'The hold survives saving modern slots and restarting');
+    await qa({ journalFail: true });
+    assert.equal((await cli('notify', '--resolve-owner', closed.owner, 'release')).ok, false);
+    await qa({ journalFail: false });
+    assert.equal((await cli('notify', '--resolve-owner', closed.owner, 'release')).ok, true, 'An identical decision retry repairs a failed write');
+    assert.equal(await check(closed.seq), true, 'Releasing the closed owner does not link it to the muted replacement');
+    assert.equal(await check(restored.seq), false, 'Other owners stay held');
+    assert.equal((await cli('notify', '--resolve-owner', restored.owner, 'mute')).ok, true);
+    assert.deepEqual((await cli('notify')).data.unresolved, []);
+    await reboot();
+    assert.equal(await check(closed.seq), true);
+    assert.equal(await check(restored.seq), false);
+    assert.equal((await cli('notify', '--resolve-owner', restored.owner, 'release')).ok, false, 'A resolved mute cannot resurrect old notices');
+    ok('Legacy unlinked owners are held, exposed and independently resolved without guessing from reused pane refs');
   }
 
   if (review('manual-mismatch')) {

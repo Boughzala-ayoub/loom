@@ -796,8 +796,8 @@ them: only events after that.
 
 `watch --metadata --policy` gives each event two more fields than
 `--metadata`: `source` (`submit`, `send`, `manual`) and `notify` (whether it
-may go out), under `"source": "loom-durable-events-v3"`. `notify` only ever
-turns from true to false. `notify --check 41,52` asks right before sending:
+may go out), under `"source": "loom-durable-events-v3"`. Policy mutes only turn
+`notify` from true to false. `notify --check 41,52` asks right before sending:
 
 ```json
 { "41": true, "52": false, "9": null }
@@ -822,6 +822,19 @@ what changed in the bridge, are in
 `notify` checks everything it was given, the pane included, before it changes
 anything: a command it refuses changes nothing. `--check` only asks, so it
 takes no pane or setting beside it.
+
+An upgrade from slots without `notifyIds` cannot safely connect old task owners
+to restored panes. A reference such as `work:1` may now name a different pane.
+Loom holds unlinked historical owners and lists their IDs, historical references
+and task IDs in `notify` output, under `unresolved` in JSON. A live pane's bell
+does not decide those owners' policies.
+
+After reviewing an owner, use `notify --resolve-owner ID release` to remove its
+ownership hold, or `notify --resolve-owner ID mute` to suppress its notices
+permanently. The decision is journaled and can be retried if its write fails.
+Each owner is independent, including closed panes. Release is an explicit
+exception to the hold's false result; it still respects every historical policy
+mute. It does not recreate notices a relay has already discarded or sent.
 
 ### A task's record
 
