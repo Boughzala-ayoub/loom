@@ -7714,6 +7714,15 @@ function openClose(word: string | undefined, now: boolean, what: string) {
   throw new Error(`${what} takes open or close, not ${word}.`);
 }
 
+async function windowStep(name: string, run: () => Promise<void>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([run(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new CliTimeout(`Window ${name} timed out after 2 s. Windows may still finish it.`)), 2000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
 const CLI: Record<string, CliCommand> = {
   help: {
     usage: "help [command]",
@@ -8338,11 +8347,15 @@ const CLI: Record<string, CliCommand> = {
   },
   window: {
     usage: "window <show|minimize|maximize|restore|phone>",
-    help: "Bring Loom's window up, minimize, maximize or restore it, or toggle the phone size.",
+    help: "Bring Loom's window up, minimize, maximize or restore it, or toggle the phone size. Each show step has a 2 s limit; a timeout leaves other requests runnable, though Windows may still finish the step.",
     run: async (a) => {
       const w = getCurrentWindow();
       const how = cliWord(a, 0, "show, minimize, maximize, restore or phone");
-      if (how === "show") await w.unminimize().then(() => w.show()).then(() => w.setFocus());
+      if (how === "show") {
+        await windowStep("unminimize", () => w.unminimize());
+        await windowStep("show", () => w.show());
+        await windowStep("focus", () => w.setFocus());
+      }
       else if (how === "minimize") await w.minimize();
       else if (how === "maximize") await w.maximize();
       else if (how === "restore") await w.unminimize().then(() => w.unmaximize());
