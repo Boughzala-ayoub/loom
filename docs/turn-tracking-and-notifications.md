@@ -183,13 +183,120 @@ bridge must make these changes together:
    disposition without creating a new task event. Avoid letting one held
    row block unrelated eligible rows.
 5. Preserve the existing event and completion deduplication. Exclude the
-   mutable disposition from event identity. Migrate the stored capability
-   marker and queued v3 rows explicitly; do not automatically revive old
+   mutable disposition from event identity. Perform the state migration
+   through the exclusive cutover below. Do not automatically revive old
    permanently muted rows, since they may reflect real historical mutes.
 
-Loom's checks cover ingestion during a hold, a queued notice held at the
-pre-send check, release, restart, replay deduplication, and historical mutes.
-The external bridge is not modified by this change.
+Loom's checks cover the protocol's ingestion and pre-send dispositions,
+release across a Loom restart, replay deduplication, and historical mutes.
+They do not validate a deployed v4 consumer's durable queue or cutover. The
+external bridge is not modified by this change.
+
+#### Exclusive v3-to-v4 cutover
+
+This procedure specifies requirements for a future bridge migration command
+and v4 sender. Those tools must enforce the steps before v4 deployment.
+The existing `--after-review` entrypoint accepts v2 state only; it cannot
+perform this migration. Until the v4 migration is implemented and tested,
+continue using the unchanged v3 sender.
+
+Prefer migration in the existing state directory. The current `runner.lock`
+protects one directory only. Copying its database to another directory does
+not prevent both copies from sending the same notice. V4 must also hold a
+sender lock keyed by the preserved namespace, at a canonical location
+independent of the state directory. The migration command must hold that
+lock as well. Existing v3 does not know that lock, so stopping and disabling
+v3 and making its retired state unusable are still required.
+
+1. Identify the sole authoritative v3 state directory and every launcher
+   that can start its sender, including scheduled tasks and restart loops.
+   Disable those launchers and stop the sender. Wait for it to exit and for
+   any SMTP operation to finish. If delivery might have reached SMTP before
+   termination, retain that uncertainty; do not infer that nothing was sent.
+2. Acquire the source directory's existing runner lock before taking any
+   snapshot or changing state. Refuse migration while another process holds
+   it. Then acquire the namespace lock. If either lock fails, change nothing
+   and send nothing. Hold both through snapshot, migration and validation.
+   Do not use the ordinary Store constructor to take the snapshot: opening
+   that Store already changes `sending` rows to `uncertain`.
+3. Create and verify a consistent SQLite backup under those locks, including
+   any committed journal or WAL contents. Keep the backup offline, with its
+   existing private permissions, never as another configured sender
+   directory. Record the migration ID, canonical paths, namespace, versions
+   and phase durably so an interrupted command can resume or roll back
+   without guessing which copy is authoritative.
+4. Migrate in one database transaction. Commit the schema, state mappings,
+   migration record and `native_source=loom-durable-events-v4` together.
+   Preserve all other settings, including `namespace`, `epoch`, `cursor`,
+   `baseline_set`, `halt` and `purpose`. Preserve event IDs and digests,
+   attempt identities, `seen`, `attempts`, `completions` and `muted` records,
+   and every outbox row. Keep queued body and mail bytes, retry counts, due
+   times, reasons and dry-run flags. Record any required reason change in
+   the migration audit rather than discarding the old value. Apply the
+   outbox mappings below; do not reset the cursor or generate a new namespace.
+5. While delivery remains disabled, validate the migrated state against the
+   snapshot. Check settings, row counts, identities, queued payload hashes
+   and every state transition. Probe Loom for the v4 watch and check
+   contracts without sending mail. A failed check leaves delivery disabled.
+   Preserve an existing halt; migration does not authorize clearing it.
+6. Resolve the rollback decision before enabling either sender. Before v4
+   has ever been activated, a failed transaction leaves the original v3
+   state intact. A committed migration can be reversed from its verified
+   snapshot under the same locks, provided the destination remains disabled
+   and no sender has run since the snapshot. Restore schema and capability
+   together, validate the result, then enable exactly one v3 sender. Once
+   v4 has been activated, never restore a stale backup or restart its old
+   v3 copy: that could resend delivered mail. Stop and lock v4, preserve its
+   latest state, and repair it or perform a separately reviewed reverse
+   migration that retains subsequent deliveries and uncertain attempts.
+7. Mark the validated v4 state as the sole active destination and hand off
+   the locks to exactly one v4 sender. It must acquire both its directory
+   lock and namespace lock and validate the committed migration and v4
+   capability before sending. Keep all v3 launchers disabled. The v4
+   capability marker also makes an accidental old v3 start refuse the
+   migrated state. Pending notices receive a fresh v4 pre-send check; no
+   queued notice is sent merely because it survived migration.
+
+If a directory move is necessary, hold both directory locks and the same
+namespace lock. Prepare and verify the destination with delivery disabled.
+Before activating it, durably retire the source with a capability marker
+that the existing v3 Store refuses, and remove its launch configuration.
+A marker understood only by new v4 code is insufficient to stop old v3.
+Record and verify source retirement before committing destination activation.
+An interruption between those steps leaves both senders disabled. Recovery
+must inspect the recorded phases under the locks, then complete the handoff
+or roll back before either resumes. Never leave two runnable state copies.
+
+| Old outbox state | V4 mapping |
+| --- | --- |
+| `pending`, including retry backoff | Preserve pending state, retry count and due time; require a fresh v4 check before any send. |
+| `sent`, `muted`, `dead` | Preserve as final. Do not requeue, including notices v3 permanently muted during an owner hold. |
+| `sending` | Convert to `uncertain`; SMTP might already have accepted the message. No automatic resend. |
+| `uncertain` | Keep review-only with its delivery evidence. No automatic resend. |
+| `held` | Keep review-only: this means an unavailable event, not an unresolved owner. |
+
+New recoverable owner holds must use a distinct state or typed reason, such
+as `owner-held`. Only those holds are automatically rechecked for owner
+release. Neither old `held` rows nor `uncertain` rows may enter that retry
+path. Review must resolve SMTP uncertainty separately from Loom policy.
+
+The future migration and sender implementation must pass these checks before
+deployment, using temporary databases and fake senders:
+
+- A running v3 sender prevents migration before any state change or send.
+- Concurrent starts against source and destination directories cannot both
+  deliver, even though their directory locks differ. A cloned pending event
+  produces at most one send; retired v3 state refuses startup, and competing
+  v4 copies contend on the namespace lock.
+- Crash injection before and after schema commit, source retirement,
+  destination activation and lock handoff leaves a resumable recorded phase.
+  Repeating migration preserves all state and never enables both senders.
+- Snapshot comparison covers every preserved setting and table, mail bytes,
+  deduplication and the state mappings above. `sending`, `uncertain` and old
+  manual-review holds never become automatically retryable owner holds.
+- Rollback before activation restores one valid v3 store. Rollback after
+  activation refuses stale-state restoration, including when SMTP accepted
+  mail but the sender failed before recording `sent`.
 
 ### Switching from the v2 sender
 
