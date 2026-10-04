@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-pending|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-pending|policy-combined|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -407,6 +407,32 @@ try {
       assert.equal((await cli('notify', '--check', String(seq))).data[seq], false, 'Acknowledged mute survives replay');
     }
     ok('Identical policy requests await one outstanding write and share its success or failure; failed writes remain retryable');
+  }
+
+  if (review('policy-combined')) {
+    await resetReview();
+    const sent = await cli('submit', 'work:1', 'complete during combined policy write');
+    await report(claude, { kind: 'start', match: promptMatch('complete during combined policy write') });
+    await until(sent.text, 'working');
+    const writes = await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length);
+    await qa({ journalHold: 'fn:return d.includes("\\"notify\\"")' });
+    const changing = cli('notify', 'work:1', 'on', '--all', 'off');
+    await page.waitForFunction(() => window.qa.journalHeld.length === 1);
+    const during = (await cli('notify')).data;
+    await stops(claude);
+    const done = await until(sent.text, 'completed'), seq = done.events.at(-1).seq;
+    await qa({ journalHold: null });
+    await page.evaluate(() => window.qa.journalHeld.shift()());
+    assert.equal((await changing).ok, true);
+    assert.equal((await saved(sent.text)).state, 'completed', 'The completion is durable after the held write is released');
+    const checked = await cli('notify', '--check', String(seq));
+    assert.equal(checked.data[seq], true, 'A completion during a combined update must see its final pane override');
+    assert.deepEqual([during.all, during.panes.find((p) => p.ref === 'work:1').notify, during.panes.find((p) => p.ref === 'work:3').finish], ['off', 'on', false], 'All fields change before the first await');
+    const policyWrites = await page.evaluate((before) => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').slice(before).filter((c) => c.args.text.includes('"notify"')).length, writes);
+    assert.equal(policyWrites, 1, 'The combined command records one complete policy snapshot');
+    await reboot();
+    assert.equal((await cli('notify', '--check', String(seq))).data[seq], true, 'No intermediate mute is replayed');
+    ok('A combined global and pane policy is applied and journaled once before awaiting its write');
   }
 
   if (review('manual-mismatch')) {

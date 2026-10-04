@@ -4061,20 +4061,17 @@ async function recordNotify() {
     if (notifyWrite === write) notifyWrite = undefined;
   }
 }
-/** Every pane's setting changed (on, kinds, what new panes start with). */
-async function setNotify(change: Partial<typeof notifyPolicy>) {
+/** Apply the complete policy synchronously, then await its single snapshot. */
+async function setNotify(change: Partial<typeof notifyPolicy>, own?: { pane: Pane; value: PaneNotify }) {
   requireJournal();
   notifyPolicy = { ...notifyPolicy, ...change };
+  if (own) own.pane.notify = own.value;
   paintNotifications();
   save();
   await recordNotify();
 }
-async function setPaneNotify(p: Pane, v: PaneNotify) {
-  requireJournal();
-  p.notify = v;
-  p.paintBell();
-  save();
-  await recordNotify();
+function setPaneNotify(p: Pane, v: PaneNotify) {
+  return setNotify({}, { pane: p, value: v });
 }
 /** A pane's bell: like every pane, or its own on or off. */
 const notifyMenu = (p: Pane): Menu => ({
@@ -7971,10 +7968,10 @@ const CLI: Record<string, CliCommand> = {
       const pane = a._[0] !== undefined ? cliPane(a._[0]) : undefined;
       const own = a._[1];
       if (own !== undefined && own !== "inherit" && own !== "on" && own !== "off") throw new Error(`A pane's notices are inherit, on or off, not ${own}.`);
-      if (Object.keys(change).length) await setNotify(change);
+      if (Object.keys(change).length || (pane && own !== undefined))
+        await setNotify(change, pane && own !== undefined ? { pane, value: own } : undefined);
       if (pane) {
         const p = pane;
-        if (own !== undefined) await setPaneNotify(p, own);
         const row = notifyRow(p);
         return { data: { ...row, unresolved: unresolvedNotices() }, text: [table(Object.entries(row).map(([k, v]) => [k, String(v)])), unresolvedText()].filter(Boolean).join("\n") };
       }
