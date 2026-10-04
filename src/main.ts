@@ -20,7 +20,7 @@ import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
-import { changeFields, codexAsks, eventsAfter, isFinal, parseSignal, promptMatch, readJournal, route, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type Signal, type Task, type TaskEvent, type TaskState } from "./task";
+import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, NOTIFY_KINDS, notifies, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
@@ -1013,7 +1013,11 @@ function applyTheme(t: Theme) {
 
 /** A pane as saved: the command it booted with, the claude session it owns,
  * and the session's last-known effort level (hook-reported; resume re-pins it). */
-type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string; groupIds?: string[] };
+type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off" };
+/** A pane's task notices: every pane's setting (`inherit`), or its own on or off. */
+type PaneNotify = "inherit" | "on" | "off";
+/** Every pane's task notices, which kinds, and what a pane made from now on starts with. */
+let notifyPolicy: { on: boolean; kinds: Record<NotifyKind, boolean>; newPanes: PaneNotify } = { on: true, kinds: { ...DEFAULT_NOTIFY.kinds }, newPanes: "inherit" };
 
 type Startup = { label: string; cmd: string };
 const DEFAULT_STARTUPS: Startup[] = [
@@ -1386,8 +1390,15 @@ async function micStop() {
         // Codex reads an Enter that lands right behind pasted text as part of
         // the paste (a newline in the composer), so let the input settle first.
         await p.settle(150, 1000);
+        const mark = manualEnter(p);
+        p.typed = null;
+        const release = holdForEnter(p, mark);
         p.inputSeq++;
-        invoke("pty_write", { id: p.id, data: "\r" });
+        void invoke("pty_write", { id: p.id, data: "\r" }).then(release, (e) => {
+          if (mark) manualFailed(mark);
+          release();
+          toast(`Could not write to ${p.agent}: ${String(e)}`);
+        });
       }
     } else if (pre.text) {
       // A mis-tapped F4 with nothing said: take the prefix back out instead of
@@ -1492,6 +1503,17 @@ class Pane {
    * Part of the input revision send --input checks, so any writer in between
    * is noticed even before the screen shows what it wrote. */
   inputSeq = 0;
+  /** Its task notices: every pane's setting, or its own on or off (notifyPolicy). */
+  notify: PaneNotify = "inherit";
+  /** Enters a person gave it in Loom's window that may have sent a prompt no
+   * task holds yet (manualEnter), oldest first. Never their text. */
+  manual: ManualEnter[] = [];
+  /** The launch something was typed or pasted into in Loom's window since
+   * its last Enter, or null: what was typed is never kept. Where Loom can't
+   * read the input (OpenCode, say), it is the only sign an Enter sent
+   * anything, and only in that launch: a draft left in a process that was
+   * relaunched since is no sign for the new one (review 2026-10-03 19:10). */
+  typed: number | null = null;
   /** DECTCEM: the app hid the terminal cursor (Claude draws its own caret). */
   cursorHidden = false;
   /** What the config panel last set, each stamped with the turn count at the
@@ -1510,6 +1532,8 @@ class Pane {
   private stateTag = document.createElement("span");
   private gauge = document.createElement("span");
   private cfg: HTMLButtonElement;
+  /** Its task notices at a glance, and the way to change them (notifyMenu). */
+  readonly bell: HTMLButtonElement;
   private unlisten: UnlistenFn[] = [];
   private out = new Channel<string>();
   private idle = 0;
@@ -1585,11 +1609,14 @@ class Pane {
       showMenu(this.cfg, configMenu);
     });
     this.cfg.classList.add("cfg", "hidden"); // until start() knows this pane runs claude
+    this.bell = mini(glyph("bell"), "Task notices", () => showMenu(this.bell, notifyMenu(this)));
+    this.bell.classList.add("notify");
     const head = document.createElement("div");
     head.className = "pane-head";
     const actions = document.createElement("div");
     actions.className = "pane-actions";
     actions.append(
+      this.bell,
       this.cfg,
       mini(glyph("maximize"), "Zoom (F2)", () => this.th.toggleZoom(this)),
       mini(glyph("x"), "Close pane", () => this.th.closePane(this)),
@@ -1733,14 +1760,27 @@ class Pane {
       // focus, not you answering: pass them on, leave the alert alone.
       if (d === "\x1b[I" || d === "\x1b[O") return void invoke("pty_write", { id: this.id, data: d }).catch(() => {});
       this.lastIn = Date.now();
+      // Read before the Enter goes in: the input still holds what it sends.
+      const mark = d === "\r" ? manualEnter(this) : undefined;
+      // Keys and pastes, never escape sequences (arrows, mouse reports), count
+      // as typing; Enter, Ctrl+C and Ctrl+U leave the input empty.
+      if (d === "\r" || d === "\x03" || d === "\x15") this.typed = null;
+      else if (!d.startsWith("\x1b") || d.startsWith("\x1b[200~")) this.typed = this.generation;
+      const release = holdForEnter(this, mark);
       this.inputSeq++;
       this.usePrompt(d);
       const waitingSince = this.waitingSince;
       void invoke("pty_write", { id: this.id, data: d }).then(() => {
         this.wrote(d, true);
+        release();
         if (this.waitingSince === waitingSince) this.seen(); // A failed write must leave the attention signal intact.
         if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint());
-      }, e => (this.wrote(d, false), toast(`Could not write to ${this.agent}: ${String(e)}`)));
+      }, e => {
+        if (mark) manualFailed(mark);
+        release();
+        this.wrote(d, false);
+        toast(`Could not write to ${this.agent}: ${String(e)}`);
+      });
     });
     this.term.parser.registerOscHandler(133, (d) => (this.mark(d), true));
     // Watched, not handled: false lets xterm show or hide the cursor itself.
@@ -2134,6 +2174,16 @@ class Pane {
       getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
   }
 
+  /** Its bell: on or off as its task notices are, marked when it has its own setting. */
+  paintBell() {
+    const on = this.notify === "inherit" ? notifyPolicy.on : this.notify === "on";
+    this.bell.replaceChildren(glyph(on ? "bell" : "bell-off"));
+    this.bell.classList.toggle("own", this.notify !== "inherit");
+    this.bell.classList.toggle("off", !on);
+    this.bell.title = `Task notices ${this.notify === "inherit" ? `${on ? "on" : "off"}, like every pane` : `${this.notify} for this pane`}. Click to change.`;
+    this.bell.setAttribute("aria-label", this.bell.title);
+  }
+
   seen() {
     if (!this.waiting) return;
     this.waiting = false;
@@ -2492,6 +2542,9 @@ class Thread {
     p.groupIds = Array.isArray(st.groupIds) ? [...new Set(st.groupIds.filter(id => agentGroups.some(g => g.id === id)))] : [];
     if (st.sessionId && validSessionId(st.sessionId)) p.sessionId = st.sessionId;
     if (st.effort) p.effort = st.effort;
+    // A restored pane keeps its own setting; a new one starts as notifyPolicy.newPanes says.
+    p.notify = st.notify === "on" || st.notify === "off" ? st.notify : restoring ? "inherit" : notifyPolicy.newPanes;
+    p.paintBell();
     this.panes.push(p);
     this.grid.append(p.el);
     this.list.append(p.row); // sidebar order = grid order
@@ -2501,6 +2554,7 @@ class Thread {
       this.reordered(p);
     });
     this.relayout();
+    if (!restoring && p.notify !== "inherit") recordNotify(); // before it can have a task
     await p.start(st.cmd, st.sid);
     if (!this.panes.includes(p)) return;
     if (focus) this.focusPane(p);
@@ -2754,7 +2808,7 @@ const flushSave = (): Promise<unknown> => {
         branch: t.branch,
         name: t.name,
         open: t.open,
-        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds })),
+        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify })),
         layout: t.layout,
         active: t.panes.indexOf(t.active!),
         zoomed: t.panes.indexOf(t.zoomed!),
@@ -2777,6 +2831,7 @@ const flushSave = (): Promise<unknown> => {
       paneCount,
       soundEnabled,
       taskbarEnabled,
+      notify: notifyPolicy,
       keepAwake,
       planUsage,
       overlay: overlayMode,
@@ -3431,6 +3486,10 @@ function stepDashboardPreview(step: 1 | -1 | "waiting") {
  * alone, so an answer that stops part-way still shows as waiting. */
 function keys(p: Pane, data: string) {
   p.lastIn = Date.now(); // The echo is not the agent working.
+  // An Enter Loom writes itself (loomctl's, the Overview reply's) explains the
+  // next turn better than an earlier Enter of a person's that named no
+  // prompt: those claim none now.
+  if (data === "\r") (p.typed = null), (p.manual = p.manual.filter((m) => m.match !== null));
   p.inputSeq++;
   p.usePrompt(data);
   return invoke("pty_write", { id: p.id, data }).then(() => p.wrote(data, true), (e) => {
@@ -3639,7 +3698,9 @@ function journal(lines: object[], ids: string[]): Promise<void> {
     const body = covered || whole ? reserving : lines;
     if (covered && !body.length) return;
     const seenCalls = journalCalls, seenSeq = taskSeq;
-    const text = (whole ? writeJournal(typedTasks(), taskSeq, taskPruned) : "") + body.map((l) => JSON.stringify(l)).join("\n") + "\n";
+    const kept = typedTasks();
+    const oldest = Math.min(...kept.flatMap((t) => t.events.map((e) => e.seq)), taskSeq + 1);
+    const text = (whole ? writeJournal(kept, taskSeq, taskPruned, keptNotify(notifyHistory, oldest)) : "") + body.map((l) => JSON.stringify(l)).join("\n") + "\n";
     return invoke("task_journal_write", { text, append: !whole }).then(
       () => {
         writtenSeq = Math.max(writtenSeq, whole ? seenSeq : upTo);
@@ -3728,19 +3789,32 @@ function keepTasks() {
  * replayed in order. Until then nothing says whether that Enter went in: a
  * turn of its text could be an earlier prompt's (an untracked send), and had
  * it settled the task, the write's failure would have found it final and been
- * lost. Sends to a pane take turns, so one Enter at a time holds it. The
- * pane's other tasks wait too: what they saw before (a Stop, a quiet spell,
- * an Esc) may be overtaken by a report held here, so sweepTasks judges none
- * of them until the replay has gone in.
+ * lost. Sends to a pane take turns, but a person's Enters don't, so several
+ * may be written at once: each holds the pane (holdSignals), and what came
+ * meanwhile goes in only when the last of them has its outcome (review
+ * 2026-10-03 19:10). The pane's other tasks wait too: what they saw before (a
+ * Stop, a quiet spell, an Esc) may be overtaken by a report held here, so
+ * sweepTasks judges none of them until the replay has gone in. Reports and
+ * sweepTasks are the only ways an open task ends, so none ends before its own
+ * Enter's outcome is on it.
  * ponytail: a write returns once the process reads its input or the pane is
  * killed; one that reads none leaves the pane's tasks open until then (or
  * until Loom restarts: unknown). A deadline if that's ever seen. */
-const enterHeld = new Map<string, Signal[]>();
-/** The Enter has its outcome on the task: replay what came meanwhile. */
-function releaseSignals(p: Pane) {
-  const held = enterHeld.get(p.id);
-  enterHeld.delete(p.id);
-  held?.forEach((s) => taskSignal(p, s));
+const enterHeld = new Map<string, { signals: Signal[]; holds: number }>();
+/** Holds a pane's reports for one Enter being written. Returns its release,
+ * for once that Enter's outcome is on its task; a second call does nothing. */
+function holdSignals(p: Pane): () => void {
+  const held = enterHeld.get(p.id) ?? { signals: [], holds: 0 };
+  held.holds++;
+  enterHeld.set(p.id, held);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    if (--held.holds > 0) return;
+    enterHeld.delete(p.id);
+    held.signals.forEach((s) => taskSignal(p, s));
+  };
 }
 
 /** Tasks whose text Loom typed and then didn't press Enter for, because the
@@ -3777,10 +3851,201 @@ function heldTask(p: Pane, id?: string): Task | undefined {
 /** A held task's Enter (heldTask), pressed as sendText presses one: what
  * the pane reports meanwhile waits (enterHeld), and from the Enter on a
  * report of the task's text may be its (submittedAt). */
+/** A task for a turn no submit asked for (task.ts TaskSource), from its Enter
+ * on: accepted now, and journaled without being waited for, so a journal that
+ * can't take it never stops the turn (the record says `saved: false`). Its
+ * text is never kept, only its match, which the agent's reports name it by. */
+function turnTask(p: Pane, source: TaskSource, match: string, at: number, more: Partial<Task> = {}): Task {
+  const t: Task = {
+    id: crypto.randomUUID().replace(/-/g, "").slice(0, 16), source, key: null, what: null, pane: p.id, ref: paneName(p), agent: p.agent, gen: p.generation,
+    sha256: "", bytes: 0, match, input: "unknown", state: "accepted", correlation: null, uncertain: null, reason: null, detail: null, exit: null,
+    acceptedAt: at, submittedAt: null, startedAt: null, endedAt: null, events: [], ...more,
+  };
+  const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at, state: "accepted", signal: source };
+  t.events.push(accepted);
+  tasks.set(t.id, t);
+  void journal([{ task: { ...t, events: [accepted] } }], [t.id]).catch(() => {});
+  sweepSoon();
+  return t;
+}
+
+/** A turn Loom saw go in, at its Enter (`at`): submitted from then on, so a
+ * report of its text written before it can't be its. */
+function enterTurn(t: Task, at: number) {
+  t.submittedAt = at;
+  moveTask(t, { state: "submitted", signal: "enter" }, at);
+}
+
+/** Text an agent shows in its input instead of what it holds: a collapsed paste or an image. */
+const PLACEHOLDER = /\[Pasted text #\d+|\[Pasted Content \d+ chars\]|\[Image #\d+\]/;
+
+/** A person gave an agent pane an Enter in Loom's window: typing in the pane,
+ * the Overview's reply box, or dictation. If it may have sent a prompt (no
+ * question on screen, which Enter would answer, and an input with something
+ * in it where Loom can read it), it is noted with the prompt's match when Loom
+ * has it (the reply's own text, or the input read off the screen), never the
+ * text. Codex reports only a finished turn, so a prompt of its Loom could read
+ * is a task now; anything else waits for the agent to report the turn
+ * (adoptManual), so an Enter that sent nothing never becomes a task. */
+function manualEnter(p: Pane, text?: string): ManualEnter | Task | undefined {
+  if (!(p.agent === "claude" || p.agent === "codex" || p.agent === "opencode") || p.dead || readMenu(liveScreen(p, false))) return;
+  let read = text;
+  if (read === undefined && p.agent !== "opencode") {
+    const input = inputState(p);
+    if (input.kind === "empty" || input.kind === "suggestion") return; // Enter sends nothing
+    if (input.kind === "draft") read = input.text ?? undefined;
+  }
+  // The reply's own text is what it sent; text read off the screen may be a placeholder for it.
+  const match = text !== undefined ? promptMatch(text) : read !== undefined && !PLACEHOLDER.test(read) ? promptMatch(read) : null;
+  // An input Loom couldn't read, with nothing typed or pasted into this
+  // launch since its last Enter, is most likely empty (reviews 2026-10-03
+  // 15:52 and 19:10): an Enter there must not claim a later turn that some
+  // other Enter sent.
+  if (match === null && p.typed !== p.generation) return;
+  const at = Date.now();
+  // A slash or bang command may run no turn at all: Codex's would wait for its report.
+  if (p.agent === "codex" && match && !/^\s*[/!]/.test(read!)) {
+    const t = turnTask(p, "manual", match, at);
+    enterTurn(t, at);
+    return t;
+  }
+  const m: ManualEnter = { at, launch: p.generation, match };
+  // An hour is longer than any one turn; the eight newest are plenty.
+  p.manual = [...p.manual.filter((x) => at - x.at < 3_600_000), m].slice(-8);
+  return m;
+}
+
+/** A person's Enter whose write to the process failed (review 2026-10-03
+ * 15:52, P2): it may have sent nothing, so what manualEnter noted can't be
+ * proven sent. A report of the same text, from an earlier prompt say, leaves
+ * the doubt (uncertain: "submit"), and the turn ends unknown, never completed. */
+function manualFailed(mark: ManualEnter | Task) {
+  if ("events" in mark) moveTask(mark, { state: mark.state, signal: "enter", uncertain: "submit" });
+  else mark.uncertain = true;
+}
+
+/** Holds a pane's reports while a person's noted Enter is written, as
+ * sendText does for its own, so its write's outcome is on what was noted
+ * before any report of the turn is judged. Its own hold, whatever else holds
+ * the pane. Returns the release. */
+function holdForEnter(p: Pane, mark: ManualEnter | Task | undefined): () => void {
+  return mark ? holdSignals(p) : () => {};
+}
+
+/** The Overview's reply, sent as a person's turn: its own text names it
+ * (manualEnter), the pane's reports wait while its Enter is written, and an
+ * Enter whose write failed leaves its turn in doubt. */
+async function replyAsPerson(p: Pane, text: string) {
+  const steps: SendSteps = {};
+  let mark: ManualEnter | Task | undefined, release = () => {};
+  try {
+    await sendReply(p, text, { steps, beforeEnter: () => ((mark = manualEnter(p, text)), (release = holdForEnter(p, mark))) });
+  } catch (e) {
+    if (mark && steps.entering && !steps.submitted) manualFailed(mark);
+    throw e;
+  } finally {
+    release();
+  }
+}
+
+/** A report no task claimed, after a person's Enter waiting for one
+ * (manualEnter): the turn it reports is theirs, a task of its own from that
+ * Enter on, and the report goes to it. Claude names a prompt as it goes in
+ * (start, with its match), OpenCode only that a run started, Codex only a
+ * finished turn's prompts (an end, with its mentions). A report with no such
+ * Enter (a background notice's turn, say) stays untracked, and so do Enters
+ * older than the one a report took. True when it took the report. */
+function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChange][]): boolean {
+  // A replaced process's late report is stale: it starts no task, whatever Enter it went with.
+  if (!p.manual.length || launch !== p.generation) return false;
+  const take = (at: number, match: string | null, window: number) => {
+    const i = claimManual(p.manual, at, launch, match, window);
+    if (i < 0) return null;
+    const m = p.manual[i];
+    p.manual = p.manual.slice(i + 1);
+    return m;
+  };
+  if (s.kind === "start" && !s.token && !moved.length && (p.agent === "claude" ? s.match : p.agent === "opencode" && !s.match)) {
+    const m = take(s.at, s.match ?? null, p.agent === "claude" ? 10_000 : Infinity);
+    if (!m) return false;
+    enterTurn(turnTask(p, "manual", s.match ?? m.match ?? "", m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }), m.at);
+    taskSignal(p, s);
+    return true;
+  }
+  if (s.kind === "end" && p.agent === "codex" && s.matches?.length) {
+    // The mentions no task took, one each, made tasks; then the turn's end goes to all of them again.
+    const left = [...s.matches];
+    for (const [t] of moved) {
+      const i = left.indexOf(t.match);
+      if (i >= 0) left.splice(i, 1);
+    }
+    let made = false;
+    for (const match of left) {
+      const m = take(s.at, match, Infinity);
+      if (m) (enterTurn(turnTask(p, "manual", match, m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }), m.at), (made = true));
+    }
+    if (made) taskSignal(p, s);
+    return made;
+  }
+  return false;
+}
+
+/** The notification policy's history as the journal keeps it (task.ts notifies), oldest first. */
+let notifyHistory: NotifySnapshot[] = [];
+/** The policy as it stands, with each pane's own setting by this run's pane
+ * id. Pane ids are new each time Loom starts, so the settings of panes no
+ * longer here carry over while Loom keeps tasks of theirs: a restart is no
+ * policy change for the events they had. */
+const currentNotify = (): Omit<NotifySnapshot, "at"> => {
+  const live = threads.flatMap((t) => t.panes), last = notifyHistory[notifyHistory.length - 1];
+  const kept = new Set([...tasks.values()].map((t) => t.pane));
+  return {
+    on: notifyPolicy.on, kinds: { ...notifyPolicy.kinds },
+    panes: {
+      ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => kept.has(id) && !live.some((p) => p.id === id))),
+      ...Object.fromEntries(live.filter((p) => p.notify !== "inherit").map((p) => [p.id, p.notify as "on" | "off"])),
+    },
+  };
+};
+/** Journals the policy when it changed. It decides every event from the next
+ * one on, and an event it turns off stays off (notifies). */
+function recordNotify() {
+  const now = currentNotify(), last = notifyHistory[notifyHistory.length - 1];
+  if (sameNotify(last ?? DEFAULT_NOTIFY, now)) return;
+  notifyHistory.push({ at: taskSeq, ...now });
+  void journal([{ notify: now, at: taskSeq }], []).catch(() => {});
+}
+/** Every pane's setting changed (on, kinds, what new panes start with). */
+function setNotify(change: Partial<typeof notifyPolicy>) {
+  notifyPolicy = { ...notifyPolicy, ...change };
+  paintNotifications();
+  recordNotify();
+  save();
+}
+function setPaneNotify(p: Pane, v: PaneNotify) {
+  p.notify = v;
+  p.paintBell();
+  recordNotify();
+  save();
+}
+/** A pane's bell: like every pane, or its own on or off. */
+const notifyMenu = (p: Pane): Menu => ({
+  placeholder: "",
+  rows: (list) => {
+    for (const [v, label] of [["inherit", `Like every pane (now ${notifyPolicy.on ? "on" : "off"})`], ["on", "On for this pane"], ["off", "Off for this pane"]] as const)
+      menuItem(list, `${p.notify === v ? "✓ " : "   "}${label}`, () => setPaneNotify(p, v));
+  },
+});
+/** Each pane's notices as they stand: its setting, and whether each kind goes out now. */
+const notifyRow = (p: Pane) => ({
+  pane: p.id, ref: paneName(p), notify: p.notify,
+  ...Object.fromEntries(NOTIFY_KINDS.map((k) => [k, allows(currentNotify(), p.id, k)])),
+});
+
 async function enterTask(p: Pane, t: Task) {
   const r = heldEnter.get(t.id)!.receipt;
   heldEnter.delete(t.id);
-  enterHeld.set(p.id, []);
+  const release = holdSignals(p);
   if (p.agent !== "shell") r.turnsAt = p.turns;
   const entering = Date.now();
   r.steps.entering = entering;
@@ -3790,13 +4055,13 @@ async function enterTask(p: Pane, t: Task) {
     r.uncertain = "submit";
     t.submittedAt = entering;
     moveTask(t, { state: "submitted", signal: "enter", uncertain: "submit", detail: null }, entering);
-    releaseSignals(p);
+    release();
     throw Object.assign(new NotSubmitted(`Writing Enter into ${paneName(p)} failed (${e instanceof Error ? e.message : String(e)}), so it may or may not have gone in. Don't press it again: loomctl read ${paneName(p)} shows whether the text still waits.`, true), { details: { task: t.id, uncertain: "submit" } });
   }
   r.steps.submitted = Date.now();
   t.submittedAt = entering;
   const saved = moveTask(t, { state: "submitted", signal: "enter", uncertain: null, detail: null }, entering);
-  releaseSignals(p);
+  release();
   await saved;
 }
 
@@ -3805,7 +4070,7 @@ async function enterTask(p: Pane, t: Task) {
  * Stop is held until Claude is seen idle (sweepTasks). */
 function taskSignal(p: Pane, s: Signal) {
   const held = enterHeld.get(p.id);
-  if (held) return void held.push({ ...s, launch: s.launch ?? p.generation });
+  if (held) return void held.signals.push({ ...s, launch: s.launch ?? p.generation });
   const launch = s.launch ?? p.generation;
   const open = [...tasks.values()].filter((t) => t.pane === p.id && t.gen === launch && t.events.length && !isFinal(t.state));
   // An agent's start names a prompt by its text alone, never by the Enter
@@ -3813,7 +4078,9 @@ function taskSignal(p: Pane, s: Signal) {
   // of the same text, its report written late, looks the same (task.ts
   // changeFields keeps the doubt; only a shell's token, which is this task's
   // own, clears it).
-  for (const [t, c] of route(open, s)) {
+  const moved = route(open, s);
+  if (adoptManual(p, s, launch, moved)) return;
+  for (const [t, c] of moved) {
     // The latest Stop's final message is the one its completion names.
     if (c.signal === "stop") Object.assign(watched(t), { stopAt: Date.now(), response: s.kind === "stop" ? s.response : undefined });
     else {
@@ -3830,7 +4097,7 @@ const turnsSeen = new Set<string>();
 /** An agent's report from its event file (lib.rs send_task_events). */
 function agentReport(p: Pane, s: Signal) {
   if (s.kind === "end" && s.turn) {
-    const key = `${p.id}:${s.turn}`;
+    const key = `${p.id}:${s.launch ?? p.generation}:${s.turn}`;
     if (turnsSeen.has(key)) return;
     turnsSeen.add(key);
     if (turnsSeen.size > 1000) turnsSeen.delete(turnsSeen.values().next().value!);
@@ -3951,6 +4218,7 @@ async function loadTasks() {
     return;
   }
   const got = readJournal(text);
+  notifyHistory = got.notify;
   // Numbering goes on from the journal: no watcher saw an event it doesn't hold (writtenSeq).
   taskSeq = writtenSeq = Math.max(taskSeq, got.seq);
   taskPruned = Math.max(taskPruned, got.pruned);
@@ -4022,7 +4290,7 @@ function replyForm(p: Pane, th: Thread) {
     e.preventDefault();
     const text = input.value.trim();
     if (text) void answer(p, async () => {
-      await sendReply(p, text);
+      await replyAsPerson(p, text);
       dashboardDrafts.delete(p.id);
     });
   };
@@ -4119,7 +4387,7 @@ $("#dashboard-bulk-reply").onsubmit = async e => {
   dashboardBulkBusy = true;
   renderBulk();
   let sent = 0;
-  await Promise.all(targets.map(p => answer(p, async () => { await sendReply(p, text); sent++; }))); // Each failure toasts for itself.
+  await Promise.all(targets.map(p => answer(p, async () => { await replyAsPerson(p, text); sent++; }))); // Each failure toasts for itself.
   dashboardBulkBusy = false;
   if (sent === targets.length) bulkInput.value = "";
   toast(sent === targets.length ? `Sent to ${sent} agent${sent === 1 ? "" : "s"}` : `Sent to ${sent} of ${targets.length} agents. Open the others to finish`);
@@ -6698,11 +6966,14 @@ function paintPlanUsage() {
 }
 
 function paintNotifications() {
-  for (const [id, enabled] of [["#notification-sound", soundEnabled], ["#notification-taskbar", taskbarEnabled]] as const) {
+  for (const [id, enabled] of [["#notification-sound", soundEnabled], ["#notification-taskbar", taskbarEnabled], ["#notices", notifyPolicy.on],
+    ["#notice-finish", notifyPolicy.kinds.finish], ["#notice-fail", notifyPolicy.kinds.fail], ["#notice-blocked", notifyPolicy.kinds.blocked]] as const) {
     const b = $(id);
-    b.textContent = enabled ? "on" : "off";
+    if (!b.dataset.kind) b.textContent = enabled ? "on" : "off";
     b.setAttribute("aria-pressed", String(enabled));
   }
+  $("#notice-new").textContent = notifyPolicy.newPanes === "inherit" ? "like every pane" : notifyPolicy.newPanes;
+  for (const p of threads.flatMap((t) => t.panes)) p.paintBell();
 }
 
 async function setKeepAwake(enabled: boolean) {
@@ -6896,7 +7167,7 @@ const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
   title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, dir: p.th.dir, front: current === p.th && p.th.active === p,
   // Which launch this is (send --gen takes it), and what a shell with Loom's prompt last reported.
-  generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit, atPrompt: p.atPrompt, turns: p.turns,
+  generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit, atPrompt: p.atPrompt, turns: p.turns, notify: p.notify,
   lastOutput: p.lastOut ? new Date(p.lastOut).toISOString() : null,
 });
 /** --gen: input for that launch of the pane only. */
@@ -7084,7 +7355,11 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
     }
   }
   const receipt = token ? receipts.get(token) : undefined;
-  const task = submit?.task;
+  let task = submit?.task;
+  let release = () => {};
+  // An ordinary send to an agent is a turn Loom can follow too: a task of its
+  // own, made right before its Enter, so a send that stops sooner leaves none.
+  const tracked = !submit && !flag(a, "no-enter") && p.agent !== "shell";
   // A shell receipt needs PowerShell's prompt, checked in the pane's turn,
   // right before the paste: an Enter queued ahead of it spends the prompt it
   // saw (usePrompt), so it waits for the next one, or gives up unwritten.
@@ -7142,7 +7417,9 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
         beforeEnter: () => {
           leftover();
           if (receipt && p.agent !== "shell") receipt.turnsAt = p.turns;
-          if (task) enterHeld.set(p.id, []);
+          if (tracked) task = turnTask(p, "send", promptMatch(asked), Date.now(),
+            { ...(token ? { id: token } : {}), key: ctx.key ?? null, what: ctx.what ?? null, sha256: digest, bytes, input: shown?.kind ?? "unknown" });
+          if (task) release = holdSignals(p);
         },
       });
   } catch (e) {
@@ -7176,7 +7453,7 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
       }
       else if (heldEnter.has(task.id)) moveTask(task, { state: "accepted", signal: "loomctl", uncertain: "enter", detail: why.slice(0, 200) });
       else moveTask(task, { state: "failed", signal: "loomctl", reason: "not-submitted", uncertain: uncertain ?? null, detail: why.slice(0, 200) });
-      releaseSignals(p);
+      release();
     }
     // A pane that restarted or closed took the text with it, so a retry is safe.
     if (e instanceof NotSubmitted && !e.typed) throw Object.assign(e, { details: { ...e.details, ...details } });
@@ -7194,10 +7471,10 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
     // Nothing moved it while its Enter was written: what came then was held, and goes in after.
     // Answered once the journal has it, or `saved: false` says it doesn't.
     const saved = task.state === "accepted" ? moveTask(task, { state: "submitted", signal: "enter", input: task.input }, task.submittedAt) : undefined;
-    releaseSignals(p);
+    release();
     await saved;
   }
-  return { data: { pane: p.id, generation: gen, sha256: digest, bytes, ...(token ? { receipt: token } : {}) }, text: token ?? "" };
+  return { data: { pane: p.id, generation: gen, sha256: digest, bytes, ...(token ? { receipt: token } : {}), ...(task && !submit ? { task: task.id } : {}) }, text: token ?? "" };
 }
 
 /** A task Loom still has, or a failure saying it isn't available. */
@@ -7556,6 +7833,59 @@ const CLI: Record<string, CliCommand> = {
       return { data: paneData(p), text: `${paneName(p)} is ${cliState(p)}` };
     },
   },
+  notify: {
+    usage: "notify [pane [inherit|on|off]] [--all on|off] [--finish on|off] [--fail on|off] [--blocked on|off] [--new-panes inherit|on|off] [--check SEQ,...]",
+    help: "Task notices: what Loom lets a relay send on (watch --metadata --policy). --all turns every pane on or off; a pane's own on or off wins over it, and inherit follows it again. --finish, --fail and --blocked choose the kinds, for every pane. --new-panes is what a pane made from now on starts with. Turning a pane or kind off also stops its notices not sent yet, and turning it back on sends none of them. --check asks for events by number whether they may go out now (null: Loom doesn't have it).",
+    options: { all: "string", finish: "string", fail: "string", blocked: "string", "new-panes": "string", check: "string" },
+    run: (a) => {
+      const check = str(a, "check");
+      if (check !== undefined && (a._.length || [...NOTIFY_KINDS, "all", "new-panes"].some((k) => a[k] !== undefined)))
+        throw new Error("--check only asks: give it alone.");
+      if (check !== undefined) {
+        const seqs = check.split(",").map((n) => {
+          const seq = Number(n.trim());
+          if (!Number.isSafeInteger(seq) || seq < 1) throw new Error(`--check takes event numbers, not ${n.trim() || "nothing"}.`);
+          return seq;
+        });
+        const all = [...tasks.values()];
+        const got = Object.fromEntries(seqs.map((seq) => {
+          const t = all.find((t) => t.events.some((e) => e.seq === seq));
+          const e = t?.events.find((e) => e.seq === seq);
+          return [seq, t && e && e.seq <= writtenSeq ? notifies(e, t.pane, notifyHistory) : null];
+        }));
+        return { data: got, text: table(Object.entries(got).map(([k, v]) => [k, v === null ? "unknown" : v ? "send" : "muted"])) };
+      }
+      // Everything asked is checked first, the pane included, so a refused
+      // command changes nothing at all (review 2026-10-03 15:52, P2).
+      if (a._.length > 2) throw new Error(`notify takes a pane and inherit, on or off, not ${a._.slice(2).join(" ")} too.`);
+      const change: Partial<typeof notifyPolicy> = {};
+      if (a.all !== undefined) change.on = onOff(str(a, "all"), "--all");
+      const kinds = { ...notifyPolicy.kinds };
+      for (const k of NOTIFY_KINDS) if (a[k] !== undefined) kinds[k] = onOff(str(a, k), `--${k}`);
+      if (NOTIFY_KINDS.some((k) => kinds[k] !== notifyPolicy.kinds[k])) change.kinds = kinds;
+      const fresh = str(a, "new-panes");
+      if (fresh !== undefined) {
+        if (fresh !== "inherit" && fresh !== "on" && fresh !== "off") throw new Error(`--new-panes takes inherit, on or off, not ${fresh}.`);
+        change.newPanes = fresh;
+      }
+      const pane = a._[0] !== undefined ? cliPane(a._[0]) : undefined;
+      const own = a._[1];
+      if (own !== undefined && own !== "inherit" && own !== "on" && own !== "off") throw new Error(`A pane's notices are inherit, on or off, not ${own}.`);
+      if (Object.keys(change).length) setNotify(change);
+      if (pane) {
+        const p = pane;
+        if (own !== undefined) setPaneNotify(p, own);
+        const row = notifyRow(p);
+        return { data: row, text: table(Object.entries(row).map(([k, v]) => [k, String(v)])) };
+      }
+      const panes = threads.flatMap((t) => t.panes).map(notifyRow);
+      return {
+        data: { all: notifyPolicy.on ? "on" : "off", kinds: notifyPolicy.kinds, newPanes: notifyPolicy.newPanes, panes },
+        text: `every pane ${notifyPolicy.on ? "on" : "off"}; ${NOTIFY_KINDS.map((k) => `${k} ${notifyPolicy.kinds[k] ? "on" : "off"}`).join(", ")}; new panes ${notifyPolicy.newPanes}\n` +
+          table(panes.map((r) => [r.ref, r.notify, ...NOTIFY_KINDS.map((k) => (r[k as keyof typeof r] ? k : "-"))])),
+      };
+    },
+  },
   receipt: {
     usage: "receipt <token>",
     help: "What send --receipt sent, without waiting: the SHA-256 and size of the text Loom typed, its --key, when it was accepted, typed and submitted, and what the pane signaled back (a turn's end or a command's exit), if anything yet.",
@@ -7589,12 +7919,12 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   watch: {
-    usage: "watch [task] [--after N] [--follow] [--metadata]",
-    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2.",
-    options: { after: "int", metadata: "bool" },
+    usage: "watch [task] [--after N] [--follow] [--metadata [--policy]]",
+    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send or manual) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one.",
+    options: { after: "int", metadata: "bool", policy: "bool" },
     run: async (a, ctx) => {
       const one = a._[0] ? cliTask(a._[0]) : undefined;
-      const meta = flag(a, "metadata");
+      const meta = flag(a, "metadata"), v3 = meta && flag(a, "policy");
       let after = num(a, "after", 0, 0, Number.MAX_SAFE_INTEGER);
       // A number from beyond this journal (it was lost or reset): start over.
       // Only events the journal holds (writtenSeq), so a number never comes twice across restarts.
@@ -7607,15 +7937,23 @@ const CLI: Record<string, CliCommand> = {
       // before a pruned one) would have `watch <task> --follow` ask again at once, forever.
       await taskEventGate.waitUntil(() => pick().length > 0 || finished(), Math.max(0, end - Date.now()));
       const events = pick();
-      const at = (n: number) => new Date(n).toISOString();
-      const done = finished();
       // `one`, not tasks.get: it may have been pruned while this waited.
       const owner = (id: string) => one ?? tasks.get(id)!;
+      // A v2 reader can't see the policy and sends every outcome, so it gets
+      // none that the policy holds back (review 2026-10-03 15:52, P1): the
+      // whole answer is refused until it reads v3.
+      const held = meta && !v3 ? events.find((e) => notifyKind(e.state) && !notifies(e, owner(e.task).pane, notifyHistory)) : undefined;
+      if (held) throw new Error(`Event ${held.seq} is a task notice the notification policy holds back, and a loom-durable-events-v2 reader would send it, so Loom answers none. Read with --metadata --policy (loom-durable-events-v3), which says which may go out.`);
+      const at = (n: number) => new Date(n).toISOString();
+      const done = finished();
       return {
         data: {
-          events: events.map((e) => (meta ? { seq: e.seq, task: e.task, pane: owner(e.task).pane, generation: owner(e.task).gen, state: e.state, at: at(e.at), response: e.response ?? null } : { ...e, at: at(e.at) })),
+          events: events.map((e) => (meta ? {
+            seq: e.seq, task: e.task, pane: owner(e.task).pane, generation: owner(e.task).gen, state: e.state, at: at(e.at), response: e.response ?? null,
+            ...(v3 ? { source: owner(e.task).source ?? "submit", notify: notifies(e, owner(e.task).pane, notifyHistory) } : {}),
+          } : { ...e, at: at(e.at) })),
           next: events[events.length - 1]?.seq ?? after, done, gap: gap || after < taskPruned, last: writtenSeq,
-          ...(meta ? { source: "loom-durable-events-v2" } : {}),
+          ...(meta ? { source: v3 ? "loom-durable-events-v3" : "loom-durable-events-v2" } : {}),
         },
         text: events.map((e) => `${e.seq}  ${at(e.at)}  ${e.task}  ${e.state}` + (meta ? "" : `  ${e.signal}${e.detail ? `  ${e.detail}` : ""}`)).join("\n"),
       };
@@ -7886,6 +8224,7 @@ async function main() {
     silent?: boolean;
     soundEnabled?: boolean;
     taskbarEnabled?: boolean;
+    notify?: { on?: boolean; kinds?: Partial<Record<NotifyKind, boolean>>; newPanes?: PaneNotify };
     keepAwake?: boolean;
     planUsage?: boolean;
     overlay?: boolean | OverlayMode;
@@ -7912,6 +8251,12 @@ async function main() {
   // Preserve the old combined preference until each new setting is saved.
   soundEnabled = saved.soundEnabled ?? (saved.silent !== true);
   taskbarEnabled = saved.taskbarEnabled ?? (saved.silent !== true);
+  // Every pane on when nothing was saved: Loom's behavior before there was a policy.
+  notifyPolicy = {
+    on: saved.notify?.on !== false,
+    kinds: Object.fromEntries(NOTIFY_KINDS.map((k) => [k, saved.notify?.kinds?.[k] !== false])) as Record<NotifyKind, boolean>,
+    newPanes: (["inherit", "on", "off"] as const).find((v) => v === saved.notify?.newPanes) ?? "inherit",
+  };
   await setKeepAwake(saved.keepAwake === true);
   planUsage = saved.planUsage !== false;
   // true was "in background" before there was an "always".
@@ -8051,6 +8396,9 @@ async function main() {
     paintNotifications();
     save();
   };
+  $("#notices").onclick = () => setNotify({ on: !notifyPolicy.on });
+  for (const k of NOTIFY_KINDS) $(`#notice-${k}`).onclick = () => setNotify({ kinds: { ...notifyPolicy.kinds, [k]: !notifyPolicy.kinds[k] } });
+  $("#notice-new").onclick = () => setNotify({ newPanes: ({ inherit: "on", on: "off", off: "inherit" } as const)[notifyPolicy.newPanes] });
   $("#keep-awake").onclick = () => void setKeepAwake(!keepAwake);
   $("#plan-usage").onclick = () => {
     planUsage = !planUsage;
@@ -8311,6 +8659,7 @@ async function main() {
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
   await loadTasks(); // before loomctl answers, so a retried --key finds its task
+  recordNotify(); // the panes restored with their own settings, under this run's pane ids
   installCli(); // after the threads exist, before their panes finish starting
   await opened;
   restoring = false;

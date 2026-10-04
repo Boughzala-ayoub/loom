@@ -117,7 +117,7 @@ shows one.
 | `receipt <token>` | What `send --receipt` sent and what came back, without waiting. See [Receipts as a record](#receipts-as-a-record). |
 | `task <id>` | A task from `submit` as it stands. See [Tasks](#tasks). |
 | `tasks [--pane P] [--state S]` | Every open task and the last 500 to finish. |
-| `watch [task] [--after N] [--follow] [--metadata]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
+| `watch [task] [--after N] [--follow] [--metadata [--policy]]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
 | `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
 | `help [command]` | The commands, or one command. |
@@ -392,6 +392,8 @@ when time runs out.
 | `set` | Show the settings. |
 | `set sound\|taskbar\|awake\|plan-usage on\|off` | Change one. |
 | `set overlay off\|background\|always` | When the agent overlay shows. |
+| `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
+| `notify --check SEQ,...` | Whether those events may go out as notices now. |
 
 ## Answering questions
 
@@ -506,6 +508,29 @@ fails with `"unavailable": true`.
 Enter went in. From then on Loom records where the task got to, from what the
 agent itself reports, and keeps that record in a journal beside your workspace
 file. The id, its `--key` and its events still answer after Loom restarts.
+
+Two other turns are tasks too, each with its own id, and every task says what
+started it in `source`:
+
+- `send`: an ordinary `loomctl send` to Claude, Codex or OpenCode with Enter.
+  The task is made right before its Enter, so a send that stops sooner leaves
+  none, and `send` answers with its id as `task` (the receipt token, with
+  `--receipt`). A send to a shell, or with `--no-enter`, makes none.
+- `manual`: a person's Enter in Loom's window, typed in the pane, sent from
+  the Overview's reply box, or dictated. Loom notes the Enter and, where it
+  can read the input, a hash of the prompt, never the text. The task appears
+  only when the agent reports the turn that Enter sent: Claude's prompt hook
+  naming it, OpenCode's first run after it, Codex's turn report naming its
+  prompt (or, when Loom could read Codex's input, at the Enter itself, since
+  Codex reports only a finished turn). An Enter on an empty input, one that
+  answers a question on screen, and a turn no such Enter explains (an agent's
+  background notice, input from outside Loom) make no task. A report from a
+  launch the pane has since replaced makes none either.
+
+A `send` or `manual` task then moves like a submit's, on the same reports and
+with the same rules: a quiet pane never completes it, and without the agent's
+own end it ends `unknown`. Its record keeps no text at all for `manual`
+(`sha256` empty, `bytes` 0), only the prompt's match.
 
 ```powershell
 $t = loomctl --json --key login-1 submit api-fix:1 'fix the login test' | ConvertFrom-Json
@@ -741,6 +766,61 @@ from a terminal outside Loom to ride out a restart.
 loomctl --json watch --follow | ForEach-Object { $e = $_ | ConvertFrom-Json; "$($e.task) $($e.state)" }
 ```
 
+### Task notices
+
+Loom decides which task events may go out as notices: a task finished, failed,
+or blocked on a question (the email bridge sends these, and they wake Ash).
+Every other state is never a notice.
+
+- Every pane: on or off (Preferences, Task notices, or `notify --all`). On by
+  default, as Loom always was.
+- The kinds: finished, failed and blocked, each on or off, for every pane
+  (`notify --finish`, `--fail`, `--blocked`).
+- A pane's own setting: like every pane (`inherit`), or its own `on` or `off`
+  (its bell, top right of the pane, or `notify <pane> on`). A pane's own on or
+  off wins over every pane's; the kinds apply either way. The bell is faint
+  while the pane follows every pane, bright when it has its own on, and
+  crossed out whenever its notices are off.
+- New panes: what a pane added from now on starts with (`notify --new-panes`):
+  like every pane by default, or its own on or off.
+
+All of it is kept: every pane's settings in the workspace file, a pane's own
+in its saved slot (so it survives a relaunch and a Loom restart, though pane
+ids change), and each change in the task journal, so every event's decision
+does too. An event may go out only if its kind was allowed for its pane when
+it happened and by every change since. So turning a pane or kind off also
+holds back its notices not sent yet, and turning it on again sends none of
+them: only events after that.
+
+`watch --metadata --policy` gives each event two more fields than
+`--metadata`: `source` (`submit`, `send`, `manual`) and `notify` (whether it
+may go out), under `"source": "loom-durable-events-v3"`. `notify` only ever
+turns from true to false. `notify --check 41,52` asks right before sending:
+
+```json
+{ "41": true, "52": false, "9": null }
+```
+
+`null` means Loom has no such event. The email bridge reads v3, leaves out
+every notice with `notify: false`, and asks `notify --check` again right
+before each send. A message the mail server already accepted can't be
+recalled, so turning a pane off stops every notice not yet sent, never one
+already on its way. A v2 sender that is still running sends what it
+already queued without asking, so mutes reach its mail only once it is
+stopped; the bridge's runbook gives the switch.
+
+`watch --metadata` without `--policy` (`loom-durable-events-v2`) can't say
+what the policy holds back, and a reader of it would send every outcome. So
+Loom answers it only while none of the events in the answer is a notice the
+policy holds back, and otherwise refuses the whole answer, naming v3. With
+every pane on, as by default, v2 answers as it always did. The details, and
+what changed in the bridge, are in
+[docs/turn-tracking-and-notifications.md](turn-tracking-and-notifications.md).
+
+`notify` checks everything it was given, the pane included, before it changes
+anything: a command it refuses changes nothing. `--check` only asks, so it
+takes no pane or setting beside it.
+
 ### A task's record
 
 `task --json` (and `submit`, `wait --task`, `tasks`) answers with:
@@ -748,6 +828,7 @@ loomctl --json watch --follow | ForEach-Object { $e = $_ | ConvertFrom-Json; "$(
 | Field | Meaning |
 | --- | --- |
 | `task`, `key` | Its id, and the `--key` it came with |
+| `source` | What started it: `submit`, `send` or `manual` (a task from before Loom kept this says `submit`) |
 | `state`, `final` | Where it is, and whether that can change |
 | `pane`, `ref`, `agent`, `generation` | The pane and the launch it went to |
 | `sha256`, `bytes` | Of the text as Loom got it, as `send` reports them |

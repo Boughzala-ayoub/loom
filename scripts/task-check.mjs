@@ -20,7 +20,7 @@ import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
-import { promptMatch, readJournal } from '../src/task.ts';
+import { isFinal, promptMatch, readJournal } from '../src/task.ts';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const base = process.env.RESP_BASE || 'http://localhost:4273';
 assert.equal((await fetch(base)).status, 200, 'The preview must be serving');
@@ -56,7 +56,9 @@ const setup = () => {
   mockWindows('main');
   mockIPC((cmd, args = {}) => {
     qa.calls.push({ cmd, args });
-    if (cmd === 'load_state') return JSON.stringify(state);
+    // What Loom saved comes back on a reload only when a test asks (qa-use-state); every other reload starts as set up.
+    if (cmd === 'save_state') return void localStorage.setItem('qa-state', args.json);
+    if (cmd === 'load_state') return (localStorage.getItem('qa-use-state') && localStorage.getItem('qa-state')) || JSON.stringify(state);
     // The journal outlives a reload, as the file outlives Loom. A write can be
     // refused (a full disk) or held (still in flight when Loom "crashes").
     if (cmd === 'task_journal_read') {
@@ -164,6 +166,11 @@ try {
     for (const [k, v] of Object.entries(set)) window.qa[k] = typeof v === 'string' && v.startsWith('fn:') ? new Function('d', v.slice(3)) : v;
   }, set);
   const prompts = (id) => page.evaluate((id) => window.qa.prompts.filter(([p]) => p === id).map(([, t]) => t), id);
+  /** A prompt Loom tracks no task for: typed with send --no-enter, then a bare Enter from keys (an ordinary send is a task now). */
+  const untracked = async (ref, text) => {
+    const typed = await cli('send', ref, '--no-enter', text), entered = await cli('keys', ref, 'enter');
+    return { ok: typed.ok && entered.ok && entered.data.task === undefined };
+  };
   const pastes = (id) => page.evaluate((id) => window.qa.calls.filter((c) => c.cmd === 'pty_write' && c.args.id === id && c.args.data.startsWith('\x1b[200~')).length, id);
   /** The task as the journal would bring it back after a restart. */
   const saved = async (id) => readJournal(await page.evaluate(() => localStorage.getItem('qa-journal') ?? '')).tasks.get(id);
@@ -456,7 +463,7 @@ try {
     await until(b.text, 'completed');
     assert.equal((await state(a.task)).final, false);
     await agent(codex, { busy: false, input: '' });
-    assert.equal((await cli('send', 'work:2', 'same again')).ok, true, 'An untracked send of the same text');
+    assert.equal((await untracked('work:2', 'same again')).ok, true, 'An untracked send of the same text');
     await report(codex, { kind: 'end', matches: [promptMatch('same again')], turn: 'turn-review3-c' });
     const codexA = await until(a.task, 'unknown');
     assert.deepEqual([codexA.reason, codexA.uncertain], ['submit-uncertain', 'submit'], `Ambiguous, not completed: ${JSON.stringify(codexA)}`);
@@ -466,7 +473,7 @@ try {
     const c = await call('submit', ['work:1', 'claude same again'], null, 'review3-c');
     await qa({ failWriteIf: null });
     await agent(claude, { input: '' });
-    assert.equal((await cli('send', 'work:1', 'claude same again')).ok, true);
+    assert.equal((await untracked('work:1', 'claude same again')).ok, true);
     await report(claude, { kind: 'start', match: promptMatch('claude same again') });
     assert.equal((await until(c.task, 'working')).uncertain, 'submit', 'Input went in since its Enter: the start proves nothing');
     await stops(claude);
@@ -535,7 +542,7 @@ try {
     const a = await call('submit', ['work:1', 'approval same text'], null, 'review4-answer');
     await qa({ failWriteIf: null });
     await agent(claude, { input: '' });
-    assert.equal((await cli('send', 'work:1', 'approval same text')).ok, true, 'An untracked send of the text');
+    assert.equal((await untracked('work:1', 'approval same text')).ok, true, 'An untracked send of the text');
     await report(claude, { kind: 'start', match: promptMatch('approval same text') });
     assert.equal((await until(a.task, 'working')).uncertain, 'submit');
     await report(claude, { kind: 'approval', detail: 'Bash' });
@@ -559,7 +566,7 @@ try {
   {
     await agent(claude, { busy: false, input: '' });
     await qa({ idleAfterEnter: true }); // the earlier prompt's busy output hasn't drawn yet
-    assert.equal((await cli('send', 'work:1', 'earlier pending same text')).ok, true, 'An untracked prompt goes in first');
+    assert.equal((await untracked('work:1', 'earlier pending same text')).ok, true, 'An untracked prompt goes in first');
     await qa({ idleAfterEnter: false, failWriteIf: "fn:return d === '\\r'" });
     const a = await call('submit', ['work:1', 'earlier pending same text'], null, 'review5-a');
     await qa({ failWriteIf: null });
@@ -576,7 +583,7 @@ try {
     // Codex, the same order: its earlier turn's end comes after the task's failed Enter.
     await agent(codex, { busy: false, input: '' });
     await qa({ idleAfterEnter: true });
-    assert.equal((await cli('send', 'work:2', 'codex earlier same text')).ok, true);
+    assert.equal((await untracked('work:2', 'codex earlier same text')).ok, true);
     await qa({ idleAfterEnter: false, failWriteIf: "fn:return d === '\\r'" });
     const c = await call('submit', ['work:2', 'codex earlier same text'], null, 'review5-codex');
     await qa({ failWriteIf: null });
@@ -594,7 +601,7 @@ try {
       await agent(claude, { busy: false, input: '' });
       const text = 'earlier prompt, native stamp';
       await qa({ idleAfterEnter: true });
-      assert.equal((await cli('send', 'work:1', text)).ok, true);
+      assert.equal((await untracked('work:1', text)).ok, true);
       await qa({ idleAfterEnter: false });
       // Claude's hook for that prompt starts now, and finishes reading its payload only after the task's Enter fails.
       const temp = mkdtempSync(join(tmpdir(), 'loom-task-check-'));
@@ -696,7 +703,7 @@ try {
     const earlier = async (id, ref, text) => {
       await agent(id, { busy: false, input: '' });
       await qa({ idleAfterEnter: true });
-      assert.equal((await cli('send', ref, text)).ok, true, 'The earlier, untracked prompt');
+      assert.equal((await untracked(ref, text)).ok, true, 'The earlier, untracked prompt');
       await qa({ idleAfterEnter: false });
     };
     /** Submits `text` with one write (`hold`) held, runs `during` while it is, then settles it `how`. */
@@ -1541,11 +1548,15 @@ try {
     assert.equal(new Set(last.map((e) => e.response)).size, 1, 'One answer text, named alike');
 
     // A Loom restart: the journal brings back every event as it was, the same numbers and the same responses.
-    const whole = (await cli('watch', '--after', String(base), '--metadata')).data;
-    assert.equal(whole.source, 'loom-durable-events-v2');
-    assert.ok(whole.events.every((e) => Object.keys(e).sort().join() === 'at,generation,pane,response,seq,state,task'), 'Metadata only');
+    const whole = (await cli('watch', '--after', String(base), '--metadata', '--policy')).data;
+    assert.equal(whole.source, 'loom-durable-events-v3');
+    assert.ok(whole.events.every((e) => Object.keys(e).sort().join() === 'at,generation,notify,pane,response,seq,source,state,task'), 'Metadata only');
+    assert.ok(whole.events.every((e) => e.notify === ['completed', 'failed', 'approval'].includes(e.state)), 'Every pane on: every outcome may go out');
+    // Every pane on, the default: v2 reads the same events, without the two fields.
+    const v2 = (await cli('watch', '--after', String(base), '--metadata')).data;
+    assert.deepEqual([v2.source, v2.events], ['loom-durable-events-v2', whole.events.map(({ source, notify, ...e }) => e)]);
     await reboot();
-    const again = (await cli('watch', '--after', String(base), '--metadata')).data;
+    const again = (await cli('watch', '--after', String(base), '--metadata', '--policy')).data;
     assert.deepEqual(again.events.filter((e) => e.seq <= whole.last), whole.events, 'Replayed after a restart exactly as before');
     for (const p of ['claude', 'codex', 'opencode']) cells.push({ provider: p, scenario: 'restart-replay', tasks: cells.filter((c) => c.provider === p && c.scenario === 'completion')[0].tasks, expect: [['finish']] });
     if (process.env.TASK_MATRIX_OUT) {
@@ -1554,6 +1565,616 @@ try {
       writeFileSync(process.env.TASK_MATRIX_OUT, JSON.stringify({ made: 'Loom scripts/task-check.mjs over Tauri mocks; no live agent or mail', baseline: base, batch, cells }, null, 1) + '\n');
     }
     ok(`Matrix: ${cells.length} cells across Claude Code, Codex and OpenCode, metadata replayed exactly after a restart`);
+  }
+
+  // Ordinary sends and a person's own input are tasks too, each told apart by its source (task.ts TaskSource):
+  // an ordinary loomctl send, and a person's Enter in Loom's window (the pane's own terminal, the Overview's
+  // reply box), which becomes a task only once the agent reports the turn it sent.
+  const ocPane = (await call('add', ['work', '--cmd=opencode'])).data.id;
+  const ocRef = (await cli('panes')).data.find((p) => p.id === ocPane).ref;
+  await agent(ocPane, { busy: false, input: '' });
+  const refOf = { claude: 'work:1', codex: 'work:2', opencode: ocRef };
+  const paneOf = async (provider) => (await cli('panes')).data.find((p) => p.ref === refOf[provider]).id;
+  const taskIds = async () => (await cli('tasks')).data.map((t) => t.task);
+  const newTasks = async (before) => (await cli('tasks')).data.filter((t) => !before.includes(t.task));
+  /** A person typing in the pane in Loom's window and pressing Enter there, never loomctl. */
+  const typeIn = async (pane, text) => {
+    await page.locator(`.pane[data-id="${pane}"] .xterm-helper-textarea`).focus();
+    if (text) await page.keyboard.type(text);
+    await page.waitForTimeout(250); // the input shows it before the Enter, as it does for a person
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(150);
+    await page.evaluate(() => document.activeElement?.blur());
+  };
+  /** Each agent's own reports of a turn, as they reach Loom (helper.rs, the OpenCode plugin). */
+  let manualTurns = 0;
+  const startTurn = async (provider, pane, text) => {
+    await agent(pane, { busy: true });
+    if (provider === 'claude') await report(pane, { kind: 'start', match: promptMatch(text) });
+    if (provider === 'opencode') await report(pane, { kind: 'start' });
+  };
+  const endTurn = async (provider, pane, text, answer = 'Done.') => {
+    await agent(pane, { busy: false });
+    if (provider === 'claude') await report(pane, { kind: 'stop', response: promptMatch(answer) });
+    if (provider === 'codex') await report(pane, { kind: 'end', matches: [promptMatch(text)], turn: `manual-${++manualTurns}`, response: promptMatch(answer) });
+    if (provider === 'opencode') await report(pane, { kind: 'end', response: promptMatch(answer) });
+  };
+  const waitNew = async (before, n = 1) => {
+    for (let i = 0; i < 40; i++) { const got = await newTasks(before); if (got.length >= n) return got; await page.waitForTimeout(100); }
+    return newTasks(before);
+  };
+
+  // An ordinary send (the reproduced gap): a task of its own, linked to its receipt, on every agent. A shell's isn't.
+  {
+    for (const provider of ['claude', 'codex', 'opencode']) {
+      const pane = await paneOf(provider), text = `${provider} ordinary send`;
+      await agent(pane, { busy: false, input: '' });
+      const before = await taskIds();
+      const sent = await cli('send', refOf[provider], '--receipt', text);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      const made = await newTasks(before);
+      assert.deepEqual(made.map((t) => [t.task, t.source, t.final]), [[sent.data.receipt, 'send', false]], `${provider}: ${JSON.stringify(made)}`);
+      assert.equal(sent.data.task, sent.data.receipt, 'The task and its receipt are one token');
+      assert.deepEqual([made[0].sha256, made[0].bytes], [sent.data.sha256, sent.data.bytes], 'The caller\'s digest, never the text');
+      await startTurn(provider, pane, text);
+      await until(sent.data.task, 'working');
+      await endTurn(provider, pane, text, 'Sent and done.');
+      const done = await until(sent.data.task, 'completed');
+      assert.deepEqual([done.source, done.correlation === 'screen'], ['send', false], JSON.stringify(done));
+      const meta = (await cli('watch', sent.data.task, '--after', '0', '--metadata', '--policy')).data.events.at(-1);
+      assert.deepEqual([meta.state, meta.source, meta.notify, meta.response], ['completed', 'send', true, promptMatch('Sent and done.')]);
+      assert.equal((await cli('receipt', sent.data.receipt)).ok, true, 'Its receipt is still there');
+    }
+    const shell = (await call('add', ['work', '--cmd='])).data.id;
+    await page.waitForFunction((id) => window.qa.panes.some((p) => p.id === id), shell);
+    await page.waitForTimeout(400);
+    const before = await taskIds();
+    const shellRef = (await cli('panes')).data.find((p) => p.id === shell).ref;
+    const plain = await cli('send', shellRef, 'echo untracked line');
+    assert.deepEqual([plain.ok, plain.data.task, (await newTasks(before)).length], [true, undefined, 0], 'A shell line has no turn to follow: no task');
+    assert.equal((await cli('send', 'work:1', '--no-enter', 'typed only')).data.task, undefined, '--no-enter: no Enter, no task');
+    await agent(claude, { busy: false, input: '' });
+    ok('An ordinary send is a task of its own on Claude, Codex and OpenCode, linked to its receipt; a shell line and --no-enter are not');
+  }
+
+  // A person's input in Loom's window, a path apart from loomctl's: a task once the agent reports the turn, never before.
+  {
+    // Claude: the prompt's report names it; until then nothing.
+    await agent(claude, { busy: false, input: '' });
+    let before = await taskIds();
+    await typeIn(claude, 'claude typed by hand');
+    assert.equal((await prompts(claude)).at(-1), 'claude typed by hand', 'It went in from the window');
+    assert.deepEqual(await newTasks(before), [], 'No task until Claude reports the turn');
+    await startTurn('claude', claude, 'claude typed by hand');
+    const [c] = await waitNew(before);
+    assert.deepEqual([c?.source, c?.state, c?.correlation, c?.sha256, c?.bytes], ['manual', 'working', 'prompt', '', 0], JSON.stringify(c));
+    await endTurn('claude', claude, 'claude typed by hand', 'Handled.');
+    assert.equal((await until(c.task, 'completed')).source, 'manual');
+    // Codex with an input it can't read (its composer isn't drawn): the turn's end report makes the task.
+    await agent(codex, { busy: false, input: '' });
+    before = await taskIds();
+    await typeIn(codex, 'codex typed by hand');
+    assert.deepEqual(await newTasks(before), [], 'Nothing read, nothing reported yet: no task');
+    await endTurn('codex', codex, 'codex typed by hand');
+    const [x] = await waitNew(before);
+    assert.deepEqual([x?.source, x?.state, x?.correlation], ['manual', 'completed', 'prompt'], JSON.stringify(x));
+    // Codex with its composer read off the screen: a task at the Enter, since Codex reports only finished turns.
+    await agent(codex, { codexShape: true, busy: false, input: '' });
+    before = await taskIds();
+    await typeIn(codex, 'codex read by Loom');
+    const [y] = await waitNew(before);
+    assert.deepEqual([y?.source, ['submitted', 'working'].includes(y?.state), y?.correlation === 'prompt'], ['manual', true, false], `A task before any report: ${JSON.stringify(y)}`);
+    await endTurn('codex', codex, 'codex read by Loom');
+    await until(y.task, 'completed');
+    await agent(codex, { codexShape: false, input: '' });
+    // OpenCode names no prompt: the first run it reports after the Enter.
+    before = await taskIds();
+    await typeIn(ocPane, 'opencode typed by hand');
+    assert.deepEqual(await newTasks(before), [], 'No run reported yet: no task');
+    await startTurn('opencode', ocPane, '');
+    const [o] = await waitNew(before);
+    assert.deepEqual([o?.source, o?.state, o?.correlation], ['manual', 'working', 'sequence'], JSON.stringify(o));
+    await endTurn('opencode', ocPane, '');
+    await until(o.task, 'completed');
+    // An Enter on an empty input sends nothing, and a turn nobody's Enter explains (a background notice) stays untracked.
+    await agent(claude, { busy: false, input: '' });
+    before = await taskIds();
+    await typeIn(claude, '');
+    await startTurn('claude', claude, 'a background notice');
+    await endTurn('claude', claude, 'a background notice');
+    await page.waitForTimeout(800);
+    assert.deepEqual(await newTasks(before), [], 'No task for an empty Enter or a turn no Enter sent');
+    // The Overview's reply box is a person's input too: its own text names the prompt.
+    await agent(claude, { busy: false, input: '' });
+    await page.evaluate((id) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, '']] }), claude);
+    await page.click('#dashboard-btn');
+    const box = page.locator(`input[data-key="reply-${claude}"]`).first();
+    await box.waitFor();
+    before = await taskIds();
+    await box.fill('replied from the overview');
+    await box.press('Enter');
+    await page.waitForFunction((id) => window.qa.prompts.some(([p, t]) => p === id && t === 'replied from the overview'), claude);
+    assert.deepEqual(await newTasks(before), [], 'Not before Claude reports it');
+    await startTurn('claude', claude, 'replied from the overview');
+    const [r] = await waitNew(before);
+    assert.deepEqual([r?.source, r?.correlation], ['manual', 'prompt'], JSON.stringify(r));
+    await endTurn('claude', claude, 'replied from the overview');
+    await until(r.task, 'completed');
+    await page.click('#dashboard-btn');
+    ok('Input typed in a pane or replied in the Overview is a manual task once Claude, Codex or OpenCode reports its turn; an empty Enter or an unexplained turn is none');
+  }
+
+  // Review 2026-10-03 15:52 (P2): a person's Enter whose write failed can't be proven sent, so the turn a report then
+  // names ends unknown, never completed, even when the report comes while the write is still out. And an Enter in
+  // OpenCode's input, which Loom can't read, with nothing typed since the last Enter, claims no turn loomctl sent.
+  {
+    const rejectHeld = () => page.evaluate(() => window.qa.heldWrites.splice(0).forEach((w) => w.reject(new Error('Test: the terminal write failed late'))));
+    // Claude: the Enter fails at once; a start naming the same words (an earlier prompt's, written late) proves nothing.
+    await agent(claude, { busy: false, input: '' });
+    let before = await taskIds();
+    await qa({ failWriteIf: "fn:return d === '\\r'" });
+    await typeIn(claude, 'claude enter failed');
+    await qa({ failWriteIf: null });
+    await startTurn('claude', claude, 'claude enter failed');
+    const [cf] = await waitNew(before);
+    assert.deepEqual([cf?.source, cf?.uncertain], ['manual', 'submit'], JSON.stringify(cf));
+    await endTurn('claude', claude, 'claude enter failed');
+    const cDone = await until(cf.task, 'unknown');
+    assert.deepEqual([cDone.reason, (await saved(cf.task))?.state, (await saved(cf.task))?.uncertain], ['submit-uncertain', 'unknown', 'submit'], JSON.stringify(cDone));
+    // Claude again, the report arriving while the Enter's write is out, and the write failing after it.
+    await agent(claude, { busy: false, input: '' });
+    before = await taskIds();
+    await qa({ holdWriteIf: "fn:return d === '\\r'" });
+    await typeIn(claude, 'claude enter failed late');
+    await page.waitForFunction(() => window.qa.heldWrites.length > 0);
+    await qa({ holdWriteIf: null });
+    await startTurn('claude', claude, 'claude enter failed late');
+    await page.waitForTimeout(300);
+    assert.deepEqual(await newTasks(before), [], 'The report waits for the write');
+    await rejectHeld();
+    const [cl] = await waitNew(before);
+    assert.deepEqual([cl?.source, cl?.uncertain], ['manual', 'submit'], JSON.stringify(cl));
+    await endTurn('claude', claude, 'claude enter failed late');
+    assert.equal((await until(cl.task, 'unknown')).reason, 'submit-uncertain');
+    // Codex with its composer read: the task is made at the Enter; its turn's end comes while the write is out, then it fails.
+    await agent(codex, { codexShape: true, busy: false, input: '' });
+    before = await taskIds();
+    await qa({ holdWriteIf: "fn:return d === '\\r'" });
+    await typeIn(codex, 'codex enter failed late');
+    await page.waitForFunction(() => window.qa.heldWrites.length > 0);
+    await qa({ holdWriteIf: null });
+    const [xf] = await waitNew(before);
+    assert.equal(xf?.source, 'manual', JSON.stringify(xf));
+    await endTurn('codex', codex, 'codex enter failed late');
+    await page.waitForTimeout(300);
+    assert.equal(isFinal((await cli('task', xf.task)).data.state), false, 'The end waits for the write');
+    await rejectHeld();
+    const xDone = await until(xf.task, 'unknown');
+    assert.deepEqual([xDone.uncertain, xDone.reason], ['submit', 'submit-uncertain'], JSON.stringify(xDone));
+    // The same, the write succeeding: completed as before. (The failed Enter left its text in the composer.)
+    await agent(codex, { codexShape: true, busy: false, input: '' });
+    before = await taskIds();
+    await typeIn(codex, 'codex enter went in');
+    const [xo] = await waitNew(before);
+    await endTurn('codex', codex, 'codex enter went in');
+    assert.equal((await until(xo.task, 'completed')).uncertain ?? null, null);
+    await agent(codex, { codexShape: false, input: '' });
+    // OpenCode: an Enter with nothing typed, then a run nobody's Enter sent (no Enter of Loom's either).
+    await agent(ocPane, { busy: false, input: '' });
+    before = await taskIds();
+    await typeIn(ocPane, '');
+    await startTurn('opencode', ocPane, '');
+    await endTurn('opencode', ocPane, '');
+    await page.waitForTimeout(800);
+    assert.deepEqual(await newTasks(before), [], 'An empty Enter claims no later run');
+    // A person's Enter that started no run (typed, so noted), then a prompt loomctl typed and entered: loomctl's Enter explains it.
+    await typeIn(ocPane, 'handled without a run');
+    await agent(ocPane, { busy: false, input: '' });
+    assert.equal((await untracked(ocRef, 'opencode typed by loomctl first')).ok, true);
+    await startTurn('opencode', ocPane, '');
+    await endTurn('opencode', ocPane, '');
+    await page.waitForTimeout(800);
+    assert.deepEqual(await newTasks(before), [], 'An earlier Enter naming no prompt claims no turn loomctl entered');
+    // An Enter with nothing typed, then a prompt loomctl typed and entered, which no task follows.
+    await typeIn(ocPane, '');
+    assert.equal((await untracked(ocRef, 'opencode typed by loomctl')).ok, true);
+    await startTurn('opencode', ocPane, '');
+    await endTurn('opencode', ocPane, '');
+    await page.waitForTimeout(800);
+    assert.deepEqual(await newTasks(before), [], 'An empty Enter claims no turn loomctl sent');
+    // Typed, then cleared with Ctrl+U: empty again.
+    await page.locator(`.pane[data-id="${ocPane}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('never sent');
+    await page.keyboard.press('Control+U');
+    await page.keyboard.press('Enter');
+    await page.evaluate(() => document.activeElement?.blur());
+    await startTurn('opencode', ocPane, '');
+    await endTurn('opencode', ocPane, '');
+    await page.waitForTimeout(800);
+    assert.deepEqual(await newTasks(before), [], 'Nor one cleared before its Enter');
+    // A person's Enter after typing still makes its task, as above.
+    await typeIn(ocPane, 'opencode typed after');
+    await startTurn('opencode', ocPane, '');
+    const [oc2] = await waitNew(before);
+    assert.equal(oc2?.source, 'manual');
+    await endTurn('opencode', ocPane, '');
+    await until(oc2.task, 'completed');
+    ok('A person\'s Enter whose write failed, at once or after the agent reported, ends its turn unknown; an empty OpenCode Enter claims no loomctl turn');
+  }
+
+  // Review 2026-10-03 19:10 (P2): a person's Enters don't take turns as sends do, so two can be written at once. Each
+  // holds the pane's reports until its own outcome is on its task: what came meanwhile goes in only when both have one,
+  // and a failure leaves only its own task in doubt.
+  {
+    const settle = (i, went) => page.evaluate(([i, went]) => {
+      const w = window.qa.heldWrites[i];
+      if (went) w.resolve(); else w.reject(new Error('Test: the terminal write failed late'));
+    }, [i, went]);
+    const holdBoth = async (pane, first, second, reset) => {
+      await page.evaluate(() => (window.qa.heldWrites.length = 0));
+      await qa({ holdWriteIf: "fn:return d === '\\r'" });
+      await typeIn(pane, first);
+      await reset(); // the first Enter never reached the process: a person clears the input and types another prompt
+      await typeIn(pane, second);
+      await page.waitForFunction(() => window.qa.heldWrites.length === 2);
+      await qa({ holdWriteIf: null });
+    };
+    const finals = (...ts) => Promise.all(ts.map(async (t) => (await cli('task', t.task)).data.final));
+    // Codex, its composer read: a task at each Enter. The second Enter goes in, then (second pass) fails.
+    for (const second of ['went in', 'failed']) {
+      const reset = () => agent(codex, { codexShape: true, busy: false, input: '' });
+      await reset();
+      const before = await taskIds();
+      await holdBoth(codex, `codex first, then one that ${second}`, `codex second, one that ${second}`, reset);
+      const [one, two] = await waitNew(before, 2);
+      assert.deepEqual([one?.source, two?.source], ['manual', 'manual'], JSON.stringify([one, two]));
+      // The second's turn reported while both are out, then the first goes in, the second still out: nothing moves.
+      await endTurn('codex', codex, `codex second, one that ${second}`);
+      await settle(0, true);
+      await page.waitForTimeout(400);
+      assert.deepEqual(await finals(one, two), [false, false], 'Reports wait for every Enter still out');
+      // The first's own turn, reported in the overlap.
+      await endTurn('codex', codex, `codex first, then one that ${second}`);
+      await page.waitForTimeout(400);
+      assert.deepEqual(await finals(one, two), [false, false], 'Still waiting for the second');
+      await settle(1, second === 'went in');
+      const t1 = await until(one.task, 'completed');
+      const t2 = await until(two.task, second === 'went in' ? 'completed' : 'unknown');
+      assert.deepEqual([t1.uncertain ?? null, t2.uncertain ?? null, t2.reason ?? null],
+        [null, ...(second === 'went in' ? [null, null] : ['submit', 'submit-uncertain'])], JSON.stringify([t1, t2]));
+      const kept = await saved(two.task);
+      assert.deepEqual([kept?.state, kept?.uncertain ?? null], [t2.state, t2.uncertain ?? null], 'The journal says the same');
+    }
+    // Claude: Enters are noted, tasks come with its reports. The second's start, reported in the overlap, waits for the
+    // second write, and its failure is on the task that start makes.
+    {
+      const reset = () => agent(claude, { busy: false, input: '' });
+      await reset();
+      const before = await taskIds();
+      await holdBoth(claude, 'claude overlap first', 'claude overlap second', reset);
+      await startTurn('claude', claude, 'claude overlap second');
+      await settle(0, true);
+      await page.waitForTimeout(400);
+      assert.deepEqual(await newTasks(before), [], 'No task while the second Enter is out');
+      await settle(1, false);
+      const [c2] = await waitNew(before);
+      assert.deepEqual([c2?.source, c2?.uncertain], ['manual', 'submit'], JSON.stringify(c2));
+      await endTurn('claude', claude, 'claude overlap second');
+      assert.equal((await until(c2.task, 'unknown')).reason, 'submit-uncertain');
+      await reset();
+    }
+    // The pane exits while a person's Enter is still out, then the write fails: the task isn't final before the
+    // failure is known, and ends with the doubt on it.
+    {
+      await agent(codex, { codexShape: true, busy: false, input: '' });
+      const before = await taskIds();
+      await page.evaluate(() => (window.qa.heldWrites.length = 0));
+      await qa({ holdWriteIf: "fn:return d === '\\r'" });
+      await typeIn(codex, 'codex enter out at an exit');
+      await page.waitForFunction(() => window.qa.heldWrites.length === 1);
+      await qa({ holdWriteIf: null });
+      const [x] = await waitNew(before);
+      await page.evaluate((id) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${id}`, payload: 1 }), codex);
+      await page.waitForTimeout(1200); // past the sweep
+      assert.equal((await cli('task', x.task)).data.final, false, 'Not final while its Enter is out');
+      await settle(0, false);
+      const xe = await until(x.task, 'failed');
+      assert.deepEqual([xe.reason, xe.uncertain, (await saved(x.task))?.uncertain], ['exited', 'submit', 'submit'], JSON.stringify(xe));
+      // Codex starts again by resuming its session, as its notify reports one.
+      await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c']] });
+      await page.waitForFunction(() => !window.qa.sessions.length, null, { timeout: 10000 });
+      await page.waitForTimeout(200);
+      const back = await cli('restart', 'work:2', '--yes');
+      assert.equal(back.ok, true, JSON.stringify(back));
+      await page.waitForTimeout(300);
+      await agent(codex, { codexShape: false, busy: false, input: '' });
+    }
+    ok('Overlapping Enters of a person\'s: reports wait for every write; the first going in releases nothing; the second going in or failing settles only its own task; a pane exit during a write ends no task before its outcome');
+  }
+
+  // Review 2026-10-03 19:10 (P2): typing evidence belongs to the launch that got it. A draft left in OpenCode's process
+  // before a relaunch is no sign that an Enter on the new launch's empty input sent anything.
+  {
+    await agent(ocPane, { busy: false, input: '' });
+    const before = await taskIds();
+    const gen = async () => (await cli('panes')).data.find((p) => p.id === ocPane).generation;
+    const g1 = await gen();
+    await page.locator(`.pane[data-id="${ocPane}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('a draft never sent');
+    await page.evaluate(() => document.activeElement?.blur());
+    // OpenCode starts again by resuming its session, as its plugin reports one.
+    await qa({ sessions: [[ocPane, 'ses_relaunch']] });
+    await page.waitForFunction(() => !window.qa.sessions.length, null, { timeout: 10000 });
+    await page.waitForTimeout(200);
+    // The process exits and the pane starts again: a new launch, its input empty.
+    await page.evaluate((id) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${id}`, payload: 0 }), ocPane);
+    const back = await cli('restart', ocRef, '--yes');
+    assert.equal(back.ok, true, JSON.stringify(back));
+    await page.waitForTimeout(300);
+    await agent(ocPane, { busy: false, input: '' });
+    const g2 = await gen();
+    assert.ok(g2 > g1, `A new launch: ${g1} -> ${g2}`);
+    // An Enter with nothing typed in this launch, then a run nobody's Enter sent.
+    await typeIn(ocPane, '');
+    await startTurn('opencode', ocPane, '');
+    await endTurn('opencode', ocPane, '');
+    await page.waitForTimeout(800);
+    assert.deepEqual(await newTasks(before), [], 'A draft from the last launch qualifies no Enter in this one');
+    // Again, a prompt loomctl typed and entered after the empty Enter: no task either.
+    await typeIn(ocPane, '');
+    assert.equal((await untracked(ocRef, 'opencode loomctl after a relaunch')).ok, true);
+    await startTurn('opencode', ocPane, '');
+    await endTurn('opencode', ocPane, '');
+    await page.waitForTimeout(800);
+    assert.deepEqual(await newTasks(before), [], 'Nor a loomctl turn');
+    // Typed in this launch: tracked, on this launch.
+    await typeIn(ocPane, 'typed in the new launch');
+    await startTurn('opencode', ocPane, '');
+    const [t] = await waitNew(before);
+    assert.deepEqual([t?.source, t?.generation], ['manual', g2], JSON.stringify(t));
+    await endTurn('opencode', ocPane, '');
+    await until(t.task, 'completed');
+    ok('Typing evidence is the launch\'s that got it: a relaunch clears it, an empty Enter after claims no run, typing in the new launch is tracked');
+  }
+
+  // A person's prompt during a tracked submit's turn: two tasks, one each, one Stop ends both; repeated idle adds nothing.
+  {
+    await agent(claude, { busy: false, input: '' });
+    const before = await taskIds();
+    const s = await cli('submit', 'work:1', 'tracked overlap task');
+    await startTurn('claude', claude, 'tracked overlap task');
+    await until(s.text, 'working');
+    await typeIn(claude, 'typed during the turn');
+    await report(claude, { kind: 'start', match: promptMatch('typed during the turn') });
+    const made = await waitNew(before, 2);
+    assert.deepEqual(made.map((t) => t.source).sort(), ['manual', 'submit'], 'Exactly two tasks: no double count');
+    const m = made.find((t) => t.source === 'manual');
+    assert.equal((await until(m.task, 'working')).correlation, 'prompt');
+    await endTurn('claude', claude, 'tracked overlap task', 'Both done.');
+    await until(s.text, 'completed');
+    await until(m.task, 'completed');
+    const events = async () => (await cli('watch', '--after', '0')).data.events.filter((e) => e.task === s.text || e.task === m.task).length;
+    const count = await events();
+    for (let i = 0; i < 2; i++) await endTurn('claude', claude, 'tracked overlap task', 'Both done.');
+    await page.waitForTimeout(1200);
+    assert.deepEqual([await events(), (await newTasks(before)).length], [count, 2], 'Repeated idle reports: no event, no task');
+    ok('A typed prompt during a tracked submit is its own task, one Stop completes both, and repeated idle reports add nothing');
+  }
+
+  // The same words in two turns are two tasks, each completed once; Codex the same.
+  {
+    for (const provider of ['claude', 'codex']) {
+      const pane = await paneOf(provider);
+      if (provider === 'codex') await agent(pane, { codexShape: true });
+      const before = await taskIds();
+      for (let turn = 0; turn < 2; turn++) {
+        await agent(pane, { busy: false, input: '' });
+        const was = await taskIds();
+        await typeIn(pane, 'the same words');
+        await startTurn(provider, pane, 'the same words');
+        const [t] = await waitNew(was);
+        assert.ok(t, `${provider} turn ${turn + 1} has a task`);
+        await endTurn(provider, pane, 'the same words');
+        await until(t.task, 'completed');
+      }
+      const made = await newTasks(before);
+      assert.equal(made.length, 2, `${provider}: two turns, two tasks`);
+      for (const t of made) assert.equal(t.events.filter((e) => e.state === 'completed').length, 1, 'Each completed once');
+      if (provider === 'codex') await agent(pane, { codexShape: false, input: '' });
+    }
+    ok('The same words typed in two turns are two tasks, each completed once (Claude and Codex)');
+  }
+
+  // Fast: the turn's reports come at once. Approval and failure of a person's own turn.
+  {
+    await agent(claude, { busy: false, input: '' });
+    let before = await taskIds();
+    await typeIn(claude, 'quick question');
+    await agent(claude, { busy: false }); // done before Loom looks again
+    await report(claude, { kind: 'start', match: promptMatch('quick question') }, { kind: 'stop', response: promptMatch('Quick answer.') });
+    const [f] = await waitNew(before);
+    const fast = await until(f.task, 'completed');
+    assert.equal(fast.events.at(-1).response, promptMatch('Quick answer.'));
+    await agent(claude, { busy: false, input: '' });
+    before = await taskIds();
+    await typeIn(claude, 'needs a permission');
+    await startTurn('claude', claude, 'needs a permission');
+    const [a] = await waitNew(before);
+    await report(claude, { kind: 'approval', detail: 'Write' });
+    await until(a.task, 'approval');
+    const blocked = (await cli('watch', a.task, '--after', '0', '--metadata', '--policy')).data.events.at(-1);
+    assert.deepEqual([blocked.state, blocked.source, blocked.notify], ['approval', 'manual', true]);
+    await report(claude, { kind: 'resume' });
+    await until(a.task, 'working');
+    await report(claude, { kind: 'fail', detail: 'rate_limit' });
+    assert.equal((await until(a.task, 'failed')).source, 'manual');
+    await agent(claude, { busy: false });
+    ok('A typed turn that completes at once, and one that asks then fails, keep their source and outcomes');
+  }
+
+  // Relaunch, generations and a Loom restart: an Enter belongs to the launch it went into.
+  {
+    await agent(claude, { busy: false, input: '' });
+    let before = await taskIds();
+    const g = (await cli('panes')).data.find((p) => p.id === claude).generation;
+    await typeIn(claude, 'typed before a relaunch');
+    assert.equal((await cli('restart', 'work:1', '--yes')).ok, true);
+    await page.waitForTimeout(300);
+    await agent(claude, { busy: false, input: '' });
+    await report(claude, { kind: 'start', match: promptMatch('typed before a relaunch'), launch: g });
+    await report(claude, { kind: 'start', match: promptMatch('typed before a relaunch') });
+    await page.waitForTimeout(600);
+    assert.deepEqual(await newTasks(before), [], "The old launch's report is stale, and the new launch never had that Enter");
+    // A person's turn still open when Loom restarts ends unknown, its source kept.
+    await typeIn(claude, 'open at a restart');
+    await startTurn('claude', claude, 'open at a restart');
+    const [t] = await waitNew(before);
+    await page.waitForTimeout(300);
+    await reboot();
+    const after = await state(t.task);
+    assert.deepEqual([after.state, after.reason, after.source], ['unknown', 'loom-restarted', 'manual'], JSON.stringify(after));
+    ok("A relaunch strands an Enter's old launch, a stale report starts nothing, and a restart ends a typed turn unknown, still manual");
+  }
+
+  // The notification policy: every pane on by default; a pane's own on or off wins; kinds for every pane;
+  // kept across restarts; turning off holds back what wasn't sent, and turning on again sends none of it.
+  {
+    const now = async () => (await cli('notify')).data;
+    let policy = await now();
+    assert.deepEqual([policy.all, policy.kinds, policy.newPanes, policy.panes.every((p) => p.notify === 'inherit' && p.finish && p.fail && p.blocked)],
+      ['on', { finish: true, fail: true, blocked: true }, 'inherit', true], 'Default: every pane on, every kind, new panes inherit');
+    const bell = (pane) => page.evaluate((id) => { const b = document.querySelector(`.pane[data-id="${id}"] .pane-head button.notify`); return b && { own: b.classList.contains('own'), off: b.classList.contains('off'), title: b.title }; }, pane);
+    assert.deepEqual(await bell(claude), { own: false, off: false, title: 'Task notices on, like every pane. Click to change.' });
+    // Review 2026-10-03 15:52 (P2): every argument is checked before anything changes, so a refused command leaves
+    // the policy, each pane's own setting, the journal's policy history and the saved settings as they were.
+    {
+      const kept = async () => [JSON.stringify(await now()), await page.evaluate(() => [localStorage.getItem('qa-journal'), localStorage.getItem('qa-state')])];
+      await page.waitForTimeout(700); // past save()'s 300 ms
+      const before = await kept();
+      for (const argv of [['--all', 'off', 'work:99'], ['--finish', 'off', 'work:1', 'maybe'], ['--new-panes', 'off', 'work:1', 'off', 'extra'],
+        ['--all', 'off', '--fail', 'sometimes'], ['--blocked', 'off', '--new-panes', 'never'], ['--check', '1', '--all', 'off'], ['work:1', 'off', '--check', '1']]) {
+        const r = await cli('notify', ...argv);
+        assert.equal(r.ok, false, `notify ${argv.join(' ')} is refused: ${JSON.stringify(r)}`);
+      }
+      await page.waitForTimeout(700);
+      assert.deepEqual(await kept(), before, 'A refused notify changes nothing');
+    }
+    /** A completed submit on `ref`, and what --metadata --policy says of its last event. */
+    const finish = async (ref, text) => {
+      const pane = (await cli('panes')).data.find((p) => p.ref === ref).id;
+      await agent(pane, { busy: false, input: '' });
+      const t = (await cli('submit', ref, text)).text;
+      await report(pane, { kind: 'start', match: promptMatch(text) });
+      await until(t, 'working');
+      await stops(pane);
+      await until(t, 'completed');
+      return { task: t, meta: (await cli('watch', t, '--after', '0', '--metadata', '--policy')).data.events.at(-1) };
+    };
+    const base = (await cli('watch', '--after', '0')).data.last;
+    // A reference relay, as docs/turn-tracking-and-notifications.md asks of the email bridge: queue a notice only for
+    // notify: true, ask notify --check right before sending, and never queue again what it muted.
+    const relay = { cursor: base, queued: [], sent: [], muted: [] };
+    const ingest = async () => {
+      const w = (await cli('watch', '--after', String(relay.cursor), '--metadata', '--policy')).data;
+      for (const e of w.events) if (['completed', 'failed', 'approval'].includes(e.state)) (e.notify ? relay.queued : relay.muted).push(e.seq);
+      relay.cursor = w.next;
+    };
+    const deliver = async () => {
+      if (!relay.queued.length) return;
+      const check = (await cli('notify', '--check', relay.queued.join(','))).data;
+      for (const seq of relay.queued.splice(0)) (check[seq] === true ? relay.sent : relay.muted).push(seq);
+    };
+    const a = await finish('work:1', 'notice A, pane on');
+    assert.deepEqual([a.meta.notify, a.meta.source], [true, 'submit']);
+    await ingest();
+    assert.equal(relay.queued.length, 1, 'Queued, not sent yet');
+    // Off for this pane, with A still queued: A must not go out.
+    assert.equal((await cli('notify', 'work:1', 'off')).data.notify, 'off');
+    assert.deepEqual(await bell(claude), { own: true, off: true, title: 'Task notices off for this pane. Click to change.' });
+    await deliver();
+    assert.deepEqual([relay.sent.length, relay.muted.includes(a.meta.seq)], [0, true], 'A queued notice of a pane turned off is not sent');
+    const b = await finish('work:1', 'notice B, pane off');
+    const other = await finish('work:3', 'notice on another pane');
+    assert.deepEqual([b.meta.notify, other.meta.notify], [false, true], 'Off for one pane only');
+    // On again: nothing it held back goes out, only what comes after.
+    await cli('notify', 'work:1', 'inherit');
+    assert.deepEqual(await bell(claude), { own: false, off: false, title: 'Task notices on, like every pane. Click to change.' });
+    await ingest();
+    await deliver();
+    assert.deepEqual((await cli('notify', '--check', `${a.meta.seq},${b.meta.seq}`)).data, { [a.meta.seq]: false, [b.meta.seq]: false }, 'Still held back');
+    assert.deepEqual([relay.sent, relay.muted.includes(b.meta.seq)], [[other.meta.seq], true], 'No flood of muted history');
+    const c = await finish('work:1', 'notice C, pane on again');
+    await ingest();
+    await deliver();
+    assert.equal(relay.sent.at(-1), c.meta.seq, 'Only what came after');
+    // Every pane off, one pane on: the pane wins. Kinds apply to every pane.
+    await cli('notify', '--all', 'off');
+    await cli('notify', 'work:3', 'on');
+    const [d1, d3] = [await finish('work:1', 'notice D1, every pane off'), await finish('work:3', 'notice D3, its own on')];
+    assert.deepEqual([d1.meta.notify, d3.meta.notify], [false, true], 'A pane on wins over every pane off');
+    assert.deepEqual(await bell(claude), { own: false, off: true, title: 'Task notices off, like every pane. Click to change.' });
+    await cli('notify', '--all', 'on', '--fail', 'off');
+    await cli('notify', 'work:3', 'inherit');
+    await agent(claude, { busy: false, input: '' });
+    const f = (await cli('submit', 'work:1', 'notice F, fails')).text;
+    await report(claude, { kind: 'start', match: promptMatch('notice F, fails') });
+    await until(f, 'working');
+    await report(claude, { kind: 'fail', detail: 'rate_limit' });
+    await until(f, 'failed');
+    await agent(claude, { busy: false });
+    const fm = (await cli('watch', f, '--after', '0', '--metadata', '--policy')).data.events.at(-1);
+    const g = await finish('work:1', 'notice G, finishes');
+    assert.deepEqual([fm.state, fm.notify, g.meta.notify], ['failed', false, true], 'Fail off, finish on');
+    // Review 2026-10-03 15:52 (P1): a v2 reader can't see the policy and would send every outcome, so a range
+    // holding one the policy holds back is refused whole, saying why; never a v2 answer with the muted notice in it.
+    const v2 = await cli('watch', '--after', String(base), '--metadata');
+    assert.deepEqual([v2.ok, /holds back/.test(v2.error), /loom-durable-events-v3/.test(v2.error)], [false, true, true], JSON.stringify(v2));
+    const v2f = await cli('watch', f, '--after', '0', '--metadata');
+    assert.equal(v2f.ok, false, 'Nor the muted task alone');
+    // Where every notice may go out, v2 reads as before: seven fields.
+    const v2g = (await cli('watch', g.task, '--after', '0', '--metadata')).data;
+    assert.deepEqual([v2g.source, v2g.events.at(-1).state, v2g.events.every((e) => Object.keys(e).sort().join() === 'at,generation,pane,response,seq,state,task')], ['loom-durable-events-v2', 'completed', true]);
+    // New panes start as set: off, then like every pane again.
+    await cli('notify', '--new-panes', 'off');
+    const fresh = (await call('add', ['work', '--cmd=claude'])).data.id;
+    await page.waitForTimeout(300);
+    assert.deepEqual([(await cli('panes')).data.find((p) => p.id === fresh).notify, (await bell(fresh)).off], ['off', true], 'A new pane starts off');
+    const freshRef = (await cli('panes')).data.find((p) => p.id === fresh).ref;
+    await page.waitForTimeout(500);
+    assert.equal((await finish(freshRef, 'a new pane, off')).meta.notify, false);
+    await cli('notify', '--new-panes', 'inherit');
+    const fresh2 = (await call('add', ['work', '--cmd=claude'])).data.id;
+    assert.equal((await cli('panes')).data.find((p) => p.id === fresh2).notify, 'inherit');
+    // Kept across a Loom restart: every setting, each pane's own, and every event's decision.
+    await cli('notify', 'work:1', 'off');
+    await cli('notify', '--new-panes', 'on', '--blocked', 'off');
+    // Every pane off, one on, with a notice of its own not sent yet: the restart renames its pane, never mutes it.
+    await cli('notify', '--all', 'off');
+    await cli('notify', 'work:3', 'on');
+    const own = await finish('work:3', 'its own on, across a restart');
+    assert.equal(own.meta.notify, true);
+    // Review 2026-10-03 15:52 (P2): off, on, off again with no event between: three changes at one number. The
+    // journal's replay keeps all three, so the notice after them stays held back across the restart.
+    await cli('notify', 'work:1', 'on');
+    await cli('notify', 'work:1', 'off');
+    const late = await finish('work:1', 'muted after on and off again');
+    assert.equal(late.meta.notify, false);
+    const decided = (await cli('watch', '--after', String(base), '--metadata', '--policy')).data;
+    await page.waitForTimeout(700); // past save()'s 300 ms
+    await page.evaluate(() => localStorage.setItem('qa-use-state', '1'));
+    await reboot();
+    policy = await now();
+    const w1 = policy.panes.find((p) => p.ref === 'work:1');
+    assert.deepEqual([policy.all, policy.kinds, policy.newPanes, w1.notify, policy.panes.find((p) => p.ref === 'work:3').notify],
+      ['off', { finish: true, fail: false, blocked: false }, 'on', 'off', 'on'], JSON.stringify(policy));
+    assert.equal((await cli('notify', '--check', String(own.meta.seq))).data[own.meta.seq], true, 'Its own on still lets its unsent notice go');
+    assert.equal((await cli('notify', '--check', String(late.meta.seq))).data[late.meta.seq], false, 'Off, on, off again at one number: still off after the restart');
+    assert.equal((await bell(claude)).off, true, 'Its bell still says off');
+    const again = (await cli('watch', '--after', String(base), '--metadata', '--policy')).data;
+    assert.deepEqual(again.events.filter((e) => e.seq <= decided.last).map((e) => [e.seq, e.notify]), decided.events.map((e) => [e.seq, e.notify]), 'Every decision survives the restart');
+    assert.equal((await finish('work:1', 'after the restart, still off')).meta.notify, false);
+    await page.evaluate(() => localStorage.removeItem('qa-use-state'));
+    ok('Notification policy: default on, a pane\'s own setting wins, kinds filter, queued notices of a muted pane stay unsent, re-enabling sends no history, new panes start as set, a refused notify changes nothing, v2 is refused over a muted notice, and it all survives a restart');
   }
 
   assert.deepEqual(errors, []);

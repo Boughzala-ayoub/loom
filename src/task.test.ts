@@ -1,5 +1,5 @@
 // Self-check for loomctl's tasks. Run: node src/task.test.ts
-import { changeFields, codexAsks, eventsAfter, isFinal, parseSignal, promptMatch, readJournal, route, taskFields, writeJournal, type Change, type Signal, type Task, type TaskState } from "./task.ts";
+import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, notifies, parseSignal, promptMatch, readJournal, route, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -260,6 +260,58 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   a.answerInDoubt = true;
   const got = readJournal(writeJournal([fresh], 1, 0) + JSON.stringify({ update: "u1", set: taskFields(a) }) + "\n");
   eq("an update line restores a same-state field", [got.tasks.get("u1")?.state, got.tasks.get("u1")?.answerInDoubt], ["approval", true]);
+}
+
+// The notification policy: a pane's own on or off wins over every pane's; the kinds apply to all.
+{
+  const snap = (at: number, more: Partial<NotifySnapshot> = {}): NotifySnapshot => ({ at, ...DEFAULT_NOTIFY, ...more, kinds: { ...DEFAULT_NOTIFY.kinds, ...more.kinds } });
+  eq("by default every pane sends every kind", ["finish", "fail", "blocked"].map((k) => allows(DEFAULT_NOTIFY, "p1", k as "finish")), [true, true, true]);
+  eq("a pane off, the rest on", [allows(snap(0, { panes: { p1: "off" } }), "p1", "finish"), allows(snap(0, { panes: { p1: "off" } }), "p2", "finish")], [false, true]);
+  eq("every pane off, one on", [allows(snap(0, { on: false, panes: { p1: "on" } }), "p1", "finish"), allows(snap(0, { on: false, panes: { p1: "on" } }), "p2", "finish")], [true, false]);
+  eq("a kind off applies to a pane that is on too", allows(snap(0, { panes: { p1: "on" }, kinds: { fail: false } as never }), "p1", "fail"), false);
+  const done = (seq: number) => ({ seq, state: "completed" as TaskState });
+  eq("with no history, an outcome goes out; other states never", [notifies(done(5), "p1", []), notifies({ seq: 5, state: "working" }, "p1", [])], [true, false]);
+  eq("approval is a blocked notice, failed a fail", [notifies({ seq: 5, state: "approval" }, "p1", [snap(0, { kinds: { blocked: false } as never })]), notifies({ seq: 5, state: "failed" }, "p1", [snap(0, { kinds: { fail: false } as never })])], [false, false]);
+  const off = [snap(10, { panes: { p1: "off" } })];
+  eq("an event before the pane went off stays unsent (queued, not sent yet)", notifies(done(9), "p1", off), false);
+  eq("an event while it is off", notifies(done(11), "p1", off), false);
+  const back = [...off, snap(20)];
+  eq("on again: what came while off, or before it, never goes out", [notifies(done(9), "p1", back), notifies(done(15), "p1", back)], [false, false]);
+  eq("only what comes after", notifies(done(21), "p1", back), true);
+  eq("other panes are untouched throughout", notifies(done(15), "p2", back), true);
+  eq("two changes before any event: the last decides what follows", notifies(done(31), "p1", [snap(30, { panes: { p1: "off" } }), snap(30)]), true);
+  eq("the history a rewrite keeps from event 15: the one in force then, and after", keptNotify(back, 15).map((s) => s.at), [10, 20]);
+  eq("from event 25", keptNotify(back, 25).map((s) => s.at), [20]);
+  const t = { id: "n1", events: [] } as unknown as Task;
+  const text = writeJournal([t], 30, 0, back);
+  const got = readJournal(text);
+  eq("the journal keeps the history, in order", got.notify.map((s) => [s.at, s.panes]), [[10, { p1: "off" }], [20, {}]]);
+  const twice = readJournal(text + text.split("\n")[1] + "\n").notify;
+  eq("a line written twice is kept, and decides the same", [twice.length, notifies(done(9), "p1", twice), notifies(done(21), "p1", twice)], [3, false, true]);
+  eq("a task's source; one from before sources were kept was a submit", [taskRecord({ ...task("x"), source: "manual" }).source, taskRecord(task("y")).source], ["manual", "submit"]);
+}
+
+// Review 2026-10-03 15:52 (P2): changes between two events share a number; replay keeps every one, in order.
+{
+  const snap = (at: number, off: boolean): NotifySnapshot => ({ at, ...DEFAULT_NOTIFY, panes: off ? { p1: "off" } : {} });
+  const history = [snap(10, true), snap(10, false), snap(10, true), snap(11, false)];
+  const e11 = { seq: 11, state: "completed" as TaskState };
+  eq("muted under the last of three changes at one number", notifies(e11, "p1", history), false);
+  const back = readJournal(writeJournal([], 11, 0, history)).notify;
+  eq("all four changes come back, in order", back.map((s) => [s.at, s.panes.p1 ?? "inherit"]), [[10, "off"], [10, "inherit"], [10, "off"], [11, "inherit"]]);
+  eq("and the event stays held back after replay", notifies(e11, "p1", back), false);
+  eq("a line read twice is still one change each time: replay is the file, line by line", readJournal(writeJournal([], 11, 0, history)).notify.length, 4);
+}
+
+// A person's Enter waits for the agent's report of its turn (main.ts manualEnter, adoptManual).
+{
+  const m = (at: number, match: string | null, launch = 1) => ({ at, launch, match });
+  eq("the Enter naming the reported prompt, whenever it was", claimManual([m(100, "aa"), m(200, "bb")], 5000, 1, "bb", 10_000), 1);
+  eq("else the oldest within the window", claimManual([m(100, null), m(200, null)], 300, 1, "cc", 10_000), 0);
+  eq("an unread one past the window takes nothing", claimManual([m(100, null)], 20_000, 1, "cc", 10_000), -1);
+  eq("never one after the report", claimManual([m(500, "aa")], 400, 1, "aa", 10_000), -1);
+  eq("never another launch's", claimManual([m(100, "aa", 1)], 200, 2, "aa", 10_000), -1);
+  eq("a report naming nothing (OpenCode) takes the oldest of its launch", claimManual([m(100, null, 2), m(150, null, 3)], 9_999_999, 3, null, Infinity), 1);
 }
 
 if (fails) throw new Error(`${fails} failed`);

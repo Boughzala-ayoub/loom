@@ -141,6 +141,8 @@ kbd {
 .i-maximize { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'/%3E%3C/svg%3E"); }
 .i-chevron { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 10 5 5 5-5'/%3E%3C/svg%3E"); }
 .i-more { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Ccircle cx='5.5' cy='12' r='1.7'/%3E%3Ccircle cx='12' cy='12' r='1.7'/%3E%3Ccircle cx='18.5' cy='12' r='1.7'/%3E%3C/svg%3E"); }
+.i-bell { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0'/%3E%3C/svg%3E"); }
+.i-bell-off { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 16v-5a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0M3.5 3.5l17 17'/%3E%3C/svg%3E"); }
 .i-mic { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Crect x='9' y='3' width='6' height='11' rx='3'/%3E%3Cpath d='M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21'/%3E%3C/svg%3E"); }
 .i-diff { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M12 4v10M7 9h10M7 19.5h10'/%3E%3C/svg%3E"); }
 .i-branch { --i: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Ccircle cx='6' cy='18' r='2.5'/%3E%3Ccircle cx='18' cy='6' r='2.5'/%3E%3Cpath d='M6 4v11.5M18 8.5a8 8 0 0 1-8 8H8.5'/%3E%3C/svg%3E"); }
@@ -1569,6 +1571,9 @@ select option {
 .pane-head button:hover {
   color: var(--text);
 }
+/* The bell: faint while it follows every pane, its own colour when the pane has its own setting. */
+.pane-head button.notify.own { color: var(--text); }
+.pane-head button.notify.off { color: var(--warn); }
 .pane-head button[title="Close pane"]:hover {
   color: var(--err);
   background: var(--err-dim);
@@ -2075,6 +2080,11 @@ dialog,
   border-color: var(--edge-hi);
   background: var(--well);
 }
+/* The three kinds take a row of their own: the control column is too narrow for three buttons on a phone. */
+.notice-kinds-row { grid-template-columns: 1fr; gap: 6px; }
+.notice-kinds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.notice-kinds > button { min-height: var(--tap); border-color: var(--edge-hi); background: var(--well); overflow: hidden; text-overflow: ellipsis; }
+.notice-kinds > button[aria-pressed="false"] { color: var(--faint); text-decoration: line-through; }
 .preference-actions {
   display: grid;
   gap: 4px;

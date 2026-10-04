@@ -31,8 +31,14 @@ export type Correlation = "prompt" | "token" | "sequence" | "screen";
  * same, so a relay can tell a repeat from a new answer. */
 export type TaskEvent = { seq: number; task: string; at: number; state: TaskState; signal: string; detail?: string; response?: string };
 
+/** What started a task: `loomctl submit`, an ordinary `loomctl send`, or a
+ * person in Loom's window (typing in the pane, the Overview's reply box,
+ * dictation). A task from before sources were kept was a submit. */
+export type TaskSource = "submit" | "send" | "manual";
+
 export type Task = {
   id: string;
+  source?: TaskSource;
   /** The caller's --key, and a hash of the request it named, so a retry after Loom restarts still finds it. */
   key: string | null;
   what: string | null;
@@ -283,8 +289,9 @@ export const taskFields = (t: Task): Partial<Task> => ({
   input: t.input, submittedAt: t.submittedAt, startedAt: t.startedAt, endedAt: t.endedAt,
 });
 
-export function readJournal(text: string): { tasks: Map<string, Task>; seq: number; pruned: number } {
+export function readJournal(text: string): { tasks: Map<string, Task>; seq: number; pruned: number; notify: NotifySnapshot[] } {
   const tasks = new Map<string, Task>();
+  const notify: NotifySnapshot[] = [];
   let seq = 0, pruned = 0;
   for (const line of text.split("\n")) {
     let rec: Record<string, unknown>;
@@ -295,6 +302,11 @@ export function readJournal(text: string): { tasks: Map<string, Task>; seq: numb
     }
     if (typeof rec?.seq === "number") seq = Math.max(seq, rec.seq);
     if (typeof rec?.pruned === "number") pruned = Math.max(pruned, rec.pruned);
+    // Every change is its own line, in the order made: changes between two
+    // events share a number, so off, on, off again is three, never two.
+    const n = rec?.notify as NotifySnapshot | undefined;
+    if (n && typeof rec.at === "number" && typeof n.on === "boolean" && n.kinds && n.panes)
+      notify.push({ at: rec.at, on: n.on, kinds: { ...DEFAULT_NOTIFY.kinds, ...n.kinds }, panes: { ...n.panes } });
     if (rec?.task && typeof rec.task === "object") {
       const t = rec.task as Task;
       tasks.set(t.id, t);
@@ -311,12 +323,74 @@ export function readJournal(text: string): { tasks: Map<string, Task>; seq: numb
       if (isFinal(t.state) && t.settledAt === undefined) t.settledAt = e.seq;
     }
   }
-  return { tasks, seq, pruned };
+  return { tasks, seq, pruned, notify: notify.sort((a, b) => a.at - b.at) }; // stable: equal numbers keep their order
 }
 
-/** The journal rewritten as it stands: the counters, then each task whole. */
-export const writeJournal = (tasks: Iterable<Task>, seq: number, pruned: number) =>
-  [{ seq, pruned }, ...[...tasks].map((task) => ({ task }))].map((l) => JSON.stringify(l)).join("\n") + "\n";
+/** The journal rewritten as it stands: the counters, the notification policy's
+ * history, then each task whole. */
+export const writeJournal = (tasks: Iterable<Task>, seq: number, pruned: number, notify: NotifySnapshot[] = []) =>
+  [{ seq, pruned }, ...notify.map(({ at, ...n }) => ({ notify: n, at })), ...[...tasks].map((task) => ({ task }))].map((l) => JSON.stringify(l)).join("\n") + "\n";
+
+/** Which notices a task's events stand for: finished, failed or blocked on a
+ * question. Every other state is no notice at all. */
+export type NotifyKind = "finish" | "fail" | "blocked";
+export const NOTIFY_KINDS: readonly NotifyKind[] = ["finish", "fail", "blocked"];
+export const notifyKind = (state: TaskState): NotifyKind | null =>
+  state === "completed" ? "finish" : state === "failed" ? "fail" : state === "approval" ? "blocked" : null;
+
+/** The notification policy from event `at` on (`at` is the last event number
+ * before it changed): every pane on or off (`on`), each kind on or off, and
+ * the panes that override `on` with their own on or off. A pane absent from
+ * `panes` inherits. Loom journals one each time the policy changes. */
+export type NotifySnapshot = { at: number; on: boolean; kinds: Record<NotifyKind, boolean>; panes: Record<string, "on" | "off"> };
+/** Everything on: Loom's behavior before there was a policy. */
+export const DEFAULT_NOTIFY: Omit<NotifySnapshot, "at"> = { on: true, kinds: { finish: true, fail: true, blocked: true }, panes: {} };
+export const sameNotify = (a: Omit<NotifySnapshot, "at">, b: Omit<NotifySnapshot, "at">) =>
+  a.on === b.on && NOTIFY_KINDS.every((k) => a.kinds[k] === b.kinds[k]) && JSON.stringify(Object.entries(a.panes).sort()) === JSON.stringify(Object.entries(b.panes).sort());
+
+/** Whether `policy` lets `pane` send `kind`. The pane's own on or off wins
+ * over every pane's; the kind applies either way. */
+export const allows = (policy: Omit<NotifySnapshot, "at">, pane: string, kind: NotifyKind) =>
+  (policy.panes[pane] ? policy.panes[pane] === "on" : policy.on) && policy.kinds[kind];
+
+/** Whether an event may be sent on as a notice: its kind allowed by the
+ * policy in force when it happened and by every policy since. So turning a
+ * pane or kind off also stops its notices not sent yet, and turning it back
+ * on brings none of them back: only events after that are sent. */
+export function notifies(e: { seq: number; state: TaskState }, pane: string, history: NotifySnapshot[]): boolean {
+  const kind = notifyKind(e.state);
+  if (!kind) return false;
+  let from = history.length;
+  while (from > 0 && history[from - 1].at >= e.seq) from--;
+  // `from - 1` was in force when it happened (none: everything was on), and all from `from` came after.
+  return history.slice(Math.max(from - 1, 0)).every((p) => allows(p, pane, kind));
+}
+
+/** The policy history a rewritten journal keeps: all that decide an event
+ * from `oldest` on, the one in force at `oldest` included. */
+export function keptNotify(history: NotifySnapshot[], oldest: number): NotifySnapshot[] {
+  let from = history.length;
+  while (from > 0 && history[from - 1].at >= oldest) from--;
+  return history.slice(Math.max(from - 1, 0));
+}
+
+/** An Enter a person gave a pane in Loom's window, waiting for the agent's own
+ * report to make it a task (main.ts manualEnter): when, on which launch, and
+ * the prompt's match when Loom could read it, never the text. `uncertain`:
+ * its write to the process failed, so it may have sent nothing, and a report
+ * of the same text can't prove it did (its task gets `uncertain: "submit"`). */
+export type ManualEnter = { at: number; launch: number; match: string | null; uncertain?: boolean };
+
+/** Which pending manual Enter a report no task claimed belongs to, on the
+ * same launch and not after the report: the one naming the same prompt, or
+ * else the oldest within `window` ms of it. Claude reports a prompt as it goes
+ * in, so a person's own report comes first; a prompt read off the screen can
+ * still name it wrong (wrapped mid-word, a collapsed paste). */
+export function claimManual(pending: ManualEnter[], at: number, launch: number, match: string | null, window: number): number {
+  const mine = (m: ManualEnter) => m.launch === launch && m.at <= at;
+  const named = match === null ? -1 : pending.findIndex((m) => mine(m) && m.match === match);
+  return named >= 0 ? named : pending.findIndex((m) => mine(m) && at - m.at <= window);
+}
 
 /** Events after `after`, in order, from the tasks given. */
 export const eventsAfter = (tasks: Iterable<Task>, after: number) =>
@@ -326,7 +400,7 @@ export const eventsAfter = (tasks: Iterable<Task>, after: number) =>
 export function taskRecord(t: Task) {
   const at = (n: number | null) => (n ? new Date(n).toISOString() : null);
   return {
-    task: t.id, state: t.state, final: isFinal(t.state), key: t.key,
+    task: t.id, source: t.source ?? "submit", state: t.state, final: isFinal(t.state), key: t.key,
     pane: t.pane, ref: t.ref, agent: t.agent, generation: t.gen,
     sha256: t.sha256, bytes: t.bytes, input: t.input,
     correlation: t.correlation, uncertain: t.uncertain, answerInDoubt: !!t.answerInDoubt, reason: t.reason, detail: t.detail, exit: t.exit,

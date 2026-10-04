@@ -1157,6 +1157,30 @@ try {
     await page.waitForFunction(() => window.qa.saved);
     assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'false', 'A failed startup request must not claim to keep the PC awake');
     assert.equal(await page.evaluate(() => window.qa.saved.keepAwake), false);
+    // Task notices: a pane's bell, its menu open, and the Preferences rows (finished / failed / blocked) all fit and stay tappable.
+    {
+      const bell = page.locator('.pane .pane-head button.notify').first();
+      await bell.click();
+      await page.waitForSelector('#pane-menu:not(.hidden) .menu-item');
+      await audit('notify-menu');
+      await page.locator('#pane-menu .menu-item', { hasText: 'Off for this pane' }).click();
+      assert.deepEqual(await bell.evaluate(b => [b.classList.contains('own'), b.classList.contains('off'), !!b.querySelector('.i-bell-off')]), [true, true, true], 'Its own off shows');
+      await audit('notify-pane-off');
+      await page.click('#preferences-btn');
+      await audit('notices-preferences');
+      for (const id of ['#notices', '#notice-finish', '#notice-fail', '#notice-blocked', '#notice-new']) {
+        const r = await page.locator(id).boundingBox();
+        assert.ok(r && r.width >= 40 && r.height >= 28, `${id}@${width}: too small to tap: ${JSON.stringify(r)}`);
+      }
+      await page.click('#notice-fail');
+      assert.equal(await page.locator('#notice-fail').getAttribute('aria-pressed'), 'false');
+      await page.waitForFunction(() => window.qa.saved?.notify?.kinds?.fail === false);
+      await page.click('#notice-fail');
+      await page.click('#preferences-btn');
+      await bell.click();
+      await page.locator('#pane-menu .menu-item', { hasText: 'Like every pane' }).click();
+      assert.deepEqual(await bell.evaluate(b => [b.classList.contains('own'), b.classList.contains('off')]), [false, false]);
+    }
     // The overview must observe every thread without consuming its notifications.
     await page.goto(base + '?dashboard');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
@@ -1320,7 +1344,9 @@ try {
     await page.evaluate(() => window.qa.dashboardPanes[2].onOut.onmessage('\x1b]9;ready\x07'));
     await page.waitForFunction(() => document.querySelector('#waiting').textContent === '2 waiting');
     await page.click('#dashboard-preview-close');
-    assert.equal(await compactPreview.evaluate(el => el === document.activeElement), true, `Preview returns focus to the icon @${width}: focus is on ${await page.evaluate(() => { const a = document.activeElement; return `${a?.tagName}#${a?.id}.${a?.className} key=${a?.dataset?.key}`; })}`);
+    // By key, not element: the Overview may rebuild its cards between finding the icon and reading the focus, and a
+    // rebuild puts focus back on the same key (renderDashboard), so element identity would race it.
+    assert.equal(await page.evaluate(() => document.activeElement?.dataset?.key), await compactPreview.getAttribute('data-key'), `Preview returns focus to the icon @${width}: focus is on ${await page.evaluate(() => { const a = document.activeElement; return `${a?.tagName}#${a?.id}.${a?.className} key=${a?.dataset?.key}`; })}`);
     await page.click('#dashboard-compact');
     assert.equal(await page.locator('.dashboard-preview-button').count(), 0, 'Expanded view restores its existing actions');
     await page.click('#dashboard-compact');
