@@ -371,14 +371,21 @@ export function notifyOwner(pane: string, history: NotifySnapshot[]) {
  * pane or kind off also stops its notices not sent yet, and turning it back
  * on brings none of them back: only events after that are sent. */
 export function notifies(e: { seq: number; state: TaskState }, pane: string, history: NotifySnapshot[]): boolean {
+  return notifyDisposition(e, pane, history) === "send";
+}
+
+/** v4 distinguishes a recoverable ownership hold from permanent suppression.
+ * Historical policy mutes take precedence over a temporary ownership hold. */
+export function notifyDisposition(e: { seq: number; state: TaskState }, pane: string, history: NotifySnapshot[]): "send" | "held" | "muted" | "none" {
   const kind = notifyKind(e.state);
-  if (!kind) return false;
+  if (!kind) return "none";
   const owner = notifyOwner(pane, history);
-  if (owner === "held" || owner === "muted") return false;
+  if (owner === "muted") return "muted";
   let from = history.length;
   while (from > 0 && history[from - 1].at >= e.seq) from--;
   // `from - 1` was in force when it happened (none: everything was on), and all from `from` came after.
-  return history.slice(Math.max(from - 1, 0)).every((p) => allows(p, pane, kind));
+  if (!history.slice(Math.max(from - 1, 0)).every((p) => allows(p, pane, kind))) return "muted";
+  return owner === "held" ? "held" : "send";
 }
 
 /** The policy history a rewritten journal keeps: all that decide an event

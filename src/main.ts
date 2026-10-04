@@ -20,7 +20,7 @@ import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
-import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, NOTIFY_KINDS, notifies, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskEvent, type TaskSource, type TaskState } from "./task";
+import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
@@ -7925,13 +7925,13 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   notify: {
-    usage: "notify [pane [inherit|on|off]] [--all on|off] [--finish on|off] [--fail on|off] [--blocked on|off] [--new-panes inherit|on|off] [--check SEQ,...] | notify --resolve-owner ID release|mute",
-    help: "Task notices: what Loom lets a relay send on (watch --metadata --policy). --all turns every pane on or off; a pane's own on or off wins over it, and inherit follows it again. --finish, --fail and --blocked choose the kinds, for every pane. --new-panes is what a pane made from now on starts with. Turning a pane or kind off also stops its notices not sent yet, and turning it back on sends none of them. --check asks for events by number whether they may go out now (null: Loom doesn't have it).",
-    options: { all: "string", finish: "string", fail: "string", blocked: "string", "new-panes": "string", check: "string", "resolve-owner": "string" },
+    usage: "notify [pane [inherit|on|off]] [--all on|off] [--finish on|off] [--fail on|off] [--blocked on|off] [--new-panes inherit|on|off] [--check SEQ,... [--policy-v4]] | notify --resolve-owner ID release|mute",
+    help: "Task notices: what Loom lets a relay send on (watch --metadata --policy). --all turns every pane on or off; a pane's own on or off wins over it, and inherit follows it again. --finish, --fail and --blocked choose the kinds, for every pane. --new-panes is what a pane made from now on starts with. Turning a pane or kind off also stops its notices not sent yet, and turning it back on sends none of them. --check asks for events by number whether they may go out now (null: Loom doesn't have it). --check with --policy-v4 returns send, held, muted or none instead of a boolean; null still means unavailable. Retain and recheck held notices after owner review, even without new watch events.",
+    options: { all: "string", finish: "string", fail: "string", blocked: "string", "new-panes": "string", check: "string", "resolve-owner": "string", "policy-v4": "bool" },
     run: async (a) => {
       const owner = str(a, "resolve-owner");
       if (owner !== undefined) {
-        if (a._.length !== 1 || (a._[0] !== "release" && a._[0] !== "mute") || [...NOTIFY_KINDS, "all", "new-panes", "check"].some((k) => a[k] !== undefined))
+        if (a._.length !== 1 || (a._[0] !== "release" && a._[0] !== "mute") || [...NOTIFY_KINDS, "all", "new-panes", "check", "policy-v4"].some((k) => a[k] !== undefined))
           throw new Error("--resolve-owner takes one owner id and release or mute, with no other policy options.");
         requireJournal();
         const decision = a._[0] === "release" ? "released" : "muted";
@@ -7942,6 +7942,8 @@ const CLI: Record<string, CliCommand> = {
         return { data: { owner, decision: notifyOwners[owner], unresolved: unresolvedNotices() }, text: `owner ${owner}: ${notifyOwners[owner]}` };
       }
       const check = str(a, "check");
+      const v4 = flag(a, "policy-v4");
+      if (v4 && check === undefined) throw new Error("--policy-v4 requires --check.");
       if (check !== undefined && (a._.length || [...NOTIFY_KINDS, "all", "new-panes"].some((k) => a[k] !== undefined)))
         throw new Error("--check only asks: give it alone.");
       if (check !== undefined) {
@@ -7954,9 +7956,9 @@ const CLI: Record<string, CliCommand> = {
         const got = Object.fromEntries(seqs.map((seq) => {
           const t = all.find((t) => t.events.some((e) => e.seq === seq));
           const e = t?.events.find((e) => e.seq === seq);
-          return [seq, t && e && e.seq <= writtenSeq ? notifies(e, t.pane, notifyHistory) : null];
+          return [seq, t && e && e.seq <= writtenSeq ? (v4 ? notifyDisposition(e, t.pane, notifyHistory) : notifies(e, t.pane, notifyHistory)) : null];
         }));
-        return { data: got, text: table(Object.entries(got).map(([k, v]) => [k, v === null ? "unknown" : v ? "send" : "muted"])) };
+        return { data: got, text: table(Object.entries(got).map(([k, v]) => [k, v === null ? "unknown" : typeof v === "string" ? v : v ? "send" : "muted"])) };
       }
       // Everything asked is checked first, the pane included, so a refused
       // command changes nothing at all (review 2026-10-03 15:52, P2).
@@ -8022,12 +8024,13 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   watch: {
-    usage: "watch [task] [--after N] [--follow] [--metadata [--policy]]",
-    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send or manual) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one.",
-    options: { after: "int", metadata: "bool", policy: "bool" },
+    usage: "watch [task] [--after N] [--follow] [--metadata [--policy | --policy-v4]]",
+    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send or manual) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one. --metadata --policy-v4 opts into loom-durable-events-v4: disposition replaces notify with send, held, muted or none. Persist held notices before advancing next, then recheck with notify --check SEQ --policy-v4. Owner release creates no new event. The v3 contract is unchanged.",
+    options: { after: "int", metadata: "bool", policy: "bool", "policy-v4": "bool" },
     run: async (a, ctx) => {
       const one = a._[0] ? cliTask(a._[0]) : undefined;
-      const meta = flag(a, "metadata"), v3 = meta && flag(a, "policy");
+      const meta = flag(a, "metadata"), v4 = flag(a, "policy-v4"), v3 = meta && (flag(a, "policy") || v4);
+      if (v4 && !meta) throw new Error("--policy-v4 requires --metadata.");
       let after = num(a, "after", 0, 0, Number.MAX_SAFE_INTEGER);
       // A number from beyond this journal (it was lost or reset): start over.
       // Only events the journal holds (writtenSeq), so a number never comes twice across restarts.
@@ -8053,10 +8056,10 @@ const CLI: Record<string, CliCommand> = {
         data: {
           events: events.map((e) => (meta ? {
             seq: e.seq, task: e.task, pane: owner(e.task).pane, generation: owner(e.task).gen, state: e.state, at: at(e.at), response: e.response ?? null,
-            ...(v3 ? { source: owner(e.task).source ?? "submit", notify: notifies(e, owner(e.task).pane, notifyHistory) } : {}),
+            ...(v3 ? { source: owner(e.task).source ?? "submit", ...(v4 ? { disposition: notifyDisposition(e, owner(e.task).pane, notifyHistory) } : { notify: notifies(e, owner(e.task).pane, notifyHistory) }) } : {}),
           } : { ...e, at: at(e.at) })),
           next: events[events.length - 1]?.seq ?? after, done, gap: gap || after < taskPruned, last: writtenSeq,
-          ...(meta ? { source: v3 ? "loom-durable-events-v3" : "loom-durable-events-v2" } : {}),
+          ...(meta ? { source: v4 ? "loom-durable-events-v4" : v3 ? "loom-durable-events-v3" : "loom-durable-events-v2" } : {}),
         },
         text: events.map((e) => `${e.seq}  ${at(e.at)}  ${e.task}  ${e.state}` + (meta ? "" : `  ${e.signal}${e.detail ? `  ${e.detail}` : ""}`)).join("\n"),
       };

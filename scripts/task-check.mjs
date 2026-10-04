@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-pending|policy-combined|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|pruned-owner|owner-disposition|policy-pending|policy-combined|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -458,6 +458,73 @@ try {
     assert.equal(await check(restored.seq), false);
     assert.equal((await cli('notify', '--resolve-owner', restored.owner, 'release')).ok, false, 'A resolved mute cannot resurrect old notices');
     ok('Legacy unlinked owners are held, exposed and independently resolved without guessing from reused pane refs');
+  }
+
+  if (review('owner-disposition')) {
+    await resetReview();
+    const finish = async (text) => {
+      const sent = await cli('submit', 'work:1', text);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      await report(claude, { kind: 'start', match: promptMatch(text) });
+      await stops(claude);
+      return (await until(sent.text, 'completed')).events.at(-1).seq;
+    };
+    await cli('notify', '--finish', 'off');
+    const muted = await finish('historically muted notice');
+    await cli('notify', '--finish', 'on');
+    const queued = await finish('queued before the ownership hold');
+    const held = await finish('ingested during the ownership hold'), owner = claude;
+    const preUpgrade = (await cli('watch', '--after', '0', '--metadata', '--policy')).data;
+    assert.equal(preUpgrade.events.find((e) => e.seq === queued).notify, true);
+    // An old slot with no aliases leaves all three historical tasks unlinked.
+    await page.evaluate(() => {
+      const lines = localStorage.getItem('qa-journal').trim().split('\n').map(JSON.parse);
+      for (const line of lines) if (line.notify) delete line.notify.owners;
+      localStorage.setItem('qa-journal', lines.map(JSON.stringify).join('\n') + '\n');
+    });
+    await reboot();
+    const legacy = (await cli('watch', '--after', '0', '--metadata', '--policy')).data;
+    assert.equal(legacy.source, 'loom-durable-events-v3');
+    assert.deepEqual(Object.keys(legacy).sort(), ['done', 'events', 'gap', 'last', 'next', 'source']);
+    assert.deepEqual(Object.keys(legacy.events.at(-1)).sort(), ['at', 'generation', 'notify', 'pane', 'response', 'seq', 'source', 'state', 'task']);
+    assert.equal(legacy.events.find((e) => e.seq === held).notify, false, 'The unchanged v3 bridge keeps its boolean contract');
+    assert.equal((await cli('notify', '--check', String(queued))).data[queued], false);
+    const upgraded = await cli('watch', '--after', '0', '--metadata', '--policy-v4');
+    assert.equal(upgraded.ok, true, 'A recoverable hold requires an opt-in contract');
+    assert.equal(upgraded.data.source, 'loom-durable-events-v4');
+    assert.equal(upgraded.data.events.find((e) => e.seq === held).disposition, 'held');
+    assert.equal(upgraded.data.events.find((e) => e.seq === muted).disposition, 'muted');
+    assert.ok(upgraded.data.events.some((e) => e.disposition === 'none'));
+    const pending = new Set([queued]), sent = new Set(); // one notice queued before migration
+    const ingest = (batch) => {
+      for (const e of batch.events) if (['send', 'held'].includes(e.disposition) && !sent.has(e.seq)) pending.add(e.seq);
+    };
+    const deliver = async () => {
+      for (const seq of pending) {
+        const check = (await cli('notify', '--check', String(seq), '--policy-v4')).data[seq];
+        if (check === 'send') { sent.add(seq); pending.delete(seq); }
+        else if (check === 'muted' || check === 'none') pending.delete(seq);
+      }
+    };
+    ingest(upgraded.data);
+    await deliver();
+    assert.deepEqual([...pending].sort(), [queued, held].sort(), 'Ingestion and pre-send holds both remain recoverable');
+    assert.equal(sent.size, 0);
+    assert.equal((await cli('notify', '--resolve-owner', owner, 'release')).ok, true);
+    await reboot();
+    const afterRelease = (await cli('watch', '--after', String(upgraded.data.next), '--metadata', '--policy-v4')).data;
+    assert.deepEqual(afterRelease.events, [], 'Release does not require a new task event or cursor rewind');
+    await deliver();
+    assert.deepEqual([...sent].sort(), [queued, held].sort());
+    assert.equal((await cli('notify', '--check', String(muted), '--policy-v4')).data[muted], 'muted');
+    assert.equal((await cli('notify', '--check', '999999', '--policy-v4')).data[999999], null);
+    ingest((await cli('watch', '--after', '0', '--metadata', '--policy-v4')).data);
+    await deliver();
+    assert.equal(sent.size, 2, 'Replay cannot send either notice twice');
+    assert.equal(pending.size, 0);
+    for (const [command, args] of [['watch', ['--policy-v4']], ['notify', ['--policy-v4']], ['notify', ['--resolve-owner', owner, 'release', '--policy-v4']]])
+      assert.equal((await cli(command, ...args)).ok, false, 'The version selector must not mutate policy');
+    ok('v4 preserves ingestion and pre-send holds through release and restart, deduplicates replay, and keeps v3 unchanged');
   }
 
   if (review('policy-pending')) {

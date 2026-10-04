@@ -158,6 +158,39 @@ code.
 - `send_email_test.py` (the one synthetic message, no pane behind it) passes a
   check that always allows it.
 
+### Recoverable owner holds, v4
+
+Loom preserves the v3 bridge contract. `watch --metadata --policy` still
+returns `loom-durable-events-v3` with exactly the existing event fields, and
+`notify --check` still returns boolean values or null. Unresolved owners
+still return false in v3. A bridge that permanently discards false results
+cannot recover those notices merely because the owner is later released.
+
+The opt-in v4 contract fixes that distinction. To adopt it, the external
+bridge must make these changes together:
+
+1. Probe for `--policy-v4`, read `watch --metadata --policy-v4`, and require
+   `loom-durable-events-v4`. In the event parser, replace the `notify` boolean
+   with `disposition`, allowing `send`, `held`, `muted`, and `none`.
+2. Persist both `send` and `held` outcomes before advancing the watch cursor.
+   Keep `held` outcomes in a retryable queue. Only `muted` outcomes belong in
+   permanent suppression. `none` events create no notice.
+3. Call `notify --check SEQ --policy-v4` before every send and when revisiting
+   held rows. Send only on `send`, retry `held`, permanently suppress `muted`,
+   and treat `none` as no notice. Keep null results for manual review and
+   leave rows retryable on command errors.
+4. Recheck held rows even when watch returns no new events. Release changes
+   disposition without creating a new task event. Avoid letting one held
+   row block unrelated eligible rows.
+5. Preserve the existing event and completion deduplication. Exclude the
+   mutable disposition from event identity. Migrate the stored capability
+   marker and queued v3 rows explicitly; do not automatically revive old
+   permanently muted rows, since they may reflect real historical mutes.
+
+Loom's checks cover ingestion during a hold, a queued notice held at the
+pre-send check, release, restart, replay deduplication, and historical mutes.
+The external bridge is not modified by this change.
+
 ### Switching from the v2 sender
 
 Loom's refusal of v2 reads can't reach mail the v2 sender already queued. That

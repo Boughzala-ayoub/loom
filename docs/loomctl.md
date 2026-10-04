@@ -836,6 +836,33 @@ Each owner is independent, including closed panes. Release is an explicit
 exception to the hold's false result; it still respects every historical policy
 mute. It does not recreate notices a relay has already discarded or sent.
 
+For recoverable holds, opt in with `watch --metadata --policy-v4`. Its batch
+source is `loom-durable-events-v4`. Events keep the v3 fields except that
+`disposition` replaces `notify`:
+
+| Disposition | Consumer action |
+| --- | --- |
+| `send` | Queue the notice and recheck before sending. |
+| `held` | Retain the notice durably and recheck later. Do not mark it permanently muted. |
+| `muted` | Suppress the notice permanently. This includes historical policy mutes, even while the owner is unresolved. |
+| `none` | This event is not a notification outcome. |
+
+Use `notify --check 41,52 --policy-v4` for pre-send checks. Its map values are
+the same four strings, or `null` if the event is unavailable. Keep a held
+notice pending when its check returns `held`, and move an unavailable notice
+to manual review. A successful owner release changes an eligible notice to
+`send`; an owner mute changes it to `muted`. Release creates no task event.
+Consumers must recheck retained notices independently of their watch cursor.
+Store the batch and held notices before advancing that cursor, and preserve
+event and completion deduplication across retries and replay.
+
+The existing `watch --metadata --policy` and `notify --check` contract stays
+v3, including its boolean false for held owners. The current email bridge
+continues to work unchanged, with its existing limitation that it discards
+those notices permanently. Recoverable delivery requires the bridge to opt
+into v4 and retain held notices. See the
+[bridge upgrade requirements](turn-tracking-and-notifications.md#recoverable-owner-holds-v4).
+
 ### A task's record
 
 `task --json` (and `submit`, `wait --task`, `tasks`) answers with:

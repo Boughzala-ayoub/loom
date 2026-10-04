@@ -1,5 +1,5 @@
 // Self-check for loomctl's tasks. Run: node src/task.test.ts
-import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, notifies, parseSignal, promptMatch, readJournal, route, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
+import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, notifies, notifyDisposition, parseSignal, promptMatch, readJournal, route, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -318,6 +318,13 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   const replay = readJournal(writeJournal([], 10, 0, [held, released])).notify;
   eq("owner decisions survive compaction and replay", replay.map((n) => n.owners), [{ old: "held" }, { old: "released" }]);
   eq("the replayed release still permits the event", notifies(event, "old", replay), true);
+  eq("v4 distinguishes a recoverable hold", notifyDisposition(event, "old", [held]), "held");
+  eq("v4 preserves the hold after a filtered snapshot", notifyDisposition(event, "old", [held, { ...held, owners: {} }]), "held");
+  eq("v4 releases an explicitly reviewed owner", notifyDisposition(event, "old", [held, released]), "send");
+  eq("a historical mute wins even while the owner is held", notifyDisposition(event, "old", [muted]), "muted");
+  eq("release never revives a historical mute in v4", notifyDisposition(event, "old", [muted, released]), "muted");
+  eq("an explicit owner mute is permanent in v4", notifyDisposition(event, "old", [{ ...held, owners: { old: "muted" } }]), "muted");
+  eq("non-notices have no pending disposition", notifyDisposition({ seq: 5, state: "working" }, "old", [held]), "none");
 }
 
 // A person's Enter waits for the agent's report of its turn (main.ts manualEnter, adoptManual).
