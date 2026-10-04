@@ -12,7 +12,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -211,4 +211,20 @@ if (check(103)) {
   assert.equal(writes, 2, "retry must write a recovery snapshot");
   assert.equal(t.events.length, 1);
   console.log("ok   N3 concurrent settlement waits and failed settlement retries without another event");
+}
+
+if (check(104)) {
+  const t = { id: "held", pane: "p", state: "accepted", events: [] };
+  const p = { id: "p", generation: 1 };
+  const r = { pane: p, gen: 1, ref: "work:1", unsent: false };
+  const c = fixture({ tasks: new Map([[t.id, t]]), receipts: new Map([[t.id, r]]),
+    heldEnter: new Map([[t.id, { receipt: r }]]), paneById: () => undefined, requireJournal() {}, journal: async () => {}, gone: () => false,
+    until: async (ready: () => boolean) => {
+      assert.equal(ready(), false);
+      await c.task.run({ _: [t.id], end: "unknown" });
+      assert.equal(ready(), true, "receipt wait must wake when tracking ends without Enter");
+    } });
+  await assert.rejects(c.wait.run({ _: [], receipt: t.id }, { seconds: 1 }), /didn't press Enter/);
+  assert.equal(r.unsent, true);
+  console.log("ok   N4 existing receipt waits wake with no outcome after held task settlement");
 }

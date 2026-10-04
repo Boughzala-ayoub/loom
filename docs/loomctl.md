@@ -1089,3 +1089,5 @@ Usage failures return bounded transport errors. Curl ignores default configurati
 New threads require an existing directory. Loom resolves relative paths against the caller, canonicalizes the directory, and refuses missing paths or files before inserting a thread. Explicit invalid pane working directories are errors; only an omitted directory uses home.
 
 An identical task-end retry waits for the outstanding settlement write. If that write failed, the retry writes and awaits a recovery snapshot without allocating another event.
+
+A receipt wait already in progress also stops if task-end settles a held Enter. It reports that Enter was not pressed and no outcome will arrive; operator settlement does not acknowledge agent work.

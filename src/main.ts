@@ -7524,7 +7524,8 @@ async function waitReceipt(token: string, seconds: number) {
   // The result is recorded by the launch the receipt went to (finishReceipt),
   // so it stands after a restart, and a later launch can't supply one.
   const lost = () => gone(p) || p.dead || p.generation !== r.gen;
-  await until(() => !!r.result || lost(), seconds, `receipt ${token} on ${r.ref}`);
+  await until(() => !!r.result || !!r.unsent || lost(), seconds, `receipt ${token} on ${r.ref}`);
+  if (r.unsent && !r.result) throw new Error(`Loom ${r.uncertain === "type" ? "may have typed part of" : "typed"} ${token}'s text into ${r.ref} but didn't press Enter, so no outcome will come. loomctl read ${r.ref} shows the input.`);
   const result = r.result;
   if (!result) throw new Error(`${r.ref} ${gone(p) ? "was closed" : p.dead ? "exited" : "restarted"} before it finished, so there's no outcome; it may have run partway.`);
   if ("turn" in result) {
@@ -8075,7 +8076,7 @@ const CLI: Record<string, CliCommand> = {
   },
   wait: {
     usage: "wait [pane] [--state waiting] [--turn-after N [--gen N]] [--receipt R] [--task ID [--until S] [--or-idle]] [--timeout S]",
-    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting. --turn-after N: until an agent finishes turn N+1 (turns in loomctl panes). --receipt R: until the command or turn behind send --receipt's token finishes. --task ID: until a task finishes or asks for approval, or reaches --until S. --or-idle also returns when that task's same pane generation is idle or waiting, even if already idle; waitReason is task or pane-idle. It does not settle the task or prove completion.",
+    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting. --turn-after N: until an agent finishes turn N+1 (turns in loomctl panes). --receipt R: until the command or turn behind send --receipt's token finishes. If task-end abandons held Enter, the wait stops with an explicit no-outcome error. --task ID: until a task finishes or asks for approval, or reaches --until S. --or-idle also returns when that task's same pane generation is idle or waiting, even if already idle; waitReason is task or pane-idle. It does not settle the task or prove completion.",
     options: { state: "string", "turn-after": "int", gen: "int", receipt: "string", task: "string", until: "string", "or-idle": "bool" },
     run: async (a, ctx) => {
       const id = str(a, "task");
