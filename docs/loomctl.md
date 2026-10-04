@@ -1062,3 +1062,5 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
 The three steps of `window show` (unminimize, show, focus) each time out after 2 seconds. A stuck step does not block later commands. Windows may still finish that step after loomctl reports a timeout.
 
 Task records resolve `ref` from the pane ID each time they are read. After close, `ref` is null and `paneClosed` is true; text output names the closed pane and its original reference. `tasks --pane` accepts a current reference or a pane ID, including a closed pane's ID. Historical watch events stay unchanged.
+
+`new <folder>` opens ordinary folders as well as repositories, preserving the folder you selected. Git is required only for `--name` or `--base`, which creates a worktree. `--base` alone also supplies its name.

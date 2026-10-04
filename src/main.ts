@@ -7894,16 +7894,17 @@ const CLI: Record<string, CliCommand> = {
   },
   new: {
     usage: "new <folder> [--agent A | --cmd C] [--name N] [--base B] [--panes N]",
-    help: "Open a Git folder as a thread. --name cuts a new worktree and branch loom/<name> off --base. A relative folder is relative to your terminal.",
+    help: "Open any folder as a thread. --name or --base requires Git and cuts a new worktree; --base alone also supplies its name. A relative folder is relative to your terminal.",
     options: { agent: "string", cmd: "string", name: "string", base: "string", panes: "int" },
     run: async (a, ctx) => {
       // Everything checked before git runs: nothing may be left behind by a bad argument.
       const folder = callerPath(cliWord(a, 0, "a folder"), ctx.cwd);
       const cmd = cliCommand(a);
       const n = num(a, "panes", 1, 1, MAX_PANES);
-      const top = await git(folder, "rev-parse", "--show-toplevel").catch(() => {
+      const name = str(a, "name") ?? "", base = str(a, "base") ?? "";
+      const top = name || base ? await git(folder, "rev-parse", "--show-toplevel").catch(() => {
         throw new Error(`${folder} isn't in a Git repository.`);
-      });
+      }) : folder;
       const repo = top.trim().replace(/\//g, "\\");
       const th = await createThread(repo, str(a, "name") ?? "", cmd, str(a, "base") ?? "", n);
       const failed = th.panes.filter((p) => p.dead);

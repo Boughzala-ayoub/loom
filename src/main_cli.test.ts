@@ -27,6 +27,18 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(4)) {
+  let created = "", gitCalls = 0;
+  const c = fixture({ MAX_PANES: 16, callerPath: (s: string) => s,
+    git: async () => { gitCalls++; throw new Error("not a repository"); },
+    createThread: async (folder: string) => { created = folder; return { name: "ideas", dir: folder, panes: [] }; } });
+  await c.new.run({ _: ["C:\\ideas"] }, {});
+  assert.equal(created, "C:\\ideas");
+  assert.equal(gitCalls, 0);
+  await assert.rejects(c.new.run({ _: ["C:\\ideas"], name: "branch" }, {}), /Git repository/);
+  await assert.rejects(c.new.run({ _: ["C:\\ideas"], base: "main" }, {}), /Git repository/);
+  console.log("ok   new opens a plain folder and requires Git for a worktree");
+}
 if (check(2)) {
   const th = { name: "work", panes: [] as any[] };
   const p = { id: "p", th };
