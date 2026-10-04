@@ -12,7 +12,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "accountPlan", "accountPolls", "accountCache", "fetchPlan"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -118,7 +118,7 @@ if (check(6)) {
   assert.ok(c.usage, "usage command must exist");
   const r = await c.usage.run({ _: ["codex"] });
   assert.equal(r.data.codex.bankedResets, 2);
-  assert.deepEqual(r.data.codex.bankedResetExpiries, plan.bankedResetExpiries);
+  assert.deepEqual(Array.from(r.data.codex.bankedResetExpiries), ["2026-11-01T00:00:00.000Z", null]);
   assert.deepEqual(calls, ["codex_plan_usage"]);
   await assert.rejects(c.usage.run({ _: ["invalid"] }));
   console.log("ok   usage explicitly fetches with polling off and preserves banked reset expiries");
@@ -305,4 +305,18 @@ if (check(106)) {
   await lastFixture.fetchPlan("claude");
   assert.match(planErrors.claude, /rate limited/, "a cached reading must not hide the background refresh error");
   console.log("ok   N6 background refresh retains its error beside cached readings");
+}
+
+if (check(107)) {
+  for (const provider of ["claude", "codex"]) {
+    const c = fixture({ PLAN_PROVIDERS: { [provider]: { command: "usage" } },
+      invoke: async () => ({ stale: true, limits: [
+        { resetsAt: "1791580233" }, { resetsAt: "2026-10-09T23:10:33+02:00" },
+        { resetsAt: "bad" }, { resetsAt: "999999999999999999999" }],
+        bankedResetExpiries: ["1791580233", null, "not-a-date"] }) });
+    const plan = (await c.usage.run({ _: [provider] })).data[provider];
+    assert.deepEqual(Array.from(plan.limits, (l: any) => l.resetsAt), ["2026-10-09T21:10:33.000Z", "2026-10-09T21:10:33.000Z", null, null]);
+    assert.deepEqual(Array.from(plan.bankedResetExpiries), ["2026-10-09T21:10:33.000Z", null, null]);
+  }
+  console.log("ok   N7 all exported reset dates and credit expiries use validated UTC ISO timestamps");
 }

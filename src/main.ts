@@ -7103,6 +7103,25 @@ function paintPlan(provider: PlanProvider) {
  * minutes is as often as it's worth asking, plus the panel's refresh button.
  * A failure keeps the last good numbers and shows why underneath them. One
  * request per provider at a time: a click during a poll waits for that one. */
+function resetIso(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  const text = String(value).trim();
+  let at: number;
+  if (/^\d+(?:\.\d+)?$/.test(text)) at = Number(text) * 1000;
+  else {
+    const date = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))?$/.exec(text);
+    if (!date) return null;
+    const [, y, m, d] = date.map(Number);
+    if (m < 1 || m > 12 || d < 1 || d > new Date(Date.UTC(y, m, 0)).getUTCDate()) return null;
+    at = Date.parse(text);
+  }
+  return Number.isFinite(at) && at > 0 && at <= 253402300799999 ? new Date(at).toISOString() : null;
+}
+function normalizePlan(plan: Plan): Plan {
+  return { ...plan, limits: plan.limits.map((l) => ({ ...l, resetsAt: resetIso(l.resetsAt) })),
+    ...(plan.bankedResetExpiries ? { bankedResetExpiries: plan.bankedResetExpiries.map(resetIso) } : {}) };
+}
+
 type AccountReading = (Plan | { error: string; stale: true }) & { fetchedAt: string | null; nextRefreshAt: string; cached: boolean };
 const accountPolls: Partial<Record<PlanProvider, Promise<AccountReading>>> = {};
 const accountCache: Partial<Record<PlanProvider, AccountReading>> = {};
@@ -7113,7 +7132,7 @@ function accountPlan(provider: PlanProvider): Promise<AccountReading> {
   return accountPolls[provider] = (async () => {
     let retry = 300, result: Plan | { error: string; stale: true }, fetchedAt = previous?.fetchedAt ?? null;
     try {
-      result = await invoke<Plan>(PLAN_PROVIDERS[provider].command);
+      result = normalizePlan(await invoke<Plan>(PLAN_PROVIDERS[provider].command));
       retry = Math.max(retry, result.retryAfterSeconds ?? 0);
       fetchedAt = new Date().toISOString();
     } catch (e) {
@@ -7845,7 +7864,7 @@ const CLI: Record<string, CliCommand> = {
   },
   usage: {
     usage: "usage [claude|codex]",
-    help: "Read account plan usage, even with plan-usage off. All callers share a fetch and a five-minute cache; rate limits can extend the cooldown. JSON includes fetchedAt, nextRefreshAt and cached. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
+    help: "Read account plan usage, even with plan-usage off. All callers share a fetch and a five-minute cache; rate limits can extend the cooldown. JSON includes fetchedAt, nextRefreshAt and cached. Reset times and banked expiries are UTC ISO timestamps or null. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
     run: async (a) => {
       const name = a._[0];
       if (a._.length > 1 || (name !== undefined && name !== "claude" && name !== "codex")) throw new Error("usage takes claude or codex, or neither for both.");
