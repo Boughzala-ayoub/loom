@@ -1099,3 +1099,5 @@ Usage reads share one in-flight request per provider with background polling and
 All exported limits.resetsAt and bankedResetExpiries values use UTC ISO timestamps, for example 2026-10-09T21:10:33.000Z. Missing, invalid or out-of-range dates are null. This applies to both providers and local fallback records.
 
 Menu and choose recognize a Claude survey only in the active footer below the live composer. Transcript quotations and a dismissed survey above a draft are not actionable. Choose rechecks that active region immediately before sending its digit.
+
+Survey questions may span real line breaks or terminal soft wraps. Loom reconstructs soft-wrapped survey rows from terminal wrap metadata while keeping numbered menus on physical rows.

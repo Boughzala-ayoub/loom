@@ -3155,13 +3155,18 @@ function toggleDashboard(on = !dashboardOpen) {
  * menu wants the rows as drawn (`joined` false): Claude pads rules and headers
  * to full width, the terminal flags the next row as their wrap, and a joined
  * rule no longer ends the question above the options. */
-function liveScreen(p: Pane, joined = true) {
+function liveScreen(p: Pane, joined = true, surveyOnly = false) {
   const buf = p.term.buffer.active;
   const lines: string[] = [];
+  let survey = false;
   for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
     const line = buf.getLine(y);
     const text = line?.translateToString(false) ?? "";
-    if (joined && line?.isWrapped && lines.length) lines[lines.length - 1] += text;
+    const wasSurvey = survey;
+    if (/^\s*[?>]/.test(text) || /^[ \t]*[???-]{3,}[ \t]*$/.test(text)) survey = false;
+    const continueSurvey = wasSurvey && survey;
+    if (/^\s*How\b/.test(text)) survey = true;
+    if (joined && (!surveyOnly || continueSurvey) && line?.isWrapped && lines.length) lines[lines.length - 1] += text;
     else lines.push(text);
   }
   return lines.join("\n");
@@ -4438,7 +4443,7 @@ function choose(p: Pane, menu: AgentMenu, i: number, gen?: number) {
     for (let step = 0; step <= menu.options.length; step++) {
       live(step > 0);
       const screen = liveScreen(p, false);
-      const now = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(screen) : null);
+      const now = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
       if (!now || menuRev(now) !== want) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
       if (now.keys) return keys(p, now.keys[i]);
       if (now.selected === i) return submit(p);
@@ -7926,11 +7931,11 @@ const CLI: Record<string, CliCommand> = {
   },
   menu: {
     usage: "menu [pane]",
-    help: "The numbered question on a pane's screen, including Claude's active session survey below the composer. Quoted or dismissed surveys are not actionable. Survey keys are 1, 2, 3 and 0; selected is -1 because none is highlighted.",
+    help: "The numbered question on a pane's screen, including Claude's active session survey below the composer. Wrapped questions are supported. Quoted or dismissed surveys are not actionable. Survey keys are 1, 2, 3 and 0; selected is -1 because none is highlighted.",
     run: (a) => {
       const p = cliPane(a._[0]);
       const screen = liveScreen(p, false);
-      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(screen) : null);
+      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
       if (!m) return { data: null, text: `${paneName(p)} isn't showing a numbered question.` };
       const rev = menuRev(m);
       // The whole prompt, which the id covers, not just the summary above the options.
@@ -8124,7 +8129,7 @@ const CLI: Record<string, CliCommand> = {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
       const n = Number(cliWord(a, 1, "an option number"));
       const screen = liveScreen(p, false);
-      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(screen) : null);
+      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
       if (!m) throw new Error(`${paneName(p)} isn't showing a numbered question.`);
       const rev = menuRev(m), expect = str(a, "menu");
       if (expect !== undefined && expect !== rev) throw new Error(`${paneName(p)} shows another question now (menu ${rev}, not ${expect}), so nothing was chosen. loomctl menu ${paneName(p)} reads it.`);

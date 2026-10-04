@@ -12,7 +12,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -27,6 +27,7 @@ function fixture(extra: Record<string, unknown> = {}) {
     threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }],
     ...extra });
   runInContext(code, s);
+  Object.assign(s, extra);
   lastFixture = s.f;
   return s.f.CLI;
 }
@@ -336,4 +337,20 @@ if (check(108)) {
   await assert.rejects(c.choose.run({ _: ["p", "0"], menu: menu.rev }));
   assert.equal(writes.length, 0);
   console.log("ok   N8 transcript surveys and dismissed surveys cannot write into a draft");
+}
+
+if (check(109)) {
+  for (const question of [["How is Claude doing", "this session?"], ["How is Clau", "de doing this session?"]]) {
+    const physical = ["????????", "?", "????????", ...question, "1: Bad 2: Fine 3: Good 0: Dismiss"];
+    const p = { id: "p", th: { name: "work", panes: [] }, agent: "claude", term: { rows: physical.length, buffer: { active: {
+      baseY: 0, getLine: (i: number) => ({ isWrapped: i === 3 || (i === 4 && question[0].endsWith("Clau")), translateToString: () => physical[i] })
+    } } } };
+    const writes: string[] = [];
+    const c = fixture({ cliPane: () => p, inTurn: (_: unknown, f: (live: () => void) => unknown) => f(() => {}), keys: (_: unknown, s: string) => writes.push(s) });
+    const menu = c.menu.run({ _: ["p"] }).data;
+    assert.ok(menu, "wrapped active survey must be visible");
+    await c.choose.run({ _: ["p", "0"], menu: menu.rev });
+    assert.deepEqual(writes, ["0"]);
+  }
+  console.log("ok   N9 hard-wrapped and soft-wrapped active surveys support menu and guarded choose");
 }
