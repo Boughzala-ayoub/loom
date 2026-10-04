@@ -1042,7 +1042,9 @@ try {
     assert.match(refused.error, /journal/);
     assert.deepEqual([await pastes(claude), (await cli('tasks')).data.length], [pasted + 1, listed], 'Nothing typed, no task');
     // The Enter's own record failing: the task went in, says the journal is behind, and the next write catches up.
-    await qa({ journalFailIf: `fn:return d.includes('"submitted"')` });
+    // Recovery may snapshot older submitted tasks while reserving this one.
+    // Fail only its new submitted event, not those retained task snapshots.
+    await qa({ journalFailIf: `fn:return d.trim().split('\\n').some(l => JSON.parse(l).event?.state === 'submitted')` });
     const behind = await cli('submit', 'work:1', 'the record lags');
     await qa({ journalFailIf: null });
     assert.deepEqual([behind.ok, behind.data.state, behind.data.saved], [true, 'submitted', false], JSON.stringify(behind));
