@@ -2564,7 +2564,7 @@ class Thread {
       this.reordered(p);
     });
     this.relayout();
-    if (!restoring && p.notify !== "inherit") recordNotify(); // before it can have a task
+    if (!restoring && p.notify !== "inherit") void recordNotify().catch(notifyError); // before it can have a task
     await p.start(st.cmd, st.sid);
     if (!this.panes.includes(p)) return;
     if (focus) this.focusPane(p);
@@ -3709,6 +3709,10 @@ const typedTasks = () => [...tasks.values()].filter((t) => t.events.length);
  * task has no events yet, so its line goes in after them (the first version
  * left it out and still answered `saved: true`). */
 function journal(lines: object[], ids: string[]): Promise<void> {
+  if (journalUnreadable) {
+    ids.forEach((id) => unsaved.add(id));
+    return Promise.reject(new Error(journalUnavailable()));
+  }
   journalLines += lines.length;
   const call = ++journalCalls, upTo = taskSeq;
   const write = journalQueue.then(() => {
@@ -4029,23 +4033,26 @@ const currentNotify = (): Omit<NotifySnapshot, "at"> => {
 };
 /** Journals the policy when it changed. It decides every event from the next
  * one on, and an event it turns off stays off (notifies). */
-function recordNotify() {
+async function recordNotify() {
+  requireJournal();
   const now = currentNotify(), last = notifyHistory[notifyHistory.length - 1];
   if (sameNotify(last ?? DEFAULT_NOTIFY, now)) return;
   notifyHistory.push({ at: taskSeq, ...now });
   void journal([{ notify: now, at: taskSeq }], []).catch(() => {});
 }
 /** Every pane's setting changed (on, kinds, what new panes start with). */
-function setNotify(change: Partial<typeof notifyPolicy>) {
+async function setNotify(change: Partial<typeof notifyPolicy>) {
+  requireJournal();
   notifyPolicy = { ...notifyPolicy, ...change };
   paintNotifications();
-  recordNotify();
+  await recordNotify();
   save();
 }
-function setPaneNotify(p: Pane, v: PaneNotify) {
+async function setPaneNotify(p: Pane, v: PaneNotify) {
+  requireJournal();
   p.notify = v;
   p.paintBell();
-  recordNotify();
+  await recordNotify();
   save();
 }
 /** A pane's bell: like every pane, or its own on or off. */
@@ -4053,7 +4060,7 @@ const notifyMenu = (p: Pane): Menu => ({
   placeholder: "",
   rows: (list) => {
     for (const [v, label] of [["inherit", `Like every pane (now ${notifyPolicy.on ? "on" : "off"})`], ["on", "On for this pane"], ["off", "Off for this pane"]] as const)
-      menuItem(list, `${p.notify === v ? "✓ " : "   "}${label}`, () => setPaneNotify(p, v));
+      menuItem(list, `${p.notify === v ? "✓ " : "   "}${label}`, () => void setPaneNotify(p, v).catch(notifyError));
   },
 });
 /** Each pane's notices as they stand: its setting, and whether each kind goes out now. */
@@ -4228,6 +4235,11 @@ function sweepTasks() {
  * refuses, since it can't find an earlier task's --key, and nothing rewrites
  * the file. */
 let journalUnreadable = "";
+const journalUnavailable = () => `Task history is unavailable because Loom couldn't read its journal (${journalUnreadable}). Fix or move the file and restart Loom. Durable tracking and policy changes are unavailable until then.`;
+function requireJournal() {
+  if (journalUnreadable) throw new Error(journalUnavailable());
+}
+const notifyError = (error: unknown) => toast(error instanceof Error ? error.message : String(error));
 /** The journal read back at start. Tasks still open belonged to processes
  * that ended with the Loom before, so their outcome is unknown. Then the
  * journal is rewritten with only what was kept. lib.rs keeps the lines
@@ -4241,6 +4253,7 @@ async function loadTasks() {
     return;
   }
   const got = readJournal(text);
+  journalUnreadable = "";
   notifyHistory = got.notify;
   // Numbering goes on from the journal: no watcher saw an event it doesn't hold (writtenSeq).
   taskSeq = writtenSeq = Math.max(taskSeq, got.seq);
@@ -7497,7 +7510,7 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
     release();
     await saved;
   }
-  return { data: { pane: p.id, generation: gen, sha256: digest, bytes, ...(token ? { receipt: token } : {}), ...(task && !submit ? { task: task.id } : {}) }, text: token ?? "" };
+  return { data: { pane: p.id, generation: gen, sha256: digest, bytes, ...(token ? { receipt: token } : {}), ...(task && !submit ? { task: task.id, ...(journalUnreadable ? { saved: false, warning: journalUnavailable() } : {}) } : {}) }, text: token ?? "" };
 }
 
 /** A task Loom still has, or a failure saying it isn't available. */
@@ -7860,7 +7873,7 @@ const CLI: Record<string, CliCommand> = {
     usage: "notify [pane [inherit|on|off]] [--all on|off] [--finish on|off] [--fail on|off] [--blocked on|off] [--new-panes inherit|on|off] [--check SEQ,...]",
     help: "Task notices: what Loom lets a relay send on (watch --metadata --policy). --all turns every pane on or off; a pane's own on or off wins over it, and inherit follows it again. --finish, --fail and --blocked choose the kinds, for every pane. --new-panes is what a pane made from now on starts with. Turning a pane or kind off also stops its notices not sent yet, and turning it back on sends none of them. --check asks for events by number whether they may go out now (null: Loom doesn't have it).",
     options: { all: "string", finish: "string", fail: "string", blocked: "string", "new-panes": "string", check: "string" },
-    run: (a) => {
+    run: async (a) => {
       const check = str(a, "check");
       if (check !== undefined && (a._.length || [...NOTIFY_KINDS, "all", "new-panes"].some((k) => a[k] !== undefined)))
         throw new Error("--check only asks: give it alone.");
@@ -7894,10 +7907,10 @@ const CLI: Record<string, CliCommand> = {
       const pane = a._[0] !== undefined ? cliPane(a._[0]) : undefined;
       const own = a._[1];
       if (own !== undefined && own !== "inherit" && own !== "on" && own !== "off") throw new Error(`A pane's notices are inherit, on or off, not ${own}.`);
-      if (Object.keys(change).length) setNotify(change);
+      if (Object.keys(change).length) await setNotify(change);
       if (pane) {
         const p = pane;
-        if (own !== undefined) setPaneNotify(p, own);
+        if (own !== undefined) await setPaneNotify(p, own);
         const row = notifyRow(p);
         return { data: row, text: table(Object.entries(row).map(([k, v]) => [k, String(v)])) };
       }
@@ -8419,9 +8432,9 @@ async function main() {
     paintNotifications();
     save();
   };
-  $("#notices").onclick = () => setNotify({ on: !notifyPolicy.on });
-  for (const k of NOTIFY_KINDS) $(`#notice-${k}`).onclick = () => setNotify({ kinds: { ...notifyPolicy.kinds, [k]: !notifyPolicy.kinds[k] } });
-  $("#notice-new").onclick = () => setNotify({ newPanes: ({ inherit: "on", on: "off", off: "inherit" } as const)[notifyPolicy.newPanes] });
+  $("#notices").onclick = () => void setNotify({ on: !notifyPolicy.on }).catch(notifyError);
+  for (const k of NOTIFY_KINDS) $(`#notice-${k}`).onclick = () => void setNotify({ kinds: { ...notifyPolicy.kinds, [k]: !notifyPolicy.kinds[k] } }).catch(notifyError);
+  $("#notice-new").onclick = () => void setNotify({ newPanes: ({ inherit: "on", on: "off", off: "inherit" } as const)[notifyPolicy.newPanes] }).catch(notifyError);
   $("#keep-awake").onclick = () => void setKeepAwake(!keepAwake);
   $("#plan-usage").onclick = () => {
     planUsage = !planUsage;
@@ -8682,7 +8695,7 @@ async function main() {
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
   await loadTasks(); // before loomctl answers, so a retried --key finds its task
-  recordNotify(); // the panes restored with their own settings, under this run's pane ids
+  void recordNotify().catch(notifyError); // the panes restored with their own settings, under this run's pane ids
   installCli(); // after the threads exist, before their panes finish starting
   await opened;
   restoring = false;

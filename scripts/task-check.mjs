@@ -198,6 +198,53 @@ try {
   /** Sixth and seventh reviews' tasks, checked again across a restart: [ref, text, key, task, state, uncertain]. */
   const acrossRestart = [];
 
+  // Review of f80a83e, 2026-10-04. TASK_REVIEW runs just these regressions.
+  const review = (name) => !process.env.TASK_REVIEW || process.env.TASK_REVIEW === name || process.env.TASK_REVIEW === 'all';
+  if (review('unreadable')) {
+    const old = await cli('submit', 'work:1', 'keep this history');
+    await report(claude, { kind: 'start', match: promptMatch('keep this history') });
+    await stops(claude);
+    await until(old.text, 'completed');
+    const original = await page.evaluate(() => localStorage.getItem('qa-journal'));
+    for (const failFirst of [false, true]) {
+      await page.evaluate(() => localStorage.setItem('qa-journal-unreadable', '1'));
+      await reboot();
+      await qa({ journalFail: failFirst });
+      const sent = await cli('send', 'work:1', 'automatic with no history');
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      assert.equal(sent.data.saved, false);
+      assert.match(sent.data.warning, /history is unavailable/i);
+      await qa({ journalFail: false });
+      await report(claude, { kind: 'start', match: promptMatch('automatic with no history') });
+      await stops(claude);
+      await until(sent.data.task, 'completed');
+      await agent(codex, { codexShape: true, input: 'a readable manual prompt' });
+      await page.waitForTimeout(250);
+      await page.locator(`.pane[data-id="${codex}"] .xterm-helper-textarea`).focus();
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(200);
+      assert.equal(await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length), 0,
+        'Unread history must block automatic appends and recovery rewrites');
+      assert.equal((await state(sent.data.task)).saved, false);
+      assert.deepEqual((await cli('watch', '--after', '0')).data.events, [], 'No reused event number is published');
+      for (const args of [['work:1', 'off'], ['--all', 'off']]) {
+        const refused = await cli('notify', ...args);
+        assert.equal(refused.ok, false, JSON.stringify(refused));
+        assert.match(refused.error, /history|journal/i);
+      }
+      assert.equal(await page.evaluate(() => localStorage.getItem('qa-journal')), original);
+      await page.evaluate(() => localStorage.removeItem('qa-journal-unreadable'));
+    }
+    await reboot();
+    assert.equal((await state(old.text)).state, 'completed');
+    ok('Unread startup history blocks automatic writes, durable events and policy changes, even after writes recover');
+  }
+
+  // Start the older cases with the same empty journal and settings as before.
+  await page.evaluate(() => { localStorage.clear(); });
+  await reboot();
+  if (!process.env.TASK_REVIEW) {
+
   // Claude, end to end: accepted, submitted, working on its prompt's report, completed on Stop and idle.
   {
     const t0 = Date.now();
@@ -2233,6 +2280,7 @@ try {
     ok('Notification policy: default on, a pane\'s own setting wins, kinds filter, queued notices of a muted pane stay unsent, re-enabling sends no history, new panes start as set, a refused notify changes nothing, v2 is refused over a muted notice, and it all survives a restart');
   }
 
+  }
   assert.deepEqual(errors, []);
   console.log(`submit round trips (ms): ${timing.join(', ')}`);
   console.log(`\nall ${checks} task checks passed`);
