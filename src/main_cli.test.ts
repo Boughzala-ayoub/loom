@@ -12,20 +12,22 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`const ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
     startupTurns: null, contextOf: () => undefined, closedTaskContexts: new WeakMap(), taskSeq: 3, taskWatch: new Map(), heldEnter: new Map(), keepTasks() {}, keepReceipts() {},
     threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }],
     ...extra });
   runInContext(code, s);
+  lastFixture = s.f;
   return s.f.CLI;
 }
 // @ts-ignore Node-only test.
@@ -227,4 +229,32 @@ if (check(104)) {
   await assert.rejects(c.wait.run({ _: [], receipt: t.id }, { seconds: 1 }), /didn't press Enter/);
   assert.equal(r.unsent, true);
   console.log("ok   N4 existing receipt waits wake with no outcome after held task settlement");
+}
+
+if (check(105)) {
+  const th = { panes: [] as any[], addPane: async (st: any) => {
+    const p = { id: "codex", th, agent: "codex", ...st }; th.panes.push(p); return p;
+  } };
+  const c = fixture({ threads: [th], paneRows: () => "", MAX_PANES: 16, cliThread: () => th, show() {}, revealPane() {}, save() {} });
+  const r = await c.add.run({ _: [], agent: "codex", model: "gpt-6.1-sol", effort: "xhigh" });
+  assert.equal(r.data.model, "gpt-6.1-sol");
+  assert.equal(r.data.effort, "xhigh");
+  th.panes[0].sessionId = "observed-session";
+  th.panes[0].providerUsage = { sid: "observed-session", model: "observed", effort: "low", ctx: 12000, window: 100000 };
+  const record = (await c.add.run({ _: [], agent: "codex" })).data;
+  assert.equal(record.model, null);
+  assert.equal(c.panes.run({ _: [] }).data[0].model, "observed");
+  assert.equal(c.panes.run({ _: [] }).data[0].context.remainingTokens, 88000);
+  th.panes[0].sessionId = "another-session";
+  assert.equal(c.panes.run({ _: [] }).data[0].model, "gpt-6.1-sol", "a changed session must not expose the previous session's settings");
+  let deliver!: (v: any) => void;
+  const p = th.panes[0];
+  p.sessionId = "known"; p.generation = 1; p.providerUsage = null;
+  fixture({ threads: [th], gone: () => false, invoke: () => new Promise((r) => { deliver = r; }) });
+  const pending = lastFixture.pollProviderUsage();
+  p.generation++;
+  deliver({ codex: { model: "wrong-generation" } });
+  await pending;
+  assert.equal(p.providerUsage, null);
+  console.log("ok   N5 startup selections are structured per-pane fallbacks");
 }

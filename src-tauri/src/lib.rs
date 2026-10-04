@@ -1375,6 +1375,21 @@ mod commands {
         blocking(move || usage::session_usage(app.state(), panes)).await
     }
     #[tauri::command]
+    pub async fn codex_session_usage(app: AppHandle, panes: Vec<(String, String)>) -> HashMap<String, usage::Usage> {
+        blocking(move || {
+            let mut out = HashMap::new();
+            let Ok(home) = super::codex_home(&app) else { return out };
+            let mut files = Vec::new();
+            super::codex_rollouts(&home.join("sessions"), &mut files);
+            for (id, sid) in panes {
+                if sid.len() != 36 || !sid.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') { continue; }
+                if let Some(u) = files.iter().filter(|(_, path)| super::rollout_is(path, &sid))
+                    .find_map(|(_, path)| usage::codex_session(path, &sid)) { out.insert(id, u); }
+            }
+            out
+        }).await
+    }
+    #[tauri::command]
     pub async fn context_profile(pane: String, dir: String, sid: String) -> Option<usage::Profile> {
         blocking(move || usage::context_profile(pane, dir, sid)).await
     }
@@ -1562,7 +1577,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
-            commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
+            commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,

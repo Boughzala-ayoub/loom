@@ -104,6 +104,7 @@ try {
           user: `Review the ${agent} changes`, agent: `The ${agent} changes are ready`,
         }]));
         if (cmd === 'canonical_directory') return args.path;
+        if (cmd === 'codex_session_usage') return {};
         if (cmd === 'session_usage') return Object.fromEntries(args.panes.map(([id, , sid]) => [id, { ctx: 48000, window: 200000, input: 12000, output: 2400, cacheRead: 16000, cacheWrite: 800, turns: 6, mainTurns: 6, sid, model: 'sonnet', effort: 'high', liveModel: 'sonnet', liveEffort: 'high' }]));
         if (cmd === 'context_profile') return { buckets: [{ label: 'Read', tokens: 24000 }, { label: 'Prompts', tokens: 3000 }], series: [1000, 18000, 48000], drops: [], ctx: 48000, est: 27000 };
         if (cmd === 'plan_usage') {

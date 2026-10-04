@@ -138,7 +138,7 @@ shows one.
 
 `usage [claude|codex] --json` fetches current account plan usage, even while `set plan-usage off` is in effect. Omit the provider for both. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.
 
-`panes --json` includes `model`, `effort` and `context` from the latest session data. Context contains `usedTokens`, `windowTokens`, `remainingTokens` and `remainingPercent`. Missing data is null. Recent settings take precedence over statusline reports, then the last transcript turn; this does not depend on pane width. The same fields appear in nested pane records from `threads` and `status`.
+`panes --json` includes `model`, `effort` and `context` from Claude and Codex session records, with structured startup selections as fallbacks. OpenCode currently has startup selections only. Context contains `usedTokens`, `windowTokens`, `remainingTokens` and `remainingPercent`. Missing data is null. Recent settings take precedence over statusline reports, then the last transcript turn; this does not depend on pane width. The same fields appear in nested pane records from `threads` and `status`.
 
 `threads --json` includes `zoomed`, the zoomed pane's ID or null. Each pane record, including `panes --json`, also has a `zoomed` boolean. These report the actual zoom target separately from the focused pane's `front` flag.
 
@@ -1091,3 +1091,5 @@ New threads require an existing directory. Loom resolves relative paths against 
 An identical task-end retry waits for the outstanding settlement write. If that write failed, the retry writes and awaits a recovery snapshot without allocating another event.
 
 A receipt wait already in progress also stops if task-end settles a held Enter. It reports that Enter was not pressed and no outcome will arrive; operator settlement does not acknowledge agent work.
+
+Pane settings use Claude session data and bounded reads of the known Codex session. Codex context uses the latest request token usage and actual model window, never cumulative session totals. Results apply only while the pane session and generation still match. Explicit startup model and effort are saved as structured fallbacks until provider records supply values. OpenCode currently exposes startup model only; unobserved effort and context remain null.

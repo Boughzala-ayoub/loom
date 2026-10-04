@@ -1025,7 +1025,7 @@ function applyTheme(t: Theme) {
 
 /** A pane as saved: the command it booted with, the claude session it owns,
  * and the session's last-known effort level (hook-reported; resume re-pins it). */
-type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off"; notifyIds?: string[] };
+type PaneState = { cmd: string; startupSettings?: { model?: string; effort?: string }; sid?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off"; notifyIds?: string[] };
 /** A pane's task notices: every pane's setting (`inherit`), or its own on or off. */
 type PaneNotify = "inherit" | "on" | "off";
 /** Every pane's task notices, which kinds, and what a pane made from now on starts with. */
@@ -1513,6 +1513,8 @@ class Pane {
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
   sid = ""; // and the claude session it owns, so the next launch resumes it
+  startupSettings?: { model?: string; effort?: string };
+  providerUsage: Usage | null = null;
   sessionId?: string; // Provider-reported ID, never a generated placeholder.
   effort = ""; // session's effort per the last hook, "" until one reports
   usage: Usage | null = null; // null until claude is up in this pane; zeroed until its first turn
@@ -1913,6 +1915,7 @@ class Pane {
     this.atPrompt = false;
     this.receiptRunning = undefined;
     this.codexState = undefined;
+    this.providerUsage = null;
     this.startupStarted = Date.now();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
       try {
@@ -2561,6 +2564,7 @@ class Thread {
     p.groupIds = Array.isArray(st.groupIds) ? [...new Set(st.groupIds.filter(id => agentGroups.some(g => g.id === id)))] : [];
     if (st.sessionId && validSessionId(st.sessionId)) p.sessionId = st.sessionId;
     if (st.effort) p.effort = st.effort;
+    p.startupSettings = st.startupSettings;
     // A restored pane keeps its own setting; a new one starts as notifyPolicy.newPanes says.
     p.notify = st.notify === "on" || st.notify === "off" ? st.notify : restoring ? "inherit" : notifyPolicy.newPanes;
     if (restoring && Array.isArray(st.notifyIds)) p.notifyIds = [...new Set([...st.notifyIds.filter((id) => typeof id === "string" && id), p.id])];
@@ -2831,7 +2835,7 @@ const flushSave = (): Promise<unknown> => {
         branch: t.branch,
         name: t.name,
         open: t.open,
-        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify,
+        panes: t.panes.map((p) => ({ cmd: p.startup, startupSettings: p.startupSettings, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify,
           notifyIds: p.notifyIds.filter((id) => journalUnreadable || id === p.id || typedTasks().some((t) => t.pane === id)) })),
         layout: t.layout,
         active: t.panes.indexOf(t.active!),
@@ -6246,7 +6250,7 @@ async function refExists(repo: string, ref: string) {
  * that names nothing, locally or on origin, is taken as a NEW branch name: the
  * thread is created on it, off HEAD. */
 /** The thread it opened, or the one already open on that folder. */
-async function createThread(repo: string, name: string, cmd: string, base: string, n: number): Promise<Thread> {
+async function createThread(repo: string, name: string, cmd: string, base: string, n: number, startupSettings?: PaneState["startupSettings"]): Promise<Thread> {
   // Before git touches anything: a bad count must not leave a worktree behind.
   if (!Number.isInteger(n) || n < 1 || n > MAX_PANES) throw new Error(`A thread takes 1 to ${MAX_PANES} panes, not ${n}.`);
   let dir = repo;
@@ -6300,7 +6304,7 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     }
     branch = (await git(repo, "rev-parse", "--abbrev-ref", "HEAD").catch(() => "")).trim();
   }
-  return openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd }));
+  return openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd, startupSettings }));
 }
 
 /** "+ Thread": a native <dialog> — repo, name, agent, base branch, pane count.
@@ -7348,6 +7352,18 @@ class CliError extends Error {
   }
 }
 
+async function pollProviderUsage() {
+  const snapshots = threads.flatMap((t) => t.panes).filter((p) => p.agent === "codex" && p.sessionId)
+    .map((p) => ({ p, sid: p.sessionId!, gen: p.generation }));
+  if (!snapshots.length) return;
+  const got = await invoke<Record<string, Usage>>("codex_session_usage", {
+    panes: snapshots.map(({ p, sid }) => [p.id, sid]),
+  }).catch(() => ({} as Record<string, Usage>));
+  for (const { p, sid, gen } of snapshots) {
+    if (!gone(p) && p.generation === gen && p.sessionId === sid) p.providerUsage = got[p.id] ?? null;
+  }
+}
+
 /** A pane's state in one word, the Overview's words. */
 const cliState = (p: Pane) => (p.dead ? "exited" : p.starting ? "starting" : p.waiting ? "waiting" : p.busy ? "working" : "idle");
 const CLI_STATES = ["waiting", "working", "idle", "exited", "starting"];
@@ -7361,12 +7377,12 @@ function cliStates(value: unknown, fallback: string): string[] {
 /** "<thread>:<n>", the name loomctl prints and takes back. */
 const paneName = (p: Pane) => `${p.th.name}:${p.th.panes.indexOf(p) + 1}`;
 function paneSettings(p: Pane) {
-  const u = p.usage, ran = u?.mainTurns ?? 0;
+  const u = (p.providerUsage?.sid === p.sessionId ? p.providerUsage : null) ?? p.usage, ran = u?.mainTurns ?? 0;
   const held = (s: Set_ | undefined, cur: string) => s && (ran <= s.at || (s.was !== undefined && cur === s.was)) ? s.v : "";
   const left = u ? Math.max(0, u.window - u.ctx) : 0;
   return {
-    model: held(p.want?.model, u?.model ?? "") || u?.liveModel || u?.model || null,
-    effort: held(p.want?.effort, u?.effort ?? "") || u?.liveEffort || u?.effort || p.effort || null,
+    model: held(p.want?.model, u?.model ?? "") || u?.liveModel || u?.model || p.startupSettings?.model || null,
+    effort: held(p.want?.effort, u?.effort ?? "") || u?.liveEffort || u?.effort || p.effort || p.startupSettings?.effort || null,
     context: u && u.window > 0 ? { usedTokens: u.ctx, windowTokens: u.window, remainingTokens: left, remainingPercent: Math.round(100 * left / u.window) } : null,
   };
 }
@@ -7828,7 +7844,7 @@ const CLI: Record<string, CliCommand> = {
   },
   panes: {
     usage: "panes [--thread T] [--state S]",
-    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses the latest session data, not clipped screen text.",
+    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses Claude and Codex session records, with explicit startup model and effort as fallbacks. OpenCode has startup selections only; unavailable context stays null.",
     options: { thread: "string", state: "string" },
     run: (a) => {
       const want = a.state === undefined ? null : cliStates(str(a, "state"), "");
@@ -7960,7 +7976,7 @@ const CLI: Record<string, CliCommand> = {
         throw new Error(`${folder} isn't in a Git repository.`);
       }) : folder;
       const repo = top.trim().replace(/\//g, "\\");
-      const th = await createThread(repo, str(a, "name") ?? "", cmd, str(a, "base") ?? "", n);
+      const th = await createThread(repo, str(a, "name") ?? "", cmd, str(a, "base") ?? "", n, { model: str(a, "model"), effort: str(a, "effort") });
       const failed = th.panes.filter((p) => p.dead);
       if (failed.length) throw new Error(`Opened ${th.name}, but ${failed.map(paneName).join(", ")} didn't start. The pane shows why.`);
       return { data: threadData(th), text: `${th.name} (${th.id}) in ${th.dir}`, note: `loomctl opened ${th.name}` };
@@ -7977,7 +7993,7 @@ const CLI: Record<string, CliCommand> = {
       if (th.open === false) th.open = undefined; // the pane you add is one you want to see
       th.tab = null;
       show(th);
-      const p = await th.addPane({ cmd });
+      const p = await th.addPane({ cmd, startupSettings: { model: str(a, "model"), effort: str(a, "effort") } });
       if (!p) throw new Error(`Loom didn't start the pane in ${th.name}.`);
       revealPane(p);
       save();
@@ -8880,6 +8896,7 @@ async function main() {
   // appended since last time, so an idle pane costs a metadata() call.
   let usagePoll: Promise<void> | undefined;
   const pollUsage = () => usagePoll ??= (async () => {
+    await pollProviderUsage();
     const panes = threads.flatMap((t) => t.panes).filter((p) => p.isClaude);
     if (!panes.length) return;
     const got = await invoke<Record<string, Usage>>("session_usage", {

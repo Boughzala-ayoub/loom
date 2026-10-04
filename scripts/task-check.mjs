@@ -182,6 +182,7 @@ const setup = () => {
     if (cmd === 'session_usage' || cmd === 'last_messages') return {};
     if (cmd === 'has_session' || cmd === 'pane_booted' || cmd === 'has_codex_session') return true;
     if (cmd === 'git_run') return args.args.includes('--show-toplevel') ? args.dir : args.args[0] === 'rev-parse' ? 'main' : '';
+    if (cmd === 'codex_session_usage') return {};
     if (cmd === 'plan_usage' || cmd === 'codex_plan_usage') throw new Error('not in this check');
   }, { shouldMockEvents: true });
 };

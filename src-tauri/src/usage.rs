@@ -339,6 +339,40 @@ pub fn session_usage(
     out
 }
 
+/// Read only the selected Codex session, never the newest unrelated rollout.
+pub fn codex_session(path: &Path, sid: &str) -> Option<Usage> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(file.take(64 * 1024)).read_line(&mut first).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&first).ok()?;
+    if meta["type"] != "session_meta" || meta["payload"]["id"].as_str() != Some(sid)
+        || meta["payload"]["source"].is_object() { return None; }
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(256 * 1024))).ok()?;
+    let mut bytes = Vec::new();
+    file.take(256 * 1024).read_to_end(&mut bytes).ok()?;
+    let tail = String::from_utf8_lossy(&bytes);
+    let mut usage = Usage { sid: sid.into(), ..Usage::default() };
+    for line in tail.lines() {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let p = &row["payload"];
+        if row["type"] == "turn_context" {
+            if let Some(model) = p["model"].as_str().filter(|s| s.len() <= 160) { usage.model = model.into(); }
+            if let Some(effort) = p["effort"].as_str().or_else(|| p["reasoning_effort"].as_str()).filter(|s| s.len() <= 32) { usage.effort = effort.into(); }
+        }
+        if row["type"] == "event_msg" && p["type"] == "token_count" {
+            let info = &p["info"];
+            // last_token_usage is the current request, total_token_usage is cumulative.
+            if let (Some(ctx), Some(window)) = (info["last_token_usage"]["total_tokens"].as_u64(), info["model_context_window"].as_u64()) {
+                usage.ctx = ctx;
+                usage.window = window;
+            }
+        }
+    }
+    Some(usage)
+}
+
 // --- context profile ------------------------------------------------------
 // The gauge says how full the window is; this says what filled it. A separate
 // read from `scan` on purpose: that one skips every line without "usage", which
@@ -966,6 +1000,23 @@ mod tests {
     use super::{live_status, plan_from_status, profile_of, scan, slug, transcript, Usage};
     use std::io::Write;
 
+
+    #[test]
+    fn codex_session_settings_use_selected_session_and_current_context() {
+        let path = std::env::temp_dir().join(format!("loom-codex-usage-{}.jsonl", std::process::id()));
+        let rows = [
+            serde_json::json!({"type":"session_meta","payload":{"id":"selected","source":"cli"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-test","effort":"xhigh"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{
+                "last_token_usage":{"total_tokens":12000},"total_token_usage":{"total_tokens":900000},
+                "model_context_window":100000}}}),
+        ];
+        std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        assert!(super::codex_session(&path, "other").is_none());
+        let u = super::codex_session(&path, "selected").unwrap();
+        assert_eq!((u.model.as_str(), u.effort.as_str(), u.ctx, u.window), ("gpt-test", "xhigh", 12000, 100000));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn usage_errors_never_echo_credentials() {
