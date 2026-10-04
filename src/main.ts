@@ -3715,7 +3715,7 @@ const typedTasks = () => [...tasks.values()].filter((t) => t.events.length);
  * task has no events yet, so its line goes in after them (the first version
  * left it out and still answered `saved: true`). */
 function journal(lines: object[], ids: string[]): Promise<void> {
-  if (journalUnreadable) {
+  if (!journalLoaded || journalUnreadable) {
     ids.forEach((id) => unsaved.add(id));
     return Promise.reject(new Error(journalUnavailable()));
   }
@@ -4035,7 +4035,7 @@ const currentNotify = (): Omit<NotifySnapshot, "at"> => {
   const kept = new Set([...tasks.values()].map((t) => t.pane));
   return {
     on: notifyPolicy.on, kinds: { ...notifyPolicy.kinds },
-    owners: Object.fromEntries(Object.entries(notifyOwners).filter(([id]) => kept.has(id))),
+    ...(journalLoaded ? { owners: Object.fromEntries(Object.entries(notifyOwners).filter(([id]) => kept.has(id))) } : {}),
     panes: {
       ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => kept.has(id) && !live.some((p) => p.notifyIds.includes(id)))),
       ...Object.fromEntries(live.filter((p) => p.notify !== "inherit").flatMap((p) => p.notifyIds.map((id) => [id, p.notify as "on" | "off"]))),
@@ -4259,9 +4259,12 @@ function sweepTasks() {
  * refuses, since it can't find an earlier task's --key, and nothing rewrites
  * the file. */
 let journalUnreadable = "";
-const journalUnavailable = () => `Task history is unavailable because Loom couldn't read its journal (${journalUnreadable}). Fix or move the file and restart Loom. Durable tracking and policy changes are unavailable until then.`;
+let journalLoaded = false;
+const journalUnavailable = () => journalUnreadable
+  ? `Task history is unavailable because Loom couldn't read its journal (${journalUnreadable}). Fix or move the file and restart Loom. Durable tracking and policy changes are unavailable until then.`
+  : "Task history is still loading. Retry after startup finishes. Durable tracking and policy changes are unavailable until then.";
 function requireJournal() {
-  if (journalUnreadable) throw new Error(journalUnavailable());
+  if (!journalLoaded || journalUnreadable) throw new Error(journalUnavailable());
 }
 const notifyError = (error: unknown) => toast(error instanceof Error ? error.message : String(error));
 /** The journal read back at start. Tasks still open belonged to processes
@@ -4284,11 +4287,14 @@ async function loadTasks() {
   // Numbering goes on from the journal: no watcher saw an event it doesn't hold (writtenSeq).
   taskSeq = writtenSeq = Math.max(taskSeq, got.seq);
   taskPruned = Math.max(taskPruned, got.pruned);
-  if (!text && !got.tasks.size) return;
+  if (!text && !got.tasks.size) { journalLoaded = true; return; }
   for (const t of got.tasks.values()) (tasks.set(t.id, t), unsaved.add(t.id)); // the first write is the whole journal
   if (lastPolicy?.owners === undefined) {
     const linked = new Set(threads.flatMap((t) => t.panes.flatMap((p) => p.notifyIds)));
     for (const t of got.tasks.values()) if (!linked.has(t.pane)) notifyOwners[t.pane] = "held";
+  }
+  journalLoaded = true; // Classification is complete, even for a journal with no owners.
+  if (lastPolicy?.owners === undefined) {
     // Persist the migration before any restart event. A hold never guesses
     // which live pane, if any, owns a legacy task's reused reference.
     void recordNotify().catch(notifyError);

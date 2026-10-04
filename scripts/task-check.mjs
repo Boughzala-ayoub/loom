@@ -65,6 +65,9 @@ const setup = () => {
     // refused (a full disk) or held (still in flight when Loom "crashes").
     if (cmd === 'task_journal_read') {
       if (localStorage.getItem('qa-journal-unreadable')) throw new Error('Test: access is denied');
+      if (localStorage.getItem('qa-journal-read-hold')) return new Promise((resolve) => {
+        qa.releaseRead = () => resolve(localStorage.getItem('qa-journal') ?? '');
+      });
       return localStorage.getItem('qa-journal') ?? '';
     }
     if (cmd === 'task_journal_write') {
@@ -309,6 +312,35 @@ try {
     assert.equal((await cli('notify', '--check', String(closed))).data[closed], true);
     await page.evaluate(() => localStorage.removeItem('qa-use-state'));
     ok('Restored-pane mutes reach historical notices across two restarts and leave closed panes independent');
+  }
+
+  if (review('policy-startup')) {
+    await resetReview();
+    const sent = await cli('submit', 'work:1', 'legacy completion before startup');
+    await report(claude, { kind: 'start', match: promptMatch('legacy completion before startup') });
+    await stops(claude);
+    const seq = (await until(sent.text, 'completed')).events.at(-1).seq, owner = claude;
+    await page.evaluate(() => {
+      const lines = localStorage.getItem('qa-journal').trim().split('\n').map(JSON.parse);
+      for (const line of lines) if (line.notify) delete line.notify.owners;
+      localStorage.setItem('qa-journal', lines.map(JSON.stringify).join('\n') + '\n');
+      localStorage.setItem('qa-journal-read-hold', '1');
+    });
+    await page.goto(base);
+    await page.waitForFunction(() => !!window.qa.releaseRead);
+    await page.locator('.pane .notify').first().evaluate((button) => button.click());
+    await page.getByText('Off for this pane', { exact: false }).evaluate((label) => label.click());
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length), 0,
+      'Pending history must block policy writes before publishing the migration marker');
+    await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+    assert.equal((await cli('notify', '--check', String(seq))).data[seq], false);
+    assert.ok((await cli('notify')).data.unresolved.some((r) => r.owner === owner));
+    assert.equal((await cli('notify', 'work:1', 'off')).ok, true, 'The same policy command works after classification');
+    await reboot();
+    assert.equal((await cli('notify', '--check', String(seq))).data[seq], false);
+    ok('Pending startup history cannot publish an empty migration marker or release a legacy notice');
   }
 
   if (review('legacy-owners')) {
@@ -2546,6 +2578,9 @@ try {
   assert.deepEqual(errors, []);
   console.log(`submit round trips (ms): ${timing.join(', ')}`);
   console.log(`\nall ${checks} task checks passed`);
+} catch (error) {
+  console.error(error);
+  throw error;
 } finally {
   await browser.close();
 }
