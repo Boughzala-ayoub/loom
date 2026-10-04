@@ -98,6 +98,8 @@ const setup = () => {
       if (data.startsWith('\x1b[200~')) {
         if (!qa.noEcho) a.input += data.slice(6, -6);
         if (qa.unseenPaste) return; // in the input, not on screen yet: the echo check misses it
+        // Drawn a while later, nothing drawn before: Codex 0.160 went quiet 0.4 s partway through a long paste.
+        if (qa.drawLate) return void setTimeout(() => qa.draw(args.id), qa.drawLate);
       }
       else if (data === '\r') { if (a.input) { qa.prompts.push([args.id, a.input]); a.input = ''; a.busy = !qa.idleAfterEnter; } }
       else if (data === '\x1b') { if (!qa.ignoreEsc) a.busy = false; }
@@ -1238,6 +1240,31 @@ try {
     ok("Claude 2.1.288's working line, with no esc hint, keeps its task working past a Stop and 30 s; it completes once gone");
   }
 
+  // A paste the agent draws late (seen live 2026-10-04: a 964- and an 1145-byte submit to Codex 0.160 and Claude
+  // Code held their Enter as not shown, the text on screen a moment later). Codex drew a long paste in stages, quiet
+  // for 0.4 s partway, past a settle's 150 ms: Loom waits for the echo rather than reading the screen once.
+  {
+    const long = 'Review the change and report each defect with its file and line. '.repeat(18).trim(); // 1,151 bytes
+    // Codex's leg is on several lines, which its composer collapses to [Pasted Content N chars], as Codex did
+    // for long pastes when probed; one long line would wrap, and the mock doesn't indent wrapped rows as Codex does.
+    for (const [pane, ref, shape, text] of [[claude, 'work:1', {}, long], [codex, 'work:2', { codexShape: true }, long.replaceAll('. ', '.\n')]]) {
+      await agent(pane, { busy: false, input: '', ...shape });
+      await qa({ drawLate: 600 });
+      const r = await cli('submit', ref, text);
+      await qa({ drawLate: 0 });
+      assert.equal(r.ok, true, `${ref}: ${JSON.stringify(r)}`);
+      const t = await state(r.text);
+      assert.deepEqual([t.state, t.uncertain ?? null], ['submitted', null], JSON.stringify(t));
+      assert.equal((await prompts(pane)).at(-1), text, 'Its Enter went in');
+      // Its turn, as the agent reports it.
+      if (pane === claude) await report(pane, { kind: 'start', match: promptMatch(text) }), await stops(pane);
+      else await agent(pane, { busy: false }), await report(pane, { kind: 'end', matches: [promptMatch(text)], turn: 'late-draw', response: promptMatch('Done.') });
+      await until(r.text, 'completed');
+      await agent(pane, { busy: false, input: '', codexShape: false });
+    }
+    ok('A paste the agent draws late, past a settle\'s quiet, is still submitted once it shows (Claude Code and Codex)');
+  }
+
   // A held Enter pressed later for its task (the 2026-10-02 pane case): the same task goes on to completed.
   {
     await agent(claude, { busy: false, input: '' });
@@ -1344,11 +1371,12 @@ try {
     const t = held.task;
     let r = (await cli('receipt', t)).data;
     assert.deepEqual([r.outcome, r.held, r.wrote.stage], ['pending', true, 'typed'], JSON.stringify(r));
-    // 510 later receipts that settle at once: sends to two other panes whose text never shows, so Enter is held
-    // and, with no task to wait for, each ends unsent. Sent from the page in one go; they take turns per pane.
+    // 510 later receipts that settle at once: sends to two other panes whose paste write fails, so each ends
+    // unsent. (A paste that never shows would settle too, but only after sendReply's 5 s wait for its echo.) Sent
+    // from the page in one go; they take turns per pane.
     await agent(codex, { busy: false, input: '' });
     await agent(claude3, { busy: false, input: '' });
-    await qa({ noEcho: true });
+    await qa({ failWriteIf: "fn:return d.includes('filler ')" });
     const tokens = await page.evaluate(async ([refs, n]) => {
       const ids = [];
       for (let i = 0; i < n; i++) {
@@ -1364,8 +1392,8 @@ try {
       }
       return null;
     }, [['work:2', 'work:3'], 510]);
-    await qa({ noEcho: false });
-    assert.equal(tokens?.filter(Boolean).length, 510, 'Every filler send typed and was held');
+    await qa({ failWriteIf: null });
+    assert.equal(tokens?.filter(Boolean).length, 510, 'Every filler send settled with a receipt');
     assert.equal((await cli('receipt', tokens[0])).ok, false, 'The oldest filler was pruned: the settled history is full');
     r = (await cli('receipt', t)).data;
     assert.deepEqual([r.outcome, r.held, r.wrote.stage], ['pending', true, 'typed'], `Still there, still pending: ${JSON.stringify(r)}`);

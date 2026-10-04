@@ -602,7 +602,9 @@ Without `--key`, the failure tells you how far it got:
 
 A failure carries the task's id as `task` once the task was recorded.
 
-When the text didn't show, Loom's paste was all that went into the pane, so
+Loom waits up to 5 seconds for the text to show: an agent may draw a long
+paste in stages, quiet partway (Codex did for 0.4 s on its first input after
+starting). When the text didn't show, Loom's paste was all that went into the pane, so
 the text may be sitting in the input, alone. The task stays open, `accepted`
 with `uncertain: "enter"`. `loomctl read` the pane, and if the text is there,
 `loomctl keys <pane> enter --task <id>` presses its Enter for it: the task

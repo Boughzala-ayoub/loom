@@ -3542,6 +3542,9 @@ function inTurn<T>(p: Pane, sequence: (live: (typed: boolean) => void) => Promis
 }
 
 const paste = (p: Pane, text: string) => (p.term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+/** How long a paste may take to show before sendReply holds its Enter: three
+ * times the slowest draw probed (Codex 0.160, 6,000 characters, 1.6 s). */
+const ECHO_WAIT_MS = 5000;
 
 /** The text didn't show on screen, so Enter wasn't pressed (sendReply). */
 class NotShown extends NotSubmitted {}
@@ -3576,14 +3579,21 @@ function sendReply(p: Pane, text: string, { gen, beforePaste, check, beforeEnter
     steps.typing = Date.now();
     await keys(p, paste(p, text));
     steps.typed = Date.now();
-    await p.settle(150, 1000);
-    live(true);
-    // Other input first: a NotShown means Loom's paste is all that went in (a held task's Enter, sendText).
-    if (p.inputSeq !== own) {
-      throw new NotSubmitted(`Something else was typed into ${p.agent} while Loom was pasting, so it didn't press Enter: its input holds both. Open the session and check it before sending anything.`, true);
-    }
-    if (!echoed(before, echoes(liveScreen(p), text))) {
-      throw new NotShown(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
+    // The echo is waited for, not read once: an agent can go quiet partway
+    // through drawing a paste, longer than a settle's 150 ms (Codex 0.160 did
+    // for 0.4 s on its first input after starting; its 6,000-character paste
+    // took 1.6 s in all).
+    for (const until = Date.now() + ECHO_WAIT_MS; ; ) {
+      await p.settle(150, 1000);
+      live(true);
+      // Other input first: a NotShown means Loom's paste is all that went in (a held task's Enter, sendText).
+      if (p.inputSeq !== own) {
+        throw new NotSubmitted(`Something else was typed into ${p.agent} while Loom was pasting, so it didn't press Enter: its input holds both. Open the session and check it before sending anything.`, true);
+      }
+      if (echoed(before, echoes(liveScreen(p), text))) break;
+      if (Date.now() >= until) {
+        throw new NotShown(`${p.agent} didn't show your text, so Loom didn't press Enter. It may be typed there already: open the session before sending it again.`, true);
+      }
     }
     beforeEnter?.();
     steps.entering = Date.now();
