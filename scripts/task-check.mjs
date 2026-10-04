@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -739,6 +739,41 @@ try {
     ok('Ordinary sends match the complete Claude and Codex draft, keep receipt metadata and report unreadable correlation');
   }
 
+  // Review 2026-10-04 13:46 F2: the v3 bridge stops for good on a missing number that watch calls no gap.
+  if (review('reserve-hole')) {
+    await resetReview();
+    const finish = async (text) => {
+      await agent(claude, { busy: false, input: '' });
+      const sent = await cli('submit', 'work:1', text);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      await report(claude, { kind: 'start', match: promptMatch(text) });
+      await stops(claude);
+      await until(sent.text, 'completed');
+      return sent.text;
+    };
+    await finish('before a refused reservation');
+    const pasted = await pastes(claude);
+    await qa({ journalFail: true });
+    const refused = await call('submit', ['work:1', 'a refused reservation'], null, 'reserve-hole');
+    await qa({ journalFail: false });
+    assert.deepEqual([refused.ok, refused.typed, await pastes(claude)], [false, false, pasted], `Nothing typed: ${JSON.stringify(refused)}`);
+    await finish('after a refused reservation');
+    const contiguous = async (label) => {
+      const batch = (await cli('watch', '--after', '0', '--metadata', '--policy')).data;
+      assert.deepEqual([batch.gap, batch.next, batch.events.map((e) => e.seq)], [false, batch.last, Array.from({ length: batch.last }, (_, i) => i + 1)], `${label}: every number up to last is an event`);
+      assert.deepEqual(Object.keys(batch).sort(), ['done', 'events', 'gap', 'last', 'next', 'source']);
+      for (const e of batch.events) assert.deepEqual(Object.keys(e).sort(), ['at', 'generation', 'notify', 'pane', 'response', 'seq', 'source', 'state', 'task']);
+      return batch;
+    };
+    const batch = await contiguous('Before a restart');
+    assert.deepEqual(batch.events.filter((e) => ['completed', 'failed', 'approval'].includes(e.state)).map((e) => e.notify), [true, true], 'The refused task adds no notice');
+    await reboot();
+    await contiguous('After a restart');
+    const retry = await call('submit', ['work:1', 'a refused reservation'], null, 'reserve-hole');
+    assert.deepEqual([retry.ok, retry.replayed, await pastes(claude)], [true, undefined, 1], `A --key retry types the refused task: ${JSON.stringify(retry)}`);
+    ok('A refused reservation leaves no hole in the event numbers, and a --key retry still types it');
+  }
+
   // Start the older cases with the same empty journal and settings as before.
   await page.evaluate(() => { localStorage.clear(); });
   await reboot();
@@ -1408,9 +1443,12 @@ try {
     await qa({ journalFail: true });
     const refused = await cli('submit', 'work:1', 'the journal is full');
     await qa({ journalFail: false });
-    assert.deepEqual([refused.ok, refused.typed, refused.task], [false, false, undefined], JSON.stringify(refused));
+    assert.deepEqual([refused.ok, refused.typed], [false, false], JSON.stringify(refused));
     assert.match(refused.error, /journal/);
-    assert.deepEqual([await pastes(claude), (await cli('tasks')).data.length], [pasted + 1, listed], 'Nothing typed, no task');
+    assert.deepEqual([await pastes(claude), (await cli('tasks')).data.length], [pasted + 1, listed + 1], 'Nothing typed');
+    // Its event number is spent, so the task stays to fill it (review 2026-10-04 13:46, F2).
+    const kept = await state(refused.task);
+    assert.deepEqual([kept.state, kept.reason, kept.key, kept.events.map((e) => e.state)], ['cancelled', 'not-recorded', null, ['accepted', 'cancelled']]);
     // The Enter's own record failing: the task went in, says the journal is behind, and the next write catches up.
     // Recovery may snapshot older submitted tasks while reserving this one.
     // Fail only its new submitted event, not those retained task snapshots.

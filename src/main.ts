@@ -3668,7 +3668,7 @@ function turnReceipts(p: Pane) {
 /** loomctl submit's tasks (task.ts), oldest first. A task's id is also its
  * receipt's token, which a shell's command line carries. One with no events
  * is still being checked, before its reservation is written: if its send
- * stops there, it never existed. */
+ * stops before that write, it never existed. */
 const tasks = new Map<string, Task>();
 /** The last event's number. The journal carries it across restarts, so a
  * watcher's place stays good. */
@@ -3767,16 +3767,22 @@ const record = (t: Task) => ({ ...taskRecord(t), saved: !unsaved.has(t.id) });
 /** The task's first record, written before Loom types anything, so a crash
  * after the Enter still leaves its key in the journal and a retry finds the
  * task instead of typing it again. A journal that can't take it stops the
- * send with nothing typed. Runs in the pane's input turn, before the last
- * synchronous checks (sendReply), so input arriving meanwhile still stops it. */
+ * send with nothing typed, and the task ends cancelled. Runs in the pane's
+ * input turn, before the last synchronous checks (sendReply), so input
+ * arriving meanwhile still stops it. */
 async function reserveTask(t: Task) {
   requireJournal();
   const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at: Date.now(), state: "accepted", signal: "loomctl" };
   try {
     await journal([{ task: { ...t, events: [accepted] } }], [t.id]);
   } catch (e) {
-    tasks.delete(t.id);
-    unsaved.delete(t.id);
+    // Its number is spent, and a reader stops at a missing number that isn't
+    // a gap (review 2026-10-04 13:46, F2). So the task stays, cancelled, and
+    // the next write, whole since this one failed, carries both events. Its
+    // key goes: nothing was typed, so a retry types it.
+    t.key = null;
+    t.events.push(accepted);
+    moveTask(t, { state: "cancelled", signal: "loomctl", reason: "not-recorded" });
     throw new NotSubmitted(`Loom couldn't record the task in its journal (${e instanceof Error ? e.message : String(e)}), so it typed nothing.`, false);
   }
   t.events.push(accepted);
