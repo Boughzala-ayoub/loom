@@ -8001,7 +8001,7 @@ const CLI: Record<string, CliCommand> = {
   },
   keys: {
     usage: "keys <pane> <key...> [--gen N] [--task ID]",
-    help: "Press keys in a pane: enter, esc, tab, shift-tab, up, down, left, right, backspace, ctrl-c, or a single character. --gen N refuses a pane that restarted since. A lone enter on a pane where submit typed a task's text but held back its Enter, with nothing written there since, is that task's Enter: the task goes on from there. --task ID insists on it, and presses nothing if it can't be.",
+    help: "Press keys in a pane: enter, esc, tab, shift-tab, up, down, left, right, backspace, ctrl-c, ctrl-u, or a single character. ctrl-u clears input before the cursor in agents that support it; use read to check the draft afterward. It sends no Enter. --gen N refuses a pane that restarted since. A lone enter on a pane where submit typed a task's text but held back its Enter, with nothing written there since, is that task's Enter: the task goes on from there. --task ID insists on it, and presses nothing if it can't be.",
     options: { gen: "int", task: "string" },
     run: async (a) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));

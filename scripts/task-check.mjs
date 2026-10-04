@@ -290,6 +290,15 @@ try {
     assert.equal(waited.data.state, 'completed');
     ok('Claude original task completes after extra sends, background prompts, Stop and survey dismissal');
   }
+  if (review('clear-draft')) {
+    await resetReview();
+    await agent(claude, { input: 'a draft to discard', busy: false });
+    const before = (await cli('tasks')).data.length;
+    assert.equal((await cli('keys', 'work:1', 'ctrl-u')).ok, true);
+    assert.equal((await cli('read', 'work:1')).data.input.kind, 'empty');
+    assert.equal((await cli('tasks')).data.length, before, 'Clearing does not submit a turn');
+    ok('keys ctrl-u clears a draft without Enter or a task');
+  }
   if (review('unreadable')) {
     const old = await cli('submit', 'work:1', 'keep this history');
     await report(claude, { kind: 'start', match: promptMatch('keep this history') });

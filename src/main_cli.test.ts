@@ -29,6 +29,11 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(9)) {
+  assert.equal(cli.keyBytes("ctrl-u", false), "\x15");
+  assert.match(fixture().keys.help, /ctrl-u/);
+  console.log("ok   keys documents the existing ctrl-u draft-clear key");
+}
 if (check(8)) {
   let command = "";
   const th = { panes: [], addPane: async ({ cmd }: { cmd: string }) => { command = cmd; return { id: "p", th, agent: "codex" }; } };
