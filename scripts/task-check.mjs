@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-pending|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -70,7 +70,11 @@ const setup = () => {
     if (cmd === 'task_journal_write') {
       if (qa.journalFail || localStorage.getItem('qa-journal-write-fail') || qa.journalFailIf?.(args.text)) throw new Error('Test: the disk is full');
       const write = () => localStorage.setItem('qa-journal', (args.append ? localStorage.getItem('qa-journal') ?? '' : '') + args.text);
-      if (qa.journalHold?.(args.text)) return new Promise((resolve) => qa.journalHeld.push(() => (write(), resolve())));
+      if (qa.journalHold?.(args.text)) return new Promise((resolve, reject) => {
+        const release = () => (write(), resolve());
+        release.reject = reject;
+        qa.journalHeld.push(release);
+      });
       return void write();
     }
     if (cmd === 'pty_spawn') {
@@ -369,6 +373,40 @@ try {
     assert.equal(await check(restored.seq), false);
     assert.equal((await cli('notify', '--resolve-owner', restored.owner, 'release')).ok, false, 'A resolved mute cannot resurrect old notices');
     ok('Legacy unlinked owners are held, exposed and independently resolved without guessing from reused pane refs');
+  }
+
+  if (review('policy-pending')) {
+    for (const succeed of [false, true]) {
+      await resetReview();
+      const sent = await cli('submit', 'work:1', 'queued before concurrent mute');
+      await report(claude, { kind: 'start', match: promptMatch('queued before concurrent mute') });
+      await stops(claude);
+      const seq = (await until(sent.text, 'completed')).events.at(-1).seq;
+      const writes = await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length);
+      await qa({ journalHold: 'fn:return d.includes("\\"notify\\"")' });
+      const first = cli('notify', '--all', 'off');
+      await page.waitForFunction(() => window.qa.journalHeld.length === 1);
+      let secondDone = false;
+      const second = cli('notify', '--all', 'off').then((r) => { secondDone = true; return r; });
+      await page.waitForTimeout(200);
+      const premature = secondDone;
+      await qa({ journalHold: null });
+      await page.evaluate((succeed) => {
+        const held = window.qa.journalHeld.shift();
+        if (succeed) held(); else held.reject(new Error('Test: held policy write failed'));
+      }, succeed);
+      const replies = await Promise.all([first, second]);
+      assert.equal(premature, false, 'An identical policy request must wait for the outstanding persistence result');
+      assert.deepEqual(replies.map((r) => r.ok), [succeed, succeed], JSON.stringify(replies));
+      assert.equal(await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length), writes + 1, 'Both requests share the same write');
+      if (!succeed) {
+        assert.ok(replies.every((r) => /not saved/.test(r.error)));
+        assert.equal((await cli('notify', '--all', 'off')).ok, true, 'Retry after observed failure repairs the policy');
+      }
+      await reboot();
+      assert.equal((await cli('notify', '--check', String(seq))).data[seq], false, 'Acknowledged mute survives replay');
+    }
+    ok('Identical policy requests await one outstanding write and share its success or failure; failed writes remain retryable');
   }
 
   if (review('manual-mismatch')) {

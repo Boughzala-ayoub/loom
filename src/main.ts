@@ -4025,6 +4025,8 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
 /** The notification policy's history as the journal keeps it (task.ts notifies), oldest first. */
 let notifyHistory: NotifySnapshot[] = [];
 let notifyOwners: NonNullable<NotifySnapshot["owners"]> = {};
+/** The current snapshot's outstanding write, including its rejection. */
+let notifyWrite: Promise<void> | undefined;
 /** The policy as it stands, including each restored pane's historical ids.
  * Closed panes keep their last setting while their tasks remain. A new pane
  * at the same ref has no aliases to the closed one. */
@@ -4046,12 +4048,17 @@ async function recordNotify() {
   requireJournal();
   const now = currentNotify(), last = notifyHistory[notifyHistory.length - 1];
   const same = sameNotify(last ?? DEFAULT_NOTIFY, now);
+  if (same && notifyWrite) return notifyWrite;
   if (same && !journalDirty) return;
   if (!same) notifyHistory.push({ at: taskSeq, ...now });
-  try {
-    await journal([{ notify: now, at: taskSeq }], []);
-  } catch (e) {
+  const write = journal([{ notify: now, at: taskSeq }], []).catch((e) => {
     throw new Error(`Notification policy changed in memory but was not saved to the task journal (${e instanceof Error ? e.message : String(e)}). Retry the change to save it.`);
+  });
+  notifyWrite = write;
+  try {
+    await write;
+  } finally {
+    if (notifyWrite === write) notifyWrite = undefined;
   }
 }
 /** Every pane's setting changed (on, kinds, what new panes start with). */
