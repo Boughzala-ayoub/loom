@@ -7719,15 +7719,21 @@ function taskStates(value: string, what: string): TaskState[] {
 
 /** wait --task: until the task is in one of `until`'s states or finished;
  * by default until it finishes or asks for approval. */
-async function waitTask(t: Task, upTo: string | undefined, seconds: number) {
+async function waitTask(t: Task, upTo: string | undefined, seconds: number, orIdle = false) {
   const want = upTo === undefined ? (["approval"] as TaskState[]) : taskStates(upTo, "--until");
+  const ended = () => isFinal(t.state) || want.includes(t.state);
+  const idle = () => {
+    const p = paneById(t.pane);
+    return !!p && p.generation === t.gen && ["idle", "waiting"].includes(cliState(p));
+  };
   try {
-    await until(() => isFinal(t.state) || want.includes(t.state), seconds, `task ${t.id}`);
+    await until(() => ended() || (orIdle && idle()), seconds, `task ${t.id}`);
   } catch (e) {
     if (e instanceof CliTimeout) e.details = { task: t.id, state: t.state };
     throw e;
   }
-  return { data: record(t), text: taskText(t) };
+  const waitReason = ended() ? "task" : "pane-idle";
+  return { data: { ...record(t), ...(orIdle ? { waitReason } : {}) }, text: taskText(t) + (waitReason === "pane-idle" ? " (pane idle; task outcome unchanged)" : "") };
 }
 
 function openClose(word: string | undefined, now: boolean, what: string) {
@@ -8055,12 +8061,13 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   wait: {
-    usage: "wait [pane] [--state waiting] [--turn-after N [--gen N]] [--receipt R] [--task ID [--until S]] [--timeout S]",
-    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting. --turn-after N: until an agent finishes turn N+1 (turns in loomctl panes). --receipt R: until the command or turn behind send --receipt's token finishes. --task ID: until a task from submit finishes or asks for approval, or reaches a state --until names (several with commas).",
-    options: { state: "string", "turn-after": "int", gen: "int", receipt: "string", task: "string", until: "string" },
+    usage: "wait [pane] [--state waiting] [--turn-after N [--gen N]] [--receipt R] [--task ID [--until S] [--or-idle]] [--timeout S]",
+    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting. --turn-after N: until an agent finishes turn N+1 (turns in loomctl panes). --receipt R: until the command or turn behind send --receipt's token finishes. --task ID: until a task finishes or asks for approval, or reaches --until S. --or-idle also returns when that task's same pane generation is idle or waiting, even if already idle; waitReason is task or pane-idle. It does not settle the task or prove completion.",
+    options: { state: "string", "turn-after": "int", gen: "int", receipt: "string", task: "string", until: "string", "or-idle": "bool" },
     run: async (a, ctx) => {
       const id = str(a, "task");
-      if (id !== undefined) return waitTask(cliTask(id), str(a, "until"), ctx.seconds);
+      if (id !== undefined) return waitTask(cliTask(id), str(a, "until"), ctx.seconds, flag(a, "or-idle"));
+      if (a["or-idle"] !== undefined) throw new Error("--or-idle is for --task.");
       if (a.until !== undefined) throw new Error("--until is for --task.");
       const token = str(a, "receipt");
       if (token !== undefined) return waitReceipt(token, ctx.seconds);

@@ -29,6 +29,21 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(11)) {
+  const t = { id: "stuck", pane: "p", gen: 1, ref: "work:1", state: "working", events: [] };
+  const th = { name: "work", panes: [] as any[] };
+  const p = { id: "p", generation: 1, busy: true, th };
+  th.panes.push(p);
+  const c = fixture({ tasks: new Map([[t.id, t]]), paneById: () => p,
+    until: async (ok: () => boolean) => { assert.equal(ok(), false); p.busy = false; assert.equal(ok(), true); } });
+  assert.equal(c.wait.options['or-idle'], "bool");
+  const r = await c.wait.run({ _: [], task: t.id, 'or-idle': true }, { seconds: 1 });
+  assert.equal(r.data.waitReason, "pane-idle");
+  assert.equal(r.data.state, "working");
+  assert.equal(t.events.length, 0);
+  await assert.rejects(c.wait.run({ _: [], 'or-idle': true }, { seconds: 1 }), /--task/);
+  console.log("ok   wait --or-idle returns a separate fallback reason without settling the task");
+}
 if (check(10)) {
   const t = { id: "stuck", pane: "p", ref: "work:1", state: "working", events: [] };
   let moves = 0;

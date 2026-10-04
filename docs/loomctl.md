@@ -1076,3 +1076,5 @@ Task records resolve `ref` from the pane ID each time they are read. After close
 `keys <pane> ctrl-u` sends Ctrl-U without Enter. Agent line editors generally clear input before the cursor; use `read` to verify what remains, especially for multiline drafts. This key was already supported. `send --replace` still refuses drafts.
 
 `task ID --end cancelled` or `task ID --end unknown` settles an open task manually and waits for its journal write. It sends no keys and does not stop the process. The event uses `signal: loomctl` and `reason: operator-cancelled` or `operator-unknown`. Neither outcome sends a completion notice. Repeating the same final outcome is harmless; changing a final outcome is refused. A persistence failure reports `saved: false`; inspect the task before retrying.
+
+`wait --task ID --or-idle` also returns when the task's pane, on the same generation, is idle or waiting. It returns immediately if already idle. JSON adds `waitReason: task` or `pane-idle`. The fallback leaves task state and history unchanged and does not prove completion. A closed or restarted pane does not satisfy this fallback. `--or-idle` requires `--task`.
