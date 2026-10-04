@@ -100,7 +100,7 @@ export function taskContext(raw: unknown): TaskContext {
   const bad = () => (issues.add("invalid-context"), null);
   if (r.issues !== undefined && (!Array.isArray(r.issues) || r.issues.some((i) => !ISSUES.includes(i)))) bad();
   const text = (v: unknown) => (v === null || v === undefined ? null : typeof v === "string" ? v : bad());
-  const threadId = r.threadId == null ? null : typeof r.threadId === "string" && /^[\x21-\x7e]{1,96}$/.test(r.threadId) ? r.threadId : bad();
+  const threadId = r.threadId == null ? null : typeof r.threadId === "string" && /^[\x21-\x7e]{1,96}$/.test(r.threadId) && !PRIVATE.test(r.threadId) ? r.threadId : bad();
   const name = text(r.threadName);
   const threadName = name === null ? null : label(name, issues);
   const paneNumber = r.paneNumber == null ? null : typeof r.paneNumber !== "number" ? bad() : Number.isSafeInteger(r.paneNumber) && r.paneNumber > 0 ? r.paneNumber : (issues.add("missing-number"), null);

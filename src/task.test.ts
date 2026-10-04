@@ -345,6 +345,12 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
 // copies of a task's thread and pane, the labels it lets out, and replay.
 {
   const live = { threadId: "mabc1200-14", threadName: "Loom notification work", paneNumber: 2, paneTitle: "Agent session", capturedAt: 1000, origin: "event" };
+  for (const threadId of ["C:\\private\\customer-repo", "/private/customer-repo", "secret=customer-key", "ghp_abcdefghijklmnopqrstuvwxyz0123"]) {
+    const t = task("private optional context", "completed", { events: [{ seq: 3, task: "t1", at: 3, state: "completed", signal: "end", context: { ...live, threadId, origin: "event", issues: [] } }] });
+    const replay = readJournal(writeJournal([t], 3, 0)).tasks.get(t.id)!;
+    const c = contextRecord(replay, replay.events[0].context);
+    eq("replay strips a private thread ID without losing the event", [replay.events[0].seq, c.threadId, c.threadName, c.issues], [3, null, live.threadName, ["invalid-context"]]);
+  }
   eq("a clean copy keeps every field", taskContext(live), { ...live, issues: [] });
   const name = (threadName: unknown) => { const c = taskContext({ ...live, threadName }); return [c.threadName, c.issues]; };
   eq("escapes, controls, bidi and zero-width characters go, spacing becomes one space", name("\x1b]0;title\x07Fix\tthe\r\nbug\u202e\u200b  now\x1b[31m!\x1b[0m"), ["Fix the bug now!", []]);
