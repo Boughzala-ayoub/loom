@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,7 +51,7 @@ if (!process.env.TASK_REVIEW || ['pruned-owner', 'all'].includes(process.env.TAS
     const captured = { id: event.task, pane: 'old', gen: 1, state: 'completed', settledAt: 1, events: [event] };
     let resume;
     const sandbox = createContext({ ...taskModel, ...cliModel, console,
-      tasks: new Map([[captured.id, captured]]), threads: [], startupNotify: new Map(), notifyPolicy: { ...taskModel.DEFAULT_NOTIFY },
+      tasks: new Map([[captured.id, captured]]), threads: [], startupNotify: new Map(), enterHeld: new Map(), notifyPolicy: { ...taskModel.DEFAULT_NOTIFY },
       notifyOwners: { old: decision }, notifyHistory: [{ at: 1, ...taskModel.DEFAULT_NOTIFY, owners: { old: decision } }],
       journalLoaded: true, journalUnreadable: '', journalDirty: false, notifyWrite: undefined,
       taskSeq: 501, writtenSeq: 501, taskPruned: 0, journal: async () => {}, paintNotifications() {}, save() {},
@@ -96,8 +96,8 @@ const setup = () => {
     // colored), a blank row, its status lines, and the real cursor at the insertion point.
     if (a.codexRaw) return out(id).onmessage(a.codexRaw); // a Codex screen exactly as given
     if (a.codexShape) {
-      const body = !a.input ? '\x1b[2mAsk Codex to do anything\x1b[0m' : a.input.includes('\n') ? `\x1b[36m[Pasted Content ${a.input.length} chars]\x1b[0m` : a.input;
-      const x = !a.input ? 2 : 2 + (a.input.includes('\n') ? `[Pasted Content ${a.input.length} chars]` : a.input).length;
+      const body = !a.input ? '\x1b[2mAsk Codex to do anything\x1b[0m' : /[\r\n]/.test(a.input) ? `\x1b[36m[Pasted Content ${a.input.length} chars]\x1b[0m` : a.input;
+      const x = !a.input ? 2 : 2 + (/[\r\n]/.test(a.input) ? `[Pasted Content ${a.input.length} chars]` : a.input).length;
       return out(id).onmessage(`\x1b[2J\x1b[H• Ran the tests\r\n\r\n\x1b[1m›\x1b[0m ${body}\r\n\r\n  gpt-5 high · ~\\work\r\n  ${a.busy ? 'esc to interrupt' : '? for shortcuts'}\x1b[3;${x + 1}H\x1b[?25${a.hidden ? 'l' : 'h'}`);
     }
     const top = a.menu ? ` ${a.menu}\r\n ❯ 1. Yes\r\n   2. No (esc)` : ' Agent';
@@ -170,6 +170,7 @@ const setup = () => {
       else if (!a.menu && !data.startsWith('\x1b')) a.input += data;
       qa.draw(args.id);
       if (lost) throw new Error('Test: the terminal took it, and its answer was lost');
+      if (qa.holdReplyIf?.(data)) return new Promise((resolve, reject) => qa.heldWrites.push({ resolve, reject }));
       return;
     }
     if (cmd === 'plugin:window|is_focused') return true;
@@ -876,8 +877,8 @@ try {
     ok(`Saved inherit replaces a stale legacy override after failed writes, with the startup pane ${close ? 'closed' : 'live'}`);
   }
 
-  // Review 2026-10-04 15:13 R1: a completed startup turn keeps its closed pane's override.
-  for (const own of ['off', 'on']) if (review('startup-closed') || review(`startup-closed-${own}`)) {
+  // Review 2026-10-04 15:13 R1 and 16:36 F2: keep closed-pane policy through replay and Enter-held adoption.
+  for (const held of [false, true]) for (const own of ['off', 'on']) if (review(held ? 'startup-held' : 'startup-closed') || review(`${held ? 'startup-held' : 'startup-closed'}-${own}`)) {
     for (const recover of [false, true]) {
       await resetReview();
       await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b']] });
@@ -899,14 +900,24 @@ try {
       const earlyPane = await page.locator('.pane').nth(1).getAttribute('data-id');
       assert.notEqual(earlyPane, oldOwner);
       await page.waitForFunction((id) => !!window.qa.agents[id], earlyPane);
-      const text = `completed before closing a startup pane set ${own}`;
+      const text = `completed before closing a startup pane set ${own}${held ? '\ncollapsed paste awaiting its Enter acknowledgment' : ''}`;
       await agent(earlyPane, { codexShape: true, input: '', busy: false });
-      await page.locator(`.pane[data-id="${earlyPane}"] .xterm-helper-textarea`).focus();
-      await page.keyboard.type(text);
+      const input = page.locator(`.pane[data-id="${earlyPane}"] .xterm-helper-textarea`);
+      await input.focus();
+      if (held) {
+        await input.evaluate((el, text) => {
+          const data = new DataTransfer();
+          data.setData('text/plain', text);
+          el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+        }, text);
+        await qa({ holdReplyIf: "fn:return d === '\\r'" });
+      } else await page.keyboard.type(text);
       await page.waitForTimeout(250);
+      if (held) assert.equal(await page.evaluate((id) => window.qa.agents[id].input.replace(/\r/g, '\n'), earlyPane), text, 'The multiline paste reaches the composer that renders a collapsed placeholder');
       await page.keyboard.press('Enter');
       await page.waitForTimeout(100);
-      assert.ok((await prompts(earlyPane)).includes(text));
+      if (held) await page.waitForFunction(() => window.qa.heldWrites.length === 1);
+      assert.ok((await prompts(earlyPane)).some((t) => promptMatch(t) === promptMatch(text)));
       await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
         event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'closed-startup-policy' }]],
       }), [earlyPane, promptMatch(text)]);
@@ -916,6 +927,13 @@ try {
       if (recover) await qa({ journalHold: 'fn:return true' });
       await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
       await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+      if (held) {
+        assert.equal((await cli('tasks')).data.some((t) => t.pane === earlyPane), false, 'Post-load policy runs before the held report can create its task');
+        await page.evaluate(() => {
+          window.qa.holdReplyIf = null;
+          window.qa.heldWrites.shift().resolve();
+        });
+      }
       const early = (await cli('tasks')).data.find((t) => t.pane === earlyPane && t.source === 'manual');
       assert.ok(early, 'The closed pane retains its completed startup turn');
       const final = await until(early.task, 'completed'), seq = final.events.at(-1).seq;
@@ -936,7 +954,7 @@ try {
         (await cli('notify', '--check', String(n), '--policy-v4')).data[n],
       ];
       const expected = [own === 'on', own === 'on' ? 'send' : 'muted', own === 'on', own === 'on' ? 'send' : 'muted'];
-      assert.deepEqual(await decided(early.task, seq), expected, `Closed startup pane ${own}, recovery ${recover}`);
+      assert.deepEqual(await decided(early.task, seq), expected, `Closed startup pane ${own}, held Enter ${held}, recovery ${recover}`);
       assert.deepEqual(await decided(old.text, oldSeq), expected, 'The saved alias keeps the older completion policy');
       const replay = readJournal(await page.evaluate(() => localStorage.getItem('qa-journal')));
       assert.equal(replay.notify.findLast((p) => p.at === oldSeq).panes[earlyPane], own, 'The runtime owner is in the pre-numbering snapshot');
@@ -948,7 +966,7 @@ try {
       assert.deepEqual(await decided(early.task, seq), expected, 'The closed runtime owner survives another restart');
       assert.deepEqual(await decided(old.text, oldSeq), expected, 'Prior history survives another restart');
       await page.evaluate(() => localStorage.removeItem('qa-use-state'));
-      ok(`Closed startup pane ${own} preserves v3/v4 policy and saved aliases across replay${recover ? ' after a failed write' : ''}`);
+      ok(`Closed startup pane ${own} preserves v3/v4 policy and saved aliases across replay${held ? ' and Enter-held adoption' : ''}${recover ? ' after a failed write' : ''}`);
     }
   }
 

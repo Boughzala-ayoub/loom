@@ -4068,8 +4068,8 @@ let notifyOwners: NonNullable<NotifySnapshot["owners"]> = {};
 /** The current snapshot's outstanding write, including its rejection. */
 let notifyWrite: Promise<void> | undefined;
 /** The policy as it stands, including each restored pane's historical ids.
- * Closed panes keep their last setting while their tasks remain. A new pane
- * at the same ref has no aliases to the closed one. */
+ * Closed panes keep their last setting while their tasks or Enter-held
+ * reports remain. A new pane at the same ref has no aliases to the closed one. */
 const currentNotify = (): Omit<NotifySnapshot, "at"> => {
   const live = threads.flatMap((t) => t.panes), last = notifyHistory[notifyHistory.length - 1];
   const kept = new Set([...tasks.values()].map((t) => t.pane));
@@ -4078,7 +4078,7 @@ const currentNotify = (): Omit<NotifySnapshot, "at"> => {
     ...(journalLoaded ? { owners: Object.fromEntries(Object.entries(notifyOwners).filter(([id]) => kept.has(id))) } : {}),
     panes: {
       // A captured inherit removes an old explicit override, just as a live pane does.
-      ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => kept.has(id) && !startupNotify.has(id) && !live.some((p) => p.notifyIds.includes(id)))),
+      ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => (kept.has(id) || enterHeld.has(id)) && !startupNotify.has(id) && !live.some((p) => p.notifyIds.includes(id)))),
       ...Object.fromEntries([...startupNotify].filter((entry): entry is [string, "on" | "off"] => entry[1] !== "inherit" && !live.some((p) => p.notifyIds.includes(entry[0])))),
       ...Object.fromEntries(live.filter((p) => p.notify !== "inherit").flatMap((p) => p.notifyIds.map((id) => [id, p.notify as "on" | "off"]))),
     },
