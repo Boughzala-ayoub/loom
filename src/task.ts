@@ -357,6 +357,15 @@ export const sameNotify = (a: Omit<NotifySnapshot, "at">, b: Omit<NotifySnapshot
 export const allows = (policy: Omit<NotifySnapshot, "at">, pane: string, kind: NotifyKind) =>
   (policy.panes[pane] ? policy.panes[pane] === "on" : policy.on) && policy.kinds[kind];
 
+/** Pruning can omit an owner from newer snapshots while a watch still holds
+ * its task. Only an explicit decision can change that owner's disposition. */
+export function notifyOwner(pane: string, history: NotifySnapshot[]) {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const decision = history[i].owners?.[pane];
+    if (decision !== undefined) return decision;
+  }
+}
+
 /** Whether an event may be sent on as a notice: its kind allowed by the
  * policy in force when it happened and by every policy since. So turning a
  * pane or kind off also stops its notices not sent yet, and turning it back
@@ -364,7 +373,7 @@ export const allows = (policy: Omit<NotifySnapshot, "at">, pane: string, kind: N
 export function notifies(e: { seq: number; state: TaskState }, pane: string, history: NotifySnapshot[]): boolean {
   const kind = notifyKind(e.state);
   if (!kind) return false;
-  const owner = history[history.length - 1]?.owners?.[pane];
+  const owner = notifyOwner(pane, history);
   if (owner === "held" || owner === "muted") return false;
   let from = history.length;
   while (from > 0 && history[from - 1].at >= e.seq) from--;

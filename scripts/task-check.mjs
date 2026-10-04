@@ -23,6 +23,59 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { isFinal, promptMatch, readJournal } from '../src/task.ts';
+// Capture a task at watch's await, then prune it before the reply resumes.
+// Extract the production functions so this interleaving needs no 500 UI submissions.
+if (!process.env.TASK_REVIEW || ['pruned-owner', 'all'].includes(process.env.TASK_REVIEW)) {
+  const ts = await import('typescript');
+  const { createContext, runInContext } = await import('node:vm');
+  const taskModel = await import('../src/task.ts'), cliModel = await import('../src/cli.ts');
+  const source = ts.createSourceFile('main.ts', readFileSync('src/main.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+  const names = new Set(['currentNotify', 'recordNotify', 'setNotify', 'requireJournal', 'journalUnavailable', 'keepTasks']);
+  const pieces = [];
+  for (const node of source.statements) {
+    if (ts.isFunctionDeclaration(node) && names.has(node.name?.text)) pieces.push(node.getText(source));
+    if (ts.isVariableStatement(node)) for (const decl of node.declarationList.declarations)
+      if (names.has(decl.name.getText(source))) pieces.push(`const ${decl.getText(source)};`);
+  }
+  const visit = (node) => {
+    if (ts.isPropertyAssignment(node) && node.name.getText(source).replaceAll('"', '') === 'watch' && ts.isObjectLiteralExpression(node.initializer)) {
+      const run = node.initializer.properties.find((p) => p.name?.getText(source) === 'run');
+      if (run) pieces.push(`const watch = ${run.initializer.getText(source)};`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const code = ts.transpileModule(pieces.join('\n') + '\nglobalThis.fixture = { watch, keepTasks, setNotify };', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  for (const decision of ['held', 'muted', 'released']) for (const policy of [false, true]) {
+    const event = { seq: 1, task: 'captured', state: 'completed', at: 1 };
+    const captured = { id: event.task, pane: 'old', gen: 1, state: 'completed', settledAt: 1, events: [event] };
+    let resume;
+    const sandbox = createContext({ ...taskModel, ...cliModel, console,
+      tasks: new Map([[captured.id, captured]]), threads: [], notifyPolicy: { ...taskModel.DEFAULT_NOTIFY },
+      notifyOwners: { old: decision }, notifyHistory: [{ at: 1, ...taskModel.DEFAULT_NOTIFY, owners: { old: decision } }],
+      journalLoaded: true, journalUnreadable: '', journalDirty: false, notifyWrite: undefined,
+      taskSeq: 501, writtenSeq: 501, taskPruned: 0, journal: async () => {}, paintNotifications() {}, save() {},
+      cliTask: () => captured, taskEventGate: { waitUntil: () => new Promise((r) => { resume = r; }) },
+    });
+    runInContext(code, sandbox);
+    const reply = sandbox.fixture.watch({ _: [captured.id], after: 0, metadata: true, policy }, { seconds: 5 });
+    for (let seq = 2; seq <= 501; seq++) sandbox.tasks.set(`new-${seq}`, { id: `new-${seq}`, pane: 'new', settledAt: seq, events: [{ seq }] });
+    sandbox.fixture.keepTasks();
+    assert.equal(sandbox.tasks.has(captured.id), false);
+    await sandbox.fixture.setNotify({});
+    assert.equal(sandbox.notifyHistory.at(-1).owners.old, undefined, 'The new snapshot omits the pruned owner');
+    resume();
+    if (!policy && decision !== 'released') await assert.rejects(reply, /holds back/, `v2 must refuse a pruned ${decision} owner`);
+    else {
+      const { data } = await reply;
+      assert.equal(data.gap, true);
+      assert.equal(data.events[0].seq, 1);
+      if (policy) assert.equal(data.events[0].notify, decision === 'released', `v3 must preserve the explicit ${decision} decision after pruning`);
+    }
+  }
+  console.log('ok   Captured v2/v3 watches preserve held, muted and explicitly released owners across pruning');
+  if (process.env.TASK_REVIEW === 'pruned-owner') process.exit(0);
+}
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const base = process.env.RESP_BASE || 'http://localhost:4273';
 assert.equal((await fetch(base)).status, 200, 'The preview must be serving');
