@@ -3673,6 +3673,15 @@ const tasks = new Map<string, Task>();
 /** The last event's number. The journal carries it across restarts, so a
  * watcher's place stays good. */
 let taskSeq = 0;
+/** Input stays usable during startup, but turns and reports cannot allocate
+ * event numbers until replay initializes the journal counter. Keep their
+ * order, timestamps and launch identities while the read is outstanding. */
+let startupTurns: (() => void)[] | undefined = [];
+function finishTaskReplay() {
+  const pending = startupTurns;
+  startupTurns = undefined;
+  pending?.forEach((run) => run());
+}
 /** The highest event number pruned away: a watcher behind it missed some.
  * The journal carries it too, since the tasks kept can't show it. */
 let taskPruned = 0;
@@ -3761,6 +3770,7 @@ const record = (t: Task) => ({ ...taskRecord(t), saved: !unsaved.has(t.id) });
  * send with nothing typed. Runs in the pane's input turn, before the last
  * synchronous checks (sendReply), so input arriving meanwhile still stops it. */
 async function reserveTask(t: Task) {
+  requireJournal();
   const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at: Date.now(), state: "accepted", signal: "loomctl" };
   try {
     await journal([{ task: { ...t, events: [accepted] } }], [t.id]);
@@ -3780,6 +3790,10 @@ async function reserveTask(t: Task) {
  * restart too. A final task stays as it is. Resolves to whether the journal
  * took it. */
 function moveTask(t: Task, c: TaskChange, at = Date.now()): Promise<boolean> {
+  if (startupTurns) return new Promise((resolve) => {
+    const change = { ...c };
+    startupTurns!.push(() => { void moveTask(t, change, at).then(resolve); });
+  });
   if (isFinal(t.state)) return Promise.resolve(true);
   const { state, signal } = c, fields = changeFields(t, c);
   const changed = Object.entries(fields).some(([k, v]) => t[k as keyof Task] !== v);
@@ -3893,17 +3907,24 @@ function turnTask(p: Pane, source: TaskSource, match: string, at: number, more: 
     sha256: "", bytes: 0, match, input: "unknown", state: "accepted", correlation: null, uncertain: null, reason: null, detail: null, exit: null,
     acceptedAt: at, submittedAt: null, startedAt: null, endedAt: null, events: [], ...more,
   };
-  const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at, state: "accepted", signal: source };
-  t.events.push(accepted);
-  tasks.set(t.id, t);
-  void journal([{ task: { ...t, events: [accepted] } }], [t.id]).catch(() => {});
-  sweepSoon();
+  const accept = () => {
+    const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at, state: "accepted", signal: source };
+    t.events.push(accepted);
+    tasks.set(t.id, t);
+    void journal([{ task: { ...t, events: [accepted] } }], [t.id]).catch(() => {});
+    sweepSoon();
+  };
+  if (startupTurns) {
+    unsaved.add(t.id);
+    startupTurns.push(accept);
+  } else accept();
   return t;
 }
 
 /** A turn Loom saw go in, at its Enter (`at`): submitted from then on, so a
  * report of its text written before it can't be its. */
 function enterTurn(t: Task, at: number) {
+  if (startupTurns) return void startupTurns.push(() => enterTurn(t, at));
   t.submittedAt = at;
   moveTask(t, { state: "submitted", signal: "enter" }, at);
 }
@@ -3952,6 +3973,7 @@ function manualEnter(p: Pane, text?: string): ManualEnter | Task | undefined {
  * proven sent. A report of the same text, from an earlier prompt say, leaves
  * the doubt (uncertain: "submit"), and the turn ends unknown, never completed. */
 function manualFailed(mark: ManualEnter | Task) {
+  if (startupTurns) return void startupTurns.push(() => manualFailed(mark));
   if ("events" in mark) moveTask(mark, { state: mark.state, signal: "enter", uncertain: "submit" });
   else mark.uncertain = true;
 }
@@ -4122,6 +4144,10 @@ async function enterTask(p: Pane, t: Task) {
 function taskSignal(p: Pane, s: Signal) {
   const held = enterHeld.get(p.id);
   if (held) return void held.signals.push({ ...s, launch: s.launch ?? p.generation });
+  if (startupTurns) {
+    const signal = { ...s, launch: s.launch ?? p.generation };
+    return void startupTurns.push(() => taskSignal(p, signal));
+  }
   const launch = s.launch ?? p.generation;
   const open = [...tasks.values()].filter((t) => t.pane === p.id && t.gen === launch && t.events.length && !isFinal(t.state));
   // An agent's start names a prompt by its text alone, never by the Enter
@@ -4277,6 +4303,7 @@ async function loadTasks() {
     text = (await invoke<string>("task_journal_read")) ?? "";
   } catch (e) {
     journalUnreadable = e instanceof Error ? e.message : String(e);
+    finishTaskReplay(); // Keep turns visible as unsaved; the journal remains unavailable.
     return;
   }
   const got = readJournal(text);
@@ -4285,9 +4312,9 @@ async function loadTasks() {
   const lastPolicy = got.notify[got.notify.length - 1];
   notifyOwners = { ...lastPolicy?.owners };
   // Numbering goes on from the journal: no watcher saw an event it doesn't hold (writtenSeq).
-  taskSeq = writtenSeq = Math.max(taskSeq, got.seq);
+  taskSeq = writtenSeq = got.seq;
   taskPruned = Math.max(taskPruned, got.pruned);
-  if (!text && !got.tasks.size) { journalLoaded = true; return; }
+  if (!text && !got.tasks.size) { journalLoaded = true; finishTaskReplay(); return; }
   for (const t of got.tasks.values()) (tasks.set(t.id, t), unsaved.add(t.id)); // the first write is the whole journal
   if (lastPolicy?.owners === undefined) {
     const linked = new Set(threads.flatMap((t) => t.panes.flatMap((p) => p.notifyIds)));
@@ -4302,6 +4329,7 @@ async function loadTasks() {
   for (const t of got.tasks.values()) if (!isFinal(t.state)) moveTask(t, { state: "unknown", signal: "restart", reason: "loom-restarted" });
   keepTasks();
   void journal([], []).catch(() => {}); // rewritten with only what was kept, even with nothing to move
+  finishTaskReplay();
 }
 
 /** Pick option `i` the way a person would: one arrow key at a time, reading the

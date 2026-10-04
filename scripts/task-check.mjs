@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|pruned-owner|owner-disposition|policy-pending|policy-combined|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -118,8 +118,9 @@ const setup = () => {
     // refused (a full disk) or held (still in flight when Loom "crashes").
     if (cmd === 'task_journal_read') {
       if (localStorage.getItem('qa-journal-unreadable')) throw new Error('Test: access is denied');
-      if (localStorage.getItem('qa-journal-read-hold')) return new Promise((resolve) => {
+      if (localStorage.getItem('qa-journal-read-hold')) return new Promise((resolve, reject) => {
         qa.releaseRead = () => resolve(localStorage.getItem('qa-journal') ?? '');
+        qa.rejectRead = reject;
       });
       return localStorage.getItem('qa-journal') ?? '';
     }
@@ -365,6 +366,95 @@ try {
     assert.equal((await cli('notify', '--check', String(closed))).data[closed], true);
     await page.evaluate(() => localStorage.removeItem('qa-use-state'));
     ok('Restored-pane mutes reach historical notices across two restarts and leave closed panes independent');
+  }
+
+  for (const mode of ['existing', 'empty', 'failed-enter', 'unreadable']) if (review('startup-turns') || review(`startup-turn-${mode}`)) {
+    await resetReview();
+    let oldSeq = 0;
+    if (mode === 'existing' || mode === 'failed-enter') {
+      const old = await cli('submit', 'work:1', 'durable history before an early manual turn');
+      await report(claude, { kind: 'start', match: promptMatch('durable history before an early manual turn') });
+      await stops(claude);
+      oldSeq = (await until(old.text, 'completed')).events.at(-1).seq;
+    }
+    await page.evaluate((empty) => {
+      if (empty) localStorage.setItem('qa-journal', '');
+      localStorage.setItem('qa-journal-read-hold', '1');
+    }, mode === 'empty' || mode === 'unreadable');
+    await page.goto(base);
+    await page.waitForFunction(() => !!window.qa.releaseRead);
+    const earlyPane = await page.locator('.pane').nth(1).getAttribute('data-id');
+    await page.waitForFunction((id) => !!window.qa.agents[id], earlyPane);
+    const text = 'startup Codex turn';
+    await agent(earlyPane, { codexShape: true, input: '', busy: false });
+    await page.locator(`.pane[data-id="${earlyPane}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type(text);
+    await page.waitForTimeout(250);
+    if (mode === 'failed-enter') await qa({ failWriteIf: "fn:return d === '\\r'" });
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    if (mode !== 'failed-enter') assert.ok((await prompts(earlyPane)).includes(text), 'The early Enter reached the Codex process');
+    assert.equal(await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length), 0);
+    if (mode !== 'empty') {
+      // The completed turn also arrives before replay. Its signal must not be lost.
+      await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+        event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'early-codex-turn' }]],
+      }), [earlyPane, promptMatch(text)]);
+    } else await qa({ journalHold: 'fn:return true' });
+    await page.evaluate((unreadable) => {
+      localStorage.removeItem('qa-journal-read-hold');
+      if (unreadable) window.qa.rejectRead(new Error('Test: startup read failed after input'));
+      else window.qa.releaseRead();
+    }, mode === 'unreadable');
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+    const watchNow = (policy) => call('watch', ['--after', '0', '--metadata', policy], null, null, 1);
+    const startupTasks = (await cli('tasks')).data;
+    const early = startupTasks.find((t) => t.pane === earlyPane && t.source === 'manual');
+    assert.ok(early, `The early Enter is retained as a manual task: ${JSON.stringify({ earlyPane, startupTasks })}`);
+    if (mode === 'existing' || mode === 'failed-enter') {
+      const outcome = mode === 'failed-enter' ? 'unknown' : 'completed';
+      const final = await until(early.task, outcome);
+      if (mode === 'failed-enter') assert.equal(final.uncertain, 'submit', 'Buffering must preserve the failed Enter before routing its report');
+      for (const policy of ['--policy', '--policy-v4']) {
+        const batch = (await watchNow(policy)).data, seqs = batch.events.map((e) => e.seq);
+        assert.equal(new Set(seqs).size, seqs.length, 'Startup turns must not reuse journal event numbers');
+        assert.ok(batch.events.filter((e) => e.task === early.task).every((e) => e.seq > oldSeq));
+      }
+      const replay = readJournal(await page.evaluate(() => localStorage.getItem('qa-journal')));
+      const seqs = [...replay.tasks.values()].flatMap((t) => t.events.map((e) => e.seq));
+      assert.equal(new Set(seqs).size, seqs.length, 'The rewritten journal must contain unique sequence numbers');
+      assert.equal(replay.tasks.get(early.task).state, outcome);
+      await reboot();
+      assert.equal((await state(early.task)).state, outcome);
+    } else if (mode === 'empty') {
+      await page.waitForFunction(() => window.qa.journalHeld.length === 1);
+      for (const policy of ['--policy', '--policy-v4']) {
+        const batch = (await watchNow(policy)).data;
+        assert.deepEqual([batch.events, batch.last, batch.next], [[], 0, 0], 'Pending startup writes must publish no unwritten events');
+      }
+      assert.equal((await state(early.task)).saved, false);
+      await page.evaluate(() => {
+        window.qa.journalFail = true;
+        window.qa.journalHold = null;
+        window.qa.journalHeld.shift().reject(new Error('Test: the first startup write failed'));
+      });
+      for (const policy of ['--policy', '--policy-v4']) {
+        const batch = (await watchNow(policy)).data;
+        assert.deepEqual([batch.events, batch.last, batch.next], [[], 0, 0], 'Failed startup writes must publish no unwritten events');
+      }
+      assert.equal(await page.evaluate(() => localStorage.getItem('qa-journal')), '');
+      await reboot();
+      assert.deepEqual((await watchNow('--policy')).data.events, [], 'A crash loses only events that watch never acknowledged');
+    } else {
+      const final = await until(early.task, 'completed');
+      assert.equal(final.saved, false);
+      assert.equal(await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length), 0);
+      for (const policy of ['--policy', '--policy-v4']) {
+        const batch = (await watchNow(policy)).data;
+        assert.deepEqual([batch.events, batch.last, batch.next], [[], 0, 0]);
+      }
+    }
+    ok(`Startup manual Codex turn (${mode}): replay, uncertainty and the durable event cursor remain consistent`);
   }
 
   if (review('policy-startup')) {
