@@ -23,14 +23,31 @@ export function agentOf(cmd: string): Agent {
  * Inline mode keeps history in xterm so its scrollbar can be dragged. Codex's
  * alternate screen owns its transcript and leaves xterm no scrollback.
  * The title carries the thread id from startup, which notify only reports once
- * the first turn ends: see codexThread. */
+ * the first turn ends (see codexTitle), and Codex's run state: Working,
+ * Thinking or Waiting all through a turn, Ready between turns. That is how
+ * Loom knows a turn still runs while Codex hides its status row, "esc to
+ * interrupt" with it, as it does while it streams an answer. */
 const CODEX_FLAGS =
-  "-c tui.alternate_screen=never -c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
+  "-c tui.alternate_screen=never -c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id','run-state']";
 
-/** The thread id in a codex pane's title. Codex cuts the item to 29
- * characters + "...", still unique enough to find the rollout by, and appends
- * a spinner glyph while it works. */
-export const codexThread = (title: string) => /^([0-9a-f]{8}-[0-9a-f-]{12,27})(?:\.\.\.)?(?:\s+\S)?$/u.exec(title)?.[1];
+/** Codex's run states as its title shows them (codex-rs status_surfaces.rs
+ * run_state_status_text): Starting while its tools start, Ready between turns. */
+const CODEX_STATES = new Set(["Starting", "Ready", "Working", "Thinking", "Waiting"]);
+/** A codex pane's title: the thread id (Codex cuts it to 29 characters +
+ * "...", still unique enough to find the rollout by, and may append a spinner
+ * glyph) and, after " | ", its run state; the state alone before the thread
+ * exists. Anything else is a name to show. */
+export function codexTitle(title: string): { thread?: string; state?: string } | undefined {
+  const parts = title.split(" | ");
+  const state = CODEX_STATES.has(parts[parts.length - 1]) ? parts.pop() : undefined;
+  if (parts.length > 1) return undefined;
+  const thread = parts.length ? /^([0-9a-f]{8}-[0-9a-f-]{12,27})(?:\.\.\.)?(?:\s+\S)?$/u.exec(parts[0])?.[1] : undefined;
+  if (parts.length && !thread) return undefined;
+  return thread || state ? { thread, state } : undefined;
+}
+export const codexThread = (title: string) => codexTitle(title)?.thread;
+/** A Codex turn runs: its title's run state says so. */
+export const codexRunning = (state: string | undefined) => state === "Working" || state === "Thinking" || state === "Waiting";
 
 // Codex runs `notify` after every completed turn with the event as one JSON
 // argument, thread id included — and unlike its hooks, it needs no trust

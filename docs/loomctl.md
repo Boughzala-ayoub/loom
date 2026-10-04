@@ -653,7 +653,7 @@ to the agent's work:
 | Agent | Start | End | Asks | Interrupted |
 | --- | --- | --- | --- | --- |
 | Claude Code | its prompt hook names this prompt (`prompt`) | its Stop hook, once Claude is also seen idle, ends the prompts it started; a failure hook fails them | its permission hook, with the tool | no report: Loom sees Esc or Ctrl-C go in, then Claude stop working |
-| Codex | no report: Loom sees "esc to interrupt" (`screen`) | its turn notification lists the turn's prompts; each mention completes one task with that text, the oldest (`prompt`) | its "Approval requested" notification | as Claude |
+| Codex | no report: Loom sees "esc to interrupt", or its title's run state says Working, Thinking or Waiting (`screen`); Codex hides that hint while it streams an answer, so the title keeps the turn running | its turn notification lists the turn's prompts; each mention completes one task with that text, the oldest (`prompt`) | its "Approval requested" notification | as Claude |
 | OpenCode | the first run its plugin reports after the Enter (`sequence`) | that run succeeding, failing or being interrupted | its plugin's permission and question events, until all are answered | its plugin's interrupted |
 | Shell | the command line carries the task id (`token`) | that line's own exit code | | the command's exit code |
 

@@ -1,5 +1,5 @@
 // Self-check for agentOf / launch. Run: node src/agent.test.ts
-import { agentOf, codexThread, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
+import { agentOf, codexRunning, codexThread, codexTitle, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
 
 let fails = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -12,7 +12,7 @@ function check(label: string, got: unknown, want: unknown) {
 
 const S = "11111111-2222-4333-8444-555555555555";
 const H = ["--settings", "$LOOM_HOOKS"];
-const CX = "--no-daemon -c tui.alternate_screen=never -c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id']";
+const CX = "--no-daemon -c tui.alternate_screen=never -c tui.notifications=true -c tui.notification_method=osc9 -c tui.notification_condition=always -c tui.terminal_title=['thread-id','run-state']";
 
 check("agentOf claude", agentOf("claude --effort max"), "claude");
 check("agentOf claudette is a shell", agentOf("claudette"), "shell");
@@ -75,6 +75,13 @@ check("codex title: cut thread id", codexThread("01a0dc17-ee73-7f70-8741-74e25..
 check("codex title: working spinner", codexThread("01a0dc54-f0cf-7cf1-a727-6ebc1... ⠴"), "01a0dc54-f0cf-7cf1-a727-6ebc1");
 check("codex title: whole thread id", codexThread("01a0dc05-98a2-70c1-abe8-e95fe172076e"), "01a0dc05-98a2-70c1-abe8-e95fe172076e");
 check("codex title: anything else is a name", codexThread("Ready | 01a0dc18-3d9f-7fd1-bc1e-e076f..."), undefined);
+// Titles codex 0.160 drew with tui.terminal_title=['thread-id','run-state'] (probed 2026-10-04).
+check("codex title: state alone, before the thread", codexTitle("Ready"), { thread: undefined, state: "Ready" });
+check("codex title: thread and state", codexTitle("01a1044e-bfac-7c21-8008-9a965... | Working"), { thread: "01a1044e-bfac-7c21-8008-9a965", state: "Working" });
+check("codex title: thread alone, as before", codexTitle("01a0dc17-ee73-7f70-8741-74e25..."), { thread: "01a0dc17-ee73-7f70-8741-74e25", state: undefined });
+check("codex title: a name with a bar", codexTitle("my project | Working"), undefined);
+check("codex title: a name", codexTitle("Review workspace navigation"), undefined);
+check("codex run state: a turn runs", ["Working", "Thinking", "Waiting", "Ready", "Starting", undefined].map(codexRunning), [true, true, true, false, false, false]);
 check("ownSession codex resume", ownSession("codex resume abc"), true);
 check("ownSession codex flags only", ownSession("codex -m o3"), false);
 check("ownSession opencode --session=", ownSession("opencode --session=ses_x"), true);

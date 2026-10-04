@@ -1240,6 +1240,34 @@ try {
     ok("Claude 2.1.288's working line, with no esc hint, keeps its task working past a Stop and 30 s; it completes once gone");
   }
 
+  // Codex hides its status row, "esc to interrupt" with it, while it streams an answer (seen live 2026-10-04: two
+  // tasks ended unknown/no-end-signal mid-answer, after web searches). Its title's run state, which Loom asks for
+  // (tui.terminal_title run-state), says the turn still runs: the task stays working and the pane busy until the
+  // title says Ready and Codex reports the turn's end.
+  {
+    const title = (t) => page.evaluate(([id, t]) => window.qa.out(id, `\x1b]0;${t}\x07`), [codex, t]);
+    const pane = async () => (await cli('panes')).data.find((x) => x.id === codex);
+    await agent(codex, { codexShape: true, busy: false, input: '' });
+    await title('0199a1b2-c3d4-7e5f-8a9b-0c1d2... | Ready');
+    const text = 'a long codex answer after a web search';
+    const r = await cli('submit', 'work:2', text);
+    await title('0199a1b2-c3d4-7e5f-8a9b-0c1d2... | Working');
+    await until(r.text, 'working'); // its hint is up while it starts
+    await agent(codex, { busy: false }); // the row goes as the answer streams
+    await page.waitForTimeout(1500);
+    assert.deepEqual([(await state(r.text)).state, (await pane()).state], ['working', 'working'], 'No hint, its title says Working: still at work');
+    if (!process.env.TASK_QUICK) {
+      await page.waitForTimeout(31000);
+      assert.equal((await state(r.text)).state, 'working', 'Working past 30 s with no hint is not quiet');
+    }
+    await title('0199a1b2-c3d4-7e5f-8a9b-0c1d2... | Ready');
+    await report(codex, { kind: 'end', matches: [promptMatch(text)], turn: 'codex-long-answer', response: promptMatch('Done.') });
+    await until(r.text, 'completed');
+    await agent(codex, { codexShape: false });
+    assert.notEqual((await pane()).state, 'working', 'Ready: the pane is no longer busy');
+    ok("Codex's run state in its title keeps a task working while it hides its status row; it completes on Ready and its end report");
+  }
+
   // A paste the agent draws late (seen live 2026-10-04: a 964- and an 1145-byte submit to Codex 0.160 and Claude
   // Code held their Enter as not shown, the text on screen a moment later). Codex drew a long paste in stages, quiet
   // for 0.4 s partway, past a settle's 150 ms: Loom waits for the echo rather than reading the screen once.

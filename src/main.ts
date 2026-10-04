@@ -11,7 +11,7 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
-import { agentOf, codexThread, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
+import { agentOf, codexRunning, codexTitle, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
 import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { renderRows } from "./rows";
@@ -1489,7 +1489,12 @@ class Pane {
     this._dead = on;
   }
   appTitle = ""; // OSC 0/2 from the running app
-  codexThread = ""; // the thread id codex titles its pane with (agent.ts: codexThread)
+  codexThread = ""; // the thread id codex titles its pane with (agent.ts: codexTitle)
+  /** Codex's run state, from its title (agent.ts codexTitle): Working,
+   * Thinking or Waiting while a turn runs, whether or not its status row
+   * shows. Unset until this launch titles one, as a Codex older than
+   * run-state never does: then its "esc to interrupt" alone says busy. */
+  codexState: string | undefined;
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
@@ -1745,8 +1750,12 @@ class Pane {
     // streaming in the background ate ~90% of the main thread; on WebGL, ~20%.
     this.gpu(true);
     this.term.onTitleChange((t) => {
-      const thread = this.agent === "codex" ? codexThread(t) : undefined;
-      if (thread) return void (this.codexThread = thread); // an id, not a name to show
+      const codex = this.agent === "codex" ? codexTitle(t) : undefined;
+      if (codex) {
+        if (codex.thread) this.codexThread = codex.thread; // an id and a state, not a name to show
+        this.codexState = codex.state;
+        return;
+      }
       // Agents redraw the title with a spinner glyph while working, ~10 times a
       // second; paint() strips it, so those are the same title — skip them.
       const same = t.replace(SPIN, "") === this.appTitle.replace(SPIN, "");
@@ -1887,6 +1896,7 @@ class Pane {
     this.turnSource = undefined;
     this.atPrompt = false;
     this.receiptRunning = undefined;
+    this.codexState = undefined;
     this.startupStarted = Date.now();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
       try {
@@ -2037,7 +2047,7 @@ class Pane {
       // footer ("esc again to interrupt" after one press). Clear busy when it
       // goes, even without a ring. Read the live screen after xterm joins PTY
       // chunks, not scrolled history.
-      const status = INTERRUPT_HINT.test(this.screen(true));
+      const status = INTERRUPT_HINT.test(this.screen(true)) || (this.agent === "codex" && codexRunning(this.codexState));
       if (!status && this.busy) ((this.busy = false), this.paint());
       if (status && !this.interruptHint && !this.waiting) ((this.busy = true), this.paint());
       this.interruptHint = status;
@@ -4175,8 +4185,11 @@ function sweepTasks() {
     }
     const w = watched(t);
     // Claude Code 2.1.288 draws no hint while it works: its working line says so instead.
+    // Codex hides its status row, hint and all, while it streams an answer (seen
+    // live 2026-10-04: two turns ended unknown mid-answer, after web searches):
+    // its title's run state says the turn still runs.
     const screen = p.screen(true);
-    const busy = INTERRUPT_HINT.test(screen) || (p.agent === "claude" && claudeWorking(screen));
+    const busy = INTERRUPT_HINT.test(screen) || (p.agent === "claude" && claudeWorking(screen)) || (p.agent === "codex" && codexRunning(p.codexState));
     // Esc or Ctrl-C after the Enter and after any Stop, judged once, 2 s on.
     const esc = p.interruptAt;
     const escNew = esc > (t.submittedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;
