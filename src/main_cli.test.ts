@@ -15,14 +15,14 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
-    if (names.has(d.name.getText(source))) pieces.push(`const ${d.getText(source)};`);
+    if (names.has(d.name.getText(source))) pieces.push(`${node.declarationList.flags & ts.NodeFlags.Const ? "const" : "let"} ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
@@ -437,4 +437,42 @@ if (check(205)) {
   await c.usage.run({ _: ["codex"] });
   assert.equal(calls, 2);
   console.log("ok   R5 native detail-429 result extends the shared account cooldown");
+}
+
+if (check(207)) {
+  for (const fail of [false, true]) {
+    const t = { id: "pending-read", pane: "p", gen: 1, state: "working", events: [{ seq: 3, at: 1, task: "pending-read", state: "working" }] } as any;
+    const held: { resolve: () => void; reject: (e: Error) => void }[] = [];
+    const c = fixture({ tasks: new Map([[t.id, t]]), paneById: () => undefined, requireJournal() {}, journalLoaded: true, journalUnreadable: "",
+      taskPruned: 0, writtenSeq: 3, notifyHistory: [], taskEventGate: { notify() {} },
+      invoke: () => new Promise<void>((resolve, reject) => held.push({ resolve, reject })) });
+    const waitWrite = async () => { for (let n = 0; !held.length && n < 30; n++) await Promise.resolve(); assert.ok(held.length); return held.shift()!; };
+    const pending = c.task.run({ _: [t.id], end: "cancelled" }).catch((e: Error) => e);
+    const write = await waitWrite();
+    assert.equal((await c.task.run({ _: [t.id] })).data.saved, false, "plain task reads must report held settlement writes as unsaved");
+    assert.equal((await c.tasks.run({ _: [] })).data[0].saved, false);
+    if (fail) write.reject(new Error("synthetic disk failure")); else write.resolve();
+    await pending;
+    assert.equal((await c.task.run({ _: [t.id] })).data.saved, !fail);
+    if (fail) {
+      const recovery = c.task.run({ _: [t.id], end: "cancelled" });
+      const rewrite = await waitWrite();
+      assert.equal((await c.task.run({ _: [t.id] })).data.saved, false);
+      rewrite.resolve(); await recovery;
+      assert.equal((await c.task.run({ _: [t.id] })).data.saved, true);
+    }
+  }
+  const t = { id: "updates", pane: "p", state: "working", events: [{ seq: 3, at: 1, task: "updates", state: "working" }] } as any;
+  const held: (() => void)[] = [];
+  const c = fixture({ tasks: new Map([[t.id, t]]), paneById: () => undefined, journalLoaded: true, journalUnreadable: "",
+    taskPruned: 0, writtenSeq: 3, notifyHistory: [], taskEventGate: { notify() {} }, invoke: () => new Promise<void>((r) => held.push(r)) });
+  const first = lastFixture.moveTask(t, { state: "working", signal: "loomctl", reason: "first" });
+  const second = lastFixture.moveTask(t, { state: "working", signal: "loomctl", reason: "second" });
+  await Promise.resolve();
+  assert.equal((await c.task.run({ _: [t.id] })).data.saved, false);
+  held.shift()!(); await first;
+  assert.equal((await c.task.run({ _: [t.id] })).data.saved, false, "an older write cannot certify a newer field mutation");
+  held.shift()!(); await second;
+  assert.equal((await c.task.run({ _: [t.id] })).data.saved, true);
+  console.log("ok   R7 plain reads track pending success, failure, recovery and newer same-state mutations");
 }

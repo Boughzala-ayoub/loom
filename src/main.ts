@@ -3774,6 +3774,8 @@ const taskEventGate = new TaskEventGate();
  * failed. While any are, the next write rewrites the journal whole, which
  * puts them back. `task` shows them as `saved: false`. */
 const unsaved = new Set<string>();
+/** Latest queued mutation per task. An older write cannot certify a newer one. */
+const pendingJournal = new Map<string, number>();
 /** Policy-only writes have no task ids, but a failed one still needs recovery. */
 let journalDirty = false;
 /** Tasks that were reserved, the ones the journal keeps. */
@@ -3792,6 +3794,7 @@ function journal(lines: object[], ids: string[]): Promise<void> {
   }
   journalLines += lines.length;
   const call = ++journalCalls, upTo = taskSeq;
+  ids.forEach((id) => pendingJournal.set(id, call));
   const write = journalQueue.then(() => {
     const covered = call <= snapshotCalls;
     const whole = !covered && (journalDirty || unsaved.size > 0 || journalLines > 5000);
@@ -3820,15 +3823,18 @@ function journal(lines: object[], ids: string[]): Promise<void> {
       },
     );
   });
-  journalQueue = write.catch(() => {});
-  return write;
+  const settled = write.finally(() => {
+    for (const id of ids) if (pendingJournal.get(id) === call) pendingJournal.delete(id);
+  });
+  journalQueue = settled.catch(() => {});
+  return settled;
 }
 /** A task as loomctl shows it, with whether the journal has its latest change. */
 const taskLocation = (t: Task) => {
   const p = paneById(t.pane);
   return { ref: p ? paneName(p) : null, paneClosed: !p };
 };
-const record = (t: Task) => ({ ...taskRecord(t), ...taskLocation(t), saved: !unsaved.has(t.id) });
+const record = (t: Task) => ({ ...taskRecord(t), ...taskLocation(t), saved: !unsaved.has(t.id) && !pendingJournal.has(t.id) });
 
 /** The task's first record, written before Loom types anything, so a crash
  * after the Enter still leaves its key in the journal and a retry finds the
@@ -8267,7 +8273,7 @@ const CLI: Record<string, CliCommand> = {
   },
   task: {
     usage: "task <id> [--end cancelled|unknown]",
-    help: "A task as it stands, without waiting: its state, correlation, uncertainty and history. ref is its pane's current position, or null with paneClosed true after close. --end explicitly settles an open task in the journal, without sending keys or stopping its process. Identical retries wait for persistence and retry a failed write without another event. It cannot rewrite a final task or claim completion.",
+    help: "A task as it stands, without waiting: its state, correlation, uncertainty and history. saved is false while its latest journal write is pending or failed, including field updates and recovery. ref is its pane's current position, or null with paneClosed true after close. --end explicitly settles an open task in the journal, without sending keys or stopping its process. Identical retries wait for persistence and retry a failed write without another event. It cannot rewrite a final task or claim completion.",
     options: { end: "string" },
     run: async (a) => {
       const t = cliTask(cliWord(a, 0, "a task"));
@@ -8285,7 +8291,7 @@ const CLI: Record<string, CliCommand> = {
   },
   tasks: {
     usage: "tasks [--pane P] [--state S]",
-    help: "The tasks Loom keeps, oldest first: every open one and the last 500 to finish. --pane takes a current reference or a stable pane ID, including a closed pane's ID. --state takes accepted, submitted, working, approval, completed, failed, cancelled and unknown, several with commas, or open for any not finished.",
+    help: "The tasks Loom keeps, oldest first: every open one and the last 500 to finish. saved is false for a pending or failed latest write. --pane takes a current reference or a stable pane ID, including a closed pane's ID. --state takes accepted, submitted, working, approval, completed, failed, cancelled and unknown, several with commas, or open for any not finished.",
     options: { pane: "string", state: "string" },
     run: (a) => {
       const want = a.state === undefined ? null : taskStates(str(a, "state")!, "--state");

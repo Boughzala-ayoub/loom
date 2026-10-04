@@ -1109,3 +1109,5 @@ Claude survey detection uses the live composer and divider rows, including the n
 A rate limit on Codex reset-credit details extends the shared account cooldown even when primary usage succeeds. Primary limits remain available; a fixed note reports missing expiry details without including the provider response.
 
 Survey selection checks the final active footer. Earlier quoted surveys do not hide it, and dismissal invalidates guarded `choose` before any key is written.
+
+Plain `task` and `tasks` reads report `saved: false` while the latest task mutation is pending or failed. This includes same-state field updates and recovery writes. Completion of an older write cannot mark a newer mutation saved. Durable watch events remain limited to successfully written journal sequences.
