@@ -1,3 +1,5 @@
+import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
+const claudeComposer = claudeCapture.lines.join("\n");
 // Production command handlers, with only native/window boundaries replaced.
 // @ts-ignore Node-only test; the app intentionally has no Node typings.
 import assert from "node:assert/strict";
@@ -146,7 +148,7 @@ if (check(6)) {
 }
 if (check(5)) {
   const writes: string[] = [];
-  let screen = "????????\n?\n????????\nHow is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
+  let screen = claudeComposer + "\nHow is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
   const c = fixture({ cliPane: () => ({ id: "p", agent: "claude", th: { name: "work", panes: [] } }), liveScreen: () => screen,
     inTurn: (_: unknown, f: (live: () => void) => unknown) => f(() => {}), keys: (_: unknown, s: string) => writes.push(s) });
   const menu = c.menu.run({ _: ["p"] }).data;
@@ -344,16 +346,16 @@ if (check(107)) {
 
 if (check(108)) {
   const survey = "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
-  let screen = survey + "\n????????\n? normal draft\n????????\n? for shortcuts";
+  let screen = survey + "\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f\u00a0normal draft\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n? for shortcuts";
   const writes: string[] = [];
   const c = fixture({ cliPane: () => ({ id: "p", agent: "claude", th: { name: "work", panes: [] } }), liveScreen: () => screen,
     inTurn: (_: unknown, f: (live: () => void) => unknown) => f(() => {}), keys: (_: unknown, s: string) => writes.push(s) });
   assert.equal(c.menu.run({ _: ["p"] }).data, null);
   await assert.rejects(c.choose.run({ _: ["p", "0"] }), /numbered question/);
   assert.equal(writes.length, 0);
-  screen = "????????\n?\n????????\n" + survey;
+  screen = claudeComposer + "\n" + survey;
   const menu = c.menu.run({ _: ["p"] }).data;
-  screen = survey + "\n????????\n? draft\n????????";
+  screen = survey + "\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n\u276f\u00a0draft\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500";
   await assert.rejects(c.choose.run({ _: ["p", "0"], menu: menu.rev }));
   assert.equal(writes.length, 0);
   console.log("ok   N8 transcript surveys and dismissed surveys cannot write into a draft");
@@ -361,7 +363,7 @@ if (check(108)) {
 
 if (check(109)) {
   for (const question of [["How is Claude doing", "this session?"], ["How is Clau", "de doing this session?"]]) {
-    const physical = ["????????", "?", "????????", ...question, "1: Bad 2: Fine 3: Good 0: Dismiss"];
+    const physical = [...claudeCapture.lines, ...question, "1: Bad 2: Fine 3: Good 0: Dismiss"];
     const p = { id: "p", th: { name: "work", panes: [] }, agent: "claude", term: { rows: physical.length, buffer: { active: {
       baseY: 0, getLine: (i: number) => ({ isWrapped: i === 3 || (i === 4 && question[0].endsWith("Clau")), translateToString: () => physical[i] })
     } } } };

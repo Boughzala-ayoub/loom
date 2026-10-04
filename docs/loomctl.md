@@ -1101,3 +1101,5 @@ All exported limits.resetsAt and bankedResetExpiries values use UTC ISO timestam
 Menu and choose recognize a Claude survey only in the active footer below the live composer. Transcript quotations and a dismissed survey above a draft are not actionable. Choose rechecks that active region immediately before sending its digit.
 
 Survey questions may span real line breaks or terminal soft wraps. Loom reconstructs soft-wrapped survey rows from terminal wrap metadata while keeping numbered menus on physical rows.
+
+Claude survey detection uses the live composer and divider rows, including the nonbreaking space after `?`. Hard-wrapped questions and words split by terminal wrapping remain actionable.

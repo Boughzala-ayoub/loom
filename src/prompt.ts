@@ -6,6 +6,9 @@
  * highlighted, so the overview offers the options as buttons instead. */
 export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[]; keys?: string[] };
 
+export const claudeDivider = (line: string) => /^[ \t\u00a0]*[\u2500\u2501\u2550-]{3,}[ \t\u00a0]*$/.test(line);
+export const claudeComposer = (line: string) => /^[ \t]*[\u276f>]([ \t\u00a0]|$)/.test(line);
+
 /** Claude's optional session survey takes a digit directly, without Enter. */
 export function readSurvey(screen: string): Menu | null {
   const match = /^[ \t]*How\s+is\s+Claude\s+doing\s+this\s+session\?\s*1:\s*Bad\s+2:\s*Fine\s+3:\s*Good\s+0:\s*Dismiss\s*$/im.exec(screen);
@@ -13,10 +16,10 @@ export function readSurvey(screen: string): Menu | null {
   // The survey owns the footer below the live composer. Transcript quotations
   // and a dismissed survey above a new composer cannot consume survey keys.
   const above = screen.slice(0, match.index).trimEnd().split("\n");
-  if (!/^[ \t]*[???-]{3,}[ \t]*$/.test(above[above.length - 1] ?? "")) return null;
+  if (!claudeDivider(above[above.length - 1] ?? "")) return null;
   let composer = above.length - 2;
-  while (composer >= 0 && !/^[ \t]*[?>]([ \t]|$)/.test(above[composer])) {
-    if (/^[ \t]*[???-]{3,}[ \t]*$/.test(above[composer])) return null;
+  while (composer >= 0 && !claudeComposer(above[composer])) {
+    if (claudeDivider(above[composer])) return null;
     composer--;
   }
   if (composer < 0) return null;

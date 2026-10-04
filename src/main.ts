@@ -18,7 +18,7 @@ import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { readMenu, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
+import { claudeDivider, claudeComposer, readMenu, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
@@ -3163,7 +3163,7 @@ function liveScreen(p: Pane, joined = true, surveyOnly = false) {
     const line = buf.getLine(y);
     const text = line?.translateToString(false) ?? "";
     const wasSurvey = survey;
-    if (/^\s*[?>]/.test(text) || /^[ \t]*[???-]{3,}[ \t]*$/.test(text)) survey = false;
+    if (claudeComposer(text) || claudeDivider(text)) survey = false;
     const continueSurvey = wasSurvey && survey;
     if (/^\s*How\b/.test(text)) survey = true;
     if (joined && (!surveyOnly || continueSurvey) && line?.isWrapped && lines.length) lines[lines.length - 1] += text;

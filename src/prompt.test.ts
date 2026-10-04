@@ -1,3 +1,5 @@
+import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
+const claudeComposer = claudeCapture.lines.join("\n");
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
 import { readMenu, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
@@ -316,7 +318,7 @@ check("A tool still running, indented: not the working line", claudeWorking(clau
 check("A truncated line ending in …: not working", claudeWorking("● Read(src/main.ts…)\n* a bullet that ends here…ish\n"), false);
 
 for (const screen of ["How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss", "How is Claude doing this session?\n  1: Bad   2: Fine\n 3: Good  0: Dismiss"]) {
-  const m = readSurvey("????????\n?\n????????\n" + screen);
+  const m = readSurvey(claudeComposer + "\n" + screen);
   check("survey choices retain their direct keys including zero", m && [m.options, m.keys, m.selected], [["Bad", "Fine", "Good", "Dismiss"], ["1", "2", "3", "0"], -1]);
 }
 check("an incomplete survey is not actionable", readSurvey("How is Claude doing this session? 1: Bad"), null);
