@@ -160,7 +160,7 @@ The three steps of `window show` (unminimize, show, focus) each time out after 2
 
 | Command | What it does |
 | --- | --- |
-| `new <folder> [--agent A \| --cmd C] [--model M] [--effort E] [--name N] [--base B] [--panes N]` | Open any folder as a thread. |
+| `new <folder> [--agent A \| --cmd C] [--model M] [--effort E] [--name N] [--base B] [--panes N]` | Open an existing folder as a thread. |
 | `add [thread] [--agent A \| --cmd C] [--model M] [--effort E]` | Start another agent or terminal in a thread and bring it to the front. |
 | `rename <thread> <name>` | Rename a thread. Its branch and folder keep their names. |
 | `restart [pane] [--yes]` | Start the pane's process again, resuming its session. A running one needs `--yes`. |
@@ -168,7 +168,7 @@ The three steps of `window show` (unminimize, show, focus) each time out after 2
 | `close [pane] [--yes]` | Close a pane. One running an agent needs `--yes`. |
 | `close-thread <thread> --yes [--delete worktree\|branch] [--plan REV] [--discard LIST] [--force]` | Close a thread and its panes. |
 
-`new` opens the selected folder, even outside Git. A relative folder is relative
+`new` validates and canonicalizes an existing folder, even outside Git. A relative folder is relative
 to your terminal. Without `--name` or `--base`, it opens that folder or brings
 up the thread already open on it. `--name` and `--base` require Git.
 `--base` alone also supplies the worktree name. With `--name login` it creates a worktree on a new
@@ -1085,3 +1085,5 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
   instructions.
 
 Usage failures return bounded transport errors. Curl ignores default configuration, and neither provider error bodies nor curl diagnostics are returned. Credentials stay on stdin.
+
+New threads require an existing directory. Loom resolves relative paths against the caller, canonicalizes the directory, and refuses missing paths or files before inserting a thread. Explicit invalid pane working directories are errors; only an omitted directory uses home.

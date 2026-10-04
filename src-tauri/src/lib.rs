@@ -87,6 +87,17 @@ struct ProfileDir(PathBuf);
 /// use and shows or hides it; `None` closes it when the preference is turned off.
 /// Async on purpose: building a window inside a synchronous command deadlocks
 /// on Windows, which runs those on the event-loop thread the build waits for.
+/// Resolve explicit working directories before creating a pane or thread.
+#[tauri::command]
+fn canonical_directory(path: String) -> Result<String, String> {
+    let dir = std::fs::canonicalize(&path).map_err(|_| "Not an existing directory".to_string())?;
+    if !dir.is_dir() { return Err("Not an existing directory".into()); }
+    // Keep ordinary Windows paths usable by Git, PowerShell, and thread identity.
+    let text = dir.to_string_lossy();
+    Ok(if let Some(unc) = text.strip_prefix(r"\\?\UNC\") { format!(r"\\{unc}") }
+       else { text.strip_prefix(r"\\?\").unwrap_or(&text).to_string() })
+}
+
 #[tauri::command]
 async fn overlay(app: AppHandle, show: Option<bool>) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
@@ -190,6 +201,7 @@ fn pty_spawn(
         || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')) {
         return Err("invalid Codex state id".into());
     }
+    let cwd = cwd.map(canonical_directory).transpose()?;
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: rows.max(1),
@@ -309,7 +321,7 @@ fn pty_spawn(
     // transcript the pane ends up on, which the pinned session id can't (it goes
     // stale on /clear, or if claude is relaunched by hand).
     cmd.env("LOOM_HOOKS", &hooks);
-    match cwd.filter(|d| std::path::Path::new(d).is_dir()) {
+    match cwd {
         Some(dir) => cmd.cwd(dir),
         None => {
             if let Ok(home) = app.path().home_dir() {
@@ -1548,6 +1560,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
@@ -1562,6 +1575,18 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_working_directories_must_exist_and_canonicalize() {
+        let dir = std::env::temp_dir();
+        let plain = super::canonical_directory(dir.to_string_lossy().into()).unwrap();
+        assert_eq!(super::canonical_directory(dir.join(".").to_string_lossy().into()).unwrap(), plain);
+        let file = dir.join(format!("loom-cwd-test-{}.txt", std::process::id()));
+        std::fs::write(&file, "test").unwrap();
+        assert!(super::canonical_directory(file.to_string_lossy().into()).is_err());
+        std::fs::remove_file(&file).unwrap();
+        assert!(super::canonical_directory(file.to_string_lossy().into()).is_err());
+    }
+
     #[test]
     fn export_has_a_deadline_and_preserves_successful_output() {
         use std::time::{Duration, Instant};

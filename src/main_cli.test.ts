@@ -135,7 +135,7 @@ if (check(5)) {
 }
 if (check(4)) {
   let created = "", gitCalls = 0;
-  const c = fixture({ MAX_PANES: 16, callerPath: (s: string) => s,
+  const c = fixture({ MAX_PANES: 16, callerPath: (s: string) => s, invoke: async (_: string, a: any) => a.path,
     git: async () => { gitCalls++; throw new Error("not a repository"); },
     createThread: async (folder: string) => { created = folder; return { name: "ideas", dir: folder, panes: [] }; } });
   await c.new.run({ _: ["C:\\ideas"] }, {});
@@ -172,4 +172,19 @@ if (check(1)) {
     assert.match(String(result), /window.*timed out/i);
   }
   console.log("ok   window show bounds each native step and leaves other requests runnable");
+}
+
+if (check(101)) {
+  let created = 0;
+  const c = fixture({ MAX_PANES: 16, callerPath: (s: string) => s,
+    invoke: async (_: string, { path }: { path: string }) => {
+      if (path.includes("missing") || path.endsWith("package.json")) throw new Error("Not an existing directory");
+      return "C:\\ideas";
+    },
+    createThread: async (dir: string) => { created++; return { name: "ideas", dir, panes: [] }; } });
+  for (const path of ["C:\\missing", "C:\\ideas\\package.json"])
+    await assert.rejects(c.new.run({ _: [path] }, {}), /existing directory/);
+  assert.equal(created, 0);
+  assert.equal((await c.new.run({ _: ["C:\\ideas\\."] }, {})).data.dir, "C:\\ideas");
+  console.log("ok   N1 validates and canonicalizes new targets before insertion");
 }

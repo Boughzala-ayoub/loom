@@ -7935,11 +7935,11 @@ const CLI: Record<string, CliCommand> = {
   },
   new: {
     usage: "new <folder> [--agent A | --cmd C] [--model M] [--effort E] [--name N] [--base B] [--panes N]",
-    help: "Open any folder as a thread. --name or --base requires Git and cuts a new worktree; --base alone also supplies its name. A relative folder is relative to your terminal. --model selects an agent model; --effort selects Claude/Codex effort. Both refuse --cmd, and the agent validates support.",
+    help: "Open an existing folder as a thread, using its canonical path. Invalid folders are refused before startup. --name or --base requires Git and cuts a new worktree; --base alone also supplies its name. A relative folder is relative to your terminal. --model selects an agent model; --effort selects Claude/Codex effort. Both refuse --cmd, and the agent validates support.",
     options: { agent: "string", cmd: "string", model: "string", effort: "string", name: "string", base: "string", panes: "int" },
     run: async (a, ctx) => {
       // Everything checked before git runs: nothing may be left behind by a bad argument.
-      const folder = callerPath(cliWord(a, 0, "a folder"), ctx.cwd);
+      const folder = await invoke<string>("canonical_directory", { path: callerPath(cliWord(a, 0, "a folder"), ctx.cwd) });
       const cmd = cliCommand(a);
       const n = num(a, "panes", 1, 1, MAX_PANES);
       const name = str(a, "name") ?? "", base = str(a, "base") ?? "";
