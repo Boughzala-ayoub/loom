@@ -23,6 +23,22 @@ function fixture(extra: Record<string, unknown> = {}) {
   return s.f.CLI;
 }
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(2)) {
+  const th = { name: "work", panes: [] as any[] };
+  const p = { id: "p", th };
+  th.panes.push({}, p);
+  const t = { id: "task1", pane: "p", ref: "work:4", state: "working", events: [] };
+  const c = fixture({ tasks: new Map([[t.id, t]]), paneById: () => th.panes.includes(p) ? p : undefined });
+  assert.equal(c.task.run({ _: [t.id] }).data.ref, "work:2");
+  th.panes.shift();
+  assert.match(c.task.run({ _: [t.id] }).text, /on work:1/);
+  th.panes.length = 0;
+  assert.equal(c.task.run({ _: [t.id] }).data.ref, null);
+  assert.equal(c.task.run({ _: [t.id] }).data.paneClosed, true);
+  assert.match(c.task.run({ _: [t.id] }).text, /closed pane/);
+  assert.equal(t.ref, "work:4", "Display does not rewrite history");
+  console.log("ok   task references follow pane IDs and explicitly report closed panes");
+}
 if (check(1)) {
   for (const stuck of ["unminimize", "show", "setFocus"]) {
     const w = Object.fromEntries(["unminimize", "show", "setFocus"].map((k) => [k, () => k === stuck ? new Promise(() => {}) : Promise.resolve()]));

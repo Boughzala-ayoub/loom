@@ -3815,7 +3815,11 @@ function journal(lines: object[], ids: string[]): Promise<void> {
   return write;
 }
 /** A task as loomctl shows it, with whether the journal has its latest change. */
-const record = (t: Task) => ({ ...taskRecord(t), saved: !unsaved.has(t.id) });
+const taskLocation = (t: Task) => {
+  const p = paneById(t.pane);
+  return { ref: p ? paneName(p) : null, paneClosed: !p };
+};
+const record = (t: Task) => ({ ...taskRecord(t), ...taskLocation(t), saved: !unsaved.has(t.id) });
 
 /** The task's first record, written before Loom types anything, so a crash
  * after the Enter still leaves its key in the journal and a retry finds the
@@ -7680,7 +7684,7 @@ function cliTask(id: string) {
 }
 
 const taskText = (t: Task) =>
-  `${t.id} ${t.state}${t.reason ? ` (${t.reason})` : t.detail ? ` (${t.detail})` : ""} on ${t.ref}` +
+  `${t.id} ${t.state}${t.reason ? ` (${t.reason})` : t.detail ? ` (${t.detail})` : ""} on ${taskLocation(t).ref ?? `closed pane ${t.pane} (was ${t.ref})`}` +
   `${t.correlation ? `, tied by ${t.correlation}` : ""}${t.uncertain ? `, uncertain: ${t.uncertain}` : ""}`;
 
 /** A --state or --until list of task states; `open` is every state not final. */
@@ -8117,7 +8121,7 @@ const CLI: Record<string, CliCommand> = {
   },
   task: {
     usage: "task <id>",
-    help: "A task as it stands, without waiting: its state, what tied it to the agent's work (correlation), what Loom can't tell (uncertain), and every state it went through.",
+    help: "A task as it stands, without waiting: its state, correlation, uncertainty and history. ref is its pane's current position, or null with paneClosed true after close.",
     run: (a) => {
       const t = cliTask(cliWord(a, 0, "a task"));
       return { data: record(t), text: taskText(t) };
@@ -8132,7 +8136,7 @@ const CLI: Record<string, CliCommand> = {
       const sel = str(a, "pane");
       let id = sel;
       if (sel !== undefined) try { id = cliPane(sel).id; } catch { /* a pane closed since: match its id or name as given */ }
-      const list = [...tasks.values()].filter((t) => t.events.length && (!want || want.includes(t.state)) && (sel === undefined || t.pane === id || t.ref === sel));
+      const list = [...tasks.values()].filter((t) => t.events.length && (!want || want.includes(t.state)) && (sel === undefined || t.pane === id));
       return { data: list.map(record), text: list.length ? list.map(taskText).join("\n") : "No tasks." };
     },
   },
