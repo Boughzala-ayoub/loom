@@ -1066,3 +1066,5 @@ Task records resolve `ref` from the pane ID each time they are read. After close
 `new <folder>` opens ordinary folders as well as repositories, preserving the folder you selected. Git is required only for `--name` or `--base`, which creates a worktree. `--base` alone also supplies its name.
 
 `menu` recognizes Claude's session survey. Its JSON includes `keys: [1,2,3,0]` as strings and `selected: -1`. Use `choose <pane> 0` to dismiss, or 1/2/3 to rate. Loom sends that digit without Enter; `--menu REV` and `--gen N` still guard the write.
+
+`usage [claude|codex] --json` fetches current account plan usage, even while `set plan-usage off` is in effect. Omit the provider for both. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.

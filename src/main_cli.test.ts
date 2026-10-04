@@ -28,6 +28,19 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(6)) {
+  const calls: string[] = [];
+  const plan = { tier: "pro", limits: [{ label: "Weekly", percent: 40 }], stale: false, bankedResets: 2, bankedResetExpiries: ["2026-11-01", null] };
+  const c = fixture({ planUsage: false, PLAN_PROVIDERS: { claude: { command: "plan_usage" }, codex: { command: "codex_plan_usage" } },
+    invoke: async (cmd: string) => { calls.push(cmd); return plan; } });
+  assert.ok(c.usage, "usage command must exist");
+  const r = await c.usage.run({ _: ["codex"] });
+  assert.equal(r.data.codex.bankedResets, 2);
+  assert.deepEqual(r.data.codex.bankedResetExpiries, plan.bankedResetExpiries);
+  assert.deepEqual(calls, ["codex_plan_usage"]);
+  await assert.rejects(c.usage.run({ _: ["invalid"] }));
+  console.log("ok   usage explicitly fetches with polling off and preserves banked reset expiries");
+}
 if (check(5)) {
   const writes: string[] = [];
   let screen = "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";

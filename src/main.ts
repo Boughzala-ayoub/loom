@@ -7765,6 +7765,20 @@ const CLI: Record<string, CliCommand> = {
       };
     },
   },
+  usage: {
+    usage: "usage [claude|codex]",
+    help: "Fetch account plan usage now, even with plan-usage off. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider. Does not enable background polling.",
+    run: async (a) => {
+      const name = a._[0];
+      if (a._.length > 1 || (name !== undefined && name !== "claude" && name !== "codex")) throw new Error("usage takes claude or codex, or neither for both.");
+      const data: Partial<Record<PlanProvider, Plan | { error: string }>> = {};
+      for (const provider of (name ? [name] : ["claude", "codex"]) as PlanProvider[]) {
+        try { data[provider] = await invoke<Plan>(PLAN_PROVIDERS[provider].command); }
+        catch (e) { data[provider] = { error: String(e) }; }
+      }
+      return { data, text: Object.entries(data).map(([provider, p]) => `${provider}: ${JSON.stringify(p)}`).join("\n") };
+    },
+  },
   threads: {
     usage: "threads",
     help: "Every thread: name, id, state, pane count, branch and folder.",
