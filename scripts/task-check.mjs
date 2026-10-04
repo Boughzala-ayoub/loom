@@ -240,6 +240,26 @@ try {
     ok('Unread startup history blocks automatic writes, durable events and policy changes, even after writes recover');
   }
 
+  if (review('policy-recovery')) {
+    const sent = await cli('submit', 'work:1', 'queued before a failed mute');
+    await report(claude, { kind: 'start', match: promptMatch('queued before a failed mute') });
+    await stops(claude);
+    const done = await until(sent.text, 'completed'), seq = done.events.at(-1).seq;
+    assert.equal((await cli('notify', '--check', String(seq))).data[seq], true);
+    await qa({ journalFail: true });
+    const mute = await cli('notify', 'work:1', 'off');
+    await qa({ journalFail: false });
+    assert.equal((await cli('notify', 'work:1', 'inherit')).ok, true);
+    assert.equal((await cli('notify', '--check', String(seq))).data[seq], false);
+    const writes = await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').slice(-2).map((c) => c.args.append));
+    await reboot();
+    assert.equal((await cli('notify', '--check', String(seq))).data[seq], false, 'A failed mute must survive re-enable and restart');
+    assert.deepEqual(writes, [true, false], 'Recovery rewrites the retained policy history');
+    assert.equal(mute.ok, false, 'The failed persistence must not acknowledge success');
+    assert.match(mute.error, /not saved|persist|journal/i);
+    ok('A failed policy append reports failure and the next write restores the mute before replay');
+  }
+
   // Start the older cases with the same empty journal and settings as before.
   await page.evaluate(() => { localStorage.clear(); });
   await reboot();

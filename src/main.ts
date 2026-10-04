@@ -3699,6 +3699,8 @@ const taskEventGate = new TaskEventGate();
  * failed. While any are, the next write rewrites the journal whole, which
  * puts them back. `task` shows them as `saved: false`. */
 const unsaved = new Set<string>();
+/** Policy-only writes have no task ids, but a failed one still needs recovery. */
+let journalDirty = false;
 /** Tasks that were reserved, the ones the journal keeps. */
 const typedTasks = () => [...tasks.values()].filter((t) => t.events.length);
 /** Writes to the journal, in order: appends, or the whole journal after a
@@ -3717,7 +3719,7 @@ function journal(lines: object[], ids: string[]): Promise<void> {
   const call = ++journalCalls, upTo = taskSeq;
   const write = journalQueue.then(() => {
     const covered = call <= snapshotCalls;
-    const whole = !covered && (unsaved.size > 0 || journalLines > 5000);
+    const whole = !covered && (journalDirty || unsaved.size > 0 || journalLines > 5000);
     const reserving = lines.filter((l) => "task" in l && !tasks.get((l as { task: Task }).task.id)?.events.length);
     const body = covered || whole ? reserving : lines;
     if (covered && !body.length) return;
@@ -3731,11 +3733,13 @@ function journal(lines: object[], ids: string[]): Promise<void> {
         if (whole) {
           snapshotCalls = seenCalls;
           unsaved.clear();
+          journalDirty = false;
           journalLines = 0;
         }
         taskEventGate.notify();
       },
       (e) => {
+        journalDirty = true;
         ids.forEach((id) => unsaved.add(id));
         throw e;
       },
@@ -4036,24 +4040,29 @@ const currentNotify = (): Omit<NotifySnapshot, "at"> => {
 async function recordNotify() {
   requireJournal();
   const now = currentNotify(), last = notifyHistory[notifyHistory.length - 1];
-  if (sameNotify(last ?? DEFAULT_NOTIFY, now)) return;
-  notifyHistory.push({ at: taskSeq, ...now });
-  void journal([{ notify: now, at: taskSeq }], []).catch(() => {});
+  const same = sameNotify(last ?? DEFAULT_NOTIFY, now);
+  if (same && !journalDirty) return;
+  if (!same) notifyHistory.push({ at: taskSeq, ...now });
+  try {
+    await journal([{ notify: now, at: taskSeq }], []);
+  } catch (e) {
+    throw new Error(`Notification policy changed in memory but was not saved to the task journal (${e instanceof Error ? e.message : String(e)}). Retry the change to save it.`);
+  }
 }
 /** Every pane's setting changed (on, kinds, what new panes start with). */
 async function setNotify(change: Partial<typeof notifyPolicy>) {
   requireJournal();
   notifyPolicy = { ...notifyPolicy, ...change };
   paintNotifications();
-  await recordNotify();
   save();
+  await recordNotify();
 }
 async function setPaneNotify(p: Pane, v: PaneNotify) {
   requireJournal();
   p.notify = v;
   p.paintBell();
-  await recordNotify();
   save();
+  await recordNotify();
 }
 /** A pane's bell: like every pane, or its own on or off. */
 const notifyMenu = (p: Pane): Menu => ({
