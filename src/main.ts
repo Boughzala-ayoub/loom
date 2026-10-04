@@ -7401,16 +7401,34 @@ class CliError extends Error {
   }
 }
 
-async function pollProviderUsage() {
-  const snapshots = threads.flatMap((t) => t.panes).filter((p) => p.agent === "codex" && p.sessionId)
+const providerPolls = new WeakMap<Pane, { sid: string; gen: number; promise: Promise<void> }>();
+async function pollProviderUsage(panes = threads.flatMap((t) => t.panes)) {
+  const snapshots = panes.filter((p) => p.agent === "codex" && p.sessionId)
     .map((p) => ({ p, sid: p.sessionId!, gen: p.generation }));
-  if (!snapshots.length) return;
-  const got = await invoke<Record<string, Usage>>("codex_session_usage", {
-    panes: snapshots.map(({ p, sid }) => [p.id, sid]),
-  }).catch(() => ({} as Record<string, Usage>));
-  for (const { p, sid, gen } of snapshots) {
-    if (!gone(p) && p.generation === gen && p.sessionId === sid) p.providerUsage = got[p.id] ?? null;
+  const waiting: Promise<void>[] = [], fresh: typeof snapshots = [];
+  for (const snap of snapshots) {
+    const old = providerPolls.get(snap.p);
+    if (old && old.sid === snap.sid && old.gen === snap.gen) waiting.push(old.promise);
+    else fresh.push(snap);
   }
+  if (fresh.length) {
+    let timer: ReturnType<typeof setTimeout>;
+    const promise = (async () => {
+      const got = await Promise.race([
+        invoke<Record<string, Usage>>("codex_session_usage", { panes: fresh.map(({ p, sid }) => [p.id, sid]) }).catch(() => ({} as Record<string, Usage>)),
+        new Promise<Record<string, Usage>>((resolve) => { timer = setTimeout(() => resolve({}), 2000); }),
+      ]);
+      clearTimeout(timer!);
+      for (const { p, sid, gen } of fresh) {
+        if (!gone(p) && p.generation === gen && p.sessionId === sid && got[p.id]?.sid === sid) p.providerUsage = got[p.id];
+      }
+    })();
+    for (const { p, sid, gen } of fresh) providerPolls.set(p, { sid, gen, promise });
+    waiting.push(promise.finally(() => {
+      for (const { p } of fresh) if (providerPolls.get(p)?.promise === promise) providerPolls.delete(p);
+    }));
+  }
+  await Promise.all(waiting);
 }
 
 /** A pane's state in one word, the Overview's words. */
@@ -7851,8 +7869,9 @@ const CLI: Record<string, CliCommand> = {
   status: {
     usage: "status",
     help: "Counts by state, the thread in front, and every pane waiting for you.",
-    run: () => {
+    run: async () => {
       const panes = threads.flatMap((t) => t.panes);
+      await pollProviderUsage(panes);
       const count = Object.fromEntries(CLI_STATES.map((s) => [s, panes.filter((p) => cliState(p) === s).length]));
       const waiting = panes.filter((p) => cliState(p) === "waiting");
       const front = current?.active ?? current?.panes[0];
@@ -7884,23 +7903,27 @@ const CLI: Record<string, CliCommand> = {
   threads: {
     usage: "threads",
     help: "Every thread: name, id, state, pane count, branch and folder. --json includes zoomed, the zoomed pane ID or null, independently of front; nested panes have a zoomed boolean.",
-    run: () => ({
+    run: async () => {
+      await pollProviderUsage();
+      return {
       data: threads.map(threadData),
       text: threads.length
         ? table(threads.map((t) => [t === current ? "*" : " ", t.name, t.id, threadState(t), `${t.panes.length} pane${t.panes.length === 1 ? "" : "s"}`, t.branch || "-", t.dir]))
         : "No threads. loomctl new <folder> opens one.",
-    }),
+      };
+    },
   },
   panes: {
     usage: "panes [--thread T] [--state S]",
-    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses Claude and Codex session records, with explicit startup model and effort as fallbacks. Invalid identifiers, efforts and recognizable secrets are omitted, including restored settings. Codex settings persist across large tool results. OpenCode has startup selections only; unavailable context stays null.",
+    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses Claude and Codex session records, with explicit startup model and effort as fallbacks. Invalid identifiers, efforts and recognizable secrets are omitted, including restored settings. Codex settings persist across large tool results. Pane, thread and status reads refresh selected Codex sessions even while minimized, sharing concurrent fetches with a two-second wait limit. OpenCode has startup selections only; unavailable context stays null.",
     options: { thread: "string", state: "string" },
-    run: (a) => {
+    run: async (a) => {
       const want = a.state === undefined ? null : cliStates(str(a, "state"), "");
       const thread = str(a, "thread");
       const panes = (thread === undefined ? threads : [cliThread(thread)])
         .flatMap((t) => t.panes)
         .filter((p) => !want || want.includes(cliState(p)));
+      await pollProviderUsage(panes);
       return { data: panes.map(paneData), text: panes.length ? paneRows(panes) : "No panes." };
     },
   },

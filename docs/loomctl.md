@@ -1103,3 +1103,5 @@ Menu and choose recognize a Claude survey only in the active footer below the li
 Survey questions may span real line breaks or terminal soft wraps. Loom reconstructs soft-wrapped survey rows from terminal wrap metadata while keeping numbered menus on physical rows.
 
 Claude survey detection uses the live composer and divider rows, including the nonbreaking space after `?`. Hard-wrapped questions and words split by terminal wrapping remain actionable.
+
+`panes`, `threads` and `status` refresh the Codex sessions they return even while Loom is minimized. Concurrent reads share pending fetches and wait at most two seconds. Late replies cannot replace data for a changed session or pane generation. UI repaint polling remains paused in the background.

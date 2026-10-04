@@ -14,7 +14,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -25,7 +25,7 @@ const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pol
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
-    startupTurns: null, contextOf: () => undefined, closedTaskContexts: new WeakMap(), taskSeq: 3, taskWatch: new Map(), heldEnter: new Map(), keepTasks() {}, keepReceipts() {},
+    gone: () => false, invoke: async () => ({}), startupTurns: null, contextOf: () => undefined, closedTaskContexts: new WeakMap(), taskSeq: 3, taskWatch: new Map(), heldEnter: new Map(), keepTasks() {}, keepReceipts() {},
     threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }],
     ...extra });
   runInContext(code, s);
@@ -35,6 +35,31 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(204)) {
+  const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
+  const p = { id: "p", th, agent: "codex", sessionId: "selected", generation: 1, providerUsage: null } as any;
+  th.panes.push(p);
+  let model = "first", calls = 0, deliver: ((v: any) => void) | undefined;
+  const c = fixture({ threads: [th], current: th, dashboardOpen: false, paneRows: () => "", gone: () => false,
+    document: { hidden: true }, backgroundHidden: () => true,
+    invoke: async () => { calls++; return deliver ? new Promise((r) => { deliver = r; }) : { p: { sid: p.sessionId, model, effort: "high", ctx: 12, window: 100 } }; } });
+  const first = await c.panes.run({ _: [] });
+  assert.equal(first.data[0].model, "first", "minimized CLI reads must collect initial settings");
+  model = "second";
+  assert.equal((await c.threads.run()).data[0].panes[0].model, "second");
+  assert.equal((await c.status.run()).data.front.context.usedTokens, 12);
+  const before = calls;
+  await Promise.all(Array.from({ length: 20 }, () => c.panes.run({ _: [] })));
+  assert.equal(calls, before + 1, "concurrent clients coalesce native reads");
+  deliver = () => {};
+  const pending = c.panes.run({ _: [] });
+  p.generation++; p.sessionId = "changed"; p.providerUsage = null;
+  deliver!({ p: { sid: "selected", model: "stale" } });
+  assert.equal((await pending).data[0].model, null);
+  const stalled = await c.panes.run({ _: [] });
+  assert.equal(stalled.data[0].model, null, "a stalled native read must be bounded");
+  console.log("ok   R4 minimized CLI reads refresh, coalesce, bound waits and reject stale generations");
+}
 if (check(201)) {
   const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
   const p = { id: "p", th, agent: "codex", sessionId: "selected" } as any;
@@ -44,15 +69,15 @@ if (check(201)) {
     for (const field of ["providerUsage", "startupSettings"]) {
       p.providerUsage = null; p.startupSettings = null;
       p[field] = { sid: "selected", model: value, effort: value };
-      const data = c.panes.run({ _: [] }).data[0];
+      const data = (await c.panes.run({ _: [] })).data[0];
       assert.ok(data.model === null && data.effort === null, "private settings must be absent");
-      assert.ok(!JSON.stringify(c.threads.run()).includes(value), "nested settings must be absent");
+      assert.ok(!JSON.stringify(await c.threads.run()).includes(value), "nested settings must be absent");
     }
   }
   p.startupSettings = { model: "vendor/custom-model:v2", effort: "xhigh" };
-  assert.equal(c.panes.run({ _: [] }).data[0].model, "vendor/custom-model:v2");
+  assert.equal((await c.panes.run({ _: [] })).data[0].model, "vendor/custom-model:v2");
   p.startupSettings.model = "claude-opus-5-5[1m]";
-  assert.equal(c.panes.run({ _: [] }).data[0].model, "claude-opus-5-5[1m]");
+  assert.equal((await c.panes.run({ _: [] })).data[0].model, "claude-opus-5-5[1m]");
   console.log("ok   R1 settings reject recognizable secrets and malformed restored values");
 }
 if (check(14)) {
@@ -60,14 +85,14 @@ if (check(14)) {
   const p = { id: "p", th }, q = { id: "q", th };
   th.panes.push(p, q);
   const c = fixture({ threads: [th] });
-  assert.equal(c.threads.run().data[0].zoomed, null);
+  assert.equal((await c.threads.run()).data[0].zoomed, null);
   th.zoomed = p;
-  let r = c.threads.run().data[0];
+  let r = (await c.threads.run()).data[0];
   assert.equal(r.zoomed, "p");
   assert.equal(r.panes[0].zoomed, true);
   assert.equal(r.panes[1].zoomed, false);
   th.zoomed = q;
-  r = c.threads.run().data[0];
+  r = (await c.threads.run()).data[0];
   assert.equal(r.zoomed, "q");
   console.log("ok   thread and pane records identify the actual zoom target independently of focus");
 }
@@ -123,13 +148,13 @@ if (check(7)) {
   const p = { id: "p", th, agent: "codex", usage: { model: "old", liveModel: "current", effort: "low", liveEffort: "high", ctx: 25000, window: 100000 } };
   th.panes.push(p);
   const c = fixture({ threads: [th], paneRows: () => "" });
-  const r = c.panes.run({ _: [] }).data[0];
+  const r = (await c.panes.run({ _: [] })).data[0];
   assert.equal(r.model, "current");
   assert.equal(r.effort, "high");
   assert.equal(r.context.remainingTokens, 75000);
   assert.equal(r.context.remainingPercent, 75);
   delete (p as any).usage;
-  const unknown = c.panes.run({ _: [] }).data[0];
+  const unknown = (await c.panes.run({ _: [] })).data[0];
   assert.deepEqual([unknown.model, unknown.effort, unknown.context], [null, null, null]);
   console.log("ok   panes exports live model, effort and context, with null for unavailable data");
 }
@@ -193,7 +218,7 @@ if (check(1)) {
     const w = Object.fromEntries(["unminimize", "show", "setFocus"].map((k) => [k, () => k === stuck ? new Promise(() => {}) : Promise.resolve()]));
     const c = fixture({ getCurrentWindow: () => w });
     const pending = c.window.run({ _: ["show"] });
-    assert.equal(c.threads.run().data.length, 0, "A pending window call does not block other requests");
+    assert.equal((await c.threads.run()).data.length, 0, "A pending window call does not block other requests");
     const result = await Promise.race([pending.then(() => "unexpected success", (e: Error) => e.message), new Promise((r) => setTimeout(() => r("hung"), 100))]);
     assert.match(String(result), /window.*timed out/i);
   }
@@ -266,10 +291,10 @@ if (check(105)) {
   th.panes[0].providerUsage = { sid: "observed-session", model: "observed", effort: "low", ctx: 12000, window: 100000 };
   const record = (await c.add.run({ _: [], agent: "codex" })).data;
   assert.equal(record.model, null);
-  assert.equal(c.panes.run({ _: [] }).data[0].model, "observed");
-  assert.equal(c.panes.run({ _: [] }).data[0].context.remainingTokens, 88000);
+  assert.equal((await c.panes.run({ _: [] })).data[0].model, "observed");
+  assert.equal((await c.panes.run({ _: [] })).data[0].context.remainingTokens, 88000);
   th.panes[0].sessionId = "another-session";
-  assert.equal(c.panes.run({ _: [] }).data[0].model, "gpt-6.1-sol", "a changed session must not expose the previous session's settings");
+  assert.equal((await c.panes.run({ _: [] })).data[0].model, "gpt-6.1-sol", "a changed session must not expose the previous session's settings");
   let deliver!: (v: any) => void;
   const p = th.panes[0];
   p.sessionId = "known"; p.generation = 1; p.providerUsage = null;
