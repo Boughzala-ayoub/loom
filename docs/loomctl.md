@@ -1064,3 +1064,5 @@ The three steps of `window show` (unminimize, show, focus) each time out after 2
 Task records resolve `ref` from the pane ID each time they are read. After close, `ref` is null and `paneClosed` is true; text output names the closed pane and its original reference. `tasks --pane` accepts a current reference or a pane ID, including a closed pane's ID. Historical watch events stay unchanged.
 
 `new <folder>` opens ordinary folders as well as repositories, preserving the folder you selected. Git is required only for `--name` or `--base`, which creates a worktree. `--base` alone also supplies its name.
+
+`menu` recognizes Claude's session survey. Its JSON includes `keys: [1,2,3,0]` as strings and `selected: -1`. Use `choose <pane> 0` to dismiss, or 1/2/3 to rate. Loom sends that digit without Enter; `--menu REV` and `--gen N` still guard the write.

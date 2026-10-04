@@ -8,9 +8,10 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as cli from "./cli.ts";
 import * as task from "./task.ts";
+import * as prompt from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -19,7 +20,7 @@ for (const node of source.statements) {
 }
 const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function fixture(extra: Record<string, unknown> = {}) {
-  const s = createContext({ ...cli, ...task, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
+  const s = createContext({ ...cli, ...task, ...prompt, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
     threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }],
     ...extra });
   runInContext(code, s);
@@ -27,6 +28,19 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(5)) {
+  const writes: string[] = [];
+  let screen = "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
+  const c = fixture({ cliPane: () => ({ id: "p", agent: "claude" }), liveScreen: () => screen,
+    inTurn: (_: unknown, f: (live: () => void) => unknown) => f(() => {}), keys: (_: unknown, s: string) => writes.push(s) });
+  const menu = c.menu.run({ _: ["p"] }).data;
+  await c.choose.run({ _: ["p", "0"], menu: menu.rev });
+  assert.deepEqual(writes, ["0"]);
+  screen = "different question";
+  await assert.rejects(c.choose.run({ _: ["p", "1"], menu: menu.rev }));
+  assert.deepEqual(writes, ["0"]);
+  console.log("ok   survey choose sends its digit without Enter and refuses a changed screen");
+}
 if (check(4)) {
   let created = "", gitCalls = 0;
   const c = fixture({ MAX_PANES: 16, callerPath: (s: string) => s,

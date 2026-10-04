@@ -18,7 +18,7 @@ import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { readMenu, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
+import { readMenu, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
@@ -4421,8 +4421,10 @@ function choose(p: Pane, menu: AgentMenu, i: number, gen?: number) {
     const want = menuRev(menu);
     for (let step = 0; step <= menu.options.length; step++) {
       live(step > 0);
-      const now = readMenu(liveScreen(p, false));
+      const screen = liveScreen(p, false);
+      const now = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(screen) : null);
       if (!now || menuRev(now) !== want) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
+      if (now.keys) return keys(p, now.keys[i]);
       if (now.selected === i) return submit(p);
       await keys(p, (p.term.modes.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + (now.selected > i ? "A" : "B"));
       await p.settle(80, 800);
@@ -7813,14 +7815,15 @@ const CLI: Record<string, CliCommand> = {
   },
   menu: {
     usage: "menu [pane]",
-    help: "The numbered question on a pane's screen, if it shows one.",
+    help: "The numbered question on a pane's screen, including Claude's session survey. Survey keys are 1, 2, 3 and 0; selected is -1 because none is highlighted.",
     run: (a) => {
       const p = cliPane(a._[0]);
-      const m = readMenu(liveScreen(p, false));
+      const screen = liveScreen(p, false);
+      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(screen) : null);
       if (!m) return { data: null, text: `${paneName(p)} isn't showing a numbered question.` };
       const rev = menuRev(m);
       // The whole prompt, which the id covers, not just the summary above the options.
-      const note = `(${m.selected + 1} is highlighted. Menu ${rev}: choose --menu ${rev} answers only this question.)`;
+      const note = `(${m.selected < 0 ? "Press a listed digit" : `${m.selected + 1} is highlighted`}. Menu ${rev}: choose --menu ${rev} answers only this question.)`;
       return { data: { ...m, rev }, text: [...m.prompt, note].join("\n") };
     },
   },
@@ -8004,18 +8007,20 @@ const CLI: Record<string, CliCommand> = {
   },
   choose: {
     usage: "choose <pane> <n> [--menu REV] [--gen N]",
-    help: "Pick option n of the numbered question on a pane's screen, as the Overview's buttons do. --menu REV (from loomctl menu) refuses any other question; --gen N a pane that restarted since.",
+    help: "Pick option n of the numbered question on a pane's screen. For Claude's survey, use its digit, including 0 to dismiss, without Enter. --menu REV (from loomctl menu) refuses any other question; --gen N a pane that restarted since.",
     options: { menu: "string", gen: "int" },
     run: async (a) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
       const n = Number(cliWord(a, 1, "an option number"));
-      const m = readMenu(liveScreen(p, false));
+      const screen = liveScreen(p, false);
+      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(screen) : null);
       if (!m) throw new Error(`${paneName(p)} isn't showing a numbered question.`);
       const rev = menuRev(m), expect = str(a, "menu");
       if (expect !== undefined && expect !== rev) throw new Error(`${paneName(p)} shows another question now (menu ${rev}, not ${expect}), so nothing was chosen. loomctl menu ${paneName(p)} reads it.`);
-      if (!Number.isInteger(n) || n < 1 || n > m.options.length) throw new Error(`Pick 1 to ${m.options.length}.`);
-      await choose(p, m, n - 1, cliGen(a));
-      return { data: { pane: p.id, option: n, text: m.options[n - 1], rev }, text: `Chose ${n}. ${m.options[n - 1]}` };
+      const i = m.keys ? m.keys.indexOf(String(n)) : n - 1;
+      if (!Number.isInteger(n) || i < 0 || i >= m.options.length) throw new Error(`Pick ${m.keys?.join(", ") ?? `1 to ${m.options.length}`}.`);
+      await choose(p, m, i, cliGen(a));
+      return { data: { pane: p.id, option: n, text: m.options[i], rev }, text: `Chose ${n}. ${m.options[i]}` };
     },
   },
   wait: {

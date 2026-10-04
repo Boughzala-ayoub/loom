@@ -4,7 +4,14 @@
  * numbered list with a cursor glyph on the highlighted option. Text pasted into
  * one of those is not an answer, and the Enter after it picks whatever is
  * highlighted, so the overview offers the options as buttons instead. */
-export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[] };
+export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[]; keys?: string[] };
+
+/** Claude's optional session survey takes a digit directly, without Enter. */
+export function readSurvey(screen: string): Menu | null {
+  const match = /How is Claude doing this session\?\s*1:\s*Bad\s+2:\s*Fine\s+3:\s*Good\s+0:\s*Dismiss/i.exec(screen);
+  if (!match) return null;
+  return { question: ["How is Claude doing this session?"], options: ["Bad", "Fine", "Good", "Dismiss"], keys: ["1", "2", "3", "0"], selected: -1, multi: false, prompt: [match[0].replace(/\s+/g, " ")] };
+}
 
 const CURSOR = /^[❯›▶➤]\s*/; // Not ASCII ">": that is Claude's input prompt.
 const OPTION = /^([❯›▶➤]\s*)?(\d{1,2})[.)]\s+(\S.*)$/;

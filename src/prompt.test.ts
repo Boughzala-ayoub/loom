@@ -1,5 +1,5 @@
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, readInput, echoes, echoed, menuRev, claudeWorking, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import { readMenu, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 
 let fails = 0;
@@ -315,5 +315,10 @@ check("The line a turn leaves: not working", claudeWorking(claudeBusy.replace(/^
 check("A tool still running, indented: not the working line", claudeWorking(claudeBusy.replace(/^✢ .*\n/m, "")), false);
 check("A truncated line ending in …: not working", claudeWorking("● Read(src/main.ts…)\n* a bullet that ends here…ish\n"), false);
 
+for (const screen of ["How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss", "How is Claude doing this session?\n  1: Bad   2: Fine\n 3: Good  0: Dismiss"]) {
+  const m = readSurvey(screen);
+  check("survey choices retain their direct keys including zero", m && [m.options, m.keys, m.selected], [["Bad", "Fine", "Good", "Dismiss"], ["1", "2", "3", "0"], -1]);
+}
+check("an incomplete survey is not actionable", readSurvey("How is Claude doing this session? 1: Bad"), null);
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");
