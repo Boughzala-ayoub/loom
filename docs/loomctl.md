@@ -1068,3 +1068,5 @@ Task records resolve `ref` from the pane ID each time they are read. After close
 `menu` recognizes Claude's session survey. Its JSON includes `keys: [1,2,3,0]` as strings and `selected: -1`. Use `choose <pane> 0` to dismiss, or 1/2/3 to rate. Loom sends that digit without Enter; `--menu REV` and `--gen N` still guard the write.
 
 `usage [claude|codex] --json` fetches current account plan usage, even while `set plan-usage off` is in effect. Omit the provider for both. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.
+
+`panes --json` includes `model`, `effort` and `context` from the latest session data. Context contains `usedTokens`, `windowTokens`, `remainingTokens` and `remainingPercent`. Missing data is null. Recent settings take precedence over statusline reports, then the last transcript turn; this does not depend on pane width. The same fields appear in nested pane records from `threads` and `status`.

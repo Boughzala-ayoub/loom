@@ -11,7 +11,7 @@ import * as task from "./task.ts";
 import * as prompt from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -28,6 +28,21 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(7)) {
+  const th = { name: "work", panes: [] as any[] };
+  const p = { id: "p", th, agent: "codex", usage: { model: "old", liveModel: "current", effort: "low", liveEffort: "high", ctx: 25000, window: 100000 } };
+  th.panes.push(p);
+  const c = fixture({ threads: [th], paneRows: () => "" });
+  const r = c.panes.run({ _: [] }).data[0];
+  assert.equal(r.model, "current");
+  assert.equal(r.effort, "high");
+  assert.equal(r.context.remainingTokens, 75000);
+  assert.equal(r.context.remainingPercent, 75);
+  delete (p as any).usage;
+  const unknown = c.panes.run({ _: [] }).data[0];
+  assert.deepEqual([unknown.model, unknown.effort, unknown.context], [null, null, null]);
+  console.log("ok   panes exports live model, effort and context, with null for unavailable data");
+}
 if (check(6)) {
   const calls: string[] = [];
   const plan = { tier: "pro", limits: [{ label: "Weekly", percent: 40 }], stale: false, bankedResets: 2, bankedResetExpiries: ["2026-11-01", null] };

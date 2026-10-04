@@ -7348,12 +7348,23 @@ function cliStates(value: unknown, fallback: string): string[] {
 
 /** "<thread>:<n>", the name loomctl prints and takes back. */
 const paneName = (p: Pane) => `${p.th.name}:${p.th.panes.indexOf(p) + 1}`;
+function paneSettings(p: Pane) {
+  const u = p.usage, ran = u?.mainTurns ?? 0;
+  const held = (s: Set_ | undefined, cur: string) => s && (ran <= s.at || (s.was !== undefined && cur === s.was)) ? s.v : "";
+  const left = u ? Math.max(0, u.window - u.ctx) : 0;
+  return {
+    model: held(p.want?.model, u?.model ?? "") || u?.liveModel || u?.model || null,
+    effort: held(p.want?.effort, u?.effort ?? "") || u?.liveEffort || u?.effort || p.effort || null,
+    context: u && u.window > 0 ? { usedTokens: u.ctx, windowTokens: u.window, remainingTokens: left, remainingPercent: Math.round(100 * left / u.window) } : null,
+  };
+}
 const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
   title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, dir: p.th.dir, front: current === p.th && p.th.active === p,
   // Which launch this is (send --gen takes it), and what a shell with Loom's prompt last reported.
   generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit, atPrompt: p.atPrompt, turns: p.turns, notify: p.notify,
   lastOutput: p.lastOut ? new Date(p.lastOut).toISOString() : null,
+  ...paneSettings(p),
 });
 /** --gen: input for that launch of the pane only. */
 const cliGen = (a: Args) => (a.gen === undefined ? undefined : num(a, "gen", 0, 0, Number.MAX_SAFE_INTEGER));
@@ -7791,7 +7802,7 @@ const CLI: Record<string, CliCommand> = {
   },
   panes: {
     usage: "panes [--thread T] [--state S]",
-    help: "Every pane: its <thread>:<n>, id, agent, state and title.",
+    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses the latest session data, not clipped screen text.",
     options: { thread: "string", state: "string" },
     run: (a) => {
       const want = a.state === undefined ? null : cliStates(str(a, "state"), "");
