@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-closed|startup-closed-off|startup-closed-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -813,6 +813,67 @@ try {
     assert.deepEqual(await decided(), [true, 'send', true], 'The same after a restart');
     await page.evaluate(() => localStorage.removeItem('qa-use-state'));
     ok('A turn during the startup read is judged by the policy restored with its pane');
+  }
+
+  // Review 2026-10-04 16:36 F1: workspace inherit must replace a stale legacy journal override.
+  if (review('startup-inherit')) for (const close of [false, true]) {
+    await resetReview();
+    await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b']] });
+    await page.waitForFunction(() => !window.qa.sessions.length);
+    assert.equal((await cli('notify', '--all', 'off')).ok, true);
+    assert.equal((await cli('notify', 'work:2', 'on')).ok, true);
+    const oldOwner = codex, text = 'enabled completion in a legacy journal';
+    const old = await cli('submit', 'work:2', text);
+    assert.equal(old.ok, true);
+    await report(codex, { kind: 'end', matches: [promptMatch(text)], turn: 'legacy-inherit' });
+    const seq = (await until(old.text, 'completed')).events.at(-1).seq;
+    assert.equal(seq, 3);
+    await page.waitForTimeout(700);
+    const original = await page.evaluate(() => {
+      const lines = localStorage.getItem('qa-journal').trim().split('\n').map(JSON.parse);
+      for (const line of lines) if (line.notify) delete line.notify.owners;
+      const journal = lines.map(JSON.stringify).join('\n') + '\n';
+      localStorage.setItem('qa-journal', journal);
+      localStorage.setItem('qa-use-state', '1');
+      localStorage.setItem('qa-journal-write-fail', '1');
+      return journal;
+    });
+    await reboot(); // migration cannot reach the journal
+    const changed = await cli('notify', 'work:2', 'inherit');
+    assert.equal(changed.ok, false, 'The inherit write fails too');
+    await page.waitForTimeout(700);
+    const workspace = await page.evaluate(() => JSON.parse(localStorage.getItem('qa-state')).threads[0].panes[1]);
+    assert.equal(workspace.notify, undefined, 'The separate workspace save keeps inherit');
+    assert.ok(workspace.notifyIds.includes(oldOwner));
+    assert.equal(await page.evaluate(() => localStorage.getItem('qa-journal')), original, 'Failed migration and inherit writes leave the old explicit on untouched');
+    await page.evaluate(() => {
+      localStorage.removeItem('qa-journal-write-fail');
+      localStorage.setItem('qa-journal-read-hold', '1');
+    });
+    await page.goto(base);
+    await page.waitForFunction(() => !!window.qa.releaseRead);
+    if (close) {
+      const pane = page.locator('.pane').nth(1);
+      const id = await pane.getAttribute('data-id');
+      await pane.locator('[title="Close pane"]').click();
+      await page.locator('#confirm-action').click();
+      await page.waitForFunction((id) => !document.querySelector(`.pane[data-id="${id}"]`), id);
+    }
+    await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+    const decided = async () => [
+      (await cli('watch', old.text, '--after', String(seq - 1), '--metadata', '--policy')).data.events.at(-1).notify,
+      (await cli('watch', old.text, '--after', String(seq - 1), '--metadata', '--policy-v4')).data.events.at(-1).disposition,
+      (await cli('notify', '--check', String(seq))).data[seq],
+      (await cli('notify', '--check', String(seq), '--policy-v4')).data[seq],
+    ];
+    assert.deepEqual(await decided(), [false, 'muted', false, 'muted'], `Saved inherit wins over stale on with pane ${close ? 'closed' : 'live'}`);
+    assert.equal((await cli('notify')).data.unresolved.some((r) => r.owner === oldOwner), false, 'The saved alias proves identity without an ownership hold');
+    await page.waitForTimeout(700);
+    await boot(close ? 2 : 3);
+    assert.deepEqual(await decided(), [false, 'muted', false, 'muted'], 'The inherited mute survives another restart');
+    await page.evaluate(() => localStorage.removeItem('qa-use-state'));
+    ok(`Saved inherit replaces a stale legacy override after failed writes, with the startup pane ${close ? 'closed' : 'live'}`);
   }
 
   // Review 2026-10-04 15:13 R1: a completed startup turn keeps its closed pane's override.
