@@ -11,7 +11,7 @@ export const claudeComposer = (line: string) => /^[ \t]*[\u276f>]([ \t\u00a0]|$)
 
 /** Claude's optional session survey takes a digit directly, without Enter. */
 export function readSurvey(screen: string): Menu | null {
-  const match = /^[ \t]*How\s+is\s+Claude\s+doing\s+this\s+session\?\s*1:\s*Bad\s+2:\s*Fine\s+3:\s*Good\s+0:\s*Dismiss\s*$/im.exec(screen);
+  const match = [...screen.matchAll(/^[ \t]*How\s+is\s+Claude\s+doing\s+this\s+session\?\s*1:\s*Bad\s+2:\s*Fine\s+3:\s*Good\s+0:\s*Dismiss\s*$/gim)].find((candidate) => !screen.slice(candidate.index! + candidate[0].length).trim());
   if (!match || screen.slice(match.index + match[0].length).trim()) return null;
   // The survey owns the footer below the live composer. Transcript quotations
   // and a dismissed survey above a new composer cannot consume survey keys.

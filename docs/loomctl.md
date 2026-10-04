@@ -1107,3 +1107,5 @@ Claude survey detection uses the live composer and divider rows, including the n
 `panes`, `threads` and `status` refresh the Codex sessions they return even while Loom is minimized. Concurrent reads share pending fetches and wait at most two seconds. Late replies cannot replace data for a changed session or pane generation. UI repaint polling remains paused in the background.
 
 A rate limit on Codex reset-credit details extends the shared account cooldown even when primary usage succeeds. Primary limits remain available; a fixed note reports missing expiry details without including the provider response.
+
+Survey selection checks the final active footer. Earlier quoted surveys do not hide it, and dismissal invalidates guarded `choose` before any key is written.

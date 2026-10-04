@@ -403,6 +403,24 @@ if (check(109)) {
   console.log("ok   N9 hard-wrapped and soft-wrapped active surveys support menu and guarded choose");
 }
 
+if (check(206)) {
+  const survey = "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
+  let screen = survey + "\nQuoted documentation above the live composer.\n" + claudeComposer + "\n" + survey;
+  const writes: string[] = [];
+  const p = { id: "p", th: { name: "work", panes: [] }, agent: "claude" };
+  const c = fixture({ cliPane: () => p, liveScreen: () => screen,
+    inTurn: (_: unknown, f: (live: () => void) => unknown) => f(() => {}), keys: (_: unknown, s: string) => writes.push(s) });
+  const menu = c.menu.run({ _: ["p"] }).data;
+  assert.ok(menu, "an earlier complete quote must not suppress the active survey");
+  await c.choose.run({ _: ["p", "0"], menu: menu.rev });
+  assert.deepEqual(writes, ["0"]);
+  screen = survey + "\n" + claudeComposer;
+  await assert.rejects(c.choose.run({ _: ["p", "0"], menu: menu.rev }));
+  assert.deepEqual(writes, ["0"]);
+  assert.equal(c.menu.run({ _: ["p"] }).data, null);
+  console.log("ok   R6 active survey survives earlier quotations and dismissal invalidates guarded choose");
+}
+
 if (check(205)) {
   let now = Date.now(), calls = 0;
   class Clock extends Date { static now() { return now; } }
