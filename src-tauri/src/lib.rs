@@ -1377,16 +1377,9 @@ mod commands {
     #[tauri::command]
     pub async fn codex_session_usage(app: AppHandle, panes: Vec<(String, String)>) -> HashMap<String, usage::Usage> {
         blocking(move || {
-            let mut out = HashMap::new();
+            let out = HashMap::new();
             let Ok(home) = super::codex_home(&app) else { return out };
-            let mut files = Vec::new();
-            super::codex_rollouts(&home.join("sessions"), &mut files);
-            for (id, sid) in panes {
-                if sid.len() != 36 || !sid.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-') { continue; }
-                if let Some(u) = files.iter().filter(|(_, path)| super::rollout_is(path, &sid))
-                    .find_map(|(_, path)| usage::codex_session(path, &sid)) { out.insert(id, u); }
-            }
-            out
+            usage::codex_usage(&app.state::<usage::CodexScanned>(), &home, panes)
         }).await
     }
     #[tauri::command]
@@ -1494,6 +1487,7 @@ pub fn run() {
         .manage(WindowStateReady::default())
         .manage(dictate::Dictation::default())
         .manage(usage::Scanned::default())
+        .manage(usage::CodexScanned::default())
         // The window is config-defined but built here ("create": false) because
         // enable_clipboard_access has no tauri.conf.json equivalent — without it
         // WebView2 shows a permission prompt on navigator.clipboard.readText.

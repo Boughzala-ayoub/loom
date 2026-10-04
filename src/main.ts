@@ -7893,7 +7893,7 @@ const CLI: Record<string, CliCommand> = {
   },
   panes: {
     usage: "panes [--thread T] [--state S]",
-    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses Claude and Codex session records, with explicit startup model and effort as fallbacks. Invalid identifiers, efforts and recognizable secrets are omitted, including restored settings. OpenCode has startup selections only; unavailable context stays null.",
+    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses Claude and Codex session records, with explicit startup model and effort as fallbacks. Invalid identifiers, efforts and recognizable secrets are omitted, including restored settings. Codex settings persist across large tool results. OpenCode has startup selections only; unavailable context stays null.",
     options: { thread: "string", state: "string" },
     run: (a) => {
       const want = a.state === undefined ? null : cliStates(str(a, "state"), "");

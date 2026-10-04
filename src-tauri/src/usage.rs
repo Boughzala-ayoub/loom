@@ -349,38 +349,146 @@ fn setting_value(value: &str, effort: bool) -> String {
     if valid && !PRIVATE.is_match(value) { value.into() } else { String::new() }
 }
 
-/// Read only the selected Codex session, never the newest unrelated rollout.
-pub fn codex_session(path: &Path, sid: &str) -> Option<Usage> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut first = String::new();
-    std::io::BufReader::new(file.take(64 * 1024)).read_line(&mut first).ok()?;
-    let meta: serde_json::Value = serde_json::from_str(&first).ok()?;
-    if meta["type"] != "session_meta" || meta["payload"]["id"].as_str() != Some(sid)
-        || meta["payload"]["source"].is_object() { return None; }
-    let mut file = std::fs::File::open(path).ok()?;
-    let size = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(size.saturating_sub(256 * 1024))).ok()?;
-    let mut bytes = Vec::new();
-    file.take(256 * 1024).read_to_end(&mut bytes).ok()?;
-    let tail = String::from_utf8_lossy(&bytes);
-    let mut usage = Usage { sid: sid.into(), ..Usage::default() };
-    for line in tail.lines() {
-        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let p = &row["payload"];
-        if row["type"] == "turn_context" {
-            if let Some(model) = p["model"].as_str() { usage.model = setting_value(model, false); }
-            if let Some(effort) = p["effort"].as_str().or_else(|| p["reasoning_effort"].as_str()) { usage.effort = setting_value(effort, true); }
+/// Bounded discovery once per selected session; readers fold only appended bytes.
+#[derive(Default)]
+pub struct CodexScanned(Mutex<HashMap<String, (PathBuf, CodexReader)>>);
+
+#[derive(Default)]
+struct CodexReader {
+    identity: Option<(u64, u64)>,
+    modified: Option<std::time::SystemTime>,
+    size: u64,
+    offset: u64,
+    pending: Vec<u8>,
+    oversized: bool,
+    usage: Usage,
+}
+
+fn file_identity(file: &std::fs::File) -> Option<(u64, u64)> {
+    #[cfg(windows)] {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION}};
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info).ok()?; }
+        Some((info.dwVolumeSerialNumber as u64, ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64))
+    }
+    #[cfg(unix)] {
+        use std::os::unix::fs::MetadataExt;
+        let m = file.metadata().ok()?;
+        Some((m.dev(), m.ino()))
+    }
+}
+
+impl CodexReader {
+    fn read(&mut self, path: &Path, sid: &str) -> Option<Usage> {
+        let mut file = std::fs::File::open(path).ok()?;
+        let meta = file.metadata().ok()?;
+        let identity = file_identity(&file)?;
+        let modified = meta.modified().ok();
+        if self.identity != Some(identity) || self.usage.sid != sid || meta.len() < self.size
+            || (meta.len() == self.size && modified != self.modified) {
+            *self = Self::default();
         }
-        if row["type"] == "event_msg" && p["type"] == "token_count" {
-            let info = &p["info"];
-            // last_token_usage is the current request, total_token_usage is cumulative.
-            if let (Some(ctx), Some(window)) = (info["last_token_usage"]["total_tokens"].as_u64(), info["model_context_window"].as_u64()) {
-                usage.ctx = ctx;
-                usage.window = window;
+        if self.identity.is_none() {
+            let mut first = String::new();
+            std::io::BufReader::new((&mut file).take(64 * 1024)).read_line(&mut first).ok()?;
+            if !first.ends_with('\n') { return None; }
+            let row: serde_json::Value = serde_json::from_str(&first).ok()?;
+            if row["type"] != "session_meta" || row["payload"]["id"].as_str() != Some(sid)
+                || row["payload"]["source"].is_object() { return None; }
+            self.identity = Some(identity);
+            self.offset = first.len() as u64;
+            self.usage.sid = sid.into();
+        }
+        self.size = meta.len();
+        self.modified = modified;
+        file.seek(SeekFrom::Start(self.offset)).ok()?;
+        // Bound both work per refresh and storage for a single record. Continue
+        // huge tool output on the next refresh without retaining its contents.
+        let mut reader = std::io::BufReader::new(file.take(16 * 1024 * 1024));
+        loop {
+            let bytes = reader.fill_buf().ok()?;
+            if bytes.is_empty() { break; }
+            let n = bytes.iter().position(|b| *b == b'\n').map_or(bytes.len(), |i| i + 1);
+            let complete = bytes[n - 1] == b'\n';
+            if !self.oversized {
+                if self.pending.len() + n <= 256 * 1024 { self.pending.extend_from_slice(&bytes[..n]); }
+                else { self.pending.clear(); self.oversized = true; }
+            }
+            self.offset += n as u64;
+            reader.consume(n);
+            if complete {
+                if !self.oversized {
+                    if let Ok(row) = serde_json::from_slice::<serde_json::Value>(&self.pending) {
+                        fold_codex(&mut self.usage, &row);
+                    }
+                }
+                self.pending.clear();
+                self.oversized = false;
             }
         }
+        Some(self.usage.clone())
     }
-    Some(usage)
+}
+
+fn fold_codex(usage: &mut Usage, row: &serde_json::Value) {
+    let p = &row["payload"];
+    if row["type"] == "turn_context" {
+        if let Some(model) = p["model"].as_str() { usage.model = setting_value(model, false); }
+        if let Some(effort) = p["effort"].as_str().or_else(|| p["reasoning_effort"].as_str()) { usage.effort = setting_value(effort, true); }
+    }
+    if row["type"] == "event_msg" && p["type"] == "token_count" {
+        let info = &p["info"];
+        if let (Some(ctx), Some(window)) = (info["last_token_usage"]["total_tokens"].as_u64(), info["model_context_window"].as_u64()) {
+            usage.ctx = ctx;
+            usage.window = window;
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn codex_session(path: &Path, sid: &str) -> Option<Usage> {
+    CodexReader::default().read(path, sid)
+}
+
+pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String)>) -> HashMap<String, Usage> {
+    let mut cache = state.0.lock().unwrap();
+    cache.retain(|sid, _| panes.iter().any(|(_, wanted)| wanted == sid));
+    let mut out = HashMap::new();
+    let mut missing = Vec::new();
+    for (id, sid) in panes {
+        if sid.len() != 36 || !sid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') { continue; }
+        if let Some((path, reader)) = cache.get_mut(&sid) {
+            if let Some(u) = reader.read(path, &sid) { out.insert(id, u); continue; }
+        }
+        cache.remove(&sid);
+        missing.push((id, sid));
+    }
+    if missing.is_empty() { return out; }
+    let mut dirs = vec![(home.join("sessions"), 0)];
+    let mut visited = std::collections::HashSet::new();
+    let mut budget = 20_000usize;
+    while let Some((dir, depth)) = dirs.pop() {
+        let Ok(canonical) = dir.canonicalize() else { continue };
+        if depth > 32 || !visited.insert(canonical) { continue; }
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            if budget == 0 { return out; }
+            budget -= 1;
+            let path = entry.path();
+            if path.is_dir() { dirs.push((path, depth + 1)); continue; }
+            for (id, sid) in &missing {
+                if out.contains_key(id) || !super::rollout_is(&path, sid) { continue; }
+                let mut reader = CodexReader::default();
+                if let Some(u) = reader.read(&path, sid) {
+                    out.insert(id.clone(), u);
+                    cache.insert(sid.clone(), (path.clone(), reader));
+                }
+            }
+            if missing.iter().all(|(id, _)| out.contains_key(id)) { return out; }
+        }
+    }
+    out
 }
 
 // --- context profile ------------------------------------------------------
@@ -1059,6 +1167,49 @@ fn plan_from_status(dir: &Path, tier: String) -> Option<Plan> {
 mod tests {
     use super::{live_status, plan_from_status, profile_of, scan, slug, transcript, Usage};
     use std::io::Write;
+
+    #[test]
+    fn codex_incremental_settings_invalidate_and_wait_for_complete_records() {
+        let path = std::env::temp_dir().join(format!("loom-incremental-settings-{}.jsonl", std::process::id()));
+        let header = "{\"type\":\"session_meta\",\"payload\":{\"id\":\"selected\",\"source\":\"cli\"}}\n";
+        let turn = |model: &str| format!("{}\n", serde_json::json!({"type":"turn_context","payload":{"model":model,"effort":"high"}}));
+        std::fs::write(&path, format!("{header}{}", turn("first"))).unwrap();
+        let mut reader = super::CodexReader::default();
+        assert_eq!(reader.read(&path, "selected").unwrap().model, "first");
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let next = turn("second");
+        file.write_all(&next.as_bytes()[..20]).unwrap();
+        assert_eq!(reader.read(&path, "selected").unwrap().model, "first");
+        file.write_all(&next.as_bytes()[20..]).unwrap();
+        writeln!(file, "{}", serde_json::json!({"type":"response_item","payload":"x".repeat(300_000)})).unwrap();
+        assert_eq!(reader.read(&path, "selected").unwrap().model, "second");
+        drop(file);
+        std::fs::write(&path, header).unwrap();
+        assert!(reader.read(&path, "selected").unwrap().model.is_empty(), "truncation must invalidate settings");
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, format!("{header}{}", turn("replacement"))).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert_eq!(reader.read(&path, "selected").unwrap().model, "replacement");
+        assert!(reader.read(&path, "other").is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_settings_survive_large_tool_output() {
+        let path = std::env::temp_dir().join(format!("loom-large-settings-{}.jsonl", std::process::id()));
+        let rows = [
+            serde_json::json!({"type":"session_meta","payload":{"id":"large","source":"cli"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-old","effort":"low"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"vendor/current:v2","effort":"high"}}),
+            serde_json::json!({"type":"response_item","payload":{"output":"x".repeat(300_000)}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":12000},"model_context_window":100000}}}),
+        ];
+        std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let u = super::codex_session(&path, "large").unwrap();
+        assert_eq!((u.model.as_str(), u.effort.as_str(), u.ctx), ("vendor/current:v2", "high", 12000));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn codex_settings_reject_private_metadata() {
