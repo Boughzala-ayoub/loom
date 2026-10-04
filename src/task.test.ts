@@ -1,5 +1,5 @@
 // Self-check for loomctl's tasks. Run: node src/task.test.ts
-import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, notifies, notifyDisposition, parseSignal, promptMatch, readJournal, route, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
+import { allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, notifies, notifyDisposition, parseSignal, promptMatch, readJournal, route, taskContext, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -339,6 +339,64 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   eq("never one after the report", claimManual([m(500, "aa")], 400, 1, "aa", 10_000), -1);
   eq("never another launch's", claimManual([m(100, "aa", 1)], 200, 2, "aa", 10_000), -1);
   eq("a report naming nothing (OpenCode) takes the oldest of its launch", claimManual([m(100, null, 2), m(150, null, 3)], 9_999_999, 3, null, Infinity), 1);
+}
+
+// Notification context (docs/turn-tracking-and-notifications.md): what Loom
+// copies of a task's thread and pane, the labels it lets out, and replay.
+{
+  const live = { threadId: "mabc1200-14", threadName: "Loom notification work", paneNumber: 2, paneTitle: "Agent session", capturedAt: 1000, origin: "event" };
+  eq("a clean copy keeps every field", taskContext(live), { ...live, issues: [] });
+  const name = (threadName: unknown) => { const c = taskContext({ ...live, threadName }); return [c.threadName, c.issues]; };
+  eq("escapes, controls, bidi and zero-width characters go, spacing becomes one space", name("\x1b]0;title\x07Fix\tthe\r\nbug\u202e\u200b  now\x1b[31m!\x1b[0m"), ["Fix the bug now!", []]);
+  eq("a decomposed accent is normalized", name("cafe\u0301"), ["café", []]);
+  eq("a lone surrogate goes", name("a\ud800b"), ["ab", []]);
+  eq("a branch-like name stays", name("loom/notification-work"), ["loom/notification-work", []]);
+  for (const p of ["C:\\Users\\ayoub\\work", "\\\\server\\share", "/home/ayoub/work", "~/work", "work\\sub"]) eq(`a path-like name is private: ${p}`, name(p), [null, ["private-label"]]);
+  for (const s of ["deploy sk-abcdefghijklmnopqrstuv", "ghp_abcdefghijklmnopqrstuvwxyz0123", "AKIAABCDEFGHIJKLMNOP", "password=hunter2", "-----BEGIN PRIVATE KEY-----"]) eq(`a secret-like name is private: ${s}`, name(s), [null, ["private-label"]]);
+  eq("nothing left is a missing name", name("\x1b[0m \t\u200b"), [null, ["missing-name"]]);
+  eq("a number is no name", name(42), [null, ["invalid-context"]]);
+  const long = taskContext({ ...live, threadName: "é".repeat(200) });
+  eq("cut to 128 scalar values", [[...long.threadName!].length, new TextEncoder().encode(long.threadName!).length, long.issues], [128, 256, ["truncated-label"]]);
+  const wide = taskContext({ ...live, threadName: "😀".repeat(100) }).threadName!;
+  eq("and to 256 UTF-8 bytes, at a code point", [[...wide].length, new TextEncoder().encode(wide).length], [64, 256]);
+  eq("a secret is caught before the cut could split it", name(`${"x ".repeat(60)}sk-abcdefghijklmnopqrstuv`), [null, ["private-label"]]);
+  const title = (paneTitle: unknown) => { const c = taskContext({ ...live, paneTitle }); return [c.paneTitle, c.issues]; };
+  eq("Loom's own titles go out", [title("Terminal")[0], title("Agent session")[0]], ["Terminal", "Agent session"]);
+  eq("a title the process set never does", title("✳ Fix the parser in C:\\work"), [null, ["untrusted-title"]]);
+  eq("an empty title is just none", title(""), [null, []]);
+  const number = (paneNumber: unknown) => { const c = taskContext({ ...live, paneNumber }); return [c.paneNumber, c.issues]; };
+  eq("a pane out of its thread has no number", number(0), [null, ["missing-number"]]);
+  eq("nor a fraction", number(1.5), [null, ["missing-number"]]);
+  eq("a string is no number", number("2"), [null, ["invalid-context"]]);
+  eq("an id is printable ASCII, at most 96 characters", [taskContext({ ...live, threadId: "x".repeat(97) }).threadId, taskContext({ ...live, threadId: "thréad" }).issues], [null, ["invalid-context"]]);
+  eq("a time Date can't show is none", taskContext({ ...live, capturedAt: 1e20 }).capturedAt, null);
+  eq("a damaged copy keeps nothing", taskContext("oops"), { threadId: null, threadName: null, paneNumber: null, paneTitle: null, capturedAt: null, origin: "legacy", issues: ["invalid-context"] });
+  eq("unknown origins and issue codes go", taskContext({ ...live, origin: "guess", issues: ["truncated-label", "rm -rf", "truncated-label"] }), { ...live, origin: "legacy", issues: ["truncated-label", "invalid-context"] });
+  for (const raw of [live, { ...live, threadName: "é".repeat(200), paneTitle: "secret", paneNumber: 0 }, "oops"]) eq("checking a checked copy again changes nothing", taskContext(taskContext(raw)), taskContext(raw));
+
+  eq("exported with the task's pane and agent, ten fields in order", contextRecord({ pane: "mabc1234-27", agent: "codex" }, taskContext(live)),
+    { threadId: "mabc1200-14", threadName: "Loom notification work", paneId: "mabc1234-27", paneNumber: 2, paneTitle: "Agent session", agent: "codex", provider: "codex", capturedAt: "1970-01-01T00:00:01.000Z", origin: "event", issues: [] });
+  eq("an event from before contexts is legacy, its pane and agent still known", contextRecord({ pane: "p1", agent: "claude" }),
+    { threadId: null, threadName: null, paneId: "p1", paneNumber: null, paneTitle: null, agent: "claude", provider: "claude", capturedAt: null, origin: "legacy", issues: [] });
+  eq("an agent Loom doesn't know is none", [contextRecord({ pane: "p1", agent: "vim" }).agent, contextRecord({ pane: "p1", agent: "vim" }).provider], [null, null]);
+  const worst = JSON.stringify(contextRecord({ pane: "p".repeat(96), agent: "opencode" }, taskContext({ threadId: "t".repeat(96), threadName: '"'.repeat(300), paneNumber: 16, paneTitle: "Agent session", capturedAt: 8.64e15, origin: "last-known",
+    issues: ["missing-name", "missing-number", "private-label", "truncated-label", "untrusted-title", "invalid-context"] })));
+  check("the worst case fits the 2048-byte context budget", new TextEncoder().encode(worst).length <= 2048, `${new TextEncoder().encode(worst).length} bytes`);
+
+  const first = taskContext(live), second = taskContext({ ...live, threadName: "renamed", paneNumber: 1, capturedAt: 2000 });
+  const t = task("with context", "working", { id: "c1", context: first, events: [{ seq: 1, task: "c1", at: 1, state: "accepted", signal: "loomctl", context: first }] });
+  const reserved = writeJournal([t], 1, 0);
+  t.context = second;
+  t.state = "completed";
+  t.events.push({ seq: 2, task: "c1", at: 2, state: "completed", signal: "turn-end", context: second });
+  const appended = readJournal(reserved + JSON.stringify({ event: t.events[1], set: taskFields(t) }) + "\n").tasks.get("c1")!;
+  eq("an appended event keeps its copy, and the task its latest", [appended.events.map((e) => e.context), appended.context], [[first, second], second]);
+  const compacted = readJournal(writeJournal([appended], 2, 0)).tasks.get("c1")!;
+  eq("a whole rewrite keeps every copy as it was", [compacted.events.map((e) => e.context), compacted.context], [[first, second], second]);
+  eq("an old line has none", readJournal(writeJournal([task("old", "completed", { id: "o1", events: [{ seq: 1, task: "o1", at: 1, state: "completed", signal: "turn-end" }] })], 1, 0)).tasks.get("o1")!.events[0].context, undefined);
+  const damaged = readJournal(reserved + JSON.stringify({ event: { seq: 2, task: "c1", at: 2, state: "completed", signal: "turn-end", context: { threadName: 5, paneNumber: -1, paneTitle: "secret title", capturedAt: "soon", origin: "event", issues: [] } }, set: { state: "completed" } }) + "\n").tasks.get("c1")!;
+  eq("a damaged copy is checked on replay, and its event kept", [damaged.state, damaged.events[1].context], ["completed", { threadId: null, threadName: null, paneNumber: null, paneTitle: null, capturedAt: null, origin: "event", issues: ["invalid-context", "missing-number", "untrusted-title"] }]);
+  eq("loomctl task shows no context", taskRecord(t).events.map((e) => "context" in e), [false, false]);
 }
 
 if (fails) throw new Error(`${fails} failed`);

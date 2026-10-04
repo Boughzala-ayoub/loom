@@ -29,7 +29,100 @@ export type Correlation = "prompt" | "token" | "sequence" | "screen";
  * `response`, the agent's own report of its final message named as a prompt
  * is (promptMatch), never its text: two observations of one answer name the
  * same, so a relay can tell a repeat from a new answer. */
-export type TaskEvent = { seq: number; task: string; at: number; state: TaskState; signal: string; detail?: string; response?: string };
+export type TaskEvent = { seq: number; task: string; at: number; state: TaskState; signal: string; detail?: string; response?: string; context?: TaskContext };
+
+/** What a notice may say of where an event happened: the Loom thread, its
+ * name, the pane's place in it and a title Loom chose itself
+ * (docs/turn-tracking-and-notifications.md, Notification context). Copied
+ * when Loom makes the event, never a reference, so a rename, a move or a close
+ * later changes no copy. The pane id and agent are the task's own. */
+export type TaskContext = {
+  threadId: string | null;
+  threadName: string | null;
+  paneNumber: number | null;
+  paneTitle: string | null;
+  /** When Loom copied it, in ms. */
+  capturedAt: number | null;
+  /** `event`: copied from the live pane for this event. `last-known`: the
+   * task's last copy, its pane having left its thread or relaunched.
+   * `legacy`: nothing could be kept. */
+  origin: "event" | "last-known" | "legacy";
+  issues: ContextIssue[];
+};
+export type ContextIssue = "missing-name" | "missing-number" | "private-label" | "truncated-label" | "untrusted-title" | "invalid-context";
+const ISSUES: readonly unknown[] = ["missing-name", "missing-number", "private-label", "truncated-label", "untrusted-title", "invalid-context"];
+/** The only pane titles a notice may carry: Loom's own, for a pane whose
+ * process set none. A process's title can hold a prompt summary (Claude), a
+ * thread id (Codex) or a path (a shell). */
+export const LOOM_TITLES = { shell: "Terminal", agent: "Agent session" } as const;
+/** A path, or a name that looks like it holds a secret. A filter for the
+ * obvious, not a promise that free text holds none. */
+const PRIVATE = /^(?:[a-z]:[\\/]|\/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]/i;
+
+/** Text with nothing a terminal or a reader could act on: NFC, escape
+ * sequences gone, line breaks and tabs made spaces, control, format (bidi,
+ * zero-width) and lone surrogate characters gone, spacing made single, ends
+ * trimmed. */
+const plain = (s: string) => s.normalize("NFC")
+  .replace(/\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)?|\[[0-?]*[ -/]*[@-~]|[@-_]?)/g, "")
+  .replace(/[\t\n\v\f\r\x85\u2028\u2029]/g, " ")
+  .replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, "")
+  .replace(/\s+/g, " ").trim();
+
+/** A thread name as a notice may show it: plain, null when nothing is left
+ * or it looks private (checked whole, so a cut can't split a secret past the
+ * check), cut to 128 Unicode scalar values and 256 UTF-8 bytes. */
+function label(s: string, issues: Set<ContextIssue>): string | null {
+  const text = plain(s);
+  const left = !text ? "missing-name" : PRIVATE.test(text) ? "private-label" : null;
+  if (left) {
+    issues.add(left);
+    return null;
+  }
+  const size = (cps: string[]) => new TextEncoder().encode(cps.join("")).length;
+  let cps = [...text];
+  if (cps.length <= 128 && size(cps) <= 256) return text;
+  issues.add("truncated-label");
+  cps = cps.slice(0, 128);
+  while (size(cps) > 256) cps.pop();
+  return cps.join("").trim();
+}
+
+/** A context checked field by field, the same way when Loom copies one and
+ * when replay reads one back, so checking a checked copy changes nothing and
+ * a damaged journal line can't widen what goes out. A field of the wrong shape
+ * is null with `invalid-context`; a title that isn't Loom's own is null with
+ * `untrusted-title`. */
+export function taskContext(raw: unknown): TaskContext {
+  if (!raw || typeof raw !== "object") return { threadId: null, threadName: null, paneNumber: null, paneTitle: null, capturedAt: null, origin: "legacy", issues: ["invalid-context"] };
+  const r = raw as Record<string, unknown>;
+  const issues = new Set(Array.isArray(r.issues) ? r.issues.filter((i): i is ContextIssue => ISSUES.includes(i)) : []);
+  const bad = () => (issues.add("invalid-context"), null);
+  if (r.issues !== undefined && (!Array.isArray(r.issues) || r.issues.some((i) => !ISSUES.includes(i)))) bad();
+  const text = (v: unknown) => (v === null || v === undefined ? null : typeof v === "string" ? v : bad());
+  const threadId = r.threadId == null ? null : typeof r.threadId === "string" && /^[\x21-\x7e]{1,96}$/.test(r.threadId) ? r.threadId : bad();
+  const name = text(r.threadName);
+  const threadName = name === null ? null : label(name, issues);
+  const paneNumber = r.paneNumber == null ? null : typeof r.paneNumber !== "number" ? bad() : Number.isSafeInteger(r.paneNumber) && r.paneNumber > 0 ? r.paneNumber : (issues.add("missing-number"), null);
+  const title = plain(text(r.paneTitle) ?? "");
+  const paneTitle = !title ? null : Object.values(LOOM_TITLES).some((t) => t === title) ? title : (issues.add("untrusted-title"), null);
+  // Date can show no time past 8.64e15 ms.
+  const capturedAt = r.capturedAt == null ? null : typeof r.capturedAt === "number" && r.capturedAt >= 0 && r.capturedAt <= 8.64e15 ? r.capturedAt : bad();
+  const origin = r.origin === "event" || r.origin === "last-known" || r.origin === "legacy" ? r.origin : (bad(), "legacy");
+  return { threadId, threadName, paneNumber, paneTitle, capturedAt, origin, issues: [...issues] };
+}
+
+/** An event's context as `watch --notification-context` gives it: ten
+ * fields, in this order. The pane id and the agent are the task's (`provider`
+ * names the CLI family, not a model vendor); an event from before contexts
+ * existed is `legacy`. */
+export function contextRecord(t: Pick<Task, "pane" | "agent">, c?: TaskContext) {
+  const agent = ["claude", "codex", "opencode", "shell"].includes(t.agent) ? t.agent : null;
+  return {
+    threadId: c?.threadId ?? null, threadName: c?.threadName ?? null, paneId: t.pane, paneNumber: c?.paneNumber ?? null, paneTitle: c?.paneTitle ?? null,
+    agent, provider: agent, capturedAt: c?.capturedAt == null ? null : new Date(c.capturedAt).toISOString(), origin: c?.origin ?? "legacy", issues: c ? [...c.issues] : [],
+  };
+}
 
 /** What started a task: `loomctl submit`, an ordinary `loomctl send`, or a
  * person in Loom's window (typing in the pane, the Overview's reply box,
@@ -75,6 +168,9 @@ export type Task = {
   events: TaskEvent[];
   /** When it became final, in event order: the oldest go first (pruneSettled). */
   settledAt?: number;
+  /** Its latest copy of where it is (TaskContext), for an event that comes
+   * once its pane has left its thread or relaunched. */
+  context?: TaskContext;
 };
 
 /** What an agent reported, as helper.rs, the OpenCode plugin and the pane's
@@ -286,7 +382,7 @@ export type JournalLine = { seq: number; pruned: number } | { task: Task } | { e
 /** A task's fields that change after it's reserved, as each journal line carries them. */
 export const taskFields = (t: Task): Partial<Task> => ({
   state: t.state, correlation: t.correlation, uncertain: t.uncertain, answerInDoubt: !!t.answerInDoubt, reason: t.reason, detail: t.detail, exit: t.exit,
-  input: t.input, submittedAt: t.submittedAt, startedAt: t.startedAt, endedAt: t.endedAt,
+  input: t.input, submittedAt: t.submittedAt, startedAt: t.startedAt, endedAt: t.endedAt, context: t.context,
 });
 
 export function readJournal(text: string): { tasks: Map<string, Task>; seq: number; pruned: number; notify: NotifySnapshot[] } {
@@ -323,6 +419,10 @@ export function readJournal(text: string): { tasks: Map<string, Task>; seq: numb
       seq = Math.max(seq, e.seq);
       if (isFinal(t.state) && t.settledAt === undefined) t.settledAt = e.seq;
     }
+  }
+  for (const t of tasks.values()) {
+    if (t.context !== undefined) t.context = taskContext(t.context);
+    for (const e of t.events) if (e.context !== undefined) e.context = taskContext(e.context);
   }
   return { tasks, seq, pruned, notify: notify.sort((a, b) => a.at - b.at) }; // stable: equal numbers keep their order
 }
@@ -427,6 +527,6 @@ export function taskRecord(t: Task) {
     sha256: t.sha256, bytes: t.bytes, input: t.input,
     correlation: t.correlation, uncertain: t.uncertain, answerInDoubt: !!t.answerInDoubt, reason: t.reason, detail: t.detail, exit: t.exit,
     acceptedAt: at(t.acceptedAt), submittedAt: at(t.submittedAt), startedAt: at(t.startedAt), endedAt: at(t.endedAt),
-    events: t.events.map((e) => ({ ...e, at: new Date(e.at).toISOString() })),
+    events: t.events.map(({ context: _context, ...e }) => ({ ...e, at: new Date(e.at).toISOString() })),
   };
 }

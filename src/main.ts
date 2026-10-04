@@ -20,7 +20,7 @@ import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
-import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskEvent, type TaskSource, type TaskState } from "./task";
+import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
@@ -87,6 +87,18 @@ async function phoneWindow() {
 }
 /** Provider title spinners ("✻ Thinking…"): stripped before a title is shown or compared. */
 const SPIN = /^[✳✻✽✶✢·◐◓◑◒⠁-⣿]+\s*/u;
+/** What a pane's header calls it: what its app titled itself, or Loom's own
+ * name for it (task.ts LOOM_TITLES), the only kind a notice may carry. */
+function paneTitle(appTitle: string, agent: Agent) {
+  // cmd.exe and powershell.exe title themselves with their own path until
+  // something under them sets one (codex never does) — the agent's name
+  // says more, and a shell's says nothing.
+  const app = /\.exe\s*$/i.test(appTitle) ? (agent === "shell" ? "" : agent) : appTitle;
+  // Provider title spinners go: the pane's own state says "working" once, in
+  // Loom's colours, wherever the pane shows.
+  const own = agent === "shell" ? app : app.replace(SPIN, "");
+  return own && own !== agent ? own : agent === "shell" ? LOOM_TITLES.shell : LOOM_TITLES.agent;
+}
 /** Output xterm has parsed, acknowledged for every pane in one invoke. Rust lets a pane run
  * four batches ahead (output.rs), so a pane with two pending flushes them all at once and a
  * lone one waits at most 100 ms. A timer, never requestAnimationFrame: that stops while the
@@ -1496,6 +1508,8 @@ class Pane {
    * run-state never does: then its "esc to interrupt" alone says busy. */
   codexState: string | undefined;
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
+  /** Where it was when it left its thread (keepContext). Every copy after is this one, last known. */
+  left?: TaskContext;
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
   sid = ""; // and the claude session it owns, so the next launch resumes it
@@ -2204,14 +2218,7 @@ class Pane {
   }
 
   paint(index = this.th.panes.indexOf(this)) {
-    // cmd.exe and powershell.exe title themselves with their own path until
-    // something under them sets one (codex never does) — the agent's name
-    // says more, and a shell's says nothing.
-    const app = /\.exe\s*$/i.test(this.appTitle) ? (this.agent === "shell" ? "" : this.agent) : this.appTitle;
-    // Provider title spinners go: the pane's own state says "working" once, in
-    // Loom's colours, wherever the pane shows.
-    const own = this.agent === "shell" ? app : app.replace(SPIN, "");
-    const title = (this.label = own && own !== this.agent ? own : this.agent === "shell" ? "Terminal" : "Agent session");
+    const title = (this.label = paneTitle(this.appTitle, this.agent));
     const state = paneState(this);
     const starting = this.starting && !this.dead;
     const word = this.dead ? "Exited" : starting ? "Starting" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
@@ -2599,6 +2606,7 @@ class Thread {
     const i = this.panes.indexOf(p);
     if (i === -1) return false;
     if (this.zoomed === p) this.toggleZoom(p);
+    keepContext([p]);
     this.panes.splice(i, 1);
     const cleanup = p.dispose();
     this.relayout();
@@ -2767,6 +2775,7 @@ class Thread {
 
   async dispose() {
     this.observer.disconnect();
+    keepContext(this.panes); // removeThread comes here, right after taking the thread from the list
     const cleanup = Promise.all(this.panes.splice(0).map((p) => p.dispose()));
     this.grid.remove();
     this.row.remove();
@@ -3705,6 +3714,31 @@ const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopA
 const watched = (t: Task) => taskWatch.get(t.id) ?? taskWatch.set(t.id, {}).get(t.id)!;
 const paneById = (id: string) => threads.flatMap((t) => t.panes).find((p) => p.id === id);
 
+/** Where pane `p` is now (task.ts TaskContext): its thread, its place there
+ * and Loom's own title for it. Once it has left its thread, where it was then. */
+function paneContext(p: Pane): TaskContext {
+  if (p.left) return { ...p.left, origin: "last-known" };
+  return taskContext({ threadId: p.th.id, threadName: p.th.name, paneNumber: p.th.panes.indexOf(p) + 1, paneTitle: paneTitle(p.appTitle, p.agent), capturedAt: Date.now(), origin: "event" });
+}
+/** The copy a new event of `t` takes: its pane as it is now, while the pane
+ * is in its thread on the task's launch, else the task's last copy. */
+function contextOf(t: Task): TaskContext | undefined {
+  const p = paneById(t.pane);
+  if (p && p.generation === t.gen) return paneContext(p);
+  return t.context && { ...t.context, origin: "last-known" };
+}
+/** Before panes leave their thread (closePane, Thread.dispose), each keeps
+ * where it was, and so does each open task of theirs: what comes after (the
+ * sweep's pane-closed, a report held for an Enter, a startup replay) names the
+ * place it had, never number 0 or the pane there now. */
+function keepContext(panes: Pane[]) {
+  for (const p of panes) p.left ??= paneContext(p);
+  for (const t of tasks.values()) {
+    const p = !isFinal(t.state) && panes.find((q) => q.id === t.pane);
+    if (p && p.generation === t.gen) t.context = p.left;
+  }
+}
+
 let journalQueue: Promise<unknown> = Promise.resolve();
 let journalLines = 0;
 /** Journal calls so far, and how many a whole rewrite had seen when it was
@@ -3784,7 +3818,7 @@ const record = (t: Task) => ({ ...taskRecord(t), saved: !unsaved.has(t.id) });
  * arriving meanwhile still stops it. */
 async function reserveTask(t: Task) {
   requireJournal();
-  const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at: Date.now(), state: "accepted", signal: "loomctl" };
+  const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at: Date.now(), state: "accepted", signal: "loomctl", context: t.context };
   try {
     await journal([{ task: { ...t, events: [accepted] } }], [t.id]);
   } catch (e) {
@@ -3806,11 +3840,12 @@ async function reserveTask(t: Task) {
  * also an event, numbered. Every line carries the task's fields as they
  * stand, so a change made on its own (an answer's write in doubt) survives a
  * restart too. A final task stays as it is. Resolves to whether the journal
- * took it. */
-function moveTask(t: Task, c: TaskChange, at = Date.now()): Promise<boolean> {
+ * took it. A new event takes `ctx`, where the task is when the move is asked
+ * for (contextOf), copied before any deferral or await. */
+function moveTask(t: Task, c: TaskChange, at = Date.now(), ctx = contextOf(t)): Promise<boolean> {
   if (startupTurns) return new Promise((resolve) => {
     const change = { ...c };
-    startupTurns!.push(() => { void moveTask(t, change, at).then(resolve); });
+    startupTurns!.push(() => { void moveTask(t, change, at, ctx).then(resolve); });
   });
   if (isFinal(t.state)) return Promise.resolve(true);
   const { state, signal } = c, fields = changeFields(t, c);
@@ -3822,7 +3857,8 @@ function moveTask(t: Task, c: TaskChange, at = Date.now()): Promise<boolean> {
   if (isFinal(state)) t.endedAt = at;
   const detail = c.detail ?? c.reason ?? undefined;
   const response = state === "completed" && c.response ? { response: c.response } : {};
-  const event: TaskEvent = { seq: ++taskSeq, task: t.id, at, state, signal, ...(detail ? { detail } : {}), ...response };
+  const event: TaskEvent = { seq: ++taskSeq, task: t.id, at, state, signal, ...(detail ? { detail } : {}), ...response, context: ctx };
+  if (ctx?.origin === "event") t.context = ctx;
   t.events.push(event);
   const saved = journal([{ event, set: taskFields(t) }], [t.id]).then(() => true, () => false);
   if (isFinal(state)) {
@@ -3918,15 +3954,17 @@ function heldTask(p: Pane, id?: string): Task | undefined {
 /** A task for a turn no submit asked for (task.ts TaskSource), from its Enter
  * on: accepted now, and journaled without being waited for, so a journal that
  * can't take it never stops the turn (the record says `saved: false`). Its
- * text is never kept, only its match, which the agent's reports name it by. */
-function turnTask(p: Pane, source: TaskSource, match: string, at: number, more: Partial<Task> = {}): Task {
+ * text is never kept, only its match, which the agent's reports name it by.
+ * Where the pane is (`ctx`) is copied now, before the startup read can defer
+ * its event. */
+function turnTask(p: Pane, source: TaskSource, match: string, at: number, more: Partial<Task> = {}, ctx = paneContext(p)): Task {
   const t: Task = {
     id: crypto.randomUUID().replace(/-/g, "").slice(0, 16), source, key: null, what: null, pane: p.id, ref: paneName(p), agent: p.agent, gen: p.generation,
     sha256: "", bytes: 0, match, input: "unknown", state: "accepted", correlation: null, uncertain: null, reason: null, detail: null, exit: null,
-    acceptedAt: at, submittedAt: null, startedAt: null, endedAt: null, events: [], ...more,
+    acceptedAt: at, submittedAt: null, startedAt: null, endedAt: null, events: [], context: ctx, ...more,
   };
   const accept = () => {
-    const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at, state: "accepted", signal: source };
+    const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at, state: "accepted", signal: source, context: t.context };
     t.events.push(accepted);
     tasks.set(t.id, t);
     void journal([{ task: { ...t, events: [accepted] } }], [t.id]).catch(() => {});
@@ -3941,10 +3979,10 @@ function turnTask(p: Pane, source: TaskSource, match: string, at: number, more: 
 
 /** A turn Loom saw go in, at its Enter (`at`): submitted from then on, so a
  * report of its text written before it can't be its. */
-function enterTurn(t: Task, at: number) {
-  if (startupTurns) return void startupTurns.push(() => enterTurn(t, at));
+function enterTurn(t: Task, at: number, ctx = contextOf(t)) {
+  if (startupTurns) return void startupTurns.push(() => enterTurn(t, at, ctx));
   t.submittedAt = at;
-  moveTask(t, { state: "submitted", signal: "enter" }, at);
+  moveTask(t, { state: "submitted", signal: "enter" }, at, ctx);
 }
 
 /** Text an agent shows in its input instead of what it holds: a collapsed paste or an image. */
@@ -4026,8 +4064,9 @@ async function replyAsPerson(p: Pane, text: string) {
  * (start, with its match), OpenCode only that a run started, Codex only a
  * finished turn's prompts (an end, with its mentions). A report with no such
  * Enter (a background notice's turn, say) stays untracked, and so do Enters
- * older than the one a report took. True when it took the report. */
-function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChange][]): boolean {
+ * older than the one a report took. True when it took the report. `ctx`:
+ * where the pane was when a report the startup read deferred came. */
+function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChange][], ctx?: TaskContext): boolean {
   // A replaced process's late report is stale: it starts no task, whatever Enter it went with.
   if (!p.manual.length || launch !== p.generation) return false;
   const take = (at: number, match: string | null, window: number) => {
@@ -4040,8 +4079,8 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
   if (s.kind === "start" && !s.token && !moved.length && (p.agent === "claude" ? s.match : p.agent === "opencode" && !s.match)) {
     const m = take(s.at, s.match ?? null, p.agent === "claude" ? 10_000 : Infinity);
     if (!m) return false;
-    enterTurn(turnTask(p, "manual", s.match ?? m.match ?? "", m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }), m.at);
-    taskSignal(p, s);
+    enterTurn(turnTask(p, "manual", s.match ?? m.match ?? "", m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }, ctx), m.at, ctx);
+    taskSignal(p, s, ctx);
     return true;
   }
   if (s.kind === "end" && p.agent === "codex" && s.matches?.length) {
@@ -4054,9 +4093,9 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
     let made = false;
     for (const match of left) {
       const m = take(s.at, match, Infinity);
-      if (m) (enterTurn(turnTask(p, "manual", match, m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }), m.at), (made = true));
+      if (m) (enterTurn(turnTask(p, "manual", match, m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }, ctx), m.at, ctx), (made = true));
     }
-    if (made) taskSignal(p, s);
+    if (made) taskSignal(p, s, ctx);
     return made;
   }
   return false;
@@ -4160,13 +4199,15 @@ async function enterTask(p: Pane, t: Task) {
 
 /** What an agent or the pane's own marks reported: it moves the tasks that
  * it concerns (task.ts route), only those on the launch that reported it. A
- * Stop is held until Claude is seen idle (sweepTasks). */
-function taskSignal(p: Pane, s: Signal) {
+ * Stop is held until Claude is seen idle (sweepTasks). One the startup read
+ * defers takes where the pane is now (`ctx`) along, for its launch's tasks. */
+function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
   const held = enterHeld.get(p.id);
   if (held) return void held.signals.push({ ...s, launch: s.launch ?? p.generation });
   if (startupTurns) {
     const signal = { ...s, launch: s.launch ?? p.generation };
-    return void startupTurns.push(() => taskSignal(p, signal));
+    const now = ctx ?? (signal.launch === p.generation ? paneContext(p) : undefined);
+    return void startupTurns.push(() => taskSignal(p, signal, now));
   }
   const launch = s.launch ?? p.generation;
   const open = [...tasks.values()].filter((t) => t.pane === p.id && t.gen === launch && t.events.length && !isFinal(t.state));
@@ -4176,14 +4217,14 @@ function taskSignal(p: Pane, s: Signal) {
   // changeFields keeps the doubt; only a shell's token, which is this task's
   // own, clears it).
   const moved = route(open, s);
-  if (adoptManual(p, s, launch, moved)) return;
+  if (adoptManual(p, s, launch, moved, ctx)) return;
   for (const [t, c] of moved) {
     // The latest Stop's final message is the one its completion names.
     if (c.signal === "stop") Object.assign(watched(t), { stopAt: Date.now(), response: s.kind === "stop" ? s.response : undefined });
     else {
       // Asking after a Stop: another Stop hook sent Claude on, so that Stop ended nothing.
       if (c.state === "approval") Object.assign(watched(t), { stopAt: undefined, response: undefined });
-      moveTask(t, c, s.at);
+      moveTask(t, c, s.at, ctx);
     }
   }
 }
@@ -7477,7 +7518,7 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
       submit.task = {
         id: token, key: ctx.key ?? null, what: ctx.what ?? null, pane: p.id, ref, agent: p.agent, gen, sha256: digest, bytes, match: promptMatch(asked),
         input: "unknown", state: "accepted", correlation: null, uncertain: null, reason: null, detail: null, exit: null,
-        acceptedAt: Date.now(), submittedAt: null, startedAt: null, endedAt: null, events: [],
+        acceptedAt: Date.now(), submittedAt: null, startedAt: null, endedAt: null, events: [], context: paneContext(p),
       };
       tasks.set(token, submit.task);
     }
@@ -8107,7 +8148,7 @@ const CLI: Record<string, CliCommand> = {
       const done = finished();
       return {
         data: {
-          events: events.map((e) => (meta ? {
+          events: events.map(({ context: _context, ...e }) => (meta ? {
             seq: e.seq, task: e.task, pane: owner(e.task).pane, generation: owner(e.task).gen, state: e.state, at: at(e.at), response: e.response ?? null,
             ...(v3 ? { source: owner(e.task).source ?? "submit", ...(v4 ? { disposition: notifyDisposition(e, owner(e.task).pane, notifyHistory) } : { notify: notifies(e, owner(e.task).pane, notifyHistory) }) } : {}),
           } : { ...e, at: at(e.at) })),

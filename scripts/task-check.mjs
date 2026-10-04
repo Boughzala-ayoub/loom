@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=notification-context|notification-context-startup|notification-context-startup-held|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1006,6 +1006,120 @@ try {
     for (const t of (await cli('tasks')).data.filter((t) => t.pane === pane)) turns.push([(await saved(t.task))?.match, t.state]);
     assert.deepEqual(turns, [[promptMatch('startup prompt A'), 'completed'], [promptMatch('startup prompt B'), 'working']], 'Both turns are tasks, and the Stop is A\'s');
     ok('Reports from the startup read go in before those held for an Enter written after them');
+  }
+
+  // Notification context (LOOM_NOTIFICATION_METADATA_PLAN.md phase 2): each event's copy of its thread and pane, as the journal keeps it.
+  const where = async (task) => (await saved(task)).events.map((e) => [e.state, e.context?.threadName, e.context?.paneNumber, e.context?.paneTitle, e.context?.origin]);
+  if (review('notification-context')) {
+    await resetReview();
+    const thread = (await cli('panes')).data[0].threadId, third = await paneId('work:3');
+    const a = await cli('submit', 'work:3', 'context on the third pane');
+    await report(third, { kind: 'start', match: promptMatch('context on the third pane') });
+    await until(a.text, 'working');
+    // Claude titles itself with a summary of the conversation: never exported.
+    await page.evaluate((id) => window.qa.out(id, '\x1b]0;✳ Summarize C:\\private\\plan.txt\x07'), third);
+    assert.equal((await cli('rename', 'work', 'renamed work')).ok, true);
+    assert.equal((await cli('close', claude, '--yes')).ok, true); // the third pane is second now
+    await stops(third);
+    await until(a.text, 'completed');
+    assert.deepEqual(await where(a.text), [
+      ['accepted', 'work', 3, 'Agent session', 'event'],
+      ['submitted', 'work', 3, 'Agent session', 'event'],
+      ['working', 'work', 3, 'Agent session', 'event'],
+      ['completed', 'renamed work', 2, null, 'event'],
+    ], 'Each event copies the thread and place it had; a rename or a move changes only later events');
+    const done = await saved(a.text);
+    assert.deepEqual([done.events.map((e) => e.context.threadId), done.events.at(-1).context.issues, done.context], [[thread, thread, thread, thread], ['untrusted-title'], done.events.at(-1).context]);
+    assert.ok(done.events.every((e) => typeof e.context.capturedAt === 'number' && e.context.capturedAt >= done.acceptedAt));
+    assert.ok([...(await cli('task', a.text)).data.events, ...(await cli('watch', '--after', '0')).data.events].every((e) => !('context' in e)), 'task and plain watch show no context');
+    ok('Events copy their thread, place and only Loom\'s own title; a rename or move after one changes only the next');
+
+    // A pane closed under an open task: its outcome names the place it had, never 0 or the pane now there.
+    // Then its whole thread, through Thread.dispose. Each renamed after the task's last event, so only the
+    // copy taken before the panes left their thread has the new name.
+    await resetReview();
+    const thread2 = (await cli('panes')).data[0].threadId, second = await paneId('work:2');
+    const b = await cli('submit', 'work:2', 'context of a pane that closes');
+    const c = await cli('submit', 'work:3', 'context of a thread that closes');
+    await until(b.text, 'working');
+    await until(c.text, 'working');
+    assert.equal((await cli('rename', thread2, 'closing')).ok, true);
+    assert.equal((await cli('close', second, '--yes')).ok, true);
+    await until(b.text, 'cancelled');
+    assert.deepEqual((await where(b.text)).at(-1), ['cancelled', 'closing', 2, 'Agent session', 'last-known'], 'Copied before the pane left its thread');
+    assert.equal((await cli('rename', thread2, 'closing thread')).ok, true);
+    assert.equal((await cli('close-thread', thread2, '--yes')).ok, true);
+    await until(c.text, 'cancelled');
+    assert.deepEqual((await where(c.text)).at(-1), ['cancelled', 'closing thread', 2, 'Agent session', 'last-known'], 'Copied before the thread let its panes go');
+    ok('Closing a pane or its thread keeps the place and name it had for the outcome after');
+
+    // A failed write, then a rename, then a whole rewrite: the event keeps the copy it was made with.
+    await resetReview();
+    const d = await cli('submit', 'work:1', 'context through a failed write');
+    await report(claude, { kind: 'start', match: promptMatch('context through a failed write') });
+    await until(d.text, 'working');
+    await qa({ journalFail: true });
+    await stops(claude);
+    await until(d.text, 'completed');
+    assert.equal((await state(d.text)).saved, false);
+    await qa({ journalFail: false });
+    const thirdD = await paneId('work:3');
+    assert.equal((await cli('rename', 'work', 'renamed after the failure')).ok, true);
+    const e = await cli('submit', thirdD, 'a later write rewrites the journal whole');
+    assert.equal((await state(d.text)).saved, true);
+    assert.deepEqual((await where(d.text)).at(-1), ['completed', 'work', 1, 'Agent session', 'event']);
+    assert.deepEqual((await where(e.text))[0], ['accepted', 'renamed after the failure', 3, 'Agent session', 'event']);
+    const before = await page.evaluate(() => localStorage.getItem('qa-journal'));
+    await reboot(); // replay, then the journal rewritten with what was kept
+    for (const id of [d.text, e.text]) {
+      const was = readJournal(before).tasks.get(id).events.map((x) => x.context);
+      assert.deepEqual((await saved(id)).events.map((x) => x.context).slice(0, was.length), was, 'Replay and compaction keep each copy');
+    }
+    assert.deepEqual((await where(e.text)).at(-1), ['unknown', 'renamed after the failure', 3, 'Agent session', 'last-known'], 'The restart ends an open task with its last copy');
+    ok('A failed write\'s retry, replay and compaction keep each event\'s copy as it was made');
+  }
+  // Startup: a turn made while the journal is read, its pane closed before replay (startup-closed), with its
+  // report buffered (copied before the deferral) or held for its Enter (the pane's place copied before it left).
+  for (const held of [false, true]) if (review('notification-context') || review(`notification-context-startup${held ? '-held' : ''}`)) {
+    await resetReview();
+    await page.evaluate(() => localStorage.setItem('qa-journal-read-hold', '1'));
+    await page.goto(base);
+    await page.waitForFunction(() => !!window.qa.releaseRead);
+    const early = await page.locator('.pane').nth(1).getAttribute('data-id');
+    await page.waitForFunction((id) => !!window.qa.agents[id], early);
+    const text = `startup context${held ? '\ncollapsed paste awaiting its Enter' : ''}`;
+    await agent(early, { codexShape: true, input: '', busy: false });
+    const input = page.locator(`.pane[data-id="${early}"] .xterm-helper-textarea`);
+    await input.focus();
+    if (held) {
+      await input.evaluate((el, text) => {
+        const data = new DataTransfer();
+        data.setData('text/plain', text);
+        el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+      }, text);
+      await qa({ holdReplyIf: "fn:return d === '\\r'" });
+    } else await page.keyboard.type(text);
+    await page.waitForTimeout(250);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    if (held) await page.waitForFunction(() => window.qa.heldWrites.length === 1);
+    await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+      event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-context' }]],
+    }), [early, promptMatch(text)]);
+    await page.locator(`.pane[data-id="${early}"] [title="Close pane"]`).click();
+    await page.locator('#confirm-action').click();
+    await page.waitForFunction((id) => !document.querySelector(`.pane[data-id="${id}"]`), early);
+    await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+    if (held) await page.evaluate(() => { window.qa.holdReplyIf = null; window.qa.heldWrites.shift().resolve(); });
+    const task = (await cli('tasks')).data.find((t) => t.pane === early && t.source === 'manual');
+    assert.ok(task, 'The closed pane keeps its startup turn');
+    await until(task.task, 'completed');
+    await page.waitForTimeout(300);
+    const origin = held ? 'last-known' : 'event';
+    assert.deepEqual(await where(task.task), [['accepted', 'work', 2, 'Agent session', origin], ['submitted', 'work', 2, 'Agent session', origin], ['completed', 'work', 2, 'Agent session', origin]],
+      held ? 'Made after the pane left: the place it had, said to be last known' : 'Copied when the Enter and the report came, before replay');
+    ok(`A startup turn on a pane closed before replay keeps place 2${held ? ' (Enter held, last known)' : ''}`);
   }
 
   // Start the older cases with the same empty journal and settings as before.
