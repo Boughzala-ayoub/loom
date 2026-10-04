@@ -7791,7 +7791,7 @@ const CLI: Record<string, CliCommand> = {
   },
   usage: {
     usage: "usage [claude|codex]",
-    help: "Fetch account plan usage now, even with plan-usage off. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider. Does not enable background polling.",
+    help: "Fetch account plan usage now, even with plan-usage off. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
     run: async (a) => {
       const name = a._[0];
       if (a._.length > 1 || (name !== undefined && name !== "claude" && name !== "codex")) throw new Error("usage takes claude or codex, or neither for both.");

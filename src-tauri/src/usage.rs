@@ -645,7 +645,7 @@ pub fn model_options() -> Result<Vec<ModelOpt>, String> {
         "https://api.anthropic.com/v1/models?limit=100",
         &creds()?.access_token,
     )?;
-    let m: ApiModels = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let m: ApiModels = serde_json::from_str(&body).map_err(|_| "Invalid models response".to_string())?;
     Ok(m.data
         .into_iter()
         .map(|x| ModelOpt {
@@ -670,7 +670,7 @@ fn creds() -> Result<Oauth, String> {
         .unwrap_or_default();
     let raw = std::fs::read_to_string(home.join(".claude/.credentials.json"))
         .map_err(|_| "No Claude credentials found — run `claude` to sign in.".to_string())?;
-    let c: Creds = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let c: Creds = serde_json::from_str(&raw).map_err(|_| "Invalid Claude credentials".to_string())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -700,7 +700,7 @@ fn get_headers(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
         .map(|r| format!("{r}\\System32\\curl.exe"))
         .unwrap_or_else(|_| "curl.exe".into());
     let mut child = Command::new(curl)
-        .args(["-sS", "--fail-with-body", "-m", "20", "-K", "-", url])
+        .args(["-q", "-sS", "--fail-with-body", "-m", "20", "-K", "-", url])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -719,26 +719,8 @@ fn get_headers(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
     if out.status.success() {
         return Ok(body);
     }
-    // 429s are expected — this endpoint rate-limits hard — so keep the body,
-    // which is where the API says what went wrong. Its own sentence, not the
-    // JSON around it: this goes on screen as one line under the limits.
-    #[derive(serde::Deserialize)]
-    struct E {
-        error: M,
-    }
-    #[derive(serde::Deserialize)]
-    struct M {
-        message: String,
-    }
-    Err(format!(
-        "usage request failed: {}",
-        match serde_json::from_str::<E>(&body) {
-            Ok(e) => e.error.message,
-            Err(_) if body.trim().is_empty() =>
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            Err(_) => body.trim().to_string(),
-        }
-    ))
+    // Neither diagnostics nor provider bodies are safe: either can echo headers.
+    Err(format!("usage request failed (curl exit {})", out.status.code().unwrap_or(-1)))
 }
 
 #[derive(serde::Serialize)]
@@ -842,7 +824,7 @@ pub fn codex_plan_usage() -> Result<CodexPlan, String> {
         let mut headers = vec![("Authorization", auth.as_str()), ("User-Agent", "codex-cli"), ("OpenAI-Beta", "codex-1"), ("originator", "Codex Desktop")];
         if !account.is_empty() { headers.push(("ChatGPT-Account-Id", account.as_str())); }
         match get_headers("https://chatgpt.com/backend-api/wham/usage", &headers)
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|e| e.to_string())) {
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|_| "Invalid usage response".to_string())) {
             Ok(value) => if let Some(mut plan) = shape_codex(&value, true) {
                 if plan.banked_resets.is_some_and(|n| n > 0) {
                     if let Ok(raw) = get_headers("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", &headers) {
@@ -886,7 +868,7 @@ pub fn plan_usage() -> Result<Plan, String> {
 
 fn api_limits(token: &str) -> Result<Vec<Limit>, String> {
     let body = get("https://api.anthropic.com/api/oauth/usage", token)?;
-    let u: ApiUsage = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    let u: ApiUsage = serde_json::from_str(&body).map_err(|_| "Invalid usage response".to_string())?;
     Ok(u.limits
         .into_iter()
         .map(|l| Limit {
@@ -984,6 +966,27 @@ mod tests {
     use super::{live_status, plan_from_status, profile_of, scan, slug, transcript, Usage};
     use std::io::Write;
 
+
+    #[test]
+    fn usage_errors_never_echo_credentials() {
+        use std::net::TcpListener;
+        use std::io::Read;
+        for body in ["fake-bearer-N2", r#"{"error":{"message":"Bearer fake-bearer-N2 account-N2"}}"#] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).unwrap();
+                write!(socket, "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            });
+            let error = super::get_headers(&url, &[("Authorization", "Bearer fake-bearer-N2"), ("ChatGPT-Account-Id", "account-N2")]).unwrap_err();
+            server.join().unwrap();
+            assert!(!error.contains("fake-bearer-N2") && !error.contains("account-N2"), "credential leaked");
+            assert!(error.len() <= 160);
+        }
+        assert!(include_str!("usage.rs").contains(".args([\"-q\", \"-sS\""));
+    }
     #[test]
     fn codex_usage_windows_and_fallback() {
         let live = serde_json::json!({"plan_type":"prolite", "rate_limit": {
