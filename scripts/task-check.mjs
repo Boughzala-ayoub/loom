@@ -268,6 +268,28 @@ try {
     await page.evaluate(() => localStorage.clear());
     await reboot();
   };
+  if (review('claude-extra-prompts')) {
+    await resetReview();
+    const first = await cli('submit', 'work:1', 'original long turn');
+    assert.equal(first.ok, true, JSON.stringify(first));
+    await report(claude, { kind: 'start', match: promptMatch('original long turn') });
+    await until(first.text, 'working');
+    for (const text of ['first follow-up', 'second follow-up']) {
+      const sent = await cli('send', 'work:1', text);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      await report(claude, { kind: 'start', match: promptMatch(text) });
+    }
+    for (const text of ['background report one', 'background report two', 'background report three'])
+      await report(claude, { kind: 'start', match: promptMatch(text) });
+    await agent(claude, { busy: false, dialog: 'How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss' });
+    await report(claude, { kind: 'stop' });
+    await page.waitForTimeout(700);
+    await agent(claude, { dialog: null, busy: false });
+    await until(first.text, 'completed');
+    const waited = await cli('wait', '--task', first.text);
+    assert.equal(waited.data.state, 'completed');
+    ok('Claude original task completes after extra sends, background prompts, Stop and survey dismissal');
+  }
   if (review('unreadable')) {
     const old = await cli('submit', 'work:1', 'keep this history');
     await report(claude, { kind: 'start', match: promptMatch('keep this history') });

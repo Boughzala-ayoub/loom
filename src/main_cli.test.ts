@@ -1,6 +1,9 @@
 // Production command handlers, with only native/window boundaries replaced.
+// @ts-ignore Node-only test; the app intentionally has no Node typings.
 import assert from "node:assert/strict";
+// @ts-ignore Node-only test.
 import { readFileSync } from "node:fs";
+// @ts-ignore Node-only test.
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as cli from "./cli.ts";
@@ -22,6 +25,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   runInContext(code, s);
   return s.f.CLI;
 }
+// @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
 if (check(2)) {
   const th = { name: "work", panes: [] as any[] };

@@ -1,6 +1,9 @@
 // Run the production startup/close paths without a WebView or a live journal.
+// @ts-ignore Node-only test; the app intentionally has no Node typings.
 import assert from "node:assert/strict";
+// @ts-ignore Node-only test.
 import { readFileSync } from "node:fs";
+// @ts-ignore Node-only test.
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
@@ -63,6 +66,6 @@ for (const held of [false, true]) {
   assert.equal(e.state, "completed");
   assert.deepEqual([e.context.threadName, e.context.paneNumber, e.context.origin], ["At Report", 2, "event"]);
   const replay = model.readJournal(model.writeJournal([t, b], t.events.length + b.events.length, 0)).tasks.get(t.id)!;
-  assert.equal(replay.events.at(-1)!.context!.threadName, "At Report");
+  assert.equal(replay.events[replay.events.length - 1].context!.threadName, "At Report");
 }
 console.log("ok   A later Enter hold preserves an earlier report's captured context");
