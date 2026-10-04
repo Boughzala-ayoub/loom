@@ -1078,3 +1078,5 @@ Task records resolve `ref` from the pane ID each time they are read. After close
 `task ID --end cancelled` or `task ID --end unknown` settles an open task manually and waits for its journal write. It sends no keys and does not stop the process. The event uses `signal: loomctl` and `reason: operator-cancelled` or `operator-unknown`. Neither outcome sends a completion notice. Repeating the same final outcome is harmless; changing a final outcome is refused. A persistence failure reports `saved: false`; inspect the task before retrying.
 
 `wait --task ID --or-idle` also returns when the task's pane, on the same generation, is idle or waiting. It returns immediately if already idle. JSON adds `waitReason: task` or `pane-idle`. The fallback leaves task state and history unchanged and does not prove completion. A closed or restarted pane does not satisfy this fallback. `--or-idle` requires `--task`.
+
+`threads --json` includes `zoomed`, the zoomed pane's ID or null. Each pane record, including `panes --json`, also has a `zoomed` boolean. These report the actual zoom target separately from the focused pane's `front` flag.

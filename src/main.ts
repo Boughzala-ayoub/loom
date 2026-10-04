@@ -7361,6 +7361,7 @@ function paneSettings(p: Pane) {
 const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
   title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, dir: p.th.dir, front: current === p.th && p.th.active === p,
+  zoomed: p.th.zoomed === p,
   // Which launch this is (send --gen takes it), and what a shell with Loom's prompt last reported.
   generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit, atPrompt: p.atPrompt, turns: p.turns, notify: p.notify,
   lastOutput: p.lastOut ? new Date(p.lastOut).toISOString() : null,
@@ -7374,7 +7375,7 @@ function threadState(th: Thread) {
 }
 const threadData = (th: Thread) => ({
   id: th.id, name: th.name, repo: th.repo, dir: th.dir, branch: th.branch, front: th === current, state: threadState(th),
-  layout: th.layout, panes: th.panes.map(paneData),
+  layout: th.layout, zoomed: th.zoomed?.id ?? null, panes: th.panes.map(paneData),
 });
 const paneRows = (panes: Pane[]) => table(panes.map((p) => [paneName(p), p.id, p.agent, cliState(p), p.label]));
 
@@ -7804,7 +7805,7 @@ const CLI: Record<string, CliCommand> = {
   },
   threads: {
     usage: "threads",
-    help: "Every thread: name, id, state, pane count, branch and folder.",
+    help: "Every thread: name, id, state, pane count, branch and folder. --json includes zoomed, the zoomed pane ID or null, independently of front; nested panes have a zoomed boolean.",
     run: () => ({
       data: threads.map(threadData),
       text: threads.length
@@ -7814,7 +7815,7 @@ const CLI: Record<string, CliCommand> = {
   },
   panes: {
     usage: "panes [--thread T] [--state S]",
-    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses the latest session data, not clipped screen text.",
+    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses the latest session data, not clipped screen text.",
     options: { thread: "string", state: "string" },
     run: (a) => {
       const want = a.state === undefined ? null : cliStates(str(a, "state"), "");

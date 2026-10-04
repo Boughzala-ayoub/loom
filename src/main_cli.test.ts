@@ -29,6 +29,22 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(14)) {
+  const th = { id: "th", name: "work", dir: "C:\\work", panes: [] as any[], zoomed: null as any };
+  const p = { id: "p", th }, q = { id: "q", th };
+  th.panes.push(p, q);
+  const c = fixture({ threads: [th] });
+  assert.equal(c.threads.run().data[0].zoomed, null);
+  th.zoomed = p;
+  let r = c.threads.run().data[0];
+  assert.equal(r.zoomed, "p");
+  assert.equal(r.panes[0].zoomed, true);
+  assert.equal(r.panes[1].zoomed, false);
+  th.zoomed = q;
+  r = c.threads.run().data[0];
+  assert.equal(r.zoomed, "q");
+  console.log("ok   thread and pane records identify the actual zoom target independently of focus");
+}
 if (check(11)) {
   const t = { id: "stuck", pane: "p", gen: 1, ref: "work:1", state: "working", events: [] };
   const th = { name: "work", panes: [] as any[] };
