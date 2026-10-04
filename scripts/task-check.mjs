@@ -260,6 +260,45 @@ try {
     ok('A failed policy append reports failure and the next write restores the mute before replay');
   }
 
+  if (review('restored-notices')) {
+    await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b']] });
+    await page.waitForFunction(() => !window.qa.sessions.length, null, { timeout: 10000 });
+    const finish = async (ref, text) => {
+      const pane = await paneId(ref);
+      await agent(pane, { input: '', busy: false });
+      const sent = await cli('submit', ref, text);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      await report(pane, { kind: 'start', match: promptMatch(text) });
+      await stops(pane);
+      return (await until(sent.text, 'completed')).events.at(-1).seq;
+    };
+    const oldPane = claude;
+    const old = await finish('work:1', 'queued before restoring its pane');
+    const closed = await finish('work:3', 'queued before closing its pane');
+    assert.equal((await cli('close', 'work:3', '--yes')).ok, true);
+    assert.equal((await cli('add', 'work', '--cmd=claude')).ok, true);
+    await page.waitForTimeout(700);
+    await page.evaluate(() => localStorage.setItem('qa-use-state', '1'));
+    await reboot();
+    assert.notEqual(claude, oldPane, 'The restored pane has a new runtime id');
+    assert.equal((await cli('notify', '--check', String(old))).data[old], true);
+    assert.equal((await cli('notify', 'work:1', 'off')).ok, true);
+    assert.equal((await cli('notify', '--check', String(old))).data[old], false, 'Restored-pane mute must reach its queued historical completion');
+    assert.equal((await cli('notify', 'work:3', 'off')).ok, true);
+    assert.equal((await cli('notify', '--check', String(closed))).data[closed], true, 'A replacement at the same ref does not own a closed pane\'s notices');
+    assert.equal((await cli('notify', 'work:1', 'inherit')).ok, true);
+    assert.equal((await cli('notify', '--check', String(old))).data[old], false, 'Re-enable never resends old notices');
+    const newer = await finish('work:1', 'queued before a second restore');
+    await page.waitForTimeout(700);
+    await reboot();
+    assert.equal((await cli('notify', '--check', String(newer))).data[newer], true);
+    assert.equal((await cli('notify', 'work:1', 'off')).ok, true);
+    assert.equal((await cli('notify', '--check', String(newer))).data[newer], false);
+    assert.equal((await cli('notify', '--check', String(closed))).data[closed], true);
+    await page.evaluate(() => localStorage.removeItem('qa-use-state'));
+    ok('Restored-pane mutes reach historical notices across two restarts and leave closed panes independent');
+  }
+
   // Start the older cases with the same empty journal and settings as before.
   await page.evaluate(() => { localStorage.clear(); });
   await reboot();

@@ -1013,7 +1013,7 @@ function applyTheme(t: Theme) {
 
 /** A pane as saved: the command it booted with, the claude session it owns,
  * and the session's last-known effort level (hook-reported; resume re-pins it). */
-type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off" };
+type PaneState = { cmd: string; sid?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off"; notifyIds?: string[] };
 /** A pane's task notices: every pane's setting (`inherit`), or its own on or off. */
 type PaneNotify = "inherit" | "on" | "off";
 /** Every pane's task notices, which kinds, and what a pane made from now on starts with. */
@@ -1510,6 +1510,8 @@ class Pane {
   inputSeq = 0;
   /** Its task notices: every pane's setting, or its own on or off (notifyPolicy). */
   notify: PaneNotify = "inherit";
+  /** Runtime ids of this saved pane, including launches from earlier Loom runs. */
+  notifyIds: string[] = [this.id];
   /** Enters a person gave it in Loom's window that may have sent a prompt no
    * task holds yet (manualEnter), oldest first. Never their text. */
   manual: ManualEnter[] = [];
@@ -2554,6 +2556,7 @@ class Thread {
     if (st.effort) p.effort = st.effort;
     // A restored pane keeps its own setting; a new one starts as notifyPolicy.newPanes says.
     p.notify = st.notify === "on" || st.notify === "off" ? st.notify : restoring ? "inherit" : notifyPolicy.newPanes;
+    if (restoring && Array.isArray(st.notifyIds)) p.notifyIds = [...new Set([...st.notifyIds.filter((id) => typeof id === "string" && id), p.id])];
     p.paintBell();
     this.panes.push(p);
     this.grid.append(p.el);
@@ -2818,7 +2821,8 @@ const flushSave = (): Promise<unknown> => {
         branch: t.branch,
         name: t.name,
         open: t.open,
-        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify })),
+        panes: t.panes.map((p) => ({ cmd: p.startup, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify,
+          notifyIds: p.notifyIds.filter((id) => journalUnreadable || id === p.id || typedTasks().some((t) => t.pane === id)) })),
         layout: t.layout,
         active: t.panes.indexOf(t.active!),
         zoomed: t.panes.indexOf(t.zoomed!),
@@ -4020,18 +4024,17 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
 
 /** The notification policy's history as the journal keeps it (task.ts notifies), oldest first. */
 let notifyHistory: NotifySnapshot[] = [];
-/** The policy as it stands, with each pane's own setting by this run's pane
- * id. Pane ids are new each time Loom starts, so the settings of panes no
- * longer here carry over while Loom keeps tasks of theirs: a restart is no
- * policy change for the events they had. */
+/** The policy as it stands, including each restored pane's historical ids.
+ * Closed panes keep their last setting while their tasks remain. A new pane
+ * at the same ref has no aliases to the closed one. */
 const currentNotify = (): Omit<NotifySnapshot, "at"> => {
   const live = threads.flatMap((t) => t.panes), last = notifyHistory[notifyHistory.length - 1];
   const kept = new Set([...tasks.values()].map((t) => t.pane));
   return {
     on: notifyPolicy.on, kinds: { ...notifyPolicy.kinds },
     panes: {
-      ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => kept.has(id) && !live.some((p) => p.id === id))),
-      ...Object.fromEntries(live.filter((p) => p.notify !== "inherit").map((p) => [p.id, p.notify as "on" | "off"])),
+      ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => kept.has(id) && !live.some((p) => p.notifyIds.includes(id)))),
+      ...Object.fromEntries(live.filter((p) => p.notify !== "inherit").flatMap((p) => p.notifyIds.map((id) => [id, p.notify as "on" | "off"]))),
     },
   };
 };
