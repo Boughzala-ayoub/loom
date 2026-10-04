@@ -7419,12 +7419,13 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
   // --input and --replace look at the input in the pane's turn, right before
   // typing, so no other loomctl call can type in between.
   let shown: ReturnType<typeof inputState> | undefined;
+  let correlationWarning: string | undefined;
   const guard = () => {
     // A question takes keys as answers, and Enter picks its highlighted option.
     if (submit && p.agent !== "shell" && readMenu(liveScreen(p, false))) {
       throw new NotSubmitted(`${ref} is asking a question, so submit typed nothing: Enter there would answer it. loomctl menu ${ref} reads it and loomctl choose answers it.`, false);
     }
-    if (expect === undefined && !replace) return;
+    if (expect === undefined && !replace && !tracked) return;
     shown = inputState(p);
     if (expect !== undefined && shown.rev !== expect) throw new NotSubmitted(`${ref}'s input changed since revision ${expect} (it's ${shown.rev} now, ${shown.kind}), so nothing was typed. loomctl --json read ${ref} shows it.`, false);
     if (replace && shown.kind !== "empty" && shown.kind !== "suggestion" && !(submit && shown.kind === "unknown")) {
@@ -7465,8 +7466,23 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
         beforeEnter: () => {
           leftover();
           if (receipt && p.agent !== "shell") receipt.turnsAt = p.turns;
-          if (tracked) task = turnTask(p, "send", promptMatch(asked), Date.now(),
-            { ...(token ? { id: token } : {}), key: ctx.key ?? null, what: ctx.what ?? null, sha256: digest, bytes, input: shown?.kind ?? "unknown" });
+          if (tracked) {
+            let match = promptMatch(asked);
+            if (p.agent === "claude" || p.agent === "codex") {
+              const complete = inputState(p);
+              // An empty composer plus our sole paste establishes the full prompt,
+              // even if the agent collapses it. Otherwise read what Enter submits:
+              // the caller's text may have joined a draft already in the composer.
+              if (shown?.kind === "empty" || shown?.kind === "suggestion") match = promptMatch(asked);
+              else if (complete.kind === "draft" && complete.text !== null && !PLACEHOLDER.test(complete.text)) match = promptMatch(complete.text);
+              else {
+                match = "";
+                correlationWarning = "Loom couldn't read the complete submitted prompt, so this send cannot be matched to the agent's prompt reports.";
+              }
+            }
+            task = turnTask(p, "send", match, Date.now(),
+              { ...(token ? { id: token } : {}), key: ctx.key ?? null, what: ctx.what ?? null, sha256: digest, bytes, input: shown?.kind ?? "unknown", detail: correlationWarning ?? null });
+          }
           if (task) release = holdSignals(p);
         },
       });
@@ -7522,7 +7538,7 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
     release();
     await saved;
   }
-  return { data: { pane: p.id, generation: gen, sha256: digest, bytes, ...(token ? { receipt: token } : {}), ...(task && !submit ? { task: task.id, ...(journalUnreadable ? { saved: false, warning: journalUnavailable() } : {}) } : {}) }, text: token ?? "" };
+  return { data: { pane: p.id, generation: gen, sha256: digest, bytes, ...(token ? { receipt: token } : {}), ...(correlationWarning ? { correlationWarning } : {}), ...(task && !submit ? { task: task.id, ...(journalUnreadable ? { saved: false, warning: journalUnavailable() } : {}) } : {}) }, text: token ?? "" };
 }
 
 /** A task Loom still has, or a failure saying it isn't available. */

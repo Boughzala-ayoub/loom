@@ -15,11 +15,13 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|all runs the 2026-10-04 regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { isFinal, promptMatch, readJournal } from '../src/task.ts';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const base = process.env.RESP_BASE || 'http://localhost:4273';
@@ -200,6 +202,10 @@ try {
 
   // Review of f80a83e, 2026-10-04. TASK_REVIEW runs just these regressions.
   const review = (name) => !process.env.TASK_REVIEW || process.env.TASK_REVIEW === name || process.env.TASK_REVIEW === 'all';
+  const resetReview = async () => {
+    await page.evaluate(() => localStorage.clear());
+    await reboot();
+  };
   if (review('unreadable')) {
     const old = await cli('submit', 'work:1', 'keep this history');
     await report(claude, { kind: 'start', match: promptMatch('keep this history') });
@@ -241,6 +247,7 @@ try {
   }
 
   if (review('policy-recovery')) {
+    await resetReview();
     const sent = await cli('submit', 'work:1', 'queued before a failed mute');
     await report(claude, { kind: 'start', match: promptMatch('queued before a failed mute') });
     await stops(claude);
@@ -261,6 +268,7 @@ try {
   }
 
   if (review('restored-notices')) {
+    await resetReview();
     await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b']] });
     await page.waitForFunction(() => !window.qa.sessions.length, null, { timeout: 10000 });
     const finish = async (ref, text) => {
@@ -300,6 +308,7 @@ try {
   }
 
   if (review('manual-mismatch')) {
+    await resetReview();
     const made = [];
     for (const [provider, pane, ref] of [['claude', claude, 'work:1'], ['codex', codex, 'work:2']]) {
       await agent(pane, { input: '', busy: false, codexShape: provider === 'codex' });
@@ -322,6 +331,42 @@ try {
     }
     assert.deepEqual(made, [['claude', []], ['codex', []]], 'A known local-command marker must not adopt a different CLI-only turn');
     ok('Claude and Codex reject a known manual hash mismatch after a local command and CLI-only input');
+  }
+
+  if (review('send-draft')) {
+    await resetReview();
+    for (const [provider, pane, ref] of [['claude', claude, 'work:1'], ['codex', codex, 'work:2']]) {
+      const prefix = 'Please fix ', asked = 'the test', full = prefix + asked;
+      await agent(pane, { input: prefix, busy: false, codexShape: provider === 'codex' });
+      await page.waitForTimeout(250);
+      const sent = await cli('send', ref, '--receipt', asked);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      assert.equal((await prompts(pane)).at(-1), full, 'Ordinary send preserves append behavior');
+      assert.equal((await saved(sent.data.task)).match, promptMatch(full), `${provider}: correlate the full submitted composer`);
+      const receipt = (await cli('receipt', sent.data.receipt)).data;
+      assert.deepEqual([sent.data.sha256, sent.data.bytes], [createHash('sha256').update(asked).digest('hex'), Buffer.byteLength(asked)]);
+      assert.deepEqual([receipt.wrote.sha256, receipt.wrote.bytes], [sent.data.sha256, sent.data.bytes]);
+      if (provider === 'claude') {
+        await report(pane, { kind: 'start', match: promptMatch(full) });
+        await until(sent.data.task, 'working');
+        await stops(pane);
+      } else {
+        await agent(pane, { busy: false });
+        await report(pane, { kind: 'end', matches: [promptMatch(full)], turn: 'appended-send' });
+      }
+      assert.equal((await until(sent.data.task, 'completed')).correlation, 'prompt');
+      const event = (await cli('watch', sent.data.task, '--after', '0', '--metadata', '--policy')).data.events.at(-1);
+      assert.equal(event.notify, true, 'The matched completion is eligible for its finish notice');
+    }
+    // No readable composer before or after: never pretend the appended text is the whole prompt.
+    await agent(codex, { input: 'hidden earlier draft ', busy: false, codexShape: true, hidden: true });
+    await page.waitForTimeout(250);
+    const limited = await cli('send', 'work:2', 'with appended text');
+    assert.equal(limited.ok, true, JSON.stringify(limited));
+    assert.match(limited.data.correlationWarning, /complete.*prompt/i);
+    assert.equal((await saved(limited.data.task)).match, '');
+    assert.match((await state(limited.data.task)).detail, /complete.*prompt/i);
+    ok('Ordinary sends match the complete Claude and Codex draft, keep receipt metadata and report unreadable correlation');
   }
 
   // Start the older cases with the same empty journal and settings as before.
@@ -1795,7 +1840,8 @@ try {
   {
     for (const provider of ['claude', 'codex', 'opencode']) {
       const pane = await paneOf(provider), text = `${provider} ordinary send`;
-      await agent(pane, { busy: false, input: '' });
+      await agent(pane, { busy: false, input: '', codexShape: provider === 'codex' });
+      await page.waitForTimeout(250);
       const before = await taskIds();
       const sent = await cli('send', refOf[provider], '--receipt', text);
       assert.equal(sent.ok, true, JSON.stringify(sent));
@@ -1838,7 +1884,7 @@ try {
     await endTurn('claude', claude, 'claude typed by hand', 'Handled.');
     assert.equal((await until(c.task, 'completed')).source, 'manual');
     // Codex with an input it can't read (its composer isn't drawn): the turn's end report makes the task.
-    await agent(codex, { busy: false, input: '' });
+    await agent(codex, { busy: false, input: '', codexShape: false });
     before = await taskIds();
     await typeIn(codex, 'codex typed by hand');
     assert.deepEqual(await newTasks(before), [], 'Nothing read, nothing reported yet: no task');
