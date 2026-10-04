@@ -136,7 +136,7 @@ shows one.
 | `atPrompt` | Shell panes: PowerShell's prompt is waiting for a command |
 | `lastOutput` | When the pane last drew anything |
 
-`usage [claude|codex] --json` fetches current account plan usage, even while `set plan-usage off` is in effect. Omit the provider for both. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.
+`usage [claude|codex] --json` reads account plan usage through a shared five-minute cache, even while `set plan-usage off` is in effect. Omit the provider for both. JSON includes `fetchedAt`, `nextRefreshAt` and `cached`. Rate limits can extend the cooldown. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.
 
 `panes --json` includes `model`, `effort` and `context` from Claude and Codex session records, with structured startup selections as fallbacks. OpenCode currently has startup selections only. Context contains `usedTokens`, `windowTokens`, `remainingTokens` and `remainingPercent`. Missing data is null. Recent settings take precedence over statusline reports, then the last transcript turn; this does not depend on pane width. The same fields appear in nested pane records from `threads` and `status`.
 
@@ -1093,3 +1093,5 @@ An identical task-end retry waits for the outstanding settlement write. If that 
 A receipt wait already in progress also stops if task-end settles a held Enter. It reports that Enter was not pressed and no outcome will arrive; operator settlement does not acknowledge agent work.
 
 Pane settings use Claude session data and bounded reads of the known Codex session. Codex context uses the latest request token usage and actual model window, never cumulative session totals. Results apply only while the pane session and generation still match. Explicit startup model and effort are saved as structured fallbacks until provider records supply values. OpenCode currently exposes startup model only; unobserved effort and context remain null.
+
+Usage reads share one in-flight request per provider with background polling and reuse readings for five minutes. JSON reports fetchedAt, nextRefreshAt, cached and stale. Rate-limit responses extend the cooldown, including when local fallback succeeds. Retry-After seconds and HTTP dates are honored up to 24 hours; an unavailable retry interval uses one hour. Explicit reads still work with background polling disabled.

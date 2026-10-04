@@ -601,6 +601,8 @@ pub struct Plan {
     /// Read off a statusline payload rather than the endpoint — the two
     /// account-wide windows only, so the caller merges instead of replacing.
     stale: bool,
+    #[serde(rename = "retryAfterSeconds", skip_serializing_if = "Option::is_none")]
+    retry_after_seconds: Option<u64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -724,6 +726,36 @@ fn get(url: &str, token: &str) -> Result<String, String> {
     get_headers(url, &[("Authorization", &auth), ("anthropic-beta", "oauth-2025-04-20"), ("anthropic-version", "2023-06-01")])
 }
 
+// Retry-After permits either delta seconds or an IMF-fixdate. Only the parsed
+// duration leaves this function, never a response header that could echo auth.
+fn retry_after(value: &str, now: u64) -> Option<u64> {
+    if let Ok(n) = value.parse::<u64>() { return Some(n.min(86400)); }
+    let words: Vec<_> = value.split_whitespace().collect();
+    if words.len() != 6 || words[5] != "GMT"
+        || !["Mon,", "Tue,", "Wed,", "Thu,", "Fri,", "Sat,", "Sun,"].contains(&words[0]) { return None; }
+    let month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        .iter().position(|m| *m == words[2])? as i64 + 1;
+    let day = words[1].parse::<i64>().ok()?;
+    let year = words[3].parse::<i64>().ok()?;
+    let clock: Vec<u64> = words[4].split(':').map(str::parse).collect::<Result<_, _>>().ok()?;
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if !(1970..=9999).contains(&year) || day < 1 || day > days[(month - 1) as usize]
+        || clock.len() != 3 || clock[0] > 23 || clock[1] > 59 || clock[2] > 59 { return None; }
+    // Gregorian civil date to days since 1970-01-01.
+    let y = year - i64::from(month <= 2);
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+    let at = days as u64 * 86400 + clock[0] * 3600 + clock[1] * 60 + clock[2];
+    Some(at.saturating_sub(now).min(86400))
+}
+
+fn retry_seconds(error: &str) -> Option<u64> {
+    error.strip_prefix("usage rate limited; retry after ")?.strip_suffix(" seconds")?.parse().ok()
+}
+
 fn get_headers(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
     if headers.iter().any(|(_, value)| value.chars().any(char::is_control)) {
         return Err("Invalid usage request credentials".into());
@@ -734,7 +766,7 @@ fn get_headers(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
         .map(|r| format!("{r}\\System32\\curl.exe"))
         .unwrap_or_else(|_| "curl.exe".into());
     let mut child = Command::new(curl)
-        .args(["-q", "-sS", "--fail-with-body", "-m", "20", "-K", "-", url])
+        .args(["-q", "-sS", "--fail-with-body", "-D", "-", "-m", "20", "-K", "-", url])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -749,9 +781,21 @@ fn get_headers(url: &str, headers: &[(&str, &str)]) -> Result<String, String> {
         .write_all(cfg.as_bytes())
         .map_err(|e| e.to_string())?;
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
-    let body = String::from_utf8_lossy(&out.stdout).into_owned();
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let mut body = raw.as_ref();
+    let mut retry = None;
+    let mut status = 0;
+    // Peel response headers, including proxy CONNECT and interim responses.
+    while body.starts_with("HTTP/") {
+        let Some((head, rest)) = body.split_once("\r\n\r\n") else { break };
+        status = head.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse::<u16>().ok()).unwrap_or(0);
+        retry = head.lines().filter_map(|l| l.split_once(':')).find(|(k, _)| k.eq_ignore_ascii_case("retry-after"))
+            .and_then(|(_, v)| retry_after(v.trim(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()));
+        body = rest;
+    }
+    if status == 429 { return Err(format!("usage rate limited; retry after {} seconds", retry.unwrap_or(3600).max(300))); }
     if out.status.success() {
-        return Ok(body);
+        return Ok(body.to_string());
     }
     // Neither diagnostics nor provider bodies are safe: either can echo headers.
     Err(format!("usage request failed (curl exit {})", out.status.code().unwrap_or(-1)))
@@ -793,7 +837,7 @@ fn shape_codex(value: &serde_json::Value, live: bool) -> Option<CodexPlan> {
     }
     if limits.is_empty() { return None; }
     Some(CodexPlan {
-        plan: Plan { tier: value["plan_type"].as_str().unwrap_or("").into(), limits, stale: !live },
+        plan: Plan { tier: value["plan_type"].as_str().unwrap_or("").into(), limits, stale: !live, retry_after_seconds: None },
         banked_resets: if live { value["rate_limit_reset_credits"]["available_count"].as_u64().filter(|n| *n <= 9_007_199_254_740_991) } else { None },
         banked_reset_expiries: None,
         note: String::new(),
@@ -872,7 +916,9 @@ pub fn codex_plan_usage() -> Result<CodexPlan, String> {
             Err(e) => error = e,
         }
         // Keep offline readings tied to the home that supplied this account's token.
-        return codex_local(std::slice::from_ref(home)).ok_or(error);
+        return codex_local(std::slice::from_ref(home)).map(|mut p| {
+            p.plan.retry_after_seconds = retry_seconds(&error); p
+        }).ok_or(error);
     }
     codex_local(&homes).ok_or(error)
 }
@@ -888,6 +934,7 @@ pub fn plan_usage() -> Result<Plan, String> {
                     tier: c.tier,
                     limits,
                     stale: false,
+                    retry_after_seconds: None,
                 })
             }
             Err(e) => (c.tier, e),
@@ -897,7 +944,9 @@ pub fn plan_usage() -> Result<Plan, String> {
     // This endpoint 429s readily — often enough that the chip would just never
     // appear. Claude Code pushes the same two numbers into every statusline
     // payload, so any pane that has run claude already has them on disk.
-    plan_from_status(&std::env::temp_dir().join("loom-status"), tier).ok_or(err)
+    plan_from_status(&std::env::temp_dir().join("loom-status"), tier).map(|mut p| {
+        p.retry_after_seconds = retry_seconds(&err); p
+    }).ok_or(err)
 }
 
 fn api_limits(token: &str) -> Result<Vec<Limit>, String> {
@@ -992,6 +1041,7 @@ fn plan_from_status(dir: &Path, tier: String) -> Option<Plan> {
             .chain(r.seven_day.map(|b| limit("weekly_all", "weekly", b)))
             .collect(),
         stale: true,
+        retry_after_seconds: None,
     })
 }
 
@@ -1000,6 +1050,25 @@ mod tests {
     use super::{live_status, plan_from_status, profile_of, scan, slug, transcript, Usage};
     use std::io::Write;
 
+
+    #[test]
+    fn usage_retry_after_is_bounded_without_echoing_headers() {
+        assert_eq!(super::retry_after("Fri, 09 Oct 2026 21:10:33 GMT", 1791573033), Some(7200));
+        assert_eq!(super::retry_after("999999999", 0), Some(86400));
+        assert_eq!(super::retry_after("Bearer fake-secret", 0), None);
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.read(&mut [0; 4096]).unwrap();
+            socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7200\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let error = super::get_headers(&url, &[("Authorization", "Bearer fake-N6")]).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(super::retry_seconds(&error), Some(7200));
+        assert!(!error.contains("fake-N6"));
+    }
 
     #[test]
     fn codex_session_settings_use_selected_session_and_current_context() {

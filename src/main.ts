@@ -1222,7 +1222,7 @@ const tok = (n: number) =>
 type Limit = { label: string; group: string; percent: number; severity: string; resetsAt: string | null };
 /** `stale` = read off a statusline payload because the endpoint wouldn't answer,
  * so it carries the two account-wide windows and nothing else. */
-type Plan = { tier: string; limits: Limit[]; stale: boolean; bankedResets?: number; bankedResetExpiries?: (string | null)[]; note?: string };
+type Plan = { tier: string; limits: Limit[]; stale: boolean; bankedResets?: number; bankedResetExpiries?: (string | null)[]; note?: string; retryAfterSeconds?: number };
 type PlanProvider = "claude" | "codex";
 const PLAN_PROVIDERS = {
   claude: { name: "Claude", button: "plan", command: "plan_usage", url: "https://claude.ai/settings/usage" },
@@ -7103,6 +7103,30 @@ function paintPlan(provider: PlanProvider) {
  * minutes is as often as it's worth asking, plus the panel's refresh button.
  * A failure keeps the last good numbers and shows why underneath them. One
  * request per provider at a time: a click during a poll waits for that one. */
+type AccountReading = (Plan | { error: string; stale: true }) & { fetchedAt: string | null; nextRefreshAt: string; cached: boolean };
+const accountPolls: Partial<Record<PlanProvider, Promise<AccountReading>>> = {};
+const accountCache: Partial<Record<PlanProvider, AccountReading>> = {};
+function accountPlan(provider: PlanProvider): Promise<AccountReading> {
+  if (accountPolls[provider]) return accountPolls[provider]!;
+  const previous = accountCache[provider];
+  if (previous && Date.parse(previous.nextRefreshAt) > Date.now()) return Promise.resolve({ ...previous, cached: true });
+  return accountPolls[provider] = (async () => {
+    let retry = 300, result: Plan | { error: string; stale: true }, fetchedAt = previous?.fetchedAt ?? null;
+    try {
+      result = await invoke<Plan>(PLAN_PROVIDERS[provider].command);
+      retry = Math.max(retry, result.retryAfterSeconds ?? 0);
+      fetchedAt = new Date().toISOString();
+    } catch (e) {
+      const error = String(e);
+      retry = Math.max(retry, Number(/retry after (\d+) seconds/.exec(error)?.[1] ?? 0));
+      result = { ...(previous && "limits" in previous ? previous : {}), error, stale: true };
+    }
+    const reading = { ...result, fetchedAt, nextRefreshAt: new Date(Date.now() + Math.min(retry, 86400) * 1000).toISOString(), cached: false };
+    accountCache[provider] = reading;
+    return reading;
+  })().finally(() => { delete accountPolls[provider]; });
+}
+
 const planPolls: Partial<Record<PlanProvider, Promise<void>>> = {};
 function pollPlan(provider: PlanProvider): Promise<void> {
   return planPolls[provider] ??= fetchPlan(provider).finally(() => {
@@ -7116,7 +7140,8 @@ async function fetchPlan(provider: PlanProvider) {
   if (!planUsage) return;
   const plan = plans[provider];
   try {
-    const got = await invoke<Plan>(PLAN_PROVIDERS[provider].command);
+    const got = await accountPlan(provider);
+    if (!("limits" in got)) throw new Error(got.error);
     // A row whose reset time has passed describes a window that rolled over —
     // its usage is back at zero, whatever the stale payload last said. This is
     // how a pane idle since 1 AM used to read "47% used, Resetting now" all
@@ -7144,7 +7169,7 @@ async function fetchPlan(provider: PlanProvider) {
         (a, b) => Number(b.group === "session") - Number(a.group === "session"),
       ),
     };
-    planErrors[provider] = "";
+    planErrors[provider] = "error" in got ? String(got.error) : "";
     planFetchedAt[provider] = Date.now();
   } catch (e) {
     planErrors[provider] = String(e);
@@ -7820,13 +7845,13 @@ const CLI: Record<string, CliCommand> = {
   },
   usage: {
     usage: "usage [claude|codex]",
-    help: "Fetch account plan usage now, even with plan-usage off. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
+    help: "Read account plan usage, even with plan-usage off. All callers share a fetch and a five-minute cache; rate limits can extend the cooldown. JSON includes fetchedAt, nextRefreshAt and cached. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
     run: async (a) => {
       const name = a._[0];
       if (a._.length > 1 || (name !== undefined && name !== "claude" && name !== "codex")) throw new Error("usage takes claude or codex, or neither for both.");
       const data: Partial<Record<PlanProvider, Plan | { error: string }>> = {};
       for (const provider of (name ? [name] : ["claude", "codex"]) as PlanProvider[]) {
-        try { data[provider] = await invoke<Plan>(PLAN_PROVIDERS[provider].command); }
+        try { data[provider] = await accountPlan(provider); }
         catch (e) { data[provider] = { error: String(e) }; }
       }
       return { data, text: Object.entries(data).map(([provider, p]) => `${provider}: ${JSON.stringify(p)}`).join("\n") };

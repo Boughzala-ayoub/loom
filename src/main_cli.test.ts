@@ -12,14 +12,14 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites", "waitReceipt", "cliReceipt", "pollProviderUsage", "accountPlan", "accountPolls", "accountCache", "fetchPlan"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`const ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
@@ -257,4 +257,52 @@ if (check(105)) {
   await pending;
   assert.equal(p.providerUsage, null);
   console.log("ok   N5 startup selections are structured per-pane fallbacks");
+}
+
+if (check(106)) {
+  let calls = 0, release!: (v: any) => void;
+  const c = fixture({ plans: {}, planErrors: {}, planFetchedAt: {}, PLAN_PROVIDERS: { claude: { command: "plan_usage" } }, planUsage: true,
+    invoke: () => { calls++; return new Promise((r) => { release = r; }); } });
+  const background = lastFixture.fetchPlan("claude");
+  const reads = Array.from({ length: 20 }, () => c.usage.run({ _: ["claude"] }));
+  assert.equal(calls, 1, "twenty clients must share one account fetch");
+  release({ tier: "pro", stale: false, limits: [] });
+  await Promise.all([background, ...reads]);
+  const cached = await c.usage.run({ _: ["claude"] });
+  assert.equal(calls, 1);
+  assert.equal(cached.data.claude.cached, true);
+  assert.ok(cached.data.claude.fetchedAt);
+  console.log("ok   N6 explicit usage coalesces and reuses a fresh account reading with polling off");
+}
+
+if (check(106)) {
+  let now = Date.now(), calls = 0;
+  class Clock extends Date { static now() { return now; } }
+  const c = fixture({ Date: Clock, PLAN_PROVIDERS: { claude: { command: "plan_usage" } },
+    invoke: async () => { calls++; throw new Error("usage rate limited; retry after 7200 seconds"); } });
+  await c.usage.run({ _: ["claude"] });
+  now += 3600_000;
+  const cached = await c.usage.run({ _: ["claude"] });
+  assert.equal(calls, 1);
+  assert.equal(cached.data.claude.stale, true);
+  now += 3601_000;
+  await c.usage.run({ _: ["claude"] });
+  assert.equal(calls, 2);
+  console.log("ok   N6 rate limits keep failures cached until the retry interval expires");
+}
+
+if (check(106)) {
+  let now = Date.now(), fail = false;
+  class Clock extends Date { static now() { return now; } }
+  const planErrors: Record<string, string> = {};
+  fixture({ Date: Clock, planUsage: true, plans: {}, planErrors, planFetchedAt: {},
+    PLAN_PROVIDERS: { claude: { command: "usage" } }, invoke: async () => {
+      if (fail) throw new Error("usage rate limited; retry after 7200 seconds");
+      return { tier: "pro", limits: [], stale: false };
+    } });
+  await lastFixture.fetchPlan("claude");
+  now += 301000; fail = true;
+  await lastFixture.fetchPlan("claude");
+  assert.match(planErrors.claude, /rate limited/, "a cached reading must not hide the background refresh error");
+  console.log("ok   N6 background refresh retains its error beside cached readings");
 }
