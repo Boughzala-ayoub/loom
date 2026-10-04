@@ -8184,13 +8184,13 @@ const CLI: Record<string, CliCommand> = {
   },
   tasks: {
     usage: "tasks [--pane P] [--state S]",
-    help: "The tasks Loom keeps, oldest first: every open one and the last 500 to finish. --state takes accepted, submitted, working, approval, completed, failed, cancelled and unknown, several with commas, or open for any not finished.",
+    help: "The tasks Loom keeps, oldest first: every open one and the last 500 to finish. --pane takes a current reference or a stable pane ID, including a closed pane's ID. --state takes accepted, submitted, working, approval, completed, failed, cancelled and unknown, several with commas, or open for any not finished.",
     options: { pane: "string", state: "string" },
     run: (a) => {
       const want = a.state === undefined ? null : taskStates(str(a, "state")!, "--state");
       const sel = str(a, "pane");
       let id = sel;
-      if (sel !== undefined) try { id = cliPane(sel).id; } catch { /* a pane closed since: match its id or name as given */ }
+      if (sel !== undefined) try { id = cliPane(sel).id; } catch { /* a pane closed since: match its stable id */ }
       const list = [...tasks.values()].filter((t) => t.events.length && (!want || want.includes(t.state)) && (sel === undefined || t.pane === id));
       return { data: list.map(record), text: list.length ? list.map(taskText).join("\n") : "No tasks." };
     },

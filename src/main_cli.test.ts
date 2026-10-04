@@ -159,6 +159,7 @@ if (check(2)) {
   assert.equal((await c.task.run({ _: [t.id] })).data.paneClosed, true);
   assert.match((await c.task.run({ _: [t.id] })).text, /closed pane/);
   assert.equal(t.ref, "work:4", "Display does not rewrite history");
+  assert.match(c.tasks.help, /current reference.*pane ID/);
   console.log("ok   task references follow pane IDs and explicitly report closed panes");
 }
 if (check(1)) {
