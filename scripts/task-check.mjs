@@ -1460,7 +1460,9 @@ try {
       await qa({ drawLate: 0 });
       assert.equal(r.ok, true, `${ref}: ${JSON.stringify(r)}`);
       const t = await state(r.text);
-      assert.deepEqual([t.state, t.uncertain ?? null], ['submitted', null], JSON.stringify(t));
+      // The sweep can see the busy screen before this read and advance it.
+      assert.ok(['submitted', 'working'].includes(t.state), JSON.stringify(t));
+      assert.deepEqual([t.events.some((e) => e.state === 'submitted'), !!t.submittedAt, t.uncertain ?? null], [true, true, null], JSON.stringify(t));
       assert.equal((await prompts(pane)).at(-1), text, 'Its Enter went in');
       // Its turn, as the agent reports it.
       if (pane === claude) await report(pane, { kind: 'start', match: promptMatch(text) }), await stops(pane);
