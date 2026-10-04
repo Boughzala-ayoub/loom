@@ -1097,3 +1097,5 @@ Pane settings use Claude session data and bounded reads of the known Codex sessi
 Usage reads share one in-flight request per provider with background polling and reuse readings for five minutes. JSON reports fetchedAt, nextRefreshAt, cached and stale. Rate-limit responses extend the cooldown, including when local fallback succeeds. Retry-After seconds and HTTP dates are honored up to 24 hours; an unavailable retry interval uses one hour. Explicit reads still work with background polling disabled.
 
 All exported limits.resetsAt and bankedResetExpiries values use UTC ISO timestamps, for example 2026-10-09T21:10:33.000Z. Missing, invalid or out-of-range dates are null. This applies to both providers and local fallback records.
+
+Menu and choose recognize a Claude survey only in the active footer below the live composer. Transcript quotations and a dismissed survey above a draft are not actionable. Choose rechecks that active region immediately before sending its digit.

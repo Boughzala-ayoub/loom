@@ -125,8 +125,8 @@ if (check(6)) {
 }
 if (check(5)) {
   const writes: string[] = [];
-  let screen = "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
-  const c = fixture({ cliPane: () => ({ id: "p", agent: "claude" }), liveScreen: () => screen,
+  let screen = "????????\n?\n????????\nHow is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
+  const c = fixture({ cliPane: () => ({ id: "p", agent: "claude", th: { name: "work", panes: [] } }), liveScreen: () => screen,
     inTurn: (_: unknown, f: (live: () => void) => unknown) => f(() => {}), keys: (_: unknown, s: string) => writes.push(s) });
   const menu = c.menu.run({ _: ["p"] }).data;
   await c.choose.run({ _: ["p", "0"], menu: menu.rev });
@@ -319,4 +319,21 @@ if (check(107)) {
     assert.deepEqual(Array.from(plan.bankedResetExpiries), ["2026-10-09T21:10:33.000Z", null, null]);
   }
   console.log("ok   N7 all exported reset dates and credit expiries use validated UTC ISO timestamps");
+}
+
+if (check(108)) {
+  const survey = "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
+  let screen = survey + "\n????????\n? normal draft\n????????\n? for shortcuts";
+  const writes: string[] = [];
+  const c = fixture({ cliPane: () => ({ id: "p", agent: "claude", th: { name: "work", panes: [] } }), liveScreen: () => screen,
+    inTurn: (_: unknown, f: (live: () => void) => unknown) => f(() => {}), keys: (_: unknown, s: string) => writes.push(s) });
+  assert.equal(c.menu.run({ _: ["p"] }).data, null);
+  await assert.rejects(c.choose.run({ _: ["p", "0"] }), /numbered question/);
+  assert.equal(writes.length, 0);
+  screen = "????????\n?\n????????\n" + survey;
+  const menu = c.menu.run({ _: ["p"] }).data;
+  screen = survey + "\n????????\n? draft\n????????";
+  await assert.rejects(c.choose.run({ _: ["p", "0"], menu: menu.rev }));
+  assert.equal(writes.length, 0);
+  console.log("ok   N8 transcript surveys and dismissed surveys cannot write into a draft");
 }

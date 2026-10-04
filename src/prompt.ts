@@ -8,8 +8,18 @@ export type Menu = { question: string[]; options: string[]; selected: number; mu
 
 /** Claude's optional session survey takes a digit directly, without Enter. */
 export function readSurvey(screen: string): Menu | null {
-  const match = /How is Claude doing this session\?\s*1:\s*Bad\s+2:\s*Fine\s+3:\s*Good\s+0:\s*Dismiss/i.exec(screen);
-  if (!match) return null;
+  const match = /^[ \t]*How is Claude doing this session\?\s*1:\s*Bad\s+2:\s*Fine\s+3:\s*Good\s+0:\s*Dismiss\s*$/im.exec(screen);
+  if (!match || screen.slice(match.index + match[0].length).trim()) return null;
+  // The survey owns the footer below the live composer. Transcript quotations
+  // and a dismissed survey above a new composer cannot consume survey keys.
+  const above = screen.slice(0, match.index).trimEnd().split("\n");
+  if (!/^[ \t]*[???-]{3,}[ \t]*$/.test(above[above.length - 1] ?? "")) return null;
+  let composer = above.length - 2;
+  while (composer >= 0 && !/^[ \t]*[?>]([ \t]|$)/.test(above[composer])) {
+    if (/^[ \t]*[???-]{3,}[ \t]*$/.test(above[composer])) return null;
+    composer--;
+  }
+  if (composer < 0) return null;
   return { question: ["How is Claude doing this session?"], options: ["Bad", "Fine", "Good", "Dismiss"], keys: ["1", "2", "3", "0"], selected: -1, multi: false, prompt: [match[0].replace(/\s+/g, " ")] };
 }
 

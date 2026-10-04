@@ -7926,7 +7926,7 @@ const CLI: Record<string, CliCommand> = {
   },
   menu: {
     usage: "menu [pane]",
-    help: "The numbered question on a pane's screen, including Claude's session survey. Survey keys are 1, 2, 3 and 0; selected is -1 because none is highlighted.",
+    help: "The numbered question on a pane's screen, including Claude's active session survey below the composer. Quoted or dismissed surveys are not actionable. Survey keys are 1, 2, 3 and 0; selected is -1 because none is highlighted.",
     run: (a) => {
       const p = cliPane(a._[0]);
       const screen = liveScreen(p, false);

@@ -316,9 +316,12 @@ check("A tool still running, indented: not the working line", claudeWorking(clau
 check("A truncated line ending in …: not working", claudeWorking("● Read(src/main.ts…)\n* a bullet that ends here…ish\n"), false);
 
 for (const screen of ["How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss", "How is Claude doing this session?\n  1: Bad   2: Fine\n 3: Good  0: Dismiss"]) {
-  const m = readSurvey(screen);
+  const m = readSurvey("????????\n?\n????????\n" + screen);
   check("survey choices retain their direct keys including zero", m && [m.options, m.keys, m.selected], [["Bad", "Fine", "Good", "Dismiss"], ["1", "2", "3", "0"], -1]);
 }
 check("an incomplete survey is not actionable", readSurvey("How is Claude doing this session? 1: Bad"), null);
+for (const prefix of ["? Documentation\n", "  tool output\n", "> quote\n", "```text\n"]) {
+  check("quoted surveys lack an active footer", readSurvey(prefix + "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss"), null);
+}
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");
