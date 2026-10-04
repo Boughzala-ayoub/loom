@@ -3722,10 +3722,14 @@ function paneContext(p: Pane): TaskContext {
 }
 /** The copy a new event of `t` takes: its pane as it is now, while the pane
  * is in its thread on the task's launch, else the task's last copy. */
+const pendingContextTasks = new Set<Task>();
+// Weak keys release the close copy when neither replay nor task history needs it.
+const closedTaskContexts = new WeakMap<Task, TaskContext>();
 function contextOf(t: Task): TaskContext | undefined {
   const p = paneById(t.pane);
   if (p && p.generation === t.gen) return paneContext(p);
-  return t.context && { ...t.context, origin: "last-known" };
+  const last = closedTaskContexts.get(t) ?? t.context;
+  return last && { ...last, origin: "last-known" };
 }
 /** Before panes leave their thread (closePane, Thread.dispose), each keeps
  * where it was, and so does each open task of theirs: what comes after (the
@@ -3733,9 +3737,12 @@ function contextOf(t: Task): TaskContext | undefined {
  * place it had, never number 0 or the pane there now. */
 function keepContext(panes: Pane[]) {
   for (const p of panes) p.left ??= paneContext(p);
-  for (const t of tasks.values()) {
+  for (const t of [...tasks.values(), ...pendingContextTasks]) {
     const p = !isFinal(t.state) && panes.find((q) => q.id === t.pane);
-    if (p && p.generation === t.gen) t.context = p.left;
+    if (p && p.generation === t.gen) {
+      t.context = p.left;
+      closedTaskContexts.set(t, p.left!);
+    }
   }
 }
 
@@ -3858,7 +3865,8 @@ function moveTask(t: Task, c: TaskChange, at = Date.now(), ctx = contextOf(t)): 
   const detail = c.detail ?? c.reason ?? undefined;
   const response = state === "completed" && c.response ? { response: c.response } : {};
   const event: TaskEvent = { seq: ++taskSeq, task: t.id, at, state, signal, ...(detail ? { detail } : {}), ...response, context: ctx };
-  if (ctx?.origin === "event") t.context = ctx;
+  if (closedTaskContexts.has(t)) t.context = closedTaskContexts.get(t);
+  else if (ctx?.origin === "event") t.context = ctx;
   t.events.push(event);
   const saved = journal([{ event, set: taskFields(t) }], [t.id]).then(() => true, () => false);
   if (isFinal(state)) {
@@ -3964,14 +3972,16 @@ function turnTask(p: Pane, source: TaskSource, match: string, at: number, more: 
     acceptedAt: at, submittedAt: null, startedAt: null, endedAt: null, events: [], context: ctx, ...more,
   };
   const accept = () => {
-    const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at, state: "accepted", signal: source, context: t.context };
+    const accepted: TaskEvent = { seq: ++taskSeq, task: t.id, at, state: "accepted", signal: source, context: ctx };
     t.events.push(accepted);
     tasks.set(t.id, t);
+    pendingContextTasks.delete(t);
     void journal([{ task: { ...t, events: [accepted] } }], [t.id]).catch(() => {});
     sweepSoon();
   };
   if (startupTurns) {
     unsaved.add(t.id);
+    pendingContextTasks.add(t);
     startupTurns.push(accept);
   } else accept();
   return t;
