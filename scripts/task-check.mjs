@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-closed|startup-closed-off|startup-closed-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,7 +51,7 @@ if (!process.env.TASK_REVIEW || ['pruned-owner', 'all'].includes(process.env.TAS
     const captured = { id: event.task, pane: 'old', gen: 1, state: 'completed', settledAt: 1, events: [event] };
     let resume;
     const sandbox = createContext({ ...taskModel, ...cliModel, console,
-      tasks: new Map([[captured.id, captured]]), threads: [], notifyPolicy: { ...taskModel.DEFAULT_NOTIFY },
+      tasks: new Map([[captured.id, captured]]), threads: [], startupNotify: new Map(), notifyPolicy: { ...taskModel.DEFAULT_NOTIFY },
       notifyOwners: { old: decision }, notifyHistory: [{ at: 1, ...taskModel.DEFAULT_NOTIFY, owners: { old: decision } }],
       journalLoaded: true, journalUnreadable: '', journalDirty: false, notifyWrite: undefined,
       taskSeq: 501, writtenSeq: 501, taskPruned: 0, journal: async () => {}, paintNotifications() {}, save() {},
@@ -197,9 +197,9 @@ try {
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(base);
   await page.evaluate(() => localStorage.removeItem('qa-journal'));
-  const boot = async () => {
+  const boot = async (panes = 3) => {
     await page.goto(base);
-    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready') && window.qa.panes.length >= 3);
+    await page.waitForFunction((panes) => window.qa.calls.some((c) => c.cmd === 'cli_ready') && window.qa.panes.length >= panes, panes);
     await page.waitForTimeout(300);
   };
   await boot();
@@ -813,6 +813,82 @@ try {
     assert.deepEqual(await decided(), [true, 'send', true], 'The same after a restart');
     await page.evaluate(() => localStorage.removeItem('qa-use-state'));
     ok('A turn during the startup read is judged by the policy restored with its pane');
+  }
+
+  // Review 2026-10-04 15:13 R1: a completed startup turn keeps its closed pane's override.
+  for (const own of ['off', 'on']) if (review('startup-closed') || review(`startup-closed-${own}`)) {
+    for (const recover of [false, true]) {
+      await resetReview();
+      await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b']] });
+      await page.waitForFunction(() => !window.qa.sessions.length);
+      assert.equal((await cli('notify', '--all', own === 'off' ? 'on' : 'off')).ok, true);
+      assert.equal((await cli('notify', 'work:2', own)).ok, true);
+      const oldOwner = codex, oldText = 'completion before restoring the pane';
+      const old = await cli('submit', 'work:2', oldText);
+      assert.equal(old.ok, true);
+      await report(codex, { kind: 'end', matches: [promptMatch(oldText)], turn: 'old-closed-policy' });
+      const oldSeq = (await until(old.text, 'completed')).events.at(-1).seq;
+      assert.equal(oldSeq, 3);
+      await page.waitForTimeout(700);
+      const aliases = await page.evaluate(() => JSON.parse(localStorage.getItem('qa-state')).threads[0].panes[1].notifyIds);
+      assert.ok(aliases.includes(oldOwner), 'The saved pane carries its previous runtime owner');
+      await page.evaluate(() => { localStorage.setItem('qa-use-state', '1'); localStorage.setItem('qa-journal-read-hold', '1'); });
+      await page.goto(base);
+      await page.waitForFunction(() => !!window.qa.releaseRead);
+      const earlyPane = await page.locator('.pane').nth(1).getAttribute('data-id');
+      assert.notEqual(earlyPane, oldOwner);
+      await page.waitForFunction((id) => !!window.qa.agents[id], earlyPane);
+      const text = `completed before closing a startup pane set ${own}`;
+      await agent(earlyPane, { codexShape: true, input: '', busy: false });
+      await page.locator(`.pane[data-id="${earlyPane}"] .xterm-helper-textarea`).focus();
+      await page.keyboard.type(text);
+      await page.waitForTimeout(250);
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(100);
+      assert.ok((await prompts(earlyPane)).includes(text));
+      await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+        event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'closed-startup-policy' }]],
+      }), [earlyPane, promptMatch(text)]);
+      await page.locator(`.pane[data-id="${earlyPane}"] [title="Close pane"]`).click();
+      await page.locator('#confirm-action').click();
+      await page.waitForFunction((id) => !document.querySelector(`.pane[data-id="${id}"]`), earlyPane);
+      if (recover) await qa({ journalHold: 'fn:return true' });
+      await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
+      await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+      const early = (await cli('tasks')).data.find((t) => t.pane === earlyPane && t.source === 'manual');
+      assert.ok(early, 'The closed pane retains its completed startup turn');
+      const final = await until(early.task, 'completed'), seq = final.events.at(-1).seq;
+      assert.deepEqual(final.events.map((e) => e.seq), [4, 5, 6]);
+      if (recover) {
+        await page.waitForFunction(() => window.qa.journalHeld.length === 1);
+        assert.equal((await cli('notify', '--check', String(seq))).data[seq], null, 'A pending policy write cannot publish the completion');
+        await page.evaluate(() => {
+          window.qa.journalHold = null;
+          window.qa.journalHeld.shift().reject(new Error('Test: startup policy write failed'));
+        });
+        await page.waitForFunction(() => window.qa.calls.filter((c) => c.cmd === 'task_journal_write').length >= 2);
+      }
+      const decided = async (task, n) => [
+        (await cli('watch', task, '--after', String(n - 1), '--metadata', '--policy')).data.events.at(-1).notify,
+        (await cli('watch', task, '--after', String(n - 1), '--metadata', '--policy-v4')).data.events.at(-1).disposition,
+        (await cli('notify', '--check', String(n))).data[n],
+        (await cli('notify', '--check', String(n), '--policy-v4')).data[n],
+      ];
+      const expected = [own === 'on', own === 'on' ? 'send' : 'muted', own === 'on', own === 'on' ? 'send' : 'muted'];
+      assert.deepEqual(await decided(early.task, seq), expected, `Closed startup pane ${own}, recovery ${recover}`);
+      assert.deepEqual(await decided(old.text, oldSeq), expected, 'The saved alias keeps the older completion policy');
+      const replay = readJournal(await page.evaluate(() => localStorage.getItem('qa-journal')));
+      assert.equal(replay.notify.findLast((p) => p.at === oldSeq).panes[earlyPane], own, 'The runtime owner is in the pre-numbering snapshot');
+      assert.equal(replay.tasks.get(early.task).pane, earlyPane);
+      // Closing pane 2 moves the unrelated pane 3 to the same reference.
+      assert.notEqual(await paneId('work:2'), earlyPane);
+      await page.waitForTimeout(700);
+      await boot(2); // the saved workspace now has two panes
+      assert.deepEqual(await decided(early.task, seq), expected, 'The closed runtime owner survives another restart');
+      assert.deepEqual(await decided(old.text, oldSeq), expected, 'Prior history survives another restart');
+      await page.evaluate(() => localStorage.removeItem('qa-use-state'));
+      ok(`Closed startup pane ${own} preserves v3/v4 policy and saved aliases across replay${recover ? ' after a failed write' : ''}`);
+    }
   }
 
   // Review 2026-10-04 13:46 F3: reports buffered during the startup read came before those held for a later Enter.

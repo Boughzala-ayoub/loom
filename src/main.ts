@@ -2557,6 +2557,7 @@ class Thread {
     // A restored pane keeps its own setting; a new one starts as notifyPolicy.newPanes says.
     p.notify = st.notify === "on" || st.notify === "off" ? st.notify : restoring ? "inherit" : notifyPolicy.newPanes;
     if (restoring && Array.isArray(st.notifyIds)) p.notifyIds = [...new Set([...st.notifyIds.filter((id) => typeof id === "string" && id), p.id])];
+    if (startupTurns) for (const id of p.notifyIds) startupNotify.set(id, p.notify);
     p.paintBell();
     this.panes.push(p);
     this.grid.append(p.el);
@@ -3677,6 +3678,9 @@ let taskSeq = 0;
  * event numbers until replay initializes the journal counter. Keep their
  * order, timestamps and launch identities while the read is outstanding. */
 let startupTurns: (() => void)[] | undefined = [];
+/** Saved overrides under runtime owner ids, including aliases. A pane can
+ * close before its buffered completion is numbered or its policy recorded. */
+const startupNotify = new Map<string, PaneNotify>();
 function finishTaskReplay() {
   const pending = startupTurns;
   startupTurns = undefined;
@@ -3686,6 +3690,9 @@ function finishTaskReplay() {
   const later = [...enterHeld.values()].map((h) => [h, h.signals.splice(0)] as const);
   pending?.forEach((run) => run());
   for (const [h, s] of later) h.signals.push(...s);
+  // The pre-replay snapshot now owns these settings, including on a failed
+  // write: journal recovery rewrites notifyHistory with the numbered tasks.
+  startupNotify.clear();
 }
 /** The highest event number pruned away: a watcher behind it missed some.
  * The journal carries it too, since the tasks kept can't show it. */
@@ -4071,6 +4078,7 @@ const currentNotify = (): Omit<NotifySnapshot, "at"> => {
     ...(journalLoaded ? { owners: Object.fromEntries(Object.entries(notifyOwners).filter(([id]) => kept.has(id))) } : {}),
     panes: {
       ...Object.fromEntries(Object.entries(last?.panes ?? {}).filter(([id]) => kept.has(id) && !live.some((p) => p.notifyIds.includes(id)))),
+      ...Object.fromEntries([...startupNotify].filter((entry): entry is [string, "on" | "off"] => entry[1] !== "inherit" && !live.some((p) => p.notifyIds.includes(entry[0])))),
       ...Object.fromEntries(live.filter((p) => p.notify !== "inherit").flatMap((p) => p.notifyIds.map((id) => [id, p.notify as "on" | "off"]))),
     },
   };
@@ -4337,7 +4345,7 @@ async function loadTasks() {
   for (const t of got.tasks.values()) (tasks.set(t.id, t), unsaved.add(t.id)); // the first write is the whole journal
   if (lastPolicy?.owners === undefined) {
     // A hold never guesses which live pane, if any, owns a legacy task's reused reference.
-    const linked = new Set(threads.flatMap((t) => t.panes.flatMap((p) => p.notifyIds)));
+    const linked = new Set([...startupNotify.keys(), ...threads.flatMap((t) => t.panes.flatMap((p) => p.notifyIds))]);
     for (const t of got.tasks.values()) if (!linked.has(t.pane)) notifyOwners[t.pane] = "held";
   }
   journalLoaded = true; // Classification is complete, even for a journal with no owners.
