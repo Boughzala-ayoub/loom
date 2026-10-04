@@ -1005,6 +1005,22 @@ fn codex_local(homes: &[PathBuf]) -> Option<CodexPlan> {
     None
 }
 
+fn codex_live_plan(value: &serde_json::Value, details: impl FnOnce() -> Result<String, String>) -> Option<CodexPlan> {
+    let mut plan = shape_codex(value, true)?;
+    if plan.banked_resets.is_some_and(|n| n > 0) {
+        match details().and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).map_err(|_| "Invalid usage response".to_string())) {
+            Ok(details) => {
+                plan.banked_reset_expiries = details["credits"].as_array().map(|credits| credits.iter().filter(|c| c["status"] == "available").map(|c| c["expires_at"].as_str().map(String::from)).collect());
+            }
+            Err(error) => { plan.plan.retry_after_seconds = retry_seconds(&error); }
+        }
+        if plan.banked_reset_expiries.is_none() {
+            plan.note = "Reset credit expiry details unavailable.".into();
+        }
+    }
+    Some(plan)
+}
+
 pub fn codex_plan_usage() -> Result<CodexPlan, String> {
     let homes = codex_homes();
     let auth = homes.iter().find_map(|home| {
@@ -1021,14 +1037,7 @@ pub fn codex_plan_usage() -> Result<CodexPlan, String> {
         if !account.is_empty() { headers.push(("ChatGPT-Account-Id", account.as_str())); }
         match get_headers("https://chatgpt.com/backend-api/wham/usage", &headers)
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).map_err(|_| "Invalid usage response".to_string())) {
-            Ok(value) => if let Some(mut plan) = shape_codex(&value, true) {
-                if plan.banked_resets.is_some_and(|n| n > 0) {
-                    if let Ok(raw) = get_headers("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", &headers) {
-                        if let Ok(details) = serde_json::from_str::<serde_json::Value>(&raw) {
-                            plan.banked_reset_expiries = details["credits"].as_array().map(|credits| credits.iter().filter(|c| c["status"] == "available").map(|c| c["expires_at"].as_str().map(String::from)).collect());
-                        }
-                    }
-                }
+            Ok(value) => if let Some(plan) = codex_live_plan(&value, || get_headers("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", &headers)) {
                 return Ok(plan);
             },
             Err(e) => error = e,
@@ -1167,6 +1176,22 @@ fn plan_from_status(dir: &Path, tier: String) -> Option<Plan> {
 mod tests {
     use super::{live_status, plan_from_status, profile_of, scan, slug, transcript, Usage};
     use std::io::Write;
+
+    #[test]
+    fn codex_detail_rate_limit_reaches_successful_plan() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            std::io::Read::read(&mut socket, &mut [0; 4096]).unwrap();
+            socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7200\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let primary = serde_json::json!({"plan_type":"pro", "rate_limit":{"primary_window":{"used_percent":4,"limit_window_seconds":18000}}, "rate_limit_reset_credits":{"available_count":2}});
+        let plan = super::codex_live_plan(&primary, || super::get_headers(&url, &[])).unwrap();
+        server.join().unwrap();
+        assert_eq!(plan.plan.retry_after_seconds, Some(7200));
+        assert_eq!(serde_json::to_value(plan).unwrap(), serde_json::from_str::<serde_json::Value>(include_str!("../../src/fixtures/codex-detail-cooldown.json")).unwrap());
+    }
 
     #[test]
     fn codex_incremental_settings_invalidate_and_wait_for_complete_records() {

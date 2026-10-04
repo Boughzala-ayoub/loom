@@ -7888,7 +7888,7 @@ const CLI: Record<string, CliCommand> = {
   },
   usage: {
     usage: "usage [claude|codex]",
-    help: "Read account plan usage, even with plan-usage off. All callers share a fetch and a five-minute cache; rate limits can extend the cooldown. JSON includes fetchedAt, nextRefreshAt and cached. Reset times and banked expiries are UTC ISO timestamps or null. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
+    help: "Read account plan usage, even with plan-usage off. All callers share a fetch and a five-minute cache; rate limits can extend the cooldown, including Codex reset-credit detail failures after primary usage succeeds. A note identifies unavailable expiry details. JSON includes fetchedAt, nextRefreshAt and cached. Reset times and banked expiries are UTC ISO timestamps or null. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
     run: async (a) => {
       const name = a._[0];
       if (a._.length > 1 || (name !== undefined && name !== "claude" && name !== "codex")) throw new Error("usage takes claude or codex, or neither for both.");

@@ -1,3 +1,4 @@
+import detailCooldown from "./fixtures/codex-detail-cooldown.json" with { type: "json" };
 import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
 const claudeComposer = claudeCapture.lines.join("\n");
 // Production command handlers, with only native/window boundaries replaced.
@@ -400,4 +401,22 @@ if (check(109)) {
     assert.deepEqual(writes, ["0"]);
   }
   console.log("ok   N9 hard-wrapped and soft-wrapped active surveys support menu and guarded choose");
+}
+
+if (check(205)) {
+  let now = Date.now(), calls = 0;
+  class Clock extends Date { static now() { return now; } }
+  const c = fixture({ Date: Clock, PLAN_PROVIDERS: { codex: { command: "codex_plan_usage" } },
+    invoke: async () => { calls++; return structuredClone(detailCooldown); } });
+  const first = (await c.usage.run({ _: ["codex"] })).data.codex;
+  assert.equal(Date.parse(first.nextRefreshAt), now + 7200_000);
+  assert.equal(first.stale, false);
+  assert.match(first.note, /details unavailable/);
+  now += 3600_000;
+  await c.usage.run({ _: ["codex"] });
+  assert.equal(calls, 1);
+  now += 3601_000;
+  await c.usage.run({ _: ["codex"] });
+  assert.equal(calls, 2);
+  console.log("ok   R5 native detail-429 result extends the shared account cooldown");
 }

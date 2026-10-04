@@ -1,0 +1,8 @@
+{
+  "tier": "pro",
+  "limits": [{"label": "5h limit", "group": "session", "percent": 4.0, "severity": "ok", "resetsAt": null}],
+  "stale": false,
+  "retryAfterSeconds": 7200,
+  "bankedResets": 2,
+  "note": "Reset credit expiry details unavailable."
+}
