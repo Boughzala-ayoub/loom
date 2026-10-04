@@ -12,7 +12,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "taskWrites"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -22,6 +22,7 @@ for (const node of source.statements) {
 const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
+    startupTurns: null, contextOf: () => undefined, closedTaskContexts: new WeakMap(), taskSeq: 3, taskWatch: new Map(), heldEnter: new Map(), keepTasks() {}, keepReceipts() {},
     threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }],
     ...extra });
   runInContext(code, s);
@@ -69,7 +70,7 @@ if (check(10)) {
   await c.task.run({ _: [t.id], end: "unknown" });
   assert.equal(t.state, "unknown");
   await c.task.run({ _: [t.id], end: "unknown" });
-  assert.equal(moves, 1);
+  assert.equal(moves, 2);
   await assert.rejects(c.task.run({ _: [t.id], end: "completed" }));
   await assert.rejects(c.task.run({ _: [t.id], end: "cancelled" }));
   console.log("ok   task --end settles explicitly, is idempotent, and cannot invent completion or rewrite a final task");
@@ -187,4 +188,27 @@ if (check(101)) {
   assert.equal(created, 0);
   assert.equal((await c.new.run({ _: ["C:\\ideas\\."] }, {})).data.dir, "C:\\ideas");
   console.log("ok   N1 validates and canonicalizes new targets before insertion");
+}
+
+if (check(103)) {
+  const t = { id: "pending", pane: "p", state: "working", events: [] as any[] };
+  let rejectWrite!: (e: Error) => void, writes = 0, secondDone = false;
+  const unsaved = new Set<string>();
+  const c = fixture({ tasks: new Map([[t.id, t]]), unsaved, paneById: () => undefined, requireJournal() {},
+    journal: () => {
+      writes++;
+      if (writes === 1) return new Promise((_, reject) => { rejectWrite = (e) => { unsaved.add(t.id); reject(e); }; });
+      unsaved.clear(); return Promise.resolve();
+    } });
+  const first = c.task.run({ _: [t.id], end: "cancelled" }).catch((e: Error) => e);
+  const second = c.task.run({ _: [t.id], end: "cancelled" }).then(() => { secondDone = true; }, (e: Error) => e);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(secondDone, false, "same-outcome retry must await persistence");
+  rejectWrite(new Error("disk failure"));
+  await first; await second;
+  const retry = await c.task.run({ _: [t.id], end: "cancelled" });
+  assert.equal(retry.data.saved, true);
+  assert.equal(writes, 2, "retry must write a recovery snapshot");
+  assert.equal(t.events.length, 1);
+  console.log("ok   N3 concurrent settlement waits and failed settlement retries without another event");
 }

@@ -1087,3 +1087,5 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
 Usage failures return bounded transport errors. Curl ignores default configuration, and neither provider error bodies nor curl diagnostics are returned. Credentials stay on stdin.
 
 New threads require an existing directory. Loom resolves relative paths against the caller, canonicalizes the directory, and refuses missing paths or files before inserting a thread. Explicit invalid pane working directories are errors; only an omitted directory uses home.
+
+An identical task-end retry waits for the outstanding settlement write. If that write failed, the retry writes and awaits a recovery snapshot without allocating another event.
