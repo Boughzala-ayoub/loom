@@ -4320,18 +4320,23 @@ async function loadTasks() {
   // Numbering goes on from the journal: no watcher saw an event it doesn't hold (writtenSeq).
   taskSeq = writtenSeq = got.seq;
   taskPruned = Math.max(taskPruned, got.pruned);
-  if (!text && !got.tasks.size) { journalLoaded = true; finishTaskReplay(); return; }
+  // This run's policy, with the panes' own settings under their new ids, is
+  // in force before any startup turn or restart event is numbered (review
+  // 2026-10-04 13:46, F1). For a journal without owners it is the migration.
+  if (!text && !got.tasks.size) {
+    journalLoaded = true;
+    void recordNotify().catch(notifyError);
+    finishTaskReplay();
+    return;
+  }
   for (const t of got.tasks.values()) (tasks.set(t.id, t), unsaved.add(t.id)); // the first write is the whole journal
   if (lastPolicy?.owners === undefined) {
+    // A hold never guesses which live pane, if any, owns a legacy task's reused reference.
     const linked = new Set(threads.flatMap((t) => t.panes.flatMap((p) => p.notifyIds)));
     for (const t of got.tasks.values()) if (!linked.has(t.pane)) notifyOwners[t.pane] = "held";
   }
   journalLoaded = true; // Classification is complete, even for a journal with no owners.
-  if (lastPolicy?.owners === undefined) {
-    // Persist the migration before any restart event. A hold never guesses
-    // which live pane, if any, owns a legacy task's reused reference.
-    void recordNotify().catch(notifyError);
-  }
+  void recordNotify().catch(notifyError);
   for (const t of got.tasks.values()) if (!isFinal(t.state)) moveTask(t, { state: "unknown", signal: "restart", reason: "loom-restarted" });
   keepTasks();
   void journal([], []).catch(() => {}); // rewritten with only what was kept, even with nothing to move
@@ -8799,7 +8804,7 @@ async function main() {
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
   await loadTasks(); // before loomctl answers, so a retried --key finds its task
-  void recordNotify().catch(notifyError); // the panes restored with their own settings, under this run's pane ids
+  void recordNotify().catch(notifyError); // loadTasks recorded this run's policy; this says if the journal couldn't be read
   installCli(); // after the threads exist, before their panes finish starting
   await opened;
   restoring = false;

@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -772,6 +772,47 @@ try {
     const retry = await call('submit', ['work:1', 'a refused reservation'], null, 'reserve-hole');
     assert.deepEqual([retry.ok, retry.replayed, await pastes(claude)], [true, undefined, 1], `A --key retry types the refused task: ${JSON.stringify(retry)}`);
     ok('A refused reservation leaves no hole in the event numbers, and a --key retry still types it');
+  }
+
+  // Review 2026-10-04 13:46 F1: a turn during the startup read is judged by this run's pane settings.
+  if (review('startup-policy')) {
+    await resetReview();
+    await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b']] }); // a restored Codex pane resumes its session
+    await page.waitForFunction(() => !window.qa.sessions.length);
+    assert.equal((await cli('notify', '--all', 'off')).ok, true);
+    assert.equal((await cli('notify', 'work:2', 'on')).ok, true);
+    await page.waitForTimeout(700);
+    await page.evaluate(() => { localStorage.setItem('qa-use-state', '1'); localStorage.setItem('qa-journal-read-hold', '1'); });
+    await page.goto(base);
+    await page.waitForFunction(() => !!window.qa.releaseRead);
+    const earlyPane = await page.locator('.pane').nth(1).getAttribute('data-id');
+    await page.waitForFunction((id) => !!window.qa.agents[id], earlyPane);
+    const text = 'startup turn on a pane set on';
+    await agent(earlyPane, { codexShape: true, input: '', busy: false });
+    await page.locator(`.pane[data-id="${earlyPane}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type(text);
+    await page.waitForTimeout(250);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(100);
+    await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+      event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-policy-turn' }]],
+    }), [earlyPane, promptMatch(text)]);
+    await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+    const early = (await cli('tasks')).data.find((t) => t.pane === earlyPane && t.source === 'manual');
+    assert.ok(early, 'The startup Enter is a manual task');
+    const seq = (await until(early.task, 'completed')).events.at(-1).seq;
+    const decided = async () => [
+      (await cli('watch', early.task, '--after', String(seq - 1), '--metadata', '--policy')).data.events.at(-1).notify,
+      (await cli('watch', early.task, '--after', String(seq - 1), '--metadata', '--policy-v4')).data.events.at(-1).disposition,
+      (await cli('notify', '--check', String(seq))).data[seq],
+    ];
+    assert.deepEqual(await decided(), [true, 'send', true], 'A pane set on under every pane off sends its startup completion');
+    await page.waitForTimeout(700);
+    await reboot();
+    assert.deepEqual(await decided(), [true, 'send', true], 'The same after a restart');
+    await page.evaluate(() => localStorage.removeItem('qa-use-state'));
+    ok('A turn during the startup read is judged by the policy restored with its pane');
   }
 
   // Start the older cases with the same empty journal and settings as before.
