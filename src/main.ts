@@ -7427,12 +7427,18 @@ function cliWord(a: Args, i: number, what: string) {
 function cliCommand(a: Args) {
   const cmd = str(a, "cmd");
   const agent = str(a, "agent");
+  const model = str(a, "model"), effort = str(a, "effort");
   if (cmd !== undefined && agent !== undefined) throw new Error("Give --agent or --cmd, not both.");
+  if (cmd !== undefined && (model !== undefined || effort !== undefined)) throw new Error("--model and --effort require an agent startup, not --cmd.");
   if (cmd !== undefined) return cmd;
-  if (agent === undefined) return startups[0]?.cmd ?? "";
-  const s = startups.find((x) => x.label.toLowerCase() === agent.toLowerCase());
+  const s = agent === undefined ? startups[0] : startups.find((x) => x.label.toLowerCase() === agent.toLowerCase());
   if (!s) throw new Error(`--agent takes ${startups.map((x) => x.label).join(", ")}, not ${agent}.`);
-  return s.cmd;
+  const family = agentOf(s.cmd);
+  if ((model !== undefined || effort !== undefined) && family === "shell") throw new Error("--model and --effort require an agent.");
+  // These values cross cmd.exe for npm shims. Accept identifiers, never shell syntax.
+  if (model !== undefined && !/^[a-z0-9][a-z0-9._:/\[\]-]{0,127}$/i.test(model)) throw new Error("--model needs a model identifier without spaces or shell characters.");
+  if (effort !== undefined && (family === "opencode" || !/^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(effort))) throw new Error("--effort takes none, minimal, low, medium, high, xhigh, max or auto for Claude or Codex; the agent validates model support.");
+  return s.cmd + (model === undefined ? "" : ` --model ${model}`) + (effort === undefined ? "" : family === "codex" ? ` -c model_reasoning_effort=${effort}` : ` --effort ${effort}`);
 }
 
 /** Resolves once `ok()` holds. Polled: states change in a dozen places. */
@@ -7921,9 +7927,9 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   new: {
-    usage: "new <folder> [--agent A | --cmd C] [--name N] [--base B] [--panes N]",
-    help: "Open any folder as a thread. --name or --base requires Git and cuts a new worktree; --base alone also supplies its name. A relative folder is relative to your terminal.",
-    options: { agent: "string", cmd: "string", name: "string", base: "string", panes: "int" },
+    usage: "new <folder> [--agent A | --cmd C] [--model M] [--effort E] [--name N] [--base B] [--panes N]",
+    help: "Open any folder as a thread. --name or --base requires Git and cuts a new worktree; --base alone also supplies its name. A relative folder is relative to your terminal. --model selects an agent model; --effort selects Claude/Codex effort. Both refuse --cmd, and the agent validates support.",
+    options: { agent: "string", cmd: "string", model: "string", effort: "string", name: "string", base: "string", panes: "int" },
     run: async (a, ctx) => {
       // Everything checked before git runs: nothing may be left behind by a bad argument.
       const folder = callerPath(cliWord(a, 0, "a folder"), ctx.cwd);
@@ -7941,9 +7947,9 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   add: {
-    usage: "add [thread] [--agent A | --cmd C]",
-    help: "Start another agent or terminal in a thread and bring it to the front.",
-    options: { agent: "string", cmd: "string" },
+    usage: "add [thread] [--agent A | --cmd C] [--model M] [--effort E]",
+    help: "Start another agent or terminal in a thread and bring it to the front. --model selects an agent model; --effort selects Claude/Codex effort. Both refuse --cmd, and the agent validates support.",
+    options: { agent: "string", cmd: "string", model: "string", effort: "string" },
     run: async (a) => {
       const th = cliThread(a._[0]);
       if (th.panes.length >= MAX_PANES) throw new Error(`${th.name} already has ${MAX_PANES} panes.`);

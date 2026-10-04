@@ -9,6 +9,7 @@ import ts from "typescript";
 import * as cli from "./cli.ts";
 import * as task from "./task.ts";
 import * as prompt from "./prompt.ts";
+import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen"]);
@@ -20,7 +21,7 @@ for (const node of source.statements) {
 }
 const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function fixture(extra: Record<string, unknown> = {}) {
-  const s = createContext({ ...cli, ...task, ...prompt, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
+  const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
     threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }],
     ...extra });
   runInContext(code, s);
@@ -28,6 +29,19 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(8)) {
+  let command = "";
+  const th = { panes: [], addPane: async ({ cmd }: { cmd: string }) => { command = cmd; return { id: "p", th, agent: "codex" }; } };
+  const c = fixture({ MAX_PANES: 16, cliThread: () => th, show() {}, revealPane() {}, save() {} });
+  await c.add.run({ _: [], agent: "codex", model: "gpt-6-astra", effort: "high" });
+  assert.equal(command, "codex --model gpt-6-astra -c model_reasoning_effort=high");
+  await c.add.run({ _: [], agent: "claude", model: "opus", effort: "max" });
+  assert.equal(command, "claude --model opus --effort max");
+  await assert.rejects(c.add.run({ _: [], agent: "codex", model: "bad & command" }));
+  await assert.rejects(c.add.run({ _: [], cmd: "codex", effort: "high" }));
+  assert.equal(c.new.options.model, "string");
+  console.log("ok   add and new accept safe model/effort flags and reject command injection or --cmd ambiguity");
+}
 if (check(7)) {
   const th = { name: "work", panes: [] as any[] };
   const p = { id: "p", th, agent: "codex", usage: { model: "old", liveModel: "current", effort: "low", liveEffort: "high", ctx: 25000, window: 100000 } };
