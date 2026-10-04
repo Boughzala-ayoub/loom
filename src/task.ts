@@ -383,13 +383,13 @@ export type ManualEnter = { at: number; launch: number; match: string | null; un
 
 /** Which pending manual Enter a report no task claimed belongs to, on the
  * same launch and not after the report: the one naming the same prompt, or
- * else the oldest within `window` ms of it. Claude reports a prompt as it goes
- * in, so a person's own report comes first; a prompt read off the screen can
- * still name it wrong (wrapped mid-word, a collapsed paste). */
+ * else the oldest unknown prompt within `window` ms of it. A known different
+ * hash contradicts a named report. OpenCode's nameless reports keep their
+ * separate sequence rule. */
 export function claimManual(pending: ManualEnter[], at: number, launch: number, match: string | null, window: number): number {
   const mine = (m: ManualEnter) => m.launch === launch && m.at <= at;
   const named = match === null ? -1 : pending.findIndex((m) => mine(m) && m.match === match);
-  return named >= 0 ? named : pending.findIndex((m) => mine(m) && at - m.at <= window);
+  return named >= 0 ? named : pending.findIndex((m) => mine(m) && (match === null || m.match === null) && at - m.at <= window);
 }
 
 /** Events after `after`, in order, from the tasks given. */

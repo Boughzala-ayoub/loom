@@ -299,6 +299,31 @@ try {
     ok('Restored-pane mutes reach historical notices across two restarts and leave closed panes independent');
   }
 
+  if (review('manual-mismatch')) {
+    const made = [];
+    for (const [provider, pane, ref] of [['claude', claude, 'work:1'], ['codex', codex, 'work:2']]) {
+      await agent(pane, { input: '', busy: false, codexShape: provider === 'codex' });
+      const before = (await cli('tasks')).data.map((t) => t.task);
+      await page.locator(`.pane[data-id="${pane}"] .xterm-helper-textarea`).focus();
+      await page.keyboard.type('/clear');
+      await page.waitForTimeout(250);
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(150);
+      await page.evaluate(() => document.activeElement?.blur());
+      await agent(pane, { input: '', busy: false }); // local command sends no turn report
+      const text = `untracked ${provider} CLI-only turn`;
+      assert.equal((await untracked(ref, text)).ok, true);
+      assert.deepEqual((await cli('tasks')).data.map((t) => t.task), before);
+      await report(pane, provider === 'claude'
+        ? { kind: 'start', match: promptMatch(text) }
+        : { kind: 'end', matches: [promptMatch(text)], turn: 'untracked-after-clear' });
+      await page.waitForTimeout(250);
+      made.push([provider, (await cli('tasks')).data.filter((t) => !before.includes(t.task)).map((t) => [t.source, t.state])]);
+    }
+    assert.deepEqual(made, [['claude', []], ['codex', []]], 'A known local-command marker must not adopt a different CLI-only turn');
+    ok('Claude and Codex reject a known manual hash mismatch after a local command and CLI-only input');
+  }
+
   // Start the older cases with the same empty journal and settings as before.
   await page.evaluate(() => { localStorage.clear(); });
   await reboot();

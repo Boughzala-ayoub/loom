@@ -308,6 +308,9 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   const m = (at: number, match: string | null, launch = 1) => ({ at, launch, match });
   eq("the Enter naming the reported prompt, whenever it was", claimManual([m(100, "aa"), m(200, "bb")], 5000, 1, "bb", 10_000), 1);
   eq("else the oldest within the window", claimManual([m(100, null), m(200, null)], 300, 1, "cc", 10_000), 0);
+  eq("a known different prompt never falls back by time", claimManual([m(100, "aa")], 300, 1, "bb", 10_000), -1);
+  eq("nor with Codex's unlimited window", claimManual([m(100, "aa")], 300, 1, "bb", Infinity), -1);
+  eq("an unknown marker after a known mismatch can still claim the report", claimManual([m(100, "aa"), m(200, null)], 300, 1, "bb", 10_000), 1);
   eq("an unread one past the window takes nothing", claimManual([m(100, null)], 20_000, 1, "cc", 10_000), -1);
   eq("never one after the report", claimManual([m(500, "aa")], 400, 1, "aa", 10_000), -1);
   eq("never another launch's", claimManual([m(100, "aa", 1)], 200, 2, "aa", 10_000), -1);
