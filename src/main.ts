@@ -8157,10 +8157,20 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   task: {
-    usage: "task <id>",
-    help: "A task as it stands, without waiting: its state, correlation, uncertainty and history. ref is its pane's current position, or null with paneClosed true after close.",
-    run: (a) => {
+    usage: "task <id> [--end cancelled|unknown]",
+    help: "A task as it stands, without waiting: its state, correlation, uncertainty and history. ref is its pane's current position, or null with paneClosed true after close. --end explicitly settles an open task in the journal, without sending keys or stopping its process. It cannot rewrite a final task or claim completion.",
+    options: { end: "string" },
+    run: async (a) => {
       const t = cliTask(cliWord(a, 0, "a task"));
+      const end = str(a, "end");
+      if (end !== undefined) {
+        if (end !== "cancelled" && end !== "unknown") throw new Error("--end takes cancelled or unknown.");
+        if (isFinal(t.state) && t.state !== end) throw new Error(`Task ${t.id} already ended ${t.state}; its outcome cannot be rewritten.`);
+        requireJournal();
+        if (!isFinal(t.state) && !await moveTask(t, { state: end, signal: "loomctl", reason: `operator-${end}` }))
+          throw new CliError("The task ended in memory but was not saved. Read task again before retrying.", { task: t.id, state: t.state, saved: false });
+        if (unsaved.has(t.id)) throw new CliError("The task outcome is not saved yet.", { task: t.id, state: t.state, saved: false });
+      }
       return { data: record(t), text: taskText(t) };
     },
   },

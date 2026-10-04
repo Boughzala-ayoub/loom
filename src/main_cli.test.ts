@@ -29,6 +29,20 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(10)) {
+  const t = { id: "stuck", pane: "p", ref: "work:1", state: "working", events: [] };
+  let moves = 0;
+  const c = fixture({ tasks: new Map([[t.id, t]]), paneById: () => undefined, requireJournal() {},
+    moveTask: async (_: unknown, change: { state: string }) => { moves++; t.state = change.state; return true; } });
+  assert.equal(c.task.options?.end, "string");
+  await c.task.run({ _: [t.id], end: "unknown" });
+  assert.equal(t.state, "unknown");
+  await c.task.run({ _: [t.id], end: "unknown" });
+  assert.equal(moves, 1);
+  await assert.rejects(c.task.run({ _: [t.id], end: "completed" }));
+  await assert.rejects(c.task.run({ _: [t.id], end: "cancelled" }));
+  console.log("ok   task --end settles explicitly, is idempotent, and cannot invent completion or rewrite a final task");
+}
 if (check(9)) {
   assert.equal(cli.keyBytes("ctrl-u", false), "\x15");
   assert.match(fixture().keys.help, /ctrl-u/);
@@ -106,13 +120,13 @@ if (check(2)) {
   th.panes.push({}, p);
   const t = { id: "task1", pane: "p", ref: "work:4", state: "working", events: [] };
   const c = fixture({ tasks: new Map([[t.id, t]]), paneById: () => th.panes.includes(p) ? p : undefined });
-  assert.equal(c.task.run({ _: [t.id] }).data.ref, "work:2");
+  assert.equal((await c.task.run({ _: [t.id] })).data.ref, "work:2");
   th.panes.shift();
-  assert.match(c.task.run({ _: [t.id] }).text, /on work:1/);
+  assert.match((await c.task.run({ _: [t.id] })).text, /on work:1/);
   th.panes.length = 0;
-  assert.equal(c.task.run({ _: [t.id] }).data.ref, null);
-  assert.equal(c.task.run({ _: [t.id] }).data.paneClosed, true);
-  assert.match(c.task.run({ _: [t.id] }).text, /closed pane/);
+  assert.equal((await c.task.run({ _: [t.id] })).data.ref, null);
+  assert.equal((await c.task.run({ _: [t.id] })).data.paneClosed, true);
+  assert.match((await c.task.run({ _: [t.id] })).text, /closed pane/);
   assert.equal(t.ref, "work:4", "Display does not rewrite history");
   console.log("ok   task references follow pane IDs and explicitly report closed panes");
 }

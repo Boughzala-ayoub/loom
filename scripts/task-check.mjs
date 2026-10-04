@@ -299,6 +299,25 @@ try {
     assert.equal((await cli('tasks')).data.length, before, 'Clearing does not submit a turn');
     ok('keys ctrl-u clears a draft without Enter or a task');
   }
+  if (review('manual-task-end')) {
+    await resetReview();
+    for (const end of ['unknown', 'cancelled']) {
+      const sent = await cli('submit', 'work:2', `stuck ${end}`);
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      const before = await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'pty_write').length);
+      const ended = await cli('task', sent.text, '--end', end);
+      assert.equal(ended.ok, true, JSON.stringify(ended));
+      assert.equal(ended.data.state, end);
+      assert.equal(ended.data.saved, true);
+      assert.equal(await page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'pty_write').length), before);
+      const seq = ended.data.events.at(-1).seq;
+      const notice = (await cli('watch', sent.text, '--after', String(seq - 1), '--metadata', '--policy')).data.events[0];
+      assert.equal(notice.notify, false);
+      assert.equal((await saved(sent.text)).state, end);
+      await agent(codex, { busy: false });
+    }
+    ok('Manual task settlement is durable, sends no pane input and emits no completion notice');
+  }
   if (review('unreadable')) {
     const old = await cli('submit', 'work:1', 'keep this history');
     await report(claude, { kind: 'start', match: promptMatch('keep this history') });
