@@ -20,7 +20,7 @@ import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
-import { allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
+import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
@@ -7430,8 +7430,8 @@ function paneSettings(p: Pane) {
   const held = (s: Set_ | undefined, cur: string) => s && (ran <= s.at || (s.was !== undefined && cur === s.was)) ? s.v : "";
   const left = u ? Math.max(0, u.window - u.ctx) : 0;
   return {
-    model: held(p.want?.model, u?.model ?? "") || u?.liveModel || u?.model || p.startupSettings?.model || null,
-    effort: held(p.want?.effort, u?.effort ?? "") || u?.liveEffort || u?.effort || p.effort || p.startupSettings?.effort || null,
+    model: settingValue(held(p.want?.model, u?.model ?? "") || u?.liveModel || u?.model || p.startupSettings?.model, "model"),
+    effort: settingValue(held(p.want?.effort, u?.effort ?? "") || u?.liveEffort || u?.effort || p.effort || p.startupSettings?.effort, "effort"),
     context: u && u.window > 0 ? { usedTokens: u.ctx, windowTokens: u.window, remainingTokens: left, remainingPercent: Math.round(100 * left / u.window) } : null,
   };
 }
@@ -7893,7 +7893,7 @@ const CLI: Record<string, CliCommand> = {
   },
   panes: {
     usage: "panes [--thread T] [--state S]",
-    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses Claude and Codex session records, with explicit startup model and effort as fallbacks. OpenCode has startup selections only; unavailable context stays null.",
+    help: "Every pane: its <thread>:<n>, id, agent, state and title. --json also includes a zoomed boolean and model, effort and context (usedTokens, windowTokens, remainingTokens, remainingPercent), or null when unavailable. Uses Claude and Codex session records, with explicit startup model and effort as fallbacks. Invalid identifiers, efforts and recognizable secrets are omitted, including restored settings. OpenCode has startup selections only; unavailable context stays null.",
     options: { thread: "string", state: "string" },
     run: (a) => {
       const want = a.state === undefined ? null : cliStates(str(a, "state"), "");

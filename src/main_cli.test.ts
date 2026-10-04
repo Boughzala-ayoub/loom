@@ -33,6 +33,26 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(201)) {
+  const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
+  const p = { id: "p", th, agent: "codex", sessionId: "selected" } as any;
+  th.panes.push(p);
+  const c = fixture({ threads: [th], paneRows: () => "" });
+  for (const value of ["sk-" + "a".repeat(40), "ghp_" + "b".repeat(30), "AKIA" + "C".repeat(16), "xoxb-synthetic", "password=synthetic", "custom\nmodel", "a".repeat(161)]) {
+    for (const field of ["providerUsage", "startupSettings"]) {
+      p.providerUsage = null; p.startupSettings = null;
+      p[field] = { sid: "selected", model: value, effort: value };
+      const data = c.panes.run({ _: [] }).data[0];
+      assert.ok(data.model === null && data.effort === null, "private settings must be absent");
+      assert.ok(!JSON.stringify(c.threads.run()).includes(value), "nested settings must be absent");
+    }
+  }
+  p.startupSettings = { model: "vendor/custom-model:v2", effort: "xhigh" };
+  assert.equal(c.panes.run({ _: [] }).data[0].model, "vendor/custom-model:v2");
+  p.startupSettings.model = "claude-opus-5-5[1m]";
+  assert.equal(c.panes.run({ _: [] }).data[0].model, "claude-opus-5-5[1m]");
+  console.log("ok   R1 settings reject recognizable secrets and malformed restored values");
+}
 if (check(14)) {
   const th = { id: "th", name: "work", dir: "C:\\work", panes: [] as any[], zoomed: null as any };
   const p = { id: "p", th }, q = { id: "q", th };

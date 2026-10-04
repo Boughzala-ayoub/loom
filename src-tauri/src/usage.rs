@@ -339,6 +339,16 @@ pub fn session_usage(
     out
 }
 
+fn setting_value(value: &str, effort: bool) -> String {
+    static PRIVATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(
+        r"(?i)(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]"
+    ).unwrap());
+    let valid = if effort { matches!(value, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") }
+        else { !value.is_empty() && value.len() <= 160 && value.as_bytes()[0].is_ascii_alphanumeric()
+            && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b)) };
+    if valid && !PRIVATE.is_match(value) { value.into() } else { String::new() }
+}
+
 /// Read only the selected Codex session, never the newest unrelated rollout.
 pub fn codex_session(path: &Path, sid: &str) -> Option<Usage> {
     let file = std::fs::File::open(path).ok()?;
@@ -358,8 +368,8 @@ pub fn codex_session(path: &Path, sid: &str) -> Option<Usage> {
         let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         let p = &row["payload"];
         if row["type"] == "turn_context" {
-            if let Some(model) = p["model"].as_str().filter(|s| s.len() <= 160) { usage.model = model.into(); }
-            if let Some(effort) = p["effort"].as_str().or_else(|| p["reasoning_effort"].as_str()).filter(|s| s.len() <= 32) { usage.effort = effort.into(); }
+            if let Some(model) = p["model"].as_str() { usage.model = setting_value(model, false); }
+            if let Some(effort) = p["effort"].as_str().or_else(|| p["reasoning_effort"].as_str()) { usage.effort = setting_value(effort, true); }
         }
         if row["type"] == "event_msg" && p["type"] == "token_count" {
             let info = &p["info"];
@@ -1049,6 +1059,19 @@ fn plan_from_status(dir: &Path, tier: String) -> Option<Plan> {
 mod tests {
     use super::{live_status, plan_from_status, profile_of, scan, slug, transcript, Usage};
     use std::io::Write;
+
+    #[test]
+    fn codex_settings_reject_private_metadata() {
+        let path = std::env::temp_dir().join(format!("loom-private-settings-{}.jsonl", std::process::id()));
+        for value in [format!("sk-{}", "a".repeat(40)), format!("ghp_{}", "b".repeat(30)), format!("AKIA{}", "C".repeat(16)), "xoxb-synthetic".into(), "password=synthetic".into(), "model\ncontrol".into(), "a".repeat(161)] {
+            let rows = [serde_json::json!({"type":"session_meta","payload":{"id":"selected","source":"cli"}}), serde_json::json!({"type":"turn_context","payload":{"model":value,"effort":value}})];
+            std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+            let u = super::codex_session(&path, "selected").unwrap();
+            assert!(u.model.is_empty() && u.effort.is_empty(), "private metadata must be absent");
+            assert!(!serde_json::to_string(&u).unwrap().contains(&value), "private metadata must not serialize");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 
 
     #[test]

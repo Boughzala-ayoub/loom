@@ -2139,6 +2139,7 @@ version = "3.0.0"
 dependencies = [
  "cpal",
  "portable-pty",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

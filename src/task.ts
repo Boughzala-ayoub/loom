@@ -59,6 +59,13 @@ export const LOOM_TITLES = { shell: "Terminal", agent: "Agent session" } as cons
  * obvious, not a promise that free text holds none. */
 const PRIVATE = /^(?:[a-z]:[\\/]|\/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]/i;
 
+/** Validate the whole value before any export, including restored fallbacks. */
+export function settingValue(value: unknown, kind: "model" | "effort"): string | null {
+  if (typeof value !== "string" || PRIVATE.test(value)) return null;
+  if (kind === "effort") return /^(none|minimal|low|medium|high|xhigh|max)$/.test(value) ? value : null;
+  return value.length <= 160 && /^[a-z0-9][a-z0-9._:/-]*(?:\[[0-9]+[km]\])?$/i.test(value) ? value : null;
+}
+
 /** Text with nothing a terminal or a reader could act on: NFC, escape
  * sequences gone, line breaks and tabs made spaces, control, format (bidi,
  * zero-width) and lone surrogate characters gone, spacing made single, ends
