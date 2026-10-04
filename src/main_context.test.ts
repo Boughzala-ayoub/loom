@@ -44,3 +44,25 @@ for (const held of [false, true]) {
   assert.equal(replay.context!.threadName, "At Close");
 }
 console.log("ok   Deferred readable tasks keep pre-close context separately from Enter snapshots");
+for (const held of [false, true]) {
+  const { th, p, f } = fixture();
+  const t = f.turnTask(p, "manual", model.promptMatch("A"), 1);
+  f.enterTurn(t, 2);
+  th.name = "At Report";
+  f.taskSignal(p, { kind: "end", at: 3, matches: [t.match], turn: "A" });
+  const b = f.turnTask(p, "manual", model.promptMatch("B"), 4);
+  f.enterTurn(b, 5);
+  const release = held ? f.holdSignals(p) : () => {};
+  th.name = "At Close";
+  th.panes.shift();
+  f.keepContext([p]);
+  th.panes.length = 0;
+  f.finishTaskReplay();
+  release();
+  const e = t.events.at(-1);
+  assert.equal(e.state, "completed");
+  assert.deepEqual([e.context.threadName, e.context.paneNumber, e.context.origin], ["At Report", 2, "event"]);
+  const replay = model.readJournal(model.writeJournal([t, b], t.events.length + b.events.length, 0)).tasks.get(t.id)!;
+  assert.equal(replay.events.at(-1)!.context!.threadName, "At Report");
+}
+console.log("ok   A later Enter hold preserves an earlier report's captured context");

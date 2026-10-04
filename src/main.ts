@@ -3908,7 +3908,7 @@ function keepTasks() {
  * ponytail: a write returns once the process reads its input or the pane is
  * killed; one that reads none leaves the pane's tasks open until then (or
  * until Loom restarts: unknown). A deadline if that's ever seen. */
-const enterHeld = new Map<string, { signals: Signal[]; holds: number }>();
+const enterHeld = new Map<string, { signals: { signal: Signal; context?: TaskContext }[]; holds: number }>();
 /** Holds a pane's reports for one Enter being written. Returns its release,
  * for once that Enter's outcome is on its task; a second call does nothing. */
 function holdSignals(p: Pane): () => void {
@@ -3921,7 +3921,7 @@ function holdSignals(p: Pane): () => void {
     done = true;
     if (--held.holds > 0) return;
     enterHeld.delete(p.id);
-    held.signals.forEach((s) => taskSignal(p, s));
+    held.signals.forEach(({ signal, context }) => taskSignal(p, signal, context));
   };
 }
 
@@ -4213,7 +4213,7 @@ async function enterTask(p: Pane, t: Task) {
  * defers takes where the pane is now (`ctx`) along, for its launch's tasks. */
 function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
   const held = enterHeld.get(p.id);
-  if (held) return void held.signals.push({ ...s, launch: s.launch ?? p.generation });
+  if (held) return void held.signals.push({ signal: { ...s, launch: s.launch ?? p.generation }, context: ctx });
   if (startupTurns) {
     const signal = { ...s, launch: s.launch ?? p.generation };
     const now = ctx ?? (signal.launch === p.generation ? paneContext(p) : undefined);
