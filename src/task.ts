@@ -124,6 +124,21 @@ export function contextRecord(t: Pick<Task, "pane" | "agent">, c?: TaskContext) 
   };
 }
 
+/** How much one `watch --notification-context` answer holds, well inside a
+ * reader's own limits (the email bridge takes 1 MiB and 5000 events). */
+export const CONTEXT_BATCH = { events: 1000, bytes: 512 * 1024 };
+/** How many of `rows`, from the first, fit one answer as JSON lines: at
+ * least one, so a reader always gets further. */
+export function fitBatch(rows: unknown[], limit = CONTEXT_BATCH): number {
+  let n = 0, bytes = 0;
+  for (const r of rows) {
+    bytes += new TextEncoder().encode(JSON.stringify(r)).length + 1;
+    if (n && (n >= limit.events || bytes > limit.bytes)) break;
+    n++;
+  }
+  return n;
+}
+
 /** What started a task: `loomctl submit`, an ordinary `loomctl send`, or a
  * person in Loom's window (typing in the pane, the Overview's reply box,
  * dictation). A task from before sources were kept was a submit. */

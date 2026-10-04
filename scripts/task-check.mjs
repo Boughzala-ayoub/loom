@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=notification-context|notification-context-startup|notification-context-startup-held|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1120,6 +1120,92 @@ try {
     assert.deepEqual(await where(task.task), [['accepted', 'work', 2, 'Agent session', origin], ['submitted', 'work', 2, 'Agent session', origin], ['completed', 'work', 2, 'Agent session', origin]],
       held ? 'Made after the pane left: the place it had, said to be last known' : 'Copied when the Enter and the report came, before replay');
     ok(`A startup turn on a pane closed before replay keeps place 2${held ? ' (Enter held, last known)' : ''}`);
+  }
+
+  // Phase 3: watch --notification-context, opt-in, with v2, v3 and v4 exactly as before.
+  if (review('notification-context-watch')) {
+    await resetReview();
+    for (const args of [['--notification-context'], ['--metadata', '--notification-context'], ['--policy', '--notification-context']]) {
+      const refused = await cli('watch', '--after', '0', ...args);
+      assert.deepEqual([refused.ok, /--notification-context requires --metadata with --policy or --policy-v4/.test(refused.error)], [false, true], JSON.stringify(refused));
+    }
+    const help = (await cli('help', 'watch')).data;
+    for (const s of ['--notification-context', 'loom-durable-events-v3-context-v1', 'loom-durable-events-v4-context-v1']) assert.ok(`${help.usage} ${help.help}`.includes(s), s);
+    // What the running bridge's probe looks for (email_bridge/bridge.py probe).
+    assert.ok(help.usage.includes('--metadata') && help.usage.includes('--policy') && help.help.includes('loom-durable-events-v3'), 'The v3 probe still passes');
+    const second = await paneId('work:2'), thread = (await cli('panes')).data[0].threadId;
+    const a = await cli('submit', 'work:2', 'context over watch');
+    await report(second, { kind: 'end', matches: [promptMatch('context over watch')], turn: 'context-watch' });
+    await until(a.text, 'completed');
+    await page.waitForTimeout(200);
+    const read = async (...flags) => (await cli('watch', a.text, '--after', '0', '--metadata', ...flags)).data;
+    const v2 = await read(), v3 = await read('--policy'), v4 = await read('--policy-v4');
+    const v3c = await read('--policy', '--notification-context'), v4c = await read('--policy-v4', '--notification-context');
+    assert.deepEqual([v2, v3, v4, v3c, v4c].map((b) => b.source), ['loom-durable-events-v2', 'loom-durable-events-v3', 'loom-durable-events-v4', 'loom-durable-events-v3-context-v1', 'loom-durable-events-v4-context-v1']);
+    for (const b of [v2, v3, v4, v3c, v4c]) assert.deepEqual(Object.keys(b).sort(), ['done', 'events', 'gap', 'last', 'next', 'source']);
+    const keys = (b) => [...new Set(b.events.map((e) => Object.keys(e).sort().join()))];
+    assert.deepEqual(keys(v2), ['at,generation,pane,response,seq,state,task'], 'v2 exactly as before');
+    assert.deepEqual(keys(v3), ['at,generation,notify,pane,response,seq,source,state,task'], 'v3 exactly as before');
+    assert.deepEqual(keys(v4), ['at,disposition,generation,pane,response,seq,source,state,task'], 'v4 exactly as before');
+    assert.deepEqual(v3c.events.map(({ context, ...e }) => e), v3.events, 'Every v3 field and decision, unchanged');
+    assert.deepEqual(v4c.events.map(({ context, ...e }) => e), v4.events, 'Every v4 field and disposition, unchanged');
+    assert.deepEqual([v3c.next, v3c.done, v3c.gap, v3c.last], [v3.next, v3.done, v3.gap, v3.last]);
+    const kept = (await saved(a.text)).events;
+    assert.equal(v3c.events.length, kept.length);
+    v3c.events.forEach((e, i) => {
+      assert.deepEqual(Object.keys(e.context), ['threadId', 'threadName', 'paneId', 'paneNumber', 'paneTitle', 'agent', 'provider', 'capturedAt', 'origin', 'issues'], 'Ten fields, in order');
+      assert.deepEqual(e.context, { threadId: thread, threadName: 'work', paneId: e.pane, paneNumber: 2, paneTitle: 'Agent session', agent: 'codex', provider: 'codex', capturedAt: new Date(kept[i].context.capturedAt).toISOString(), origin: 'event', issues: [] });
+    });
+    assert.deepEqual(v4c.events.map((e) => e.context), v3c.events.map((e) => e.context));
+    ok('watch --notification-context adds each event\'s journaled context to v3 and v4, needs --metadata and a policy, and leaves v2, v3 and v4 as they were');
+
+    // A held write: no event, nor its context, until the journal has it.
+    const b = await cli('submit', 'work:1', 'context held in a write');
+    await report(claude, { kind: 'start', match: promptMatch('context held in a write') });
+    await until(b.text, 'working');
+    await page.waitForTimeout(200);
+    await qa({ journalHold: 'fn:return d.includes(\'"completed"\')' });
+    await stops(claude);
+    await until(b.text, 'completed');
+    const early = (await cli('watch', b.text, '--after', '0', '--metadata', '--policy', '--notification-context')).data;
+    assert.deepEqual([early.events.some((e) => e.state === 'completed'), early.done], [false, false], 'Nothing unwritten goes out');
+    await page.evaluate(() => { window.qa.journalHold = null; window.qa.journalHeld.splice(0).forEach((release) => release()); });
+    const late = (await cli('watch', b.text, '--after', String(early.next), '--metadata', '--policy', '--notification-context')).data;
+    assert.deepEqual(late.events.map((e) => [e.state, e.context.paneNumber, e.context.origin]), [['completed', 1, 'event']]);
+    ok('An event and its context go out only once the journal has them');
+
+    // An event from before contexts existed: legacy, its pane id and agent still the task's.
+    const legacyTask = (id, pane, agent, events, more = {}) => ({ id, key: null, what: null, pane, ref: 'work:1', agent, gen: 1, sha256: '', bytes: 0, match: '', input: 'empty', state: 'completed',
+      correlation: 'prompt', uncertain: null, reason: null, detail: null, exit: null, acceptedAt: 1, submittedAt: 1, startedAt: 1, endedAt: events.length, events, ...more });
+    const journalOf = (seq, task) => [{ seq, pruned: 0 }, { notify: { on: true, kinds: { finish: true, fail: true, blocked: true }, panes: {}, owners: {} }, at: seq }, { task }].map((l) => JSON.stringify(l)).join('\n') + '\n';
+    await page.evaluate((text) => localStorage.setItem('qa-journal', text), journalOf(2, legacyTask('legacy0000000001', 'oldpane-7', 'claude',
+      [{ seq: 1, task: 'legacy0000000001', at: 1, state: 'accepted', signal: 'loomctl' }, { seq: 2, task: 'legacy0000000001', at: 2, state: 'completed', signal: 'turn-end' }])));
+    await reboot();
+    const legacy = (await cli('watch', '--after', '0', '--metadata', '--policy', '--notification-context')).data.events;
+    assert.deepEqual(legacy.map((e) => [e.seq, e.context]), [1, 2].map((seq) => [seq, { threadId: null, threadName: null, paneId: 'oldpane-7', paneNumber: null, paneTitle: null, agent: 'claude', provider: 'claude', capturedAt: null, origin: 'legacy', issues: [] }]));
+    ok('An event journaled before contexts reads as legacy, with its pane id and agent');
+
+    // A long history with big contexts comes in bounded parts: each event once, in order, none skipped.
+    const ctx = (i) => ({ threadId: 'thread-1', threadName: '"'.repeat(128), paneNumber: 1, paneTitle: null, capturedAt: i, origin: 'event', issues: [] });
+    const bulk = Array.from({ length: 1500 }, (_, i) => ({ seq: i + 1, task: 'bulk000000000001', at: i + 1, state: i === 1499 ? 'completed' : 'working', signal: 'x', context: ctx(i + 1) }));
+    await page.evaluate((text) => localStorage.setItem('qa-journal', text), journalOf(1500, legacyTask('bulk000000000001', 'oldpane-8', 'codex', bulk, { context: ctx(1500) })));
+    await reboot();
+    const whole = (await cli('watch', 'bulk000000000001', '--after', '0', '--metadata', '--policy')).data;
+    assert.deepEqual([whole.events.length, whole.done], [1500, true], 'Without the flag the answer is whole, as before');
+    const seen = [], sizes = [];
+    let next = 0, part;
+    do {
+      part = (await cli('watch', 'bulk000000000001', '--after', String(next), '--metadata', '--policy', '--notification-context')).data;
+      const bytes = new TextEncoder().encode(part.events.map((e) => JSON.stringify(e)).join('\n')).length;
+      assert.ok(part.events.length <= 1000 && bytes <= 512 * 1024, `bounded: ${part.events.length} events, ${bytes} bytes`);
+      assert.deepEqual([part.gap, part.next, part.last], [false, part.events.at(-1).seq, 1500]);
+      seen.push(...part.events.map((e) => e.seq));
+      sizes.push(part.events.length);
+      next = part.next;
+    } while (!part.done && sizes.length < 10);
+    assert.deepEqual(seen, bulk.map((e) => e.seq), 'Every event once, in order');
+    assert.ok(sizes.length >= 2 && sizes[0] < 1000, `cut by bytes first: ${sizes}`);
+    ok(`A long history with contexts comes in ${sizes.length} bounded parts (${sizes.join(' + ')}), every event once`);
   }
 
   // Start the older cases with the same empty journal and settings as before.

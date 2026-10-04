@@ -20,7 +20,7 @@ import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
 import { readMenu, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
-import { allows, changeFields, claimManual, codexAsks, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
+import { allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
@@ -8118,13 +8118,15 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   watch: {
-    usage: "watch [task] [--after N] [--follow] [--metadata [--policy | --policy-v4]]",
-    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send or manual) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one. --metadata --policy-v4 opts into loom-durable-events-v4: disposition replaces notify with send, held, muted or none. Persist held notices before advancing next, then recheck with notify --check SEQ --policy-v4. Owner release creates no new event. The v3 contract is unchanged.",
-    options: { after: "int", metadata: "bool", policy: "bool", "policy-v4": "bool" },
+    usage: "watch [task] [--after N] [--follow] [--metadata [--policy | --policy-v4] [--notification-context]]",
+    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send or manual) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one. --metadata --policy-v4 opts into loom-durable-events-v4: disposition replaces notify with send, held, muted or none. Persist held notices before advancing next, then recheck with notify --check SEQ --policy-v4. Owner release creates no new event. The v3 contract is unchanged. --notification-context, with --metadata and --policy or --policy-v4, adds where each event happened as Loom recorded it (context: threadId, threadName, paneId, paneNumber, paneTitle, agent, provider, capturedAt, origin, issues), with source loom-durable-events-v3-context-v1 or loom-durable-events-v4-context-v1. A title the running program set is never in it. Such an answer holds at most 1000 events and 512 KiB: read on from next.",
+    options: { after: "int", metadata: "bool", policy: "bool", "policy-v4": "bool", "notification-context": "bool" },
     run: async (a, ctx) => {
       const one = a._[0] ? cliTask(a._[0]) : undefined;
       const meta = flag(a, "metadata"), v4 = flag(a, "policy-v4"), v3 = meta && (flag(a, "policy") || v4);
+      const withContext = flag(a, "notification-context");
       if (v4 && !meta) throw new Error("--policy-v4 requires --metadata.");
+      if (withContext && !v3) throw new Error("--notification-context requires --metadata with --policy or --policy-v4.");
       let after = num(a, "after", 0, 0, Number.MAX_SAFE_INTEGER);
       // A number from beyond this journal (it was lost or reset): start over.
       // Only events the journal holds (writtenSeq), so a number never comes twice across restarts.
@@ -8145,17 +8147,21 @@ const CLI: Record<string, CliCommand> = {
       const held = meta && !v3 ? events.find((e) => notifyKind(e.state) && !notifies(e, owner(e.task).pane, notifyHistory)) : undefined;
       if (held) throw new Error(`Event ${held.seq} is a task notice the notification policy holds back, and a loom-durable-events-v2 reader would send it, so Loom answers none. Read with --metadata --policy (loom-durable-events-v3), which says which may go out.`);
       const at = (n: number) => new Date(n).toISOString();
-      const done = finished();
+      const rows = events.map(({ context, ...e }) => (meta ? {
+        seq: e.seq, task: e.task, pane: owner(e.task).pane, generation: owner(e.task).gen, state: e.state, at: at(e.at), response: e.response ?? null,
+        ...(v3 ? { source: owner(e.task).source ?? "submit", ...(v4 ? { disposition: notifyDisposition(e, owner(e.task).pane, notifyHistory) } : { notify: notifies(e, owner(e.task).pane, notifyHistory) }) } : {}),
+        ...(withContext ? { context: contextRecord(owner(e.task), context) } : {}),
+      } : { ...e, at: at(e.at) }));
+      // Contexts make each event bigger: that reader gets a bounded first part and reads on from next.
+      const n = withContext ? fitBatch(rows) : rows.length, shown = events.slice(0, n);
+      const done = finished() && n === events.length;
       return {
         data: {
-          events: events.map(({ context: _context, ...e }) => (meta ? {
-            seq: e.seq, task: e.task, pane: owner(e.task).pane, generation: owner(e.task).gen, state: e.state, at: at(e.at), response: e.response ?? null,
-            ...(v3 ? { source: owner(e.task).source ?? "submit", ...(v4 ? { disposition: notifyDisposition(e, owner(e.task).pane, notifyHistory) } : { notify: notifies(e, owner(e.task).pane, notifyHistory) }) } : {}),
-          } : { ...e, at: at(e.at) })),
-          next: events[events.length - 1]?.seq ?? after, done, gap: gap || after < taskPruned, last: writtenSeq,
-          ...(meta ? { source: v4 ? "loom-durable-events-v4" : v3 ? "loom-durable-events-v3" : "loom-durable-events-v2" } : {}),
+          events: rows.slice(0, n),
+          next: shown[shown.length - 1]?.seq ?? after, done, gap: gap || after < taskPruned, last: writtenSeq,
+          ...(meta ? { source: (v4 ? "loom-durable-events-v4" : v3 ? "loom-durable-events-v3" : "loom-durable-events-v2") + (withContext ? "-context-v1" : "") } : {}),
         },
-        text: events.map((e) => `${e.seq}  ${at(e.at)}  ${e.task}  ${e.state}` + (meta ? "" : `  ${e.signal}${e.detail ? `  ${e.detail}` : ""}`)).join("\n"),
+        text: shown.map((e) => `${e.seq}  ${at(e.at)}  ${e.task}  ${e.state}` + (meta ? "" : `  ${e.signal}${e.detail ? `  ${e.detail}` : ""}`)).join("\n"),
       };
     },
   },

@@ -485,8 +485,24 @@ already in flight or accepted.
 ## Tests
 
 - `src/task.test.ts`: precedence, the true-to-false rule, policy history kept
-  and read back from the journal (every line, in order), sources, and matching
-  an Enter to a report (134 checks).
+  and read back from the journal (every line, in order), sources, matching
+  an Enter to a report, and the notification context: label cleaning, private
+  and secret-like names, cuts at 128 scalars and 256 bytes, Loom-only titles,
+  damaged copies on replay, the ten exported fields, the 2048-byte budget and
+  the batch bound (200 checks).
+- `scripts/task-check.mjs`, notification context (`TASK_REVIEW=notification-context`,
+  `notification-context-startup`, `notification-context-startup-held`,
+  `notification-context-watch`): each event's copy through a rename, a move
+  and a process title; a pane and a whole thread closed under open tasks; a
+  failed write, its whole-rewrite retry, replay and compaction; a startup turn
+  on a pane closed before replay, with its report buffered and with its Enter
+  held; the flag's refusals and help; v2, v3 and v4 field for field; an
+  unwritten event; a legacy journal; and 1500 events read back in bounded
+  parts. Ten re-inserted defects (no copy at close, at thread disposal or
+  before the startup deferral, a removed pane's live place, a process title
+  sent, the task's last copy never updated, no bound, a cut answer saying
+  done, the flag without a policy, context in plain v3 and v4) each fail one of
+  these.
 - `scripts/task-check.mjs`, over Tauri mocks with fake agents (57 checks):
   - Ordinary send on Claude, Codex and OpenCode, with none for a shell or
     `--no-enter`.

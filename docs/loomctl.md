@@ -117,7 +117,7 @@ shows one.
 | `receipt <token>` | What `send --receipt` sent and what came back, without waiting. See [Receipts as a record](#receipts-as-a-record). |
 | `task <id>` | A task from `submit` as it stands. See [Tasks](#tasks). |
 | `tasks [--pane P] [--state S]` | Every open task and the last 500 to finish. |
-| `watch [task] [--after N] [--follow] [--metadata [--policy]]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
+| `watch [task] [--after N] [--follow] [--metadata [--policy \| --policy-v4] [--notification-context]]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
 | `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
 | `help [command]` | The commands, or one command. |
@@ -862,6 +862,27 @@ continues to work unchanged, with its existing limitation that it discards
 those notices permanently. Recoverable delivery requires the bridge to opt
 into v4 and retain held notices. See the
 [bridge upgrade requirements](turn-tracking-and-notifications.md#recoverable-owner-holds-v4).
+
+To also learn where each event happened, add `--notification-context` to
+`--metadata --policy` or `--metadata --policy-v4`. Each event then carries a
+`context` object, and the answer's source becomes
+`loom-durable-events-v3-context-v1` or `loom-durable-events-v4-context-v1`.
+The context is what Loom copied when it recorded the event: `threadId`,
+`threadName`, `paneId` (the event's `pane`), `paneNumber` (its place in the
+thread then), `paneTitle`, `agent`, `provider` (the CLI family: `claude`,
+`codex`, `opencode` or `shell`), `capturedAt`, `origin` and `issues`. A later
+rename, move or close doesn't change it. `paneTitle` is set only when Loom
+named the pane itself (`Terminal`, `Agent session`). A title the running
+program set can hold a prompt or a path, so it comes back null. `origin` is
+`event` for a copy taken from the pane for this event, `last-known` when the
+pane had already left its thread or relaunched, and `legacy` for an event from
+before contexts existed, which has only its pane id and agent. Such an answer
+holds at most 1000 events and 512 KiB of them. When that cuts one short,
+`next` is its last event and `done` stays false, so read on from `next`. The
+flag needs `--metadata` and a
+policy mode, and the answers without it keep their exact fields. The rules
+for labels are in
+[Notification context](turn-tracking-and-notifications.md#notification-context).
 
 ### A task's record
 

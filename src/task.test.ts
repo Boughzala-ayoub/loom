@@ -1,5 +1,5 @@
 // Self-check for loomctl's tasks. Run: node src/task.test.ts
-import { allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, isFinal, keptNotify, notifies, notifyDisposition, parseSignal, promptMatch, readJournal, route, taskContext, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
+import { allows, changeFields, claimManual, codexAsks, CONTEXT_BATCH, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, notifies, notifyDisposition, parseSignal, promptMatch, readJournal, route, taskContext, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -397,6 +397,18 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   const damaged = readJournal(reserved + JSON.stringify({ event: { seq: 2, task: "c1", at: 2, state: "completed", signal: "turn-end", context: { threadName: 5, paneNumber: -1, paneTitle: "secret title", capturedAt: "soon", origin: "event", issues: [] } }, set: { state: "completed" } }) + "\n").tasks.get("c1")!;
   eq("a damaged copy is checked on replay, and its event kept", [damaged.state, damaged.events[1].context], ["completed", { threadId: null, threadName: null, paneNumber: null, paneTitle: null, capturedAt: null, origin: "event", issues: ["invalid-context", "missing-number", "untrusted-title"] }]);
   eq("loomctl task shows no context", taskRecord(t).events.map((e) => "context" in e), [false, false]);
+}
+
+// watch --notification-context answers in bounded parts (fitBatch): rows as JSON lines.
+{
+  const rows = (n: number, bytes: number) => Array.from({ length: n }, () => ({ pad: "x".repeat(bytes - 10) })); // {"pad":""} is 10 bytes
+  eq("the limits are the documented ones", CONTEXT_BATCH, { events: 1000, bytes: 524288 });
+  eq("nothing to send is none", fitBatch([]), 0);
+  eq("small events stop at 1000", fitBatch(rows(3000, 50)), 1000);
+  eq("1 KiB lines fill 512 KiB exactly", fitBatch(rows(2000, 1023)), 512);
+  eq("one byte more and the 512th stays out", fitBatch(rows(2000, 1024)), 511);
+  eq("an event bigger than the limit still goes, alone", fitBatch(rows(3, 600_000)), 1);
+  eq("other limits", fitBatch(rows(10, 10), { events: 3, bytes: 1000 }), 3);
 }
 
 if (fails) throw new Error(`${fails} failed`);
