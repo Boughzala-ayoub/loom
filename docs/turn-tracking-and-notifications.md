@@ -120,6 +120,132 @@ Loom exposes the decision at three points:
   Turning a pane off also holds back that pane's earlier outcomes, so a v2 read
   that reaches back over them is refused too.
 
+## Notification context
+
+From the plan in `LOOM_NOTIFICATION_METADATA_PLAN.md`, phases 1 to 3. A
+notice should say which Loom thread, pane and agent it came from, as they were
+when Loom recorded the event, even after a rename, a reorder, a close or a
+restart. Loom copies that context into the task and into each new event, and
+exports it only to a reader that asks for it. The external bridge, its
+contract file and the email it sends are unchanged.
+
+### What Loom keeps
+
+Each task keeps its last copy (`Task.context`), and each event its own copy
+from the moment Loom made it (`TaskEvent.context`). A copy holds only plain
+values, never a pane, thread or DOM node:
+
+| Kept field | Value |
+| --- | --- |
+| `threadId` | The pane's Loom thread (`Thread.id`), never a provider conversation or session id |
+| `threadName` | That thread's name, as a safe label (below), or null |
+| `paneNumber` | The pane's one-based place in its thread, or null when it had none |
+| `paneTitle` | A title Loom chose itself (below), or null |
+| `capturedAt` | When Loom copied it, in ms. It can differ from the event's `at`, the agent's own time |
+| `origin` | `event`: copied from the live pane for this event. `last-known`: the task's last copy, reused because the pane had left its thread or relaunched |
+| `issues` | Fixed codes for what is missing or left out: `missing-name`, `missing-number`, `private-label`, `truncated-label`, `untrusted-title`, `invalid-context` |
+
+The pane id and the agent are not copied again: the task already holds both
+(`Task.pane`, `Task.agent`), fixed when it was made, so a replacement process
+can't relabel an old task.
+
+Loom copies the context:
+
+- when it makes a task (submit, an ordinary send, a person's Enter), and the
+  `accepted` event takes that copy;
+- at every new state, synchronously, before the journal write is awaited. A
+  live pane counts only if it is still in its thread and on the task's launch;
+  otherwise the event gets the task's last copy, marked `last-known`;
+- before `Thread.closePane` and `Thread.dispose` take panes out of their
+  arrays (`removeThread` goes through `dispose`). The pane remembers where it
+  was, and so does each open task of it. An outcome after that, such as the
+  sweep's `pane-closed` or a report held for an Enter, names the pre-removal
+  place as `last-known`, never number zero or another pane's place;
+- before a report, a state change or an Enter waits in `startupTurns` for the
+  journal read. The deferred action carries the copy.
+
+Replay, compaction, the whole rewrite after a failed write and pruning copy
+what the journal holds and never rebuild a context from the window. A rename
+after an event leaves that event as it was; the next event takes the new
+name. Renaming a thread or reordering panes writes nothing by itself.
+
+### Labels and limits
+
+A thread name is a label set in Loom: the worktree name given in the
+new-thread form or `loomctl new --name`, else the repo folder's own name, or a
+rename. Loom accepts strings only and cleans one this way: NFC
+normalization, terminal escape sequences (CSI, OSC and other ESC sequences)
+removed, tabs and line breaks made spaces, control, format (bidi, zero-width)
+and lone surrogate characters removed, runs of whitespace made one space, and
+the ends trimmed. An empty result is null with `missing-name`. A path-like
+name (a drive letter, a UNC or leading `/` or `~/` path, any backslash) or one
+that looks like a secret (an API key or token prefix, a private key header, a
+`password=` style pair) is null with `private-label`. That check is a filter
+for obvious cases, not a guarantee that free text holds no secret. A name over
+128 Unicode scalar values or 256 UTF-8 bytes is cut at a code point boundary
+with `truncated-label`.
+
+A pane's title is safe only when Loom chose it: `Terminal` for a shell and
+`Agent session` for an agent that set no title of its own (the same text the
+pane header shows then). A title the running process set is never exported,
+since it can hold a prompt summary (Claude), a thread id (Codex) or a path
+(a shell): it becomes null with `untrusted-title`. `paneTitle(appTitle,
+agent)` in main.ts computes the shown title for the header and the copy alike.
+
+Identifiers (`threadId`, `paneId`) are 1 to 96 printable ASCII characters.
+The exported context fits in 2048 bytes of JSON at worst (two 256-byte labels
+with every character escaped stay well inside). Replay runs each stored copy
+through the same checks: a field of the wrong type or shape becomes null with
+`invalid-context`, and a stored title that isn't one of Loom's own becomes
+null with `untrusted-title`, so a damaged journal line can't widen what goes
+out. The event itself is kept either way.
+
+Never in a context: the folder, repo, startup command, environment, session or
+account ids, prompts, responses, screen text, task `detail` or error output.
+
+### Reading it: `--notification-context`
+
+`loomctl watch --after N --metadata --policy --notification-context` and
+`--metadata --policy-v4 --notification-context` add one field, `context`, to
+each event of the v3 or v4 answer, and name the answer
+`loom-durable-events-v3-context-v1` or `loom-durable-events-v4-context-v1`.
+The flag without `--metadata` and a policy mode is refused. Every other field,
+the policy decisions, `next`, `last`, `gap` and the event order are those of
+the contract it extends.
+
+```json
+{
+  "seq": 42, "task": "a1b2c3d4e5f60708", "pane": "mabc1234-27", "generation": 1,
+  "state": "completed", "at": "2026-10-04T18:00:00.000Z", "response": null,
+  "source": "submit", "notify": true,
+  "context": {
+    "threadId": "mabc1200-14", "threadName": "Loom notification work", "paneId": "mabc1234-27",
+    "paneNumber": 2, "paneTitle": null, "agent": "codex", "provider": "codex",
+    "capturedAt": "2026-10-04T18:00:00.005Z", "origin": "event", "issues": ["untrusted-title"]
+  }
+}
+```
+
+`context` always has these ten fields, in this order. `paneId` equals the
+event's `pane`. `agent` is the task's CLI family (`claude`, `codex`,
+`opencode` or `shell`, else null) and `provider` the same value: it names the
+CLI, not an upstream model vendor. `capturedAt` is an ISO time or null. An
+event from before contexts existed reads as `origin: "legacy"` with null
+thread, number, title and time and no issues; its pane id and agent still come
+from the task. Old journal lines need no migration.
+
+One answer holds at most 1000 events and 512 KiB of serialized events. When
+that cuts it short, `next` is the last event returned and `done` stays false,
+so the next read continues with the rest; `gap` and `last` mean what they
+always did. `watch --follow` passes the flag through unchanged.
+
+Plain `watch`, `task` and `tasks` show no context, and `watch --metadata`
+(v2), `--metadata --policy` (v3) and `--metadata --policy-v4` (v4) answer
+exactly as before, field for field. The running bridge checks exact fields,
+so a context field there would stop it. Adopting the new contracts, the email
+body version 2, label rendering and the bridge's state migration are phases 4
+to 6 of the plan, not done here.
+
 ## Email bridge contract (v3)
 
 Changed in `Documents\Codex\2026-10-02\task-2` (not a git repository; the
@@ -418,3 +544,13 @@ already in flight or accepted.
   v3 with `--after-review` is the user's step; its held rows stay unsent.
 - `--after-review` takes the old runner lock only while it reads the old
   outbox. Starting the v2 sender again afterwards isn't prevented.
+- A notification context is copied when Loom makes an event, not when the
+  agent's report says the turn happened, so a report that arrives late
+  describes the pane as it was on arrival (`capturedAt` says when).
+- A rename or reorder journals nothing by itself (the plan's display-only
+  refresh is not done). Every live event copies the pane afresh and a close
+  copies it first, so this matters only for an open task that Loom's restart
+  ends `unknown`: its event carries the copy from before the rename, marked
+  `last-known`.
+- Pane titles are almost always null: Loom exports only its own two titles,
+  and there is no per-pane alias to set a safe one.
