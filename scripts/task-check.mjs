@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|all runs selected review regressions only.
+// TASK_REVIEW=unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -813,6 +813,44 @@ try {
     assert.deepEqual(await decided(), [true, 'send', true], 'The same after a restart');
     await page.evaluate(() => localStorage.removeItem('qa-use-state'));
     ok('A turn during the startup read is judged by the policy restored with its pane');
+  }
+
+  // Review 2026-10-04 13:46 F3: reports buffered during the startup read came before those held for a later Enter.
+  if (review('replay-order')) {
+    await resetReview();
+    await page.evaluate(() => localStorage.setItem('qa-journal-read-hold', '1'));
+    await page.goto(base);
+    await page.waitForFunction(() => !!window.qa.releaseRead);
+    const pane = await page.locator('.pane').first().getAttribute('data-id');
+    await page.waitForFunction((id) => !!window.qa.agents[id], pane);
+    // loomctl isn't up before the read, so reports go in as Rust would emit them.
+    const emit = (e) => page.evaluate(([id, e]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
+      event: 'agent-events', payload: [[id, { t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, ...e }]],
+    }), [pane, e]);
+    const enter = async (text) => {
+      await page.locator(`.pane[data-id="${pane}"] .xterm-helper-textarea`).focus();
+      await page.keyboard.type(text);
+      await page.waitForTimeout(250);
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(100);
+    };
+    await enter('startup prompt A');
+    await emit({ kind: 'start', match: promptMatch('startup prompt A') });
+    await agent(pane, { busy: false });
+    await emit({ kind: 'stop' });
+    await qa({ holdWriteIf: "fn:return d === '\\r'" });
+    await enter('startup prompt B');
+    await page.waitForFunction(() => window.qa.heldWrites.length === 1);
+    await qa({ holdWriteIf: null });
+    await emit({ kind: 'start', match: promptMatch('startup prompt B') });
+    await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
+    await page.evaluate(() => window.qa.heldWrites.shift().resolve());
+    await page.waitForTimeout(1500); // the sweep completes a Stop it holds once Claude looks idle
+    const turns = [];
+    for (const t of (await cli('tasks')).data.filter((t) => t.pane === pane)) turns.push([(await saved(t.task))?.match, t.state]);
+    assert.deepEqual(turns, [[promptMatch('startup prompt A'), 'completed'], [promptMatch('startup prompt B'), 'working']], 'Both turns are tasks, and the Stop is A\'s');
+    ok('Reports from the startup read go in before those held for an Enter written after them');
   }
 
   // Start the older cases with the same empty journal and settings as before.

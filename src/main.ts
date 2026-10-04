@@ -3680,7 +3680,12 @@ let startupTurns: (() => void)[] | undefined = [];
 function finishTaskReplay() {
   const pending = startupTurns;
   startupTurns = undefined;
+  // Reports held for an Enter still being written came after every buffered
+  // one, so they go back behind what replay adds (review 2026-10-04 13:46,
+  // F3). No replayed closure takes or releases a hold.
+  const later = [...enterHeld.values()].map((h) => [h, h.signals.splice(0)] as const);
   pending?.forEach((run) => run());
+  for (const [h, s] of later) h.signals.push(...s);
 }
 /** The highest event number pruned away: a watcher behind it missed some.
  * The journal carries it too, since the tasks kept can't show it. */
