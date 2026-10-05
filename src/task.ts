@@ -415,6 +415,13 @@ export function readJournal(text: string): { tasks: Map<string, Task>; seq: numb
   const tasks = new Map<string, Task>();
   const notify: NotifySnapshot[] = [];
   let seq = 0, pruned = 0;
+  // A record of the wrong shape (a hand edit, another version) throws here, and
+  // startup reads the journal as unavailable, never as a shorter history.
+  const shaped = (t: Task, where: string) => {
+    const ok = t && typeof t === "object" && typeof t.id === "string" && typeof t.pane === "string" && typeof t.state === "string"
+      && Array.isArray(t.events) && t.events.every((e) => e && typeof e === "object" && typeof e.seq === "number");
+    if (!ok) throw new Error(`a task record${where} isn't shaped as Loom writes them`);
+  };
   for (const line of text.split("\n")) {
     let rec: Record<string, unknown>;
     try {
@@ -430,18 +437,22 @@ export function readJournal(text: string): { tasks: Map<string, Task>; seq: numb
     if (n && typeof rec.at === "number" && typeof n.on === "boolean" && n.kinds && n.panes)
       notify.push({ at: rec.at, on: n.on, kinds: { ...DEFAULT_NOTIFY.kinds, ...n.kinds }, panes: { ...n.panes },
         ...(n.owners && typeof n.owners === "object" ? { owners: Object.fromEntries(Object.entries(n.owners).filter(([, v]) => v === "held" || v === "released" || v === "muted")) } : {}) });
+    if (rec?.set !== undefined && (typeof rec.set !== "object" || rec.set === null || Array.isArray(rec.set))) throw new Error("a journal change isn't shaped as Loom writes them");
     if (rec?.task && typeof rec.task === "object") {
       const t = rec.task as Task;
+      shaped(t, "");
       tasks.set(t.id, t);
       for (const e of t.events) seq = Math.max(seq, e.seq);
     }
     const updated = typeof rec?.update === "string" ? tasks.get(rec.update) : undefined;
-    if (updated) Object.assign(updated, rec.set);
+    if (updated) (Object.assign(updated, rec.set), shaped(updated, ` changed by ${JSON.stringify(rec.update)}`));
     const e = rec?.event as TaskEvent | undefined;
     const t = e && tasks.get(e.task);
     if (e && t && !t.events.some((x) => x.seq === e.seq)) {
+      if (typeof e.seq !== "number") throw new Error("a journal event has no number");
       Object.assign(t, rec.set);
       t.events.push(e);
+      shaped(t, ` changed by event ${e.seq}`);
       seq = Math.max(seq, e.seq);
       if (isFinal(t.state) && t.settledAt === undefined) t.settledAt = e.seq;
     }

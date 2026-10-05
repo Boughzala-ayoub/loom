@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|malformed-journal|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -422,6 +422,21 @@ try {
       await agent(codex, { busy: false });
     }
     ok('Manual task settlement is durable, sends no pane input and emits no completion notice');
+  }
+  if (review('malformed-journal')) {
+    // Valid JSON of the wrong shape: startup finishes (boot waits for cli_ready),
+    // history reads as unavailable, and the file stays as it was.
+    await resetReview();
+    for (const broken of ['{"seq":3,"pruned":0}\n{"task":{"id":"broken"}}\n', '{"task":{"id":"t","pane":"p","state":"working","events":[]}}\n{"update":"t","set":{"events":5}}\n']) {
+      await page.evaluate((b) => localStorage.setItem('qa-journal', b), broken);
+      await reboot();
+      const sent = await cli('send', 'work:1', 'after a broken journal');
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      assert.match(sent.data.warning, /history is unavailable/i);
+      assert.equal(await page.evaluate(() => localStorage.getItem('qa-journal')), broken, 'The broken journal is kept as it was');
+    }
+    await page.evaluate(() => localStorage.removeItem('qa-journal'));
+    ok('A journal record of the wrong shape leaves history unavailable, not startup stuck');
   }
   if (review('unreadable')) {
     const old = await cli('submit', 'work:1', 'keep this history');

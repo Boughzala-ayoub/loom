@@ -4416,15 +4416,15 @@ const notifyError = (error: unknown) => toast(error instanceof Error ? error.mes
  * journal is rewritten with only what was kept. lib.rs keeps the lines
  * before a tail an interrupted append tore. */
 async function loadTasks() {
-  let text: string;
+  let text: string, got: ReturnType<typeof readJournal>;
   try {
     text = (await invoke<string>("task_journal_read")) ?? "";
+    got = readJournal(text); // throws on a record of the wrong shape: unavailable, never shorter
   } catch (e) {
     journalUnreadable = e instanceof Error ? e.message : String(e);
     finishTaskReplay(); // Keep turns visible as unsaved; the journal remains unavailable.
     return;
   }
-  const got = readJournal(text);
   journalUnreadable = "";
   notifyHistory = got.notify;
   const lastPolicy = got.notify[got.notify.length - 1];
@@ -9107,7 +9107,12 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   toggleChanges(saved.ui?.changesOpen ?? false);
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);
   $("#threads").scrollTop = saved.ui?.sideScroll ?? 0;
-  await loadTasks(); // before loomctl answers, so a retried --key finds its task
+  // before loomctl answers, so a retried --key finds its task. Whatever goes
+  // wrong in replay, startup goes on with the history unavailable.
+  await loadTasks().catch((e) => {
+    journalUnreadable ||= `replay failed: ${e instanceof Error ? e.message : String(e)}`;
+    if (startupTurns) finishTaskReplay();
+  });
   void recordNotify().catch(notifyError); // loadTasks recorded this run's policy; this says if the journal couldn't be read
   installCli(); // after the threads exist, before their panes finish starting
   await opened;

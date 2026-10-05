@@ -248,6 +248,12 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   eq("a counter line outlives pruned tasks", readJournal(writeJournal([], 41, 0)).seq, 41);
   eq("so does the highest event pruned (review P2)", readJournal(writeJournal([a], 1002, 2)).pruned, 2);
   eq("events in order across tasks", eventsAfter(got.tasks.values(), 1).map((e) => e.seq), [2, 3]);
+  // Valid JSON of the wrong shape refuses the journal, never shortens it (review F13).
+  const refused = (text: string) => { try { readJournal(text); return ""; } catch (e) { return String(e); } };
+  eq("a task with no events is refused", /isn't shaped/.test(refused('{"task":{"id":"broken"}}')), true);
+  eq("a change that breaks one is refused", /isn't shaped/.test(refused(writeJournal([a], 1, 0) + '{"update":"j1","set":{"events":5}}\n')), true);
+  eq("a change that isn't an object is refused", /isn't shaped/.test(refused(writeJournal([a], 1, 0) + '{"update":"j1","set":"abc"}\n')), true);
+  eq("what Loom writes reads back", refused(text), "");
 }
 {
   // Follow-up review F2: an append cut inside a UTF-8 character, as lib.rs reads it back (lossy: U+FFFD).
@@ -284,7 +290,7 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   eq("two changes before any event: the last decides what follows", notifies(done(31), "p1", [snap(30, { panes: { p1: "off" } }), snap(30)]), true);
   eq("the history a rewrite keeps from event 15: the one in force then, and after", keptNotify(back, 15).map((s) => s.at), [10, 20]);
   eq("from event 25", keptNotify(back, 25).map((s) => s.at), [20]);
-  const t = { id: "n1", events: [] } as unknown as Task;
+  const t = task("n", "completed", { id: "n1" });
   const text = writeJournal([t], 30, 0, back);
   const got = readJournal(text);
   eq("the journal keeps the history, in order", got.notify.map((s) => [s.at, s.panes]), [[10, { p1: "off" }], [20, {}]]);
