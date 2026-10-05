@@ -2349,6 +2349,8 @@ class Pane {
 
   async dispose() {
     this.disposed = true;
+    dashboardMessages.delete(this.id);
+    dashboardDrafts.delete(this.id);
     // Closing the pane mid-sentence: drop the recording, there's nowhere to put it.
     if (recording?.pane === this) {
       recording = null;
@@ -2361,6 +2363,9 @@ class Pane {
     this.resizeRender?.dispose();
     this.unlisten.forEach((u) => u());
     outs.delete(this.out.id);
+    // The channel lives until native drops it; its handler mustn't keep this pane. Late output is still acked.
+    const channel = this.out.id;
+    this.out.onmessage = () => ackOutput(channel);
     this.gpu(false);
     this.term.dispose();
     this.el.remove();
@@ -3144,7 +3149,7 @@ async function refreshDashboardMessages(force = false) {
         panes: batch.map(({ p, session }) => [p.id, opencodeCommand(p.startup) || p.agent, p.th.dir, session]),
       });
       for (const { p, session, input, busy, waiting, dead } of batch) {
-        if (dashboardSession(p) !== session) continue;
+        if (gone(p) || dashboardSession(p) !== session) continue; // closed meanwhile: nothing to keep
         // A field left empty (a turn's tool output past what native reads back) keeps this session's last one.
         const was = dashboardMessages.get(p.id)?.session === session ? dashboardMessages.get(p.id) : undefined;
         dashboardMessages.set(p.id, { session, input, busy, waiting, dead, user: got[p.id]?.user || was?.user || "", agent: got[p.id]?.agent || was?.agent || "" });
@@ -3682,8 +3687,10 @@ type WakeSource = "bell" | "osc9" | "osc99" | "hook";
  * failed and may have gone in anyway. Back: `result` and `resultAt`, the
  * pane's own signal, which says a turn ended or a command exited, not that
  * the job was done. */
+/** `pane` is the pane's id, not the pane: the last 500 settled receipts
+ * outlive their panes, and must not keep a closed one's terminal alive. */
 type Receipt = {
-  pane: Pane; ref: string; gen: number; turnsAt?: number;
+  pane: string; ref: string; gen: number; turnsAt?: number;
   result?: { failed: boolean | null; exit: number | null } | { turn: number }; resultAt?: number; settledAt?: number;
   key: string | null; sha256: string; bytes: number; acceptedAt: number; steps: SendSteps; unsent?: boolean; uncertain?: "type" | "submit";
 };
@@ -3695,7 +3702,7 @@ let settlings = 0;
  * or a restarted pane's next turns, aren't its outcome. */
 function finishReceipt(token: string, from: Pane, result: NonNullable<Receipt["result"]>) {
   const r = receipts.get(token);
-  if (!r || r.result || r.pane !== from || r.gen !== from.generation) return;
+  if (!r || r.result || r.pane !== from.id || r.gen !== from.generation) return;
   r.result = result;
   r.resultAt = Date.now();
   r.settledAt = ++settlings;
@@ -3704,7 +3711,11 @@ function finishReceipt(token: string, from: Pane, result: NonNullable<Receipt["r
 /** A receipt is settled once it has its outcome, or can't get one (its pane
  * restarted, exited or closed). The last 500 to settle stay, however many are
  * pending; send --receipt refuses a 2001st pending one rather than drop one. */
-const receiptSettled = (r: Receipt) => !!r.result || !!r.unsent || gone(r.pane) || r.pane.dead || r.pane.generation !== r.gen;
+const receiptLost = (r: Receipt) => {
+  const p = paneById(r.pane);
+  return !p || p.dead || p.generation !== r.gen;
+};
+const receiptSettled = (r: Receipt) => !!r.result || !!r.unsent || receiptLost(r);
 function keepReceipts() {
   // One cut off by its pane is noticed here, not when it happened: it counts as settling now.
   for (const r of receipts.values()) if (r.settledAt === undefined && receiptSettled(r)) r.settledAt = ++settlings;
@@ -7671,7 +7682,7 @@ function receiptRecord(token: string, r: Receipt) {
   const at = (t?: number) => (t ? new Date(t).toISOString() : null);
   const res = r.result;
   return {
-    receipt: token, pane: r.pane.id, ref: r.ref, generation: r.gen, key: r.key,
+    receipt: token, pane: r.pane, ref: r.ref, generation: r.gen, key: r.key,
     wrote: {
       sha256: r.sha256, bytes: r.bytes, stage: r.steps.submitted ? "submitted" : r.steps.typed ? "typed" : "accepted", uncertain: r.uncertain ?? null,
       acceptedAt: at(r.acceptedAt), typedAt: at(r.steps.typed), submittedAt: at(r.steps.submitted),
@@ -7687,21 +7698,21 @@ function receiptRecord(token: string, r: Receipt) {
 async function waitReceipt(token: string, seconds: number) {
   const r = cliReceipt(token);
   if (r.unsent && !r.result) throw new Error(`Loom ${r.uncertain === "type" ? "may have typed part of" : "typed"} ${token}'s text into ${r.ref} but didn't press Enter, so no outcome will come. loomctl read ${r.ref} shows the input.`);
-  const p = r.pane;
   // The result is recorded by the launch the receipt went to (finishReceipt),
   // so it stands after a restart, and a later launch can't supply one.
-  const lost = () => gone(p) || p.dead || p.generation !== r.gen;
+  const lost = () => receiptLost(r);
   await until(() => !!r.result || !!r.unsent || lost(), seconds, `receipt ${token} on ${r.ref}`);
+  const p = paneById(r.pane);
   if (r.unsent && !r.result) throw new Error(`Loom ${r.uncertain === "type" ? "may have typed part of" : "typed"} ${token}'s text into ${r.ref} but didn't press Enter, so no outcome will come. loomctl read ${r.ref} shows the input.`);
   const result = r.result;
-  if (!result) throw new Error(`${r.ref} ${gone(p) ? "was closed" : p.dead ? "exited" : "restarted"} before it finished, so there's no outcome; it may have run partway.`);
+  if (!result) throw new Error(`${r.ref} ${!p ? "was closed" : p.dead ? "exited" : "restarted"} before it finished, so there's no outcome; it may have run partway.`);
   if ("turn" in result) {
     // Whether it stopped on a question can only be read off this launch's screen.
-    const asking = lost() ? null : !!readMenu(liveScreen(p, false));
-    return { data: { receipt: token, pane: p.id, done: true, turn: result.turn, asking }, text: `${r.ref} finished its turn${asking ? " with a question: loomctl menu reads it" : ""}` };
+    const asking = !p || lost() ? null : !!readMenu(liveScreen(p, false));
+    return { data: { receipt: token, pane: r.pane, done: true, turn: result.turn, asking }, text: `${r.ref} finished its turn${asking ? " with a question: loomctl menu reads it" : ""}` };
   }
   const { failed, exit } = result;
-  return { data: { receipt: token, pane: p.id, done: true, failed, exit }, text: failed === false ? "succeeded" : failed ? `failed${exit === null ? "" : ` with exit ${exit}`}` : "finished" };
+  return { data: { receipt: token, pane: r.pane, done: true, failed, exit }, text: failed === false ? "succeeded" : failed ? `failed${exit === null ? "" : ` with exit ${exit}`}` : "finished" };
 }
 
 /** send's whole path, and submit's. With `submit`, it always takes a receipt
@@ -7725,7 +7736,7 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
     if (flag(a, "no-enter")) throw new Error("A receipt is for a command that runs: leave out --no-enter.");
     if ([...receipts.values()].filter((r) => !receiptSettled(r)).length >= 2000) throw new Error("2000 receipts are still waiting for their outcome, so this wasn't sent. Wait for some first.");
     token = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-    receipts.set(token, { pane: p, ref, gen, key: ctx.key ?? null, sha256: digest, bytes, acceptedAt: Date.now(), steps });
+    receipts.set(token, { pane: p.id, ref, gen, key: ctx.key ?? null, sha256: digest, bytes, acceptedAt: Date.now(), steps });
     keepReceipts();
     if (p.agent === "shell") text = `${text}  # loom-receipt:${token}`;
     if (submit) {

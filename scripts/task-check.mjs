@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|stale-markers|close-drain|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -459,6 +459,27 @@ try {
       await agent(codex, { busy: false });
     }
     ok('Manual task settlement is durable, sends no pane input and emits no completion notice');
+  }
+  if (review('closed-pane-retained')) {
+    // A closed pane's receipt answers by its id and keeps nothing of the pane
+    // alive: no detached pane element survives a collection (Astra's full review, F18).
+    await resetReview();
+    const third = await paneId('work:3');
+    const sent = await cli('send', 'work:3', 'remember me', '--receipt');
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    assert.equal((await cli('close', 'work:3', '--yes')).ok, true);
+    const record = await cli('receipt', sent.data.receipt);
+    assert.deepEqual([record.data.pane, record.data.outcome], [third, 'none'], JSON.stringify(record));
+    await page.waitForTimeout(300);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('HeapProfiler.collectGarbage');
+    const { result: proto } = await cdp.send('Runtime.evaluate', { expression: 'HTMLDivElement.prototype' });
+    const { objects } = await cdp.send('Runtime.queryObjects', { prototypeObjectId: proto.objectId });
+    const { result } = await cdp.send('Runtime.callFunctionOn', { objectId: objects.objectId, returnByValue: true,
+      functionDeclaration: `function () { return this.filter((e) => !e.isConnected && e.classList.contains('pane') && e.dataset.id === ${JSON.stringify(third)}).length; }` });
+    await cdp.detach();
+    assert.equal(result.value, 0, 'The closed pane is not kept alive');
+    ok('A closed pane\'s receipt still answers, and keeps the pane collectable');
   }
   if (review('stale-markers')) {
     // Session and wake markers name the launch that wrote them; a replaced
