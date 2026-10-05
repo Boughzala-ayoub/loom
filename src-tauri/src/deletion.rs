@@ -100,6 +100,16 @@ struct Trashed {
 
 const PENDING: &str = "Loom trash transaction pending\n";
 
+/// git gc can't see Loom's trash: this ref keeps the retained HEAD's commit
+/// until purge. A trash id can hold characters a ref can't, so every other
+/// byte is spelled %XX.
+fn keep_ref(id: &str) -> String {
+    id.bytes().fold("refs/loom-trash/".into(), |mut s: String, b| {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' { s.push(b as char) } else { s += &format!("%{b:02X}") }
+        s
+    })
+}
+
 // Deny other readers/writers while this instance resumes or purges the record.
 // Delete sharing lets the owner remove or replace it without an unlocked gap.
 fn open_record(path: &Path) -> std::io::Result<(fs::File, Trashed)> {
@@ -238,14 +248,18 @@ fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Resul
             Err(e) => return Err(e.to_string()),
         }
     };
-    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit) };
-    // Git itself honors this lock, including a blanket prune from another instance.
-    // Until it holds, nothing has moved: a reservation that can't be written
-    // goes again rather than stay half-written.
+    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit.clone()) };
+    // Git itself honors this lock, including a blanket prune from another
+    // instance, and the ref keeps the commit. Until both hold, nothing has
+    // moved: a reservation that can't be written goes again rather than stay
+    // half-written.
+    let keep = keep_ref(&id);
     let reserved = write_record(&mut held, &file, &record).and_then(|_| {
         let lock = entry.join("locked");
         let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&lock)?;
-        f.write_all(PENDING.as_bytes()).and_then(|_| f.sync_all()).inspect_err(|_| { let _ = fs::remove_file(&lock); })
+        f.write_all(PENDING.as_bytes()).and_then(|_| f.sync_all())
+            .and_then(|_| crate::git_run(repo.into(), vec!["update-ref".into(), keep.clone(), commit], None, false).map(drop).map_err(std::io::Error::other))
+            .inspect_err(|_| { let _ = fs::remove_file(&lock); })
     });
     if let Err(e) = reserved {
         let _ = fs::remove_file(&file);
@@ -262,6 +276,7 @@ fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Resul
     if let Err(e) = moved {
         let _ = fs::remove_file(&file);
         let _ = fs::remove_file(entry.join("locked"));
+        let _ = crate::git_run(repo.into(), vec!["update-ref".into(), "-d".into(), keep], None, false);
         return Err(format!("couldn't move {} to Loom's trash; is something still using it? {e}", dir.display()));
     }
     finish_record(&mut held, &file, &mut record)
@@ -311,9 +326,9 @@ pub fn trash_records(trash: &Path) -> Result<serde_json::Value, String> {
 }
 
 /// Erase what went into `trash` more than `keep` ago: the folder each record
-/// names, git's record of it, then the record. One put back by hand isn't
-/// where its record says any more, so it stays. A failure waits for the next
-/// purge.
+/// names, git's record of it, the ref keeping its commit, then the record. One
+/// put back by hand isn't where its record says any more, so it stays. A
+/// failure waits for the next purge.
 pub fn purge(trash: &Path, keep: Duration) {
     let Ok(list) = fs::read_dir(trash) else { return };
     for file in list.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
@@ -321,8 +336,11 @@ pub fn purge(trash: &Path, keep: Duration) {
         if !due { continue; }
         let Ok((_held, r)) = open_record(&file) else { continue };
         if r.pending { continue; }
+        // The repository is the one that held the administration.
+        let unkeep = || r.entry.parent().and_then(Path::parent).is_none_or(|common| crate::git_run(common.to_string_lossy().into_owned(),
+            vec!["update-ref".into(), "-d".into(), keep_ref(&file.file_stem().unwrap().to_string_lossy())], None, false).is_ok());
         match restored(&r) {
-            Ok(true) => { let _ = fs::remove_file(&file); continue; }
+            Ok(true) => { if unkeep() { let _ = fs::remove_file(&file); } continue; }
             Err(_) => continue,
             Ok(false) => {},
         }
@@ -335,7 +353,7 @@ pub fn purge(trash: &Path, keep: Duration) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && reachable(p) => Ok(()),
             r => r,
         };
-        if erase(&r.at).and_then(|_| erase(&r.entry_at)).is_ok() { let _ = fs::remove_file(&file); }
+        if erase(&r.at).and_then(|_| erase(&r.entry_at)).is_ok() && unkeep() { let _ = fs::remove_file(&file); }
     }
 }
 
@@ -498,6 +516,7 @@ mod tests {
         assert_eq!(fs::read_to_string(at.join("a")).unwrap(), "recovered working data", "purge erased a repaired live checkout");
         assert_eq!(git(&at, &["show", ":a"]), "staged");
         assert!(!file.exists(), "a checkout put back by hand must cancel expiry");
+        assert_eq!(git(&repo, &["for-each-ref", "refs/loom-trash"]), "", "a cancelled record left its ref");
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -554,6 +573,36 @@ mod tests {
         assert!(open_record(&file).is_err(), "an update released the record lock");
         drop(held);
         assert_eq!(open_record(&file).unwrap().1.branch.as_deref(), Some("refs/heads/changed"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn git_gc_keeps_the_retained_commit_until_purge() {
+        let dir = std::env::temp_dir().join(format!("loom-trash-gc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        fs::write(wt.join("a"), "branch only").unwrap();
+        git(&wt, &["add", "a"]);
+        git(&wt, &["commit", "-qm", "branch only"]);
+        let commit = git(&wt, &["rev-parse", "HEAD"]).trim().to_owned();
+        // An old checkout's objects: weeks past git's two-week grace for unreachable ones.
+        let old = std::time::SystemTime::now() - Duration::from_secs(31 * 24 * 3600);
+        for objects in fs::read_dir(repo.join(".git/objects")).unwrap().flatten().filter(|d| d.file_name().len() == 2) {
+            for object in fs::read_dir(objects.path()).unwrap().flatten() {
+                fs::OpenOptions::new().access_mode(0x100).open(object.path()).unwrap().set_modified(old).unwrap(); // FILE_WRITE_ATTRIBUTES: they're read-only
+            }
+        }
+        remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap();
+        git(&repo, &["branch", "-D", "t"]);
+        git(&repo, &["gc", "--quiet"]);
+        let exists = || Command::new("git").arg("-C").arg(&repo).args(["cat-file", "-e", &commit]).status().unwrap().success();
+        assert!(exists(), "git gc collected the deleted worktree's commit before purge");
+        purge(&trash, Duration::ZERO);
+        assert_eq!(git(&repo, &["for-each-ref", "refs/loom-trash"]), "", "purge left the ref keeping the commit");
         fs::remove_dir_all(dir).unwrap();
     }
 

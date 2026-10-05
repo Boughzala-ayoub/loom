@@ -303,6 +303,13 @@ deleting the same worktree again, or creating a thread at its path, finishes
 it. A record shown `unreadable` was cut short as it was written, or
 another operation holds it right then; it holds up nothing else.
 
+Until purge, a ref named `refs/loom-trash/<id>` (any character other than a
+letter, digit, `-` or `_` spelled `%XX`) keeps the commit the worktree was
+on, so `git gc` can't collect it after its branch is deleted. Purge, or Git
+getting its record back, deletes the ref. Changes that were only staged get
+no such ref: the trash keeps the index, but a `git gc` that day can still
+collect a staged version that no commit has.
+
 ### Typing into panes
 
 | Command | What it does |
