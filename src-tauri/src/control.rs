@@ -37,7 +37,13 @@ pub fn serve(app: AppHandle, name: String) {
             let server = match create(&name, first, security) {
                 Ok(s) => s,
                 Err(e) if first => return eprintln!("control pipe {name} is taken, likely by another Loom on this workspace: {e}"),
-                Err(e) => return eprintln!("control pipe {name}: {e}"),
+                // ponytail: a fixed 1 s back-off. A failure here is transient (out
+                // of resources); giving up would leave loomctl no listener until restart.
+                Err(e) => {
+                    eprintln!("control pipe {name}: {e}; retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
             };
             first = false;
             if server.connect().await.is_err() {
