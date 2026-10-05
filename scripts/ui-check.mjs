@@ -845,6 +845,14 @@ try {
         assert.deepEqual([racing.ok, racing.steps], [false, { panes: 'closed', worktree: 'kept', branch: null }], JSON.stringify(racing));
         assert.match(racing.error, /kept its worktree folder: its untracked files changed while its panes closed/);
         assert.equal(await removals(d.dir), 0);
+        // Contents are read for changed and untracked files only, and not for what --discard gives up.
+        const e = await worktree('cleanup-e');
+        await statusOf(e.dir, ' M src/a.ts\0?? notes.txt\0!! node_modules/\0');
+        const hashedFor = () => page.evaluate(dir => window.qa.calls.filter(c => c.cmd === 'worktree_fingerprint' && c.args.dir === dir).at(-1)?.args.hashed, e.dir);
+        assert.equal((await cli('close-plan', e.id, '--delete', 'worktree')).ok, true);
+        assert.deepEqual(await hashedFor(), ['src/a.ts', 'notes.txt']);
+        const discarded = await cli('close-thread', e.id, '--yes', '--delete', 'worktree', '--discard', 'all');
+        assert.deepEqual([discarded.ok, await hashedFor()], [true, []], JSON.stringify(discarded));
         await page.evaluate(() => { window.qa.onKill = null; delete window.qa.statusFor; });
       }
       // Pane 7 review (2026-10-01).

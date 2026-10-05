@@ -5121,10 +5121,13 @@ const gitOk = (dir: string, ok: number[], ...args: string[]) =>
  * is one entry), and with `branch` the commits no other branch or remote
  * holds. HEAD rides along, so a new commit is a change too. Throws when git
  * can't say: unknown is never "nothing to lose". */
-type Inventory = { fingerprint: string; head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number };
-async function inventory(th: Thread, branch: boolean): Promise<Inventory> {
-  const [status, head, commits, fingerprint] = await Promise.all([
-    git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--ignored=matching"),
+type Inventory = { fingerprint: string; head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number; discard: Loss[] };
+async function inventory(th: Thread, branch: boolean, discard: Loss[] = []): Promise<Inventory> {
+  const status = lossInventory(await git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--ignored=matching"));
+  // Contents only for the files the approval names and doesn't discard; the
+  // rest (ignored build output above all) count by name, size and time.
+  const hashed = (["tracked", "untracked"] as const).flatMap((k) => (discard.includes(k) ? [] : status[k]));
+  const [head, commits, fingerprint] = await Promise.all([
     git(th.dir, "rev-parse", "HEAD").then((s) => s.trim(), () => ""), // no commits yet
     branch && th.branch
       ? git(th.repo, "rev-list", "--count", th.branch, "--not", `--exclude=${th.branch}`, "--branches", "--remotes").then((s) => {
@@ -5133,10 +5136,10 @@ async function inventory(th: Thread, branch: boolean): Promise<Inventory> {
           return n;
         })
       : 0,
-    invoke<string>("worktree_fingerprint", { dir: th.dir }),
+    invoke<string>("worktree_fingerprint", { dir: th.dir, hashed }),
   ]);
   if (!fingerprint) throw new Error("Could not fingerprint the worktree; nothing was deleted");
-  return { head, ...lossInventory(status), commits, fingerprint };
+  return { head, ...status, commits, fingerprint, discard };
 }
 const lossCounts = (inv: Inventory): Record<Loss, number> => ({ tracked: inv.tracked.length, untracked: inv.untracked.length, ignored: inv.ignored.length, commits: inv.commits });
 
@@ -5221,7 +5224,7 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
     const branch = mode === "all" && th.branch ? "kept" : undefined;
     const partial = (r: Removal & { error: string }) => (toast(`Closed ${th.name}, but ${r.error}`), r);
     if (expected) {
-      const now = await inventory(th, mode === "all").catch(() => null);
+      const now = await inventory(th, mode === "all", expected.discard).catch(() => null);
       if (!now || inventoryDiff(expected, now)) {
         return partial({ removed: true, worktree: "kept", branch, error: `kept its worktree folder${branch ? " and branch" : ""}: ${now ? `${inventoryDiff(expected, now)} changed while its panes closed` : "its status couldn't be read once its panes closed"}.` });
       }
@@ -5231,7 +5234,7 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
       // delete a folder that is still some process's cwd — retry a few times.
       for (let n = 0; ; n++) {
         try {
-          if (n > 0 && expected && inventoryDiff(expected, await inventory(th, mode === "all"))) {
+          if (n > 0 && expected && inventoryDiff(expected, await inventory(th, mode === "all", expected.discard))) {
             return partial({ removed: true, worktree: "kept", branch, error: "worktree changed during deletion retries" });
           }
           // Not `git worktree remove`: it follows junctions and empties their targets.
@@ -7584,8 +7587,8 @@ function cliDelete(a: Args, th: Thread): "" | "worktree" | "branch" {
 /** close-plan: the thread, the panes closing it stops, and with `del` what
  * deleting loses. `rev` covers all of it in full (the lists shown stop at 50),
  * so close-thread --plan refuses if any of it changed. */
-async function closePlan(th: Thread, del: "" | "worktree" | "branch") {
-  const inv = del ? await inventory(th, del === "branch") : null;
+async function closePlan(th: Thread, del: "" | "worktree" | "branch", discard: Loss[] = []) {
+  const inv = del ? await inventory(th, del === "branch", discard) : null;
   const panes = th.panes.map((p) => ({ id: p.id, ref: paneName(p), agent: p.agent, generation: p.generation }));
   const target = { thread: th.id, name: th.name, dir: th.dir, repo: th.repo, branch: th.branch || null, delete: del || null };
   const rev = (await sha256(JSON.stringify([target, panes.map((p) => [p.id, p.generation]), inv]))).slice(0, 16);
@@ -8451,7 +8454,7 @@ const CLI: Record<string, CliCommand> = {
   },
   "close-thread": {
     usage: "close-thread <thread> --yes [--delete worktree|branch] [--plan REV] [--discard LIST] [--force]",
-    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Deleting refuses while it would lose anything --discard doesn't name: tracked, untracked, ignored (files git ignores, like .env or node_modules) and commits, comma-separated, or all. --plan REV (from close-plan) refuses before closing anything if the thread, its panes or its file or index contents changed since. Checks refuse unreadable, oversized or reparse-point trees. --force is --discard all.",
+    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Deleting refuses while it would lose anything --discard doesn't name: tracked, untracked, ignored (files git ignores, like .env or node_modules) and commits, comma-separated, or all. --plan REV (from close-plan) refuses before closing anything if the thread, its panes or its file or index contents changed since. The check reads changed and untracked files whole, except what --discard gives up, and everything else by size and time, never through a link; it refuses a tree it can't finish. --force is --discard all.",
     options: { yes: "bool", delete: "string", force: "bool", plan: "string", discard: "string" },
     run: async (a) => {
       const th = cliThread(cliWord(a, 0, "a thread"));
@@ -8463,7 +8466,8 @@ const CLI: Record<string, CliCommand> = {
       // Read now, in this one call, right before anything closes.
       let plan: Awaited<ReturnType<typeof closePlan>> | undefined;
       if (expect !== undefined || (del && !force)) {
-        plan = await closePlan(th, del).catch((e) => {
+        // A plan's rev reads everything; without one, what --discard gives up isn't read.
+        plan = await closePlan(th, del, expect === undefined ? [...allowed] : []).catch((e) => {
           throw new Error(`Couldn't read what deleting ${th.name} would lose, so nothing was closed: ${e instanceof Error ? e.message : String(e)}`);
         });
         if (expect !== undefined && plan.data.rev !== expect) {

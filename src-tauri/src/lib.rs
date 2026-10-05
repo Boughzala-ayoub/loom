@@ -1399,11 +1399,11 @@ mod commands {
         blocking(move || super::pty_shutdown(app.state(), app.state())).await
     }
     #[tauri::command]
-    pub async fn worktree_fingerprint(dir: String) -> Result<String, String> {
+    pub async fn worktree_fingerprint(dir: String, hashed: Vec<String>) -> Result<String, String> {
         blocking(move || {
             let index = super::git_run(dir.clone(), vec!["rev-parse".into(), "--git-path".into(), "index".into()], None)?;
             let index = PathBuf::from(&dir).join(index.trim());
-            deletion::fingerprint(std::path::Path::new(&dir), index.exists().then_some(index.as_path()))
+            deletion::fingerprint(std::path::Path::new(&dir), index.exists().then_some(index.as_path()), &hashed)
         }).await
     }
     #[tauri::command]
