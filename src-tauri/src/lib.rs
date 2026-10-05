@@ -185,6 +185,11 @@ async fn overlay(app: AppHandle, show: Option<bool>) -> Result<(), String> {
     Ok(())
 }
 
+/// Deleted worktrees wait here a day (deletion.rs). Local, not roaming: they can be gigabytes.
+pub(crate) fn trash_dir(app: &AppHandle) -> PathBuf {
+    app.path().app_local_data_dir().expect("no local data dir").join("trash")
+}
+
 pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
     let mut dir = app.path().app_data_dir().expect("no app data dir");
     // Debug builds keep their own state, so `tauri dev` and an installed release
@@ -1581,8 +1586,8 @@ mod commands {
         blocking(move || super::canonical_directory(path)).await
     }
     #[tauri::command]
-    pub async fn worktree_remove(repo: String, dir: String, approved: Option<deletion::Approval>) -> Result<(), String> {
-        blocking(move || deletion::remove_worktree(&repo, &dir, approved.as_ref())).await
+    pub async fn worktree_remove(app: AppHandle, repo: String, dir: String) -> Result<String, String> {
+        blocking(move || deletion::remove_worktree(&repo, &dir, &super::trash_dir(&app))).await
     }
     #[tauri::command]
     pub async fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>, preview: Option<bool>) -> Result<String, String> {
@@ -1782,6 +1787,11 @@ pub fn run() {
             }
             let marks = [std::env::temp_dir().join("loom-status"), std::env::temp_dir().join("loom-tx"), data_dir(app.handle()).join("session-marks")];
             std::thread::spawn(move || prune_markers(&marks, std::time::Duration::from_secs(7 * 86_400)));
+            let trash = trash_dir(app.handle());
+            std::thread::spawn(move || loop {
+                deletion::purge(&trash, deletion::KEEP);
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            });
             // The plugin accepts an absolute filename. Keep geometry beside the
             // workspace so dev, release, and explicit profiles stay independent.
             let window_file = std::path::absolute(state_file(app.handle()))?.with_extension("window.json");

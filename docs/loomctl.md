@@ -242,31 +242,40 @@ another pane, a restart, a new file, new contents at an existing path, or a new
 commit. Without `--plan`, the check
 uses whatever is there when the command runs.
 
-After the panes stop, Loom reads the folder once more, since a pane's process
-writes until it's gone. If the folder changed, Loom keeps it and says so. The
+After the panes stop, Loom moves the folder into its trash,
+`%LOCALAPPDATA%\dev.ayoub.loom\trash` (or beside the folder, named
+`.<id>.loom-trash`, when it is on another drive), and Git's record of it into
+the repository's `.git\loom-trash`. Nothing is erased then. A file a pane
+wrote as it stopped goes along with the folder, and a day later Loom erases
+both. Each deletion leaves `<id>.json` in the trash, naming where the folder
+and Git's record were and where they are now: move both back to undo it. The
 Delete worktree buttons in the window work the same way: their dialog lists
-what would be lost, ignored files included, and nothing goes if that changed
+what would be lost, ignored files included, and nothing closes if that changed
 before you answered.
+
+Loom refuses a folder that holds another checkout, a link at the folder's own
+path, and a folder that Git records at another path. A parent folder moved or
+replaced by a junction can lead to another worktree; Loom leaves that one alone.
 
 Content checks refuse unreadable files and reparse points, and stop at 20,000
 entries, 64 directory levels, 256 MiB, or five seconds. If a check cannot
 finish, Loom keeps the folder. Inspect and remove it manually instead.
-Stop external writers before deleting: a final check cannot prevent another
-program from writing immediately afterward.
 
 A cleanup that stops part-way says which steps finished, in `steps`:
 
 ```json
 { "ok": false, "code": "failed", "closed": "mupvx2k-30",
   "steps": { "panes": "closed", "worktree": "failed", "branch": "kept" },
-  "error": "Closed login and stopped its panes, but couldn't remove its worktree folder, ..." }
+  "error": "Closed login and stopped its panes, but couldn't move its worktree folder to Loom's trash, ..." }
 ```
 
-`worktree` is `removed`, `kept` (it changed while the panes closed), `failed`
-(Git refused; the folder may be partly deleted) or `null` when not asked.
-`branch` is `deleted`, `kept` (the folder step didn't finish), `failed` or
-`null`. A thread whose panes closed is gone from Loom even when its folder
-stayed: remove that folder with `git worktree remove`.
+`worktree` is `removed` (moved to the trash; `trash` says where), `failed`
+(it couldn't be moved, usually because something still uses it; the folder
+stays whole) or `null` when not asked. `branch` is `deleted`, `kept` (the
+folder step didn't finish), `failed` or `null`. A thread whose panes closed is
+gone from Loom even when its folder stayed: close what uses the folder, delete
+it in Explorer, and run `git worktree prune`. Not `git worktree remove`: on
+Windows it empties the folders that junctions inside point to.
 
 ### Typing into panes
 

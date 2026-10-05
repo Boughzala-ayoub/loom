@@ -130,7 +130,8 @@ try {
         if (cmd === 'git_midway') return '';
         if (cmd === 'worktree_fingerprint') return qa.fingerprint || 'fixture-contents';
         if (cmd === 'worktree_remove' && qa.failRemove) throw new Error('Test: the worktree folder is in use');
-        if (cmd === 'worktree_remove' && qa.failRemoveOnce === args.dir) { qa.failRemoveOnce = null; qa.fingerprint = 'partly-deleted'; throw new Error('Test: a file in it is in use'); }
+        if (cmd === 'worktree_remove' && qa.failRemoveOnce === args.dir) { qa.failRemoveOnce = null; throw new Error('Test: a file in it is in use'); }
+        if (cmd === 'worktree_remove') return `C:\\Users\\test\\AppData\\Local\\loom\\trash\\1-${args.dir.split('\\').pop()}`;
         if (cmd === 'git_run') {
           const a = args.args;
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
@@ -822,7 +823,8 @@ try {
       }
       {
         // Deleting a worktree: ignored files count as loss, a plan pins what was
-        // seen, and a cleanup that stops part-way says which steps finished.
+        // seen, the folder goes to Loom's trash, and a cleanup that stops part-way
+        // says which steps finished.
         const worktree = async name => {
           const made = await cli('new', 'C:\\projects\\loom', '--name', name, '--cmd=');
           assert.equal(made.ok, true, JSON.stringify(made));
@@ -867,9 +869,8 @@ try {
         const done = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan2.rev, '--discard', 'ignored');
         assert.equal(done.ok, true, JSON.stringify(done));
         assert.deepEqual(done.data.steps, { panes: 'closed', worktree: 'removed', branch: 'deleted' });
-        // The native delete gets what was approved, to check the folder against where it deletes it.
-        const approvals = dir => page.evaluate(dir => window.qa.calls.filter(c => c.cmd === 'worktree_remove' && c.args.dir === dir).map(c => c.args.approved), dir);
-        assert.deepEqual(await approvals(a.dir), [{ fingerprint: 'fixture-contents', hashed: [] }]);
+        assert.equal(done.data.trash, 'C:\\Users\\test\\AppData\\Local\\loom\\trash\\1-cleanup-a');
+        assert.match(done.text, /waits in Loom's trash for a day/);
         assert.ok(!(await open(a.id)));
         // The folder won't go: the panes are closed, the folder failed, the branch is kept.
         const b = await worktree('cleanup-b');
@@ -877,21 +878,19 @@ try {
         const stuck = await cli('close-thread', b.id, '--yes', '--delete', 'branch');
         assert.equal(stuck.ok, false, JSON.stringify(stuck));
         assert.deepEqual([stuck.closed, stuck.steps], [b.id, { panes: 'closed', worktree: 'failed', branch: 'kept' }], JSON.stringify(stuck));
-        assert.match(stuck.error, /stopped its panes, but couldn't remove its worktree folder, which may be partly deleted, so its branch was kept/);
+        assert.match(stuck.error, /stopped its panes, but couldn't move its worktree folder to Loom's trash, so its branch was kept/);
         assert.equal(await gitCalls('branch -D', b.branch), 0, 'No branch deleted after the folder failed');
         // The folder goes and the branch won't: said apart. --force still deletes without looking.
         const c = await worktree('cleanup-c');
         await page.evaluate(() => { window.qa.failRemove = false; window.qa.failBranch = true; });
         const branchStuck = await cli('close-thread', c.id, '--yes', '--delete', 'branch', '--force');
         assert.deepEqual([branchStuck.ok, branchStuck.steps], [false, { panes: 'closed', worktree: 'removed', branch: 'failed' }], JSON.stringify(branchStuck));
-        assert.deepEqual(await approvals(c.dir), [null], '--force approves nothing in advance');
-        // Something writes as the panes stop: the folder is kept, and the answer says why.
+        // Something writes as the panes stop: it goes to the trash with the folder, as a file the plan never saw.
         const d = await worktree('cleanup-d');
         await page.evaluate(([dir, ids]) => { window.qa.failBranch = false; window.qa.onKill = id => { if (ids.includes(id)) window.qa.statusFor[dir] = '?? crash.log\0'; }; }, [d.dir, d.panes.map(p => p.id)]);
         const racing = await cli('close-thread', d.id, '--yes', '--delete', 'worktree');
-        assert.deepEqual([racing.ok, racing.steps], [false, { panes: 'closed', worktree: 'kept', branch: null }], JSON.stringify(racing));
-        assert.match(racing.error, /kept its worktree folder: its untracked files changed while its panes closed/);
-        assert.equal(await removals(d.dir), 0);
+        assert.deepEqual([racing.ok, racing.steps], [true, { panes: 'closed', worktree: 'removed', branch: null }], JSON.stringify(racing));
+        assert.equal(await removals(d.dir), 1);
         // Contents are read for changed and untracked files only, and not for what --discard gives up.
         const e = await worktree('cleanup-e');
         await statusOf(e.dir, ' M src/a.ts\0?? notes.txt\0!! node_modules/\0');
@@ -900,13 +899,11 @@ try {
         assert.deepEqual(await hashedFor(), ['src/a.ts', 'notes.txt']);
         const discarded = await cli('close-thread', e.id, '--yes', '--delete', 'worktree', '--discard', 'all');
         assert.deepEqual([discarded.ok, await hashedFor()], [true, []], JSON.stringify(discarded));
-        // A removal that stops part-way changed the folder itself: failed and maybe partly deleted, never kept.
+        // A folder still in use at first (a pane's process not quite gone) goes on a later try.
         const f = await worktree('cleanup-f');
         await page.evaluate(dir => { window.qa.failRemoveOnce = dir; }, f.dir);
-        const torn = await cli('close-thread', f.id, '--yes', '--delete', 'worktree');
-        await page.evaluate(() => { window.qa.fingerprint = null; });
-        assert.deepEqual([torn.ok, torn.steps], [false, { panes: 'closed', worktree: 'failed', branch: null }], JSON.stringify(torn));
-        assert.match(torn.error, /may be partly deleted/);
+        const retried = await cli('close-thread', f.id, '--yes', '--delete', 'worktree');
+        assert.deepEqual([retried.ok, retried.steps, await removals(f.dir)], [true, { panes: 'closed', worktree: 'removed', branch: null }, 2], JSON.stringify(retried));
         await page.evaluate(() => { window.qa.onKill = null; delete window.qa.statusFor; });
       }
       // Pane 7 review (2026-10-01).

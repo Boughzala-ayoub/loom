@@ -83,91 +83,105 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
     Ok(format!("{:x}", hash.finalize()))
 }
 
-/// What a deletion's approval saw: its fingerprint, and the files it hashed by contents.
-#[derive(serde::Deserialize)]
-pub struct Approval { pub fingerprint: String, pub hashed: Vec<String> }
+/// How long a deleted worktree waits in Loom's trash before [`purge`] erases it.
+pub const KEEP: Duration = Duration::from_secs(24 * 3600);
 
-/// Delete `dir`, a linked worktree of `repo`. Git for Windows' `worktree remove`
-/// recurses through junctions and empties their targets, so git never walks it:
-/// std's remove_dir_all removes each link inside as itself, then the worktree's
-/// entry in `repo` goes, as `git worktree remove` drops it. The folder itself
-/// is taken as it is, never resolved: a link there goes nowhere. With
-/// `approved`, it goes only if it still matches that approval when claimed.
-pub fn remove_worktree(repo: &str, dir: &str, approved: Option<&Approval>) -> Result<(), String> {
+/// Where a deleted worktree's folder and git's record of it went. Written into
+/// the trash before either moves, so even a crash leaves it: put both back to
+/// undo the deletion.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Trashed { folder: PathBuf, at: PathBuf, entry: PathBuf, entry_at: PathBuf }
+
+/// Delete `dir`, a linked worktree of `repo`, by moving it into `trash` and
+/// git's record of it into the repository's loom-trash. Nothing is erased
+/// here; [`purge`] does that a day later. So a file written into it after the
+/// checks, or a wrong folder that got through them, is in the trash, not lost.
+/// Git for Windows' `worktree remove` recurses through junctions and empties
+/// their targets, so git never touches it. The folder itself is taken as it
+/// is, never resolved: a link there goes nowhere. Returns where it went, or ""
+/// when it was gone already and only git's record of it went.
+pub fn remove_worktree(repo: &str, dir: &str, trash: &Path) -> Result<String, String> {
     let dir = Path::new(dir);
     let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
-    let worktrees = Path::new(repo).join(common.trim()).join("worktrees");
-    let name = dir.file_name().ok_or_else(|| format!("{} has no folder name", dir.display()))?;
-    let claim = dir.with_file_name(format!(".{}.loom-deleting", name.to_string_lossy()));
-    let meta = match fs::symlink_metadata(dir) {
-        // Gone, unless an earlier deletion left it claimed: git's record stays with it then.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && fs::symlink_metadata(&claim).is_ok() => {
-            return Err(format!("an earlier deletion left {} at {}; look at it before deleting it by hand", dir.display(), claim.display()));
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return forget(&worktrees, dir),
+    let common = Path::new(repo).join(common.trim());
+    let worktrees = common.join("worktrees");
+    let name = dir.file_name().ok_or_else(|| format!("{} has no folder name", dir.display()))?.to_string_lossy();
+    // An older Loom that stopped mid-deletion left the folder claimed beside its
+    // path, with git's record still naming the path: that deletion goes on here.
+    let claim = dir.with_file_name(format!(".{name}.loom-deleting"));
+    let from = match fs::symlink_metadata(dir) {
+        Ok(_) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && fs::symlink_metadata(&claim).is_ok() => &claim,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return forget(&worktrees, dir).map(|()| String::new()),
         Err(e) => return Err(format!("{}: {e}", dir.display())),
-        Ok(m) => m,
     };
+    let meta = fs::symlink_metadata(from).map_err(|e| format!("{}: {e}", from.display()))?;
     if meta.file_attributes() & 0x400 != 0 || !meta.is_dir() {
-        return Err(format!("{} is a link or not a folder; Loom deletes only a worktree's own folder", dir.display()));
+        return Err(format!("{} is a link or not a folder; Loom deletes only a worktree's own folder", from.display()));
     }
-    // FILE_FLAG_BACKUP_SEMANTICS opens a folder, FILE_FLAG_OPEN_REPARSE_POINT a link as itself.
-    let open = |path: &Path, share: u32| fs::OpenOptions::new().access_mode(0x80).share_mode(share).custom_flags(0x0220_0000).open(path)
-        .map_err(|e| format!("{}: {e}", path.display()));
-    let id = |f: &fs::File| crate::usage::file_identity(f).ok_or_else(|| format!("{}: no file identity", dir.display()));
-    let was = id(&open(dir, 7)?)?;
-    let entry = entry_of(dir, &worktrees)?;
-    // Claim it: Windows refuses to rename a folder while anything inside is
-    // open (a process's cwd, a file being written), and nothing reaches it by
-    // its old path afterwards. Writers are out, so what is checked is what goes.
-    fs::rename(dir, &claim).map_err(|e| format!("couldn't claim {} for deletion; is something still using it? {e}", dir.display()))?;
-    let checked = (|| {
-        // No delete sharing: nothing renames it or a parent while it's checked.
-        let pin = open(&claim, 3)?;
-        if id(&pin)? != was || pin.metadata().map_err(|e| e.to_string())?.file_attributes() & 0x400 != 0 {
-            return Err(format!("{} was replaced while it was claimed", dir.display()));
-        }
-        // The walk also refuses a folder holding another checkout.
-        let now = fingerprint(&claim, Some(&entry.join("index")), approved.map_or(&[], |a| &a.hashed))?;
-        if approved.is_some_and(|a| a.fingerprint != now) {
-            return Err(format!("{} changed after its deletion was approved", dir.display()));
-        }
-        Ok(())
-        // ponytail: the pin closes before remove_dir_all opens the claim; only a
-        // process that knows Loom's claim name could swap it in that instant, and
-        // a link put there is removed as itself.
-    })();
-    if let Err(e) = checked.and_then(|_| fs::remove_dir_all(&claim).map_err(|e| e.to_string())) {
-        // Back where the thread and git know it, even partly deleted.
-        return Err(match fs::rename(&claim, dir) {
-            Ok(()) => e,
-            Err(back) => format!("{e}; the folder is left at {}: {back}", claim.display()),
-        });
+    let entry = entry_of(from, dir, &worktrees)?;
+    // The walk refuses a folder holding another checkout, even with --force.
+    fingerprint(from, None, &[])?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let id = format!("{stamp}-{name}");
+    let file = trash.join(format!("{id}.json"));
+    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id) };
+    let write = |r: &Trashed| fs::create_dir_all(trash).and_then(|_| fs::write(&file, serde_json::to_vec_pretty(r).expect("paths serialize")));
+    // Windows refuses to move a folder while anything inside is open (a
+    // process's cwd, a file being written), so nothing is cut off mid-write.
+    let mut moved = write(&record).and_then(|_| fs::rename(from, &record.at));
+    if moved.as_ref().is_err_and(|e| e.raw_os_error() == Some(17)) {
+        // ERROR_NOT_SAME_DEVICE: on another volume than Loom's trash, it waits beside its own path.
+        record.at = dir.with_file_name(format!(".{id}.loom-trash"));
+        moved = write(&record).and_then(|_| fs::rename(from, &record.at));
     }
-    fs::remove_dir_all(&entry).map_err(|e| format!("removed {} but not git's record of it, {}: {e}", dir.display(), entry.display()))
+    if let Err(e) = moved {
+        let _ = fs::remove_file(&file);
+        return Err(format!("couldn't move {} to Loom's trash; is something still using it? {e}", dir.display()));
+    }
+    fs::create_dir_all(common.join("loom-trash")).and_then(|_| fs::rename(&entry, &record.entry_at))
+        .map_err(|e| format!("moved {} to {}, but git still records it, at {}: {e}", dir.display(), record.at.display(), entry.display()))?;
+    Ok(record.at.to_string_lossy().into_owned())
 }
 
-/// The entry in `worktrees` that `dir` is, by git's own two links: dir\.git
-/// names the entry, and the entry records the path git keeps that worktree
-/// at, which must be `dir`. A folder reached through a moved or redirected
-/// path names an entry that records its own path, so it isn't taken for
-/// `dir`'s. A locked entry is refused.
-fn entry_of(dir: &Path, worktrees: &Path) -> Result<PathBuf, String> {
+/// Erase what went into `trash` more than `keep` ago: the folder each record
+/// names, git's record of it, then the record. One put back by hand isn't
+/// where its record says any more, so it stays. A failure waits for the next
+/// purge.
+// ponytail: a crash between the two moves leaves git's record in place, naming a
+// folder that's gone; `git worktree prune` (run before each new thread) drops it.
+pub fn purge(trash: &Path, keep: Duration) {
+    let Ok(list) = fs::read_dir(trash) else { return };
+    for file in list.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
+        let due = fs::metadata(&file).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= keep));
+        let Some(r) = due.then(|| fs::read(&file).ok()).flatten().and_then(|b| serde_json::from_slice::<Trashed>(&b).ok()) else { continue };
+        // remove_dir_all removes each link inside as itself, never what it points to.
+        let erase = |p: &Path| match fs::remove_dir_all(p) { Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e), _ => Ok(()) };
+        if erase(&r.at).and_then(|_| erase(&r.entry_at)).is_ok() { let _ = fs::remove_file(&file); }
+    }
+}
+
+/// The entry in `worktrees` that the folder at `from` is, by git's own two
+/// links: from\.git names the entry, and the entry records the path git keeps
+/// that worktree at, which must be `dir`. A folder reached through a moved or
+/// redirected path names an entry that records its own path, so it isn't
+/// taken for `dir`'s. A locked entry is refused.
+fn entry_of(from: &Path, dir: &Path, worktrees: &Path) -> Result<PathBuf, String> {
     let not = || format!("{} isn't a linked worktree of this repository", dir.display());
     let id = |path: &Path| -> Result<(u64, u64), String> {
         // FILE_FLAG_BACKUP_SEMANTICS: folders open too.
         let f = fs::OpenOptions::new().access_mode(0x80).share_mode(7).custom_flags(0x0200_0000).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         crate::usage::file_identity(&f).ok_or_else(|| format!("{}: no file identity", path.display()))
     };
-    let dot = dir.join(".git");
+    let dot = from.join(".git");
     // The main checkout's .git is a folder.
     if !fs::symlink_metadata(&dot).is_ok_and(|m| m.is_file() && m.file_attributes() & 0x400 == 0) { return Err(not()); }
     let named = fs::read_to_string(&dot).map_err(|e| format!("{}: {e}", dot.display()))?;
-    let entry = dir.join(named.trim().strip_prefix("gitdir:").ok_or_else(not)?.trim());
+    let entry = from.join(named.trim().strip_prefix("gitdir:").ok_or_else(not)?.trim());
     if id(entry.parent().ok_or_else(not)?)? != id(worktrees)? { return Err(not()); }
     let back = fs::read_to_string(entry.join("gitdir")).map_err(|_| not())?;
     let kept = entry.join(back.trim());
-    if spelled(&kept) != spelled(&dot) {
+    if spelled(&kept) != spelled(&dir.join(".git")) {
         return Err(format!("{} leads to the worktree git keeps at {}, not to its own; Loom deletes a worktree only at the path git records for it",
             dir.display(), kept.parent().unwrap_or(&kept).display()));
     }
@@ -248,7 +262,7 @@ mod tests {
     fn removing_a_worktree_never_follows_its_links() {
         let dir = std::env::temp_dir().join(format!("loom-remove-worktree-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let (repo, wt, outside) = (dir.join("repo"), dir.join("wt"), dir.join("outside"));
+        let (repo, wt, outside, trash) = (dir.join("repo"), dir.join("wt"), dir.join("outside"), dir.join("trash"));
         fs::create_dir_all(outside.join("deep")).unwrap();
         fs::write(outside.join("keep.txt"), "keep").unwrap();
         fs::write(outside.join("deep/keep.txt"), "keep").unwrap();
@@ -266,12 +280,14 @@ mod tests {
         fs::set_permissions(wt.join("ro.txt"), ro).unwrap();
         let (repo_s, wt_s) = (repo.to_str().unwrap(), wt.to_str().unwrap());
         // Only a worktree git lists goes: never the checkout itself or a folder in it.
-        assert!(remove_worktree(repo_s, repo.join("sub").to_str().unwrap(), None).is_err());
-        assert!(remove_worktree(repo_s, repo_s, None).is_err());
+        assert!(remove_worktree(repo_s, repo.join("sub").to_str().unwrap(), &trash).is_err());
+        assert!(remove_worktree(repo_s, repo_s, &trash).is_err());
         assert!(repo.join("sub").is_dir());
-        remove_worktree(repo_s, wt_s, None).unwrap();
+        let at = remove_worktree(repo_s, wt_s, &trash).unwrap();
+        assert!(!wt.exists() && Path::new(&at).join("ro.txt").is_file());
+        purge(&trash, Duration::ZERO);
         assert!(outside.join("keep.txt").is_file() && outside.join("deep/keep.txt").is_file(), "a junction's target was emptied");
-        assert!(!wt.exists());
+        assert!(!Path::new(&at).exists());
         assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t"));
         fs::remove_dir_all(dir).unwrap();
     }
@@ -279,7 +295,7 @@ mod tests {
     fn a_redirected_worktree_path_is_never_what_goes() {
         let dir = std::env::temp_dir().join(format!("loom-remove-redirected-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let (repo, wt, outside) = (dir.join("repo"), dir.join("wt"), dir.join("outside"));
+        let (repo, wt, outside, trash) = (dir.join("repo"), dir.join("wt"), dir.join("outside"), dir.join("trash"));
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("keep.txt"), "keep").unwrap();
         fs::create_dir_all(&repo).unwrap();
@@ -290,7 +306,7 @@ mod tests {
         // Moved aside, and a junction to another folder put in its place: git still lists the path.
         fs::rename(&wt, dir.join("wt-aside")).unwrap();
         junction(&wt, &outside);
-        assert!(remove_worktree(repo_s, wt.to_str().unwrap(), None).is_err());
+        assert!(remove_worktree(repo_s, wt.to_str().unwrap(), &trash).is_err());
         assert!(outside.join("keep.txt").is_file(), "the junction's target was deleted");
         assert!(dir.join("wt-aside").join(".git").is_file());
         // An ancestor redirected: the folder now at the worktree's path is someone else's.
@@ -301,16 +317,16 @@ mod tests {
         fs::create_dir_all(other.join("wt2")).unwrap();
         fs::write(other.join("wt2").join("keep.txt"), "keep").unwrap();
         junction(&anc, &other);
-        assert!(remove_worktree(repo_s, wt2.to_str().unwrap(), None).is_err());
+        assert!(remove_worktree(repo_s, wt2.to_str().unwrap(), &trash).is_err());
         assert!(other.join("wt2").join("keep.txt").is_file(), "an unrelated folder behind a redirected parent was deleted");
         // A junction to the moved worktree itself: git's links check out, the link still isn't the folder.
         fs::remove_dir(&wt).unwrap();
         junction(&wt, &dir.join("wt-aside"));
-        assert!(remove_worktree(repo_s, wt.to_str().unwrap(), None).is_err());
+        assert!(remove_worktree(repo_s, wt.to_str().unwrap(), &trash).is_err());
         assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"), "git's record of a worktree that still exists went");
         // Already gone: only git's record of it goes.
         fs::remove_dir(&wt).unwrap();
-        remove_worktree(repo_s, wt.to_str().unwrap(), None).unwrap();
+        assert_eq!(remove_worktree(repo_s, wt.to_str().unwrap(), &trash).unwrap(), "");
         assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"));
         assert!(dir.join("wt-aside").join(".git").is_file());
         fs::remove_dir_all(dir).unwrap(); // removes the junctions, not their targets
@@ -320,7 +336,7 @@ mod tests {
     fn a_worktree_holding_another_checkout_stays() {
         let dir = std::env::temp_dir().join(format!("loom-remove-nested-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let (repo, outer) = (dir.join("repo"), dir.join("outer"));
+        let (repo, outer, trash) = (dir.join("repo"), dir.join("outer"), dir.join("trash"));
         let inner = outer.join("nested");
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
@@ -330,7 +346,7 @@ mod tests {
         fs::write(inner.join("work.txt"), "unsaved").unwrap();
         git(&repo, &["worktree", "lock", inner.to_str().unwrap()]);
         let repo_s = repo.to_str().unwrap();
-        assert!(remove_worktree(repo_s, outer.to_str().unwrap(), None).is_err(), "a worktree inside went with it");
+        assert!(remove_worktree(repo_s, outer.to_str().unwrap(), &trash).is_err(), "a worktree inside went with it");
         assert!(inner.join("work.txt").is_file());
         assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/inner"));
         // Another repository's checkout, which this repository's worktree list never shows.
@@ -339,47 +355,52 @@ mod tests {
         git(&repo, &["worktree", "remove", inner.to_str().unwrap()]);
         fs::create_dir_all(outer.join("vendor/lib")).unwrap();
         git(&outer.join("vendor/lib"), &["init", "-q"]);
-        assert!(remove_worktree(repo_s, outer.to_str().unwrap(), None).is_err(), "another repository inside went with it");
+        assert!(remove_worktree(repo_s, outer.to_str().unwrap(), &trash).is_err(), "another repository inside went with it");
         assert!(outer.join("vendor/lib/.git").is_dir());
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn deletion_rechecks_what_was_approved_where_it_deletes() {
-        let dir = std::env::temp_dir().join(format!("loom-remove-approved-{}", std::process::id()));
+    fn a_deleted_worktree_waits_in_the_trash_until_purged() {
+        let dir = std::env::temp_dir().join(format!("loom-remove-trash-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let (repo, wt) = (dir.join("repo"), dir.join("wt"));
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
         git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
-        fs::write(wt.join("a.txt"), "approved").unwrap();
+        fs::write(wt.join("a.txt"), "work").unwrap();
         let (repo_s, wt_s) = (repo.to_str().unwrap(), wt.to_str().unwrap());
-        let approve = || {
-            let index = wt.join(git(&wt, &["rev-parse", "--git-path", "index"]).trim());
-            let hashed = vec!["a.txt".to_string()];
-            Approval { fingerprint: fingerprint(&wt, Some(&index), &hashed).unwrap(), hashed }
-        };
-        let approved = approve();
-        // Written after the approval, by an editor or a dev server.
-        fs::write(wt.join("new.txt"), "unsaved").unwrap();
-        assert!(remove_worktree(repo_s, wt_s, Some(&approved)).is_err(), "deleted what nobody approved");
-        assert!(wt.join("new.txt").is_file());
-        fs::remove_file(wt.join("new.txt")).unwrap();
-        let approved = approve();
-        // Something still holds a file open in it: nothing can be claimed, nothing goes.
+        let listed = |branch: &str| git(&repo, &["worktree", "list", "--porcelain"]).contains(&format!("refs/heads/{branch}\n"));
+        let records = || fs::read_dir(&trash).unwrap().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).map(|e| e.path()).collect::<Vec<_>>();
+        // Something still holds a file open in it: it can't move, nothing goes.
         let open = fs::File::open(wt.join("a.txt")).unwrap();
-        assert!(remove_worktree(repo_s, wt_s, Some(&approved)).is_err());
-        assert!(wt.join("a.txt").is_file() && !dir.join(".wt.loom-deleting").exists());
+        assert!(remove_worktree(repo_s, wt_s, &trash).is_err());
+        assert!(wt.join("a.txt").is_file() && listed("t") && records().is_empty());
         drop(open);
-        // A claim an earlier deletion couldn't put back: git's record stays with it.
-        fs::rename(&wt, dir.join(".wt.loom-deleting")).unwrap();
-        assert!(remove_worktree(repo_s, wt_s, Some(&approved)).is_err());
-        assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"));
-        fs::rename(dir.join(".wt.loom-deleting"), &wt).unwrap();
-        remove_worktree(repo_s, wt_s, Some(&approved)).unwrap();
-        assert!(!wt.exists() && !dir.join(".wt.loom-deleting").exists());
-        assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"));
+        let at = PathBuf::from(remove_worktree(repo_s, wt_s, &trash).unwrap());
+        assert!(!wt.exists() && at.starts_with(&trash) && at.join("a.txt").is_file() && !listed("t"));
+        // Undone by hand as its record says: git has it back, and a purge leaves it be.
+        let [record] = &records()[..] else { panic!("one record") };
+        let r: Trashed = serde_json::from_slice(&fs::read(record).unwrap()).unwrap();
+        assert_eq!((r.folder.as_path(), r.at.as_path()), (wt.as_path(), at.as_path()));
+        fs::rename(&r.at, &r.folder).unwrap();
+        fs::rename(&r.entry_at, &r.entry).unwrap();
+        assert!(listed("t") && git(&wt, &["status", "--porcelain"]).contains("a.txt"));
+        purge(&trash, Duration::ZERO);
+        assert!(wt.join("a.txt").is_file() && records().is_empty(), "a worktree put back was purged");
+        // Deleted again: kept for a day, then erased with git's record of it.
+        let at = PathBuf::from(remove_worktree(repo_s, wt_s, &trash).unwrap());
+        purge(&trash, KEEP);
+        assert!(at.join("a.txt").is_file());
+        purge(&trash, Duration::ZERO);
+        assert!(!at.exists() && records().is_empty() && fs::read_dir(repo.join(".git").join("loom-trash")).unwrap().count() == 0);
+        // An older Loom stopped after claiming one, git's record still naming its path: it goes the same way.
+        let wt2 = dir.join("wt2");
+        git(&repo, &["worktree", "add", "-q", "-b", "t2", wt2.to_str().unwrap()]);
+        fs::rename(&wt2, dir.join(".wt2.loom-deleting")).unwrap();
+        let at = PathBuf::from(remove_worktree(repo_s, wt2.to_str().unwrap(), &trash).unwrap());
+        assert!(!dir.join(".wt2.loom-deleting").exists() && at.join(".git").is_file() && !listed("t2"));
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -387,7 +408,7 @@ mod tests {
     fn a_parent_redirected_to_another_worktree_never_takes_it() {
         let dir = std::env::temp_dir().join(format!("loom-remove-sibling-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let (repo, a, b) = (dir.join("repo"), dir.join("A"), dir.join("B"));
+        let (repo, a, b, trash) = (dir.join("repo"), dir.join("A"), dir.join("B"), dir.join("trash"));
         fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q"]);
         git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
@@ -397,10 +418,53 @@ mod tests {
         // A's folder moved aside, and a junction to B put where A was: A's thread now reaches B.
         fs::rename(&a, dir.join("A-aside")).unwrap();
         junction(&a, &b);
-        assert!(remove_worktree(repo.to_str().unwrap(), a.join("wt").to_str().unwrap(), None).is_err(), "B's worktree went for A's");
-        assert!(b.join("wt").join("unsaved.txt").is_file());
+        assert!(remove_worktree(repo.to_str().unwrap(), a.join("wt").to_str().unwrap(), &trash).is_err(), "B's worktree went for A's");
+        assert!(b.join("wt").join("unsaved.txt").is_file() && !trash.exists());
         assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/tb\n"));
         fs::remove_dir(&a).unwrap();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_file_written_after_the_checks_is_never_destroyed() {
+        let dir = std::env::temp_dir().join(format!("loom-remove-writer-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        fs::write(wt.join("marker.txt"), "").unwrap();
+        // Enough built output that checking it takes a while.
+        fs::create_dir(wt.join("target")).unwrap();
+        for i in 0..5_000 { fs::write(wt.join("target").join(i.to_string()), "").unwrap(); }
+        // A writer that follows the folder wherever it's moved, and writes there.
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (dir, wt, trash, done) = (dir.clone(), wt.clone(), trash.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut wrote = Vec::new();
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_secs(20) && !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let moved = [&dir, &trash].into_iter().flat_map(fs::read_dir).flatten().flatten().map(|e| e.path())
+                        .find(|p| *p != wt && p.join("marker.txt").is_file());
+                    if let Some(moved) = moved {
+                        let late = moved.join(format!("late-{}.txt", wrote.len()));
+                        if fs::write(&late, "written after the checks").is_ok() { wrote.push(late); }
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                wrote
+            })
+        };
+        let removed = remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash);
+        std::thread::sleep(Duration::from_millis(100));
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        let wrote = writer.join().unwrap();
+        assert!(!wrote.is_empty(), "the writer never found the folder");
+        let lost: Vec<_> = wrote.iter().filter(|p| !p.is_file()).collect();
+        assert!(lost.is_empty(), "{} of {} files written after the checks were destroyed", lost.len(), wrote.len());
+        assert!(removed.is_ok(), "{removed:?}");
         fs::remove_dir_all(dir).unwrap();
     }
 

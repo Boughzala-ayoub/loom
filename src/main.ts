@@ -5251,7 +5251,7 @@ function riskText(inv: Inventory | null, th: Thread): string {
   return lines.length ? `\n${lines.join("\n")}\n` : "";
 }
 
-/** Which of two inventories' parts differ, for the message that says why a folder was kept. */
+/** Which of two inventories' parts differ, for the message that says why nothing was closed. */
 const inventoryDiff = (was: Inventory, now: Inventory) =>
   (["head", "tracked", "untracked", "ignored", "commits", "fingerprint"] as const).filter((k) => JSON.stringify(was[k]) !== JSON.stringify(now[k]))
     .map((k) => (k === "fingerprint" ? "file or index contents" : k === "head" ? "a new commit" : k === "commits" ? "the branch's own commits" : `its ${k} files`)).join(", ");
@@ -5266,22 +5266,21 @@ const inventoryDiff = (was: Inventory, now: Inventory) =>
 const closingThreads = new WeakSet<Thread>();
 
 /** `removed` once the thread is out of Loom. Then, for a worktree being
- * deleted, what became of its folder and branch: `kept` on purpose, `failed`
- * when git refused, with `error` saying which and why (the window shows it). */
-type Removal = { removed: boolean; error?: string; worktree?: "removed" | "kept" | "failed"; branch?: "deleted" | "kept" | "failed" };
+ * deleted, what became of its folder and branch: `removed` into Loom's
+ * `trash`, or `failed`, with `error` saying which and why (the window shows it). */
+type Removal = { removed: boolean; error?: string; worktree?: "removed" | "failed"; branch?: "deleted" | "kept" | "failed"; trash?: string };
 
-/** `approved`: what loomctl checked deleting would lose, so there is no
- * dialog; null for --force or a plain close. Without it the dialog asks,
- * showing what would be lost, and nothing goes unless that still holds when
- * you answer. Either way the folder is read once more after its panes close,
- * since they write until they're gone, and kept if it changed. */
-async function removeThread(th: Thread, mode: "close" | "worktree" | "all", approved?: Inventory | null): Promise<Removal> {
+/** `ask`: false when loomctl already checked what deleting loses, so there is
+ * no dialog. Otherwise the dialog asks, showing what would be lost, and
+ * nothing closes unless that still holds when you answer. The folder goes to
+ * Loom's trash for a day (deletion.rs), with whatever its panes wrote as they
+ * closed: what the dialog showed is a summary, not a lock on the folder. */
+async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask = true): Promise<Removal> {
   if (closingThreads.has(th) || !threads.includes(th)) return { removed: false, error: `${th.name} is already closing or closed.` };
   closingThreads.add(th);
   try {
     const deleting = mode !== "close" && th.isWorktree;
-    let expected = approved ?? null;
-    if (approved === undefined) {
+    if (ask) {
       let why = "";
       const seen = deleting ? await inventory(th, mode === "all").catch((e) => ((why = `: ${String(e)}`), null)) : null;
       if (deleting && !seen) {
@@ -5294,8 +5293,8 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
         mode === "close"
           ? `Close ${th.name}?`
           : mode === "worktree"
-            ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept.`
-            : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost.`;
+            ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept. The folder waits in Loom's trash for a day.`
+            : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost. The folder waits in Loom's trash for a day.`;
       if (th.panes.length || mode !== "close") {
         if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return { removed: false };
       }
@@ -5306,7 +5305,6 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
         toast(error);
         return { removed: false, error };
       }
-      expected = seen;
     }
     const i = threads.indexOf(th);
     if (i === -1) return { removed: false, error: `${th.name} is already closed.` };
@@ -5319,25 +5317,14 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
     if (!deleting) return { removed: true };
     const branch = mode === "all" && th.branch ? "kept" : undefined;
     const partial = (r: Removal & { error: string }) => (toast(`Closed ${th.name}, but ${r.error}`), r);
-    if (expected) {
-      const now = await inventory(th, mode === "all", expected.discard).catch(() => null);
-      if (!now || inventoryDiff(expected, now)) {
-        return partial({ removed: true, worktree: "kept", branch, error: `kept its worktree folder${branch ? " and branch" : ""}: ${now ? `${inventoryDiff(expected, now)} changed while its panes closed` : "its status couldn't be read once its panes closed"}.` });
-      }
-    }
+    let trash = "";
     try {
       // The killed panes' processes take a beat to die, and Windows refuses to
-      // delete a folder that is still some process's cwd — retry a few times.
+      // move a folder that is still some process's cwd — retry a few times.
       for (let n = 0; ; n++) {
         try {
-          // A failed attempt may have deleted part of the tree, which changes it too.
-          if (n > 0 && expected && inventoryDiff(expected, await inventory(th, mode === "all", expected.discard))) {
-            return partial({ removed: true, worktree: "failed", branch, error: `couldn't remove its worktree folder, which changed during deletion retries and may be partly deleted${branch ? ", so its branch was kept" : ""}.` });
-          }
           // Not `git worktree remove`: it follows junctions and empties their targets.
-          // The approval goes along: the folder must still match it where it's deleted.
-          const approved = expected && { fingerprint: expected.fingerprint, hashed: hashedFiles(expected, expected.discard) };
-          await invoke("worktree_remove", { repo: th.repo, dir: th.dir, approved });
+          trash = await invoke<string>("worktree_remove", { repo: th.repo, dir: th.dir });
           break;
         } catch (e) {
           if (n === 10) throw e;
@@ -5345,16 +5332,17 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
         }
       }
     } catch (e) {
-      return partial({ removed: true, worktree: "failed", branch, error: `couldn't remove its worktree folder, which may be partly deleted${branch ? ", so its branch was kept" : ""}: ${String(e)}` });
+      return partial({ removed: true, worktree: "failed", branch, error: `couldn't move its worktree folder to Loom's trash${branch ? ", so its branch was kept" : ""}: ${String(e)}` });
     }
     if (branch) {
       try {
         await git(th.repo, "branch", "-D", th.branch);
       } catch (e) {
-        return partial({ removed: true, worktree: "removed", branch: "failed", error: `removed its worktree folder and couldn't delete the branch ${th.branch}: ${String(e)}` });
+        return partial({ removed: true, worktree: "removed", branch: "failed", trash, error: `moved its worktree folder to Loom's trash and couldn't delete the branch ${th.branch}: ${String(e)}` });
       }
     }
-    return { removed: true, worktree: "removed", branch: branch && "deleted" };
+    if (trash) toast(`Deleted ${th.name}'s worktree folder. It waits in Loom's trash for a day: ${trash}`);
+    return { removed: true, worktree: "removed", branch: branch && "deleted", trash };
   } finally {
     closingThreads.delete(th);
   }
@@ -8557,7 +8545,7 @@ const CLI: Record<string, CliCommand> = {
   },
   "close-thread": {
     usage: "close-thread <thread> --yes [--delete worktree|branch] [--plan REV] [--discard LIST] [--force]",
-    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Deleting refuses while it would lose anything --discard doesn't name: tracked, untracked, ignored (files git ignores, like .env or node_modules) and commits, comma-separated, or all. --plan REV (from close-plan) refuses before closing anything if the thread, its panes or its file or index contents changed since. The check reads changed and untracked files whole, except what --discard gives up, and everything else by size and time, never through a link; it refuses a tree it can't finish. --force is --discard all.",
+    help: "Close a thread and its panes. --delete worktree moves its folder to Loom's trash, erased after a day; --delete branch deletes the branch too. Deleting refuses while it would lose anything --discard doesn't name: tracked, untracked, ignored (files git ignores, like .env or node_modules) and commits, comma-separated, or all. --plan REV (from close-plan) refuses before closing anything if the thread, its panes or its file or index contents changed since. The check reads changed and untracked files whole, except what --discard gives up, and everything else by size and time, never through a link; it refuses a tree it can't finish. --force is --discard all.",
     options: { yes: "bool", delete: "string", force: "bool", plan: "string", discard: "string" },
     run: async (a) => {
       const th = cliThread(cliWord(a, 0, "a thread"));
@@ -8582,11 +8570,12 @@ const CLI: Record<string, CliCommand> = {
         }
       }
       const name = th.name;
-      const result = await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", force ? null : plan?.inv ?? null);
+      const result = await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", false);
       if (!result.removed) throw new Error(result.error ?? `${name} wasn't closed.`);
       const steps = { panes: "closed", worktree: result.worktree ?? null, branch: result.branch ?? null };
-      if (result.error) throw new CliError(`Closed ${name} and stopped its panes, but ${result.error}`, { closed: th.id, steps });
-      return { data: { closed: th.id, steps }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
+      const trash = result.trash || null;
+      if (result.error) throw new CliError(`Closed ${name} and stopped its panes, but ${result.error}`, { closed: th.id, steps, trash });
+      return { data: { closed: th.id, steps, trash }, text: `Closed ${name}${trash ? `. Its folder waits in Loom's trash for a day: ${trash}` : ""}`, note: `loomctl closed ${name}` };
     },
   },
   theme: {
