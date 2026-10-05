@@ -500,3 +500,18 @@ if (check(301)) {
   assert.notEqual(lastFixture.inventoryDiff(before, after), "", "same paths with new contents must invalidate deletion approval");
   console.log("ok   F4 deletion approval detects new contents at an already-listed path");
 }
+
+if (check(302)) {
+  const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
+  const p = { id: "p", th, agent: "codex", sessionId: "selected", generation: 1, providerUsage: null } as any;
+  th.panes.push(p);
+  const pending: ((v: unknown) => void)[] = [];
+  fixture({ threads: [th], invoke: () => new Promise(r => pending.push(r)) });
+  await lastFixture.pollProviderUsage();
+  await lastFixture.pollProviderUsage();
+  assert.equal(pending.length, 1, "N3: a caller timeout must not release the native in-flight guard");
+  pending[0]({ p: { sid: "selected", model: "late-current" } });
+  await new Promise(r => setTimeout(r, 0));
+  assert.equal(p.providerUsage?.model, "late-current", "N3: late native results still refresh the matching launch");
+  console.log("ok   N3 bounded waits retain one native scan and apply late readings");
+}

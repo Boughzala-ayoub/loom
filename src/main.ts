@@ -7433,13 +7433,8 @@ async function pollProviderUsage(panes = threads.flatMap((t) => t.panes)) {
     else fresh.push(snap);
   }
   if (fresh.length) {
-    let timer: ReturnType<typeof setTimeout>;
     const promise = (async () => {
-      const got = await Promise.race([
-        invoke<Record<string, Usage>>("codex_session_usage", { panes: fresh.map(({ p, sid }) => [p.id, sid]) }).catch(() => ({} as Record<string, Usage>)),
-        new Promise<Record<string, Usage>>((resolve) => { timer = setTimeout(() => resolve({}), 2000); }),
-      ]);
-      clearTimeout(timer!);
+      const got = await invoke<Record<string, Usage>>("codex_session_usage", { panes: fresh.map(({ p, sid }) => [p.id, sid]) }).catch(() => ({} as Record<string, Usage>));
       for (const { p, sid, gen } of fresh) {
         if (!gone(p) && p.generation === gen && p.sessionId === sid && got[p.id]?.sid === sid) p.providerUsage = got[p.id];
       }
@@ -7449,7 +7444,12 @@ async function pollProviderUsage(panes = threads.flatMap((t) => t.panes)) {
       for (const { p } of fresh) if (providerPolls.get(p)?.promise === promise) providerPolls.delete(p);
     }));
   }
-  await Promise.all(waiting);
+  // Bound each caller's wait, not the native operation or its result handler.
+  await Promise.all(waiting.map(async promise => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([promise, new Promise<void>(resolve => { timer = setTimeout(resolve, 2000); })]); }
+    finally { clearTimeout(timer); }
+  }));
 }
 
 /** A pane's state in one word, the Overview's words. */
