@@ -1166,23 +1166,30 @@ fn recent_messages(path: &std::path::Path, provider: &str) -> LastMessages {
     let mut last = LastMessages::default();
     let Ok(mut file) = std::fs::File::open(path) else { return last };
     let Ok(mut end) = file.metadata().map(|m| m.len()) else { return last };
-    let mut reversed = Vec::new();
-    while end > 0 && (last.user.is_empty() || last.agent.is_empty()) {
-        let start = end.saturating_sub(64 * 1024);
+    // ponytail: 8 MiB back from the end, and lines over 256 KiB (tool output)
+    // skipped unbuffered. A turn longer than that leaves a field empty, and the
+    // Overview keeps the one it had.
+    let floor = end.saturating_sub(8 * 1024 * 1024);
+    let (mut reversed, mut skipping) = (Vec::new(), false);
+    while end > floor && (last.user.is_empty() || last.agent.is_empty()) {
+        let start = end.saturating_sub(64 * 1024).max(floor);
         let mut chunk = vec![0; (end - start) as usize];
         if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut chunk).is_err() { break; }
         for byte in chunk.into_iter().rev() {
             if byte == b'\n' {
-                if reversed.is_empty() { continue; }
+                if std::mem::take(&mut skipping) || reversed.is_empty() { continue; }
                 reversed.reverse();
                 if let Ok(v) = serde_json::from_slice(&reversed) { collect_message(&mut last, provider, &v); }
                 reversed.clear();
                 if !last.user.is_empty() && !last.agent.is_empty() { break; }
+            } else if skipping {
+            } else if reversed.len() >= 256 * 1024 {
+                (reversed, skipping) = (Vec::new(), true);
             } else { reversed.push(byte); }
         }
         end = start;
     }
-    if end == 0 && !reversed.is_empty() && (last.user.is_empty() || last.agent.is_empty()) {
+    if end == 0 && !skipping && !reversed.is_empty() && (last.user.is_empty() || last.agent.is_empty()) {
         reversed.reverse();
         if let Ok(v) = serde_json::from_slice(&reversed) { collect_message(&mut last, provider, &v); }
     }
@@ -2032,6 +2039,12 @@ mod tests {
         assert_eq!(super::recent_messages(&codex, "codex"), super::LastMessages {
             user: "New request".into(), agent: "Working on it".into(),
         });
+        // A long turn's tool output: lines over 256 KiB skipped, and nothing past 8 MiB read.
+        let big = |n: usize| format!("{}\n", serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","output":"x".repeat(n)}}));
+        std::fs::write(&codex, format!("{}{}", std::fs::read_to_string(&codex).unwrap(), big(400_000))).unwrap();
+        assert_eq!(super::recent_messages(&codex, "codex").agent, "Working on it");
+        std::fs::write(&codex, format!("{}{}", std::fs::read_to_string(&codex).unwrap(), big(100_000).repeat(90))).unwrap();
+        assert_eq!(super::recent_messages(&codex, "codex"), super::LastMessages::default(), "bounded at 8 MiB");
 
         let export = serde_json::json!({"messages":[
             {"info":{"role":"user"},"parts":[{"type":"text","text":"Review this"}]},

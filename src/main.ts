@@ -3128,7 +3128,9 @@ async function refreshDashboardMessages(force = false) {
       });
       for (const { p, session, input, busy, waiting, dead } of batch) {
         if (dashboardSession(p) !== session) continue;
-        dashboardMessages.set(p.id, { session, input, busy, waiting, dead, user: got[p.id]?.user || "", agent: got[p.id]?.agent || "" });
+        // A field left empty (a turn's tool output past what native reads back) keeps this session's last one.
+        const was = dashboardMessages.get(p.id)?.session === session ? dashboardMessages.get(p.id) : undefined;
+        dashboardMessages.set(p.id, { session, input, busy, waiting, dead, user: got[p.id]?.user || was?.user || "", agent: got[p.id]?.agent || was?.agent || "" });
       }
       dashboardSignature = "";
       if (dashboardOpen) renderDashboard();
