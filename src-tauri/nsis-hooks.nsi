@@ -46,8 +46,9 @@ Var LoomStuck
 !macroend
 
 ; Old images are deleted once nothing holds them: here and once both new
-; executables are in. `old` gets the image kept, or "" when none is. `id`
-; keeps each insertion's labels its own.
+; executables are in. `old` gets the image kept, or "" when there was none.
+; One that can't be kept fails the install: written over in place, it would
+; leave nothing to put back. `id` keeps each insertion's labels its own.
 !macro LoomMoveAside path old id
   StrCpy ${old} ""
   Delete "${path}.*.old"
@@ -56,19 +57,14 @@ Var LoomStuck
   ClearErrors
   Rename "${path}" "${path}.$R9.old"
   IfErrors 0 loom_aside_moved_${id}
-    DetailPrint "Couldn't move ${path} aside; the install writes over it in place."
-    Goto loom_aside_done_${id}
+    Abort "Couldn't move ${path} aside to keep it. Close what uses it and run the installer again."
   loom_aside_moved_${id}:
-  ClearErrors
-  CopyFiles /SILENT "${path}.$R9.old" "${path}"
-  IfErrors 0 loom_aside_copied_${id}
-    ; No copy to write over: the original goes back, and the install writes over it in place.
-    Delete "${path}"
-    Rename "${path}.$R9.old" "${path}"
-    DetailPrint "Couldn't copy ${path}; the install writes over it in place."
-    Goto loom_aside_done_${id}
-  loom_aside_copied_${id}:
+  ; Kept from here: a failed install puts it back (.onInstFailed).
   StrCpy ${old} "${path}.$R9.old"
+  ClearErrors
+  CopyFiles /SILENT "${old}" "${path}"
+  IfErrors 0 loom_aside_done_${id}
+    Abort "Couldn't copy ${path} back beside the one kept."
   loom_aside_done_${id}:
 !macroend
 
@@ -102,20 +98,21 @@ Function .onInstFailed
 FunctionEnd
 
 ; loomctl.exe controls a running Loom from a terminal (src/bin/loomctl.rs). The
-; template writes it beside loom.exe, and a write the user told it to ignore
-; leaves the old one: it goes in once more, without that prompt, and if that
-; fails too the install fails and the previous pair goes back. The macro
-; expands after the template defines MAINBINARYSRCPATH, so its folder is known
-; here at compile time.
+; template writes it beside loom.exe, and a write of either that the user told
+; it to ignore leaves the old one: both go in once more, without that prompt,
+; and if either fails the install fails and the previous pair goes back.
+; (makensis stores each executable's data once.) The macro expands after the
+; template defines MAINBINARYSRCPATH, so its folder is known here at compile time.
 !macro NSIS_HOOK_POSTINSTALL
   !searchreplace LOOMCTL_SRC "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\loomctl.exe"
   SetOutPath "$INSTDIR"
   SetOverwrite try
   ClearErrors
+  File "/oname=${MAINBINARYNAME}.exe" "${MAINBINARYSRCPATH}"
   File "/oname=loomctl.exe" "${LOOMCTL_SRC}"
   SetOverwrite on
   IfErrors 0 loom_pair_in
-    Abort "Couldn't write $LoomCtl."
+    Abort "Couldn't write $LoomMain and $LoomCtl as a pair."
   loom_pair_in:
   ; Both are in: the images kept to put them back go.
   StrCpy $LoomMainOld ""
