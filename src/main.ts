@@ -3816,9 +3816,22 @@ function journal(lines: object[], ids: string[]): Promise<void> {
     const body = covered || whole ? reserving : lines;
     if (covered && !body.length) return;
     const seenCalls = journalCalls, seenSeq = taskSeq;
-    const kept = typedTasks();
-    const oldest = Math.min(...kept.flatMap((t) => t.events.map((e) => e.seq)), taskSeq + 1);
-    const text = (whole ? writeJournal(kept, taskSeq, taskPruned, keptNotify(notifyHistory, oldest)) : "") + body.map((l) => JSON.stringify(l)).join("\n") + "\n";
+    // A write that fails before reaching disk is a failed write too: the next is whole.
+    const failed = (e: unknown) => {
+      journalDirty = true;
+      ids.forEach((id) => unsaved.add(id));
+      throw e;
+    };
+    let text: string;
+    try {
+      let oldest = taskSeq + 1;
+      const kept = whole ? typedTasks() : [];
+      // A loop, not Math.min(...): a long history's numbers overflow an argument list.
+      for (const t of kept) for (const e of t.events) if (e.seq < oldest) oldest = e.seq;
+      text = (whole ? writeJournal(kept, taskSeq, taskPruned, keptNotify(notifyHistory, oldest)) : "") + body.map((l) => JSON.stringify(l)).join("\n") + "\n";
+    } catch (e) {
+      return failed(e);
+    }
     return invoke("task_journal_write", { text, append: !whole }).then(
       () => {
         writtenSeq = Math.max(writtenSeq, whole ? seenSeq : upTo);
@@ -3830,11 +3843,7 @@ function journal(lines: object[], ids: string[]): Promise<void> {
         }
         taskEventGate.notify();
       },
-      (e) => {
-        journalDirty = true;
-        ids.forEach((id) => unsaved.add(id));
-        throw e;
-      },
+      failed,
     );
   });
   const settled = write.finally(() => {

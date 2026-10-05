@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|malformed-journal|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -75,6 +75,43 @@ if (!process.env.TASK_REVIEW || ['pruned-owner', 'all'].includes(process.env.TAS
   }
   console.log('ok   Captured v2/v3 watches preserve held, muted and explicitly released owners across pruning');
   if (process.env.TASK_REVIEW === 'pruned-owner') process.exit(0);
+}
+// Review F12: a task with a long history, and a line that can't be written. The production journal().
+if (!process.env.TASK_REVIEW || ['journal-history', 'all'].includes(process.env.TASK_REVIEW)) {
+  const ts = await import('typescript');
+  const { createContext, runInContext } = await import('node:vm');
+  const taskModel = await import('../src/task.ts');
+  const source = ts.createSourceFile('main.ts', readFileSync('src/main.ts', 'utf8'), ts.ScriptTarget.Latest, true);
+  const pieces = [];
+  for (const node of source.statements) {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'journal') pieces.push(node.getText(source));
+    if (ts.isVariableStatement(node)) for (const decl of node.declarationList.declarations)
+      if (decl.name.getText(source) === 'typedTasks') pieces.push(`const ${decl.getText(source)};`);
+  }
+  const code = ts.transpileModule(pieces.join('\n') + '\nglobalThis.fixture = { journal };', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const events = Array.from({ length: 500_000 }, (_, i) => ({ seq: i + 1, task: 'long', at: i, state: 'working', signal: 'report' }));
+  const run = (whole, line) => {
+    const writes = [];
+    const sandbox = createContext({ ...taskModel, console,
+      tasks: new Map([['long', { id: 'long', pane: 'p', state: 'working', events }]]),
+      journalLoaded: true, journalUnreadable: '', journalUnavailable: () => 'unavailable', journalLines: 0, journalCalls: 0, snapshotCalls: 0,
+      taskSeq: events.length, taskPruned: 0, writtenSeq: 0, pendingJournal: new Map(), journalQueue: Promise.resolve(), journalDirty: whole,
+      unsaved: new Set(), notifyHistory: [], taskEventGate: { notify() {} }, invoke: async (cmd, args) => { writes.push(args); },
+    });
+    runInContext(code, sandbox);
+    return { sandbox, writes, done: sandbox.fixture.journal([line], ['long']).then(() => 'written', (e) => String(e)) };
+  };
+  for (const whole of [false, true]) {
+    const { writes, done } = run(whole, { event: events.at(-1), set: {} });
+    assert.equal(await done, 'written', `${whole ? 'a rewrite' : 'an append'} with 500,000 events in history is written`);
+    assert.deepEqual(writes.map((w) => w.append), [!whole]);
+  }
+  // A line that can't be serialized fails the way a refused write does: dirty, unsaved, rewritten next time.
+  const { sandbox, writes, done } = run(false, { event: events.at(-1), set: { size: 1n } });
+  assert.match(await done, /BigInt/);
+  assert.deepEqual([writes.length, sandbox.journalDirty, [...sandbox.unsaved]], [0, true, ['long']]);
+  console.log('ok   A long task history is journaled, and a write that fails before reaching disk is marked unsaved');
+  if (process.env.TASK_REVIEW === 'journal-history') process.exit(0);
 }
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const base = process.env.RESP_BASE || 'http://localhost:4273';
