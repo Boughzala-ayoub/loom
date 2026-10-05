@@ -1632,13 +1632,15 @@ pub fn run() {
         .setup(|app| {
             // Before reset, window construction, or any workspace/journal access.
             let path = state_file(app.handle());
-            match workspace::acquire(&path) {
+            match workspace::acquire_waiting(&path, std::time::Duration::from_secs(2)) {
                 Ok(store) => { app.manage(store); }
                 Err(e) => {
                     use tauri_plugin_dialog::DialogExt;
                     app.dialog().message(format!("Cannot open {} for writing. Another Loom may already own this workspace, or its directory is unavailable. No workspace files were changed.\n\n{e}", path.display()))
                         .title("Workspace unavailable").blocking_show();
-                    return Err(e.into());
+                    // Not Err: Tauri panics on a setup error, and the release build
+                    // aborts into a crash report for what is an ordinary refusal.
+                    std::process::exit(1);
                 }
             }
             // The plugin accepts an absolute filename. Keep geometry beside the

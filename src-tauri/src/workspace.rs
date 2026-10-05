@@ -18,6 +18,17 @@ pub fn acquire(path: &Path) -> std::io::Result<Store> {
     Ok(Store { path, _lease: lease })
 }
 
+/// `acquire`, retried for `wait`: a Loom that is still exiting holds the lease a moment longer.
+pub fn acquire_waiting(path: &Path, wait: std::time::Duration) -> std::io::Result<Store> {
+    let end = std::time::Instant::now() + wait;
+    loop {
+        match acquire(path) {
+            Err(_) if std::time::Instant::now() < end => std::thread::sleep(std::time::Duration::from_millis(100)),
+            lease => return lease,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -37,8 +48,11 @@ mod tests {
         assert!(acquire(&alias.join("work.json")).is_err(), "junction aliases share ownership");
         assert_eq!(crate::pipe::pipe_name(Some(&path.to_string_lossy())), crate::pipe::pipe_name(Some(&alias.join("work.json").to_string_lossy())));
         fs::remove_dir(alias).unwrap();
-        drop(first);
-        drop(acquire(&path).unwrap());
+        // A Loom still exiting: the next one waits for its lease, and gives up on one held for good.
+        assert!(acquire_waiting(&path, std::time::Duration::from_millis(300)).is_err());
+        let exiting = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(300)); drop(first); });
+        drop(acquire_waiting(&path, std::time::Duration::from_secs(5)).unwrap());
+        exiting.join().unwrap();
         fs::remove_file(dir.join("work.tasks.lock")).unwrap();
         fs::remove_dir(dir).unwrap();
     }
