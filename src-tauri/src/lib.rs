@@ -31,12 +31,19 @@ const OPENCODE_PLUGIN: &str = include_str!("loom-opencode.js");
 /// One `pty_write`: the bytes, and where the pane's writer thread reports the result.
 type Input = (String, tauri::async_runtime::Sender<Result<(), String>>);
 
+#[derive(Default)]
+struct Resizes {
+    active: bool,
+    pending: Option<PtySize>,
+}
+
 struct Session {
     // Close the input pipe before ClosePseudoConsole runs in master's Drop.
     // The writer thread holds it weakly, so only a write in progress keeps it open.
     _writer: Arc<Mutex<Box<dyn Write + Send>>>,
     input: std::sync::mpsc::Sender<Input>,
-    master: Box<dyn MasterPty + Send>,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    resizes: Arc<Mutex<Resizes>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
     flow: Arc<output::Flow>,
@@ -402,7 +409,7 @@ fn pty_spawn(
     let previous = ptys.0.lock().unwrap().insert(
         id.clone(),
         Session {
-            master: pair.master,
+            master: Arc::new(Mutex::new(pair.master)), resizes: Arc::default(),
             _writer: writer,
             input,
             killer,
@@ -469,18 +476,36 @@ fn pty_acks(flows: State<output::Flows>, acks: Vec<(u32, usize)>) {
     }
 }
 
-#[tauri::command]
-fn pty_resize(ptys: State<Ptys>, id: String, cols: u16, rows: u16) -> Result<(), String> {
-    let map = ptys.0.lock().unwrap();
-    let s = map.get(&id).ok_or("no such pty")?;
-    s.master
-        .resize(PtySize {
-            rows: rows.max(1),
-            cols: cols.max(1),
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())
+fn resize_pty(ptys: &Ptys, id: &str, cols: u16, rows: u16,
+    mut resize: impl FnMut(&dyn MasterPty, PtySize) -> Result<(), String>) -> Result<(), String> {
+    // ConPTY can stall here. Own this launch's handles, not the registry lock.
+    let (master, resizes) = {
+        let map = ptys.0.lock().unwrap();
+        let s = map.get(id).ok_or("no such pty")?;
+        (s.master.clone(), s.resizes.clone())
+    };
+    {
+        let mut sizes = resizes.lock().unwrap();
+        sizes.pending = Some(PtySize { rows: rows.max(1), cols: cols.max(1), pixel_width: 0, pixel_height: 0 });
+        // Later requests only replace the pending size. They never wait for
+        // the console or occupy another blocked worker behind this resize.
+        if sizes.active { return Ok(()); }
+        sizes.active = true;
+    }
+    loop {
+        let size = {
+            let mut sizes = resizes.lock().unwrap();
+            match sizes.pending.take() {
+                Some(size) => size,
+                None => { sizes.active = false; return Ok(()); }
+            }
+        };
+        let result = resize(master.lock().unwrap().as_ref(), size);
+        if result.is_err() {
+            *resizes.lock().unwrap() = Resizes::default();
+            return result;
+        }
+    }
 }
 
 fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String) -> Result<(), String> {
@@ -1294,6 +1319,12 @@ fn save_state(app: AppHandle, json: String) -> Result<(), String> {
 mod commands {
     use super::*;
 
+    #[tauri::command]
+    pub async fn pty_resize(app: AppHandle, id: String, cols: u16, rows: u16) -> Result<(), String> {
+        blocking(move || resize_pty(&app.state::<Ptys>(), &id, cols, rows,
+            |master, size| master.resize(size).map_err(|e| e.to_string()))).await
+    }
+
     async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         tauri::async_runtime::spawn_blocking(f).await.expect("blocking command panicked")
     }
@@ -1570,7 +1601,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             canonical_directory,
-            commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
+            commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::task_journal_read, commands::task_journal_write,
@@ -1584,6 +1615,58 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stalled_resize_releases_registry_for_input_and_stop() {
+        use super::*;
+        use std::time::Duration;
+        #[derive(Debug)]
+        struct Killer;
+        impl ChildKiller for Killer {
+            fn kill(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> { Box::new(Killer) }
+        }
+        let ptys = Arc::new(Ptys::default());
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let (input, inputs) = std::sync::mpsc::channel();
+        ptys.0.lock().unwrap().insert("pane".into(), Session {
+            master: Arc::new(Mutex::new(pair.master)), resizes: Arc::default(), _writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+            input, killer: Box::new(Killer), pid: None, flow: Arc::default(), _cache_lease: None,
+        });
+        let (entered, entry) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let worker = ptys.clone();
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let applied = sizes.clone();
+        let resize = std::thread::spawn(move || {
+            let mut first = true;
+            resize_pty(&worker, "pane", 90, 25, |_, size| {
+                applied.lock().unwrap().push(size.cols);
+                if first { first = false; entered.send(()).unwrap(); held.recv().unwrap(); }
+                Ok(())
+            })
+        });
+        entry.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (done, completion) = std::sync::mpsc::channel();
+        let worker = ptys.clone();
+        let other = std::thread::spawn(move || {
+            for cols in 100..200 {
+                resize_pty(&worker, "pane", cols, 25, |_, _| Ok(())).unwrap();
+            }
+            let session = worker.0.lock().unwrap().remove("pane").unwrap();
+            let (reply, _) = tauri::async_runtime::channel(1);
+            session.input.send(("input".into(), reply)).unwrap();
+            done.send(()).unwrap();
+            session
+        });
+        let progressed = completion.recv_timeout(Duration::from_millis(500)).is_ok();
+        release.send(()).unwrap();
+        resize.join().unwrap().unwrap();
+        drop(other.join().unwrap());
+        assert!(progressed, "PTY input and stop must proceed while resize is stalled");
+        assert_eq!(inputs.recv().unwrap().0, "input");
+        assert_eq!(*sizes.lock().unwrap(), [90, 199], "only the latest pending size should be applied");
+    }
+
     #[test]
     fn explicit_working_directories_must_exist_and_canonicalize() {
         let dir = std::env::temp_dir();
