@@ -51,6 +51,7 @@
   Delete "$INSTDIR\loomctl.exe.*.old"
   ; What scripts/update.ps1 leaves: its backups and its lock.
   Delete "$INSTDIR\loom-before-update-*.exe"
+  Delete "$INSTDIR\loomctl-before-update-*.exe"
   Delete "$INSTDIR\.update.lock"
   nsExec::Exec `powershell -NoProfile -Command "$$c=[Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path',(($$c -split ';' | Where-Object {$$_ -ne '$INSTDIR'}) -join ';'),'User')"`
 !macroend
