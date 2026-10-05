@@ -53,6 +53,9 @@ struct Session {
     launch: Option<u64>,
     flow: Arc<output::Flow>,
     _cache_lease: Option<std::fs::File>,
+    /// The pane's process tree: closing it (the session dropped, or Loom gone)
+    /// ends whatever the pane started, detached or not.
+    _job: Option<Job>,
 }
 
 impl Session {
@@ -66,6 +69,41 @@ impl Session {
             taskkill(&[pid]);
         }
         let _ = self.killer.kill();
+    }
+}
+
+/// A Job Object that kills its processes when its last handle closes.
+struct Job(windows::Win32::Foundation::HANDLE);
+// SAFETY: a job handle may be used and closed from any thread.
+unsafe impl Send for Job {}
+unsafe impl Sync for Job {}
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe { let _ = windows::Win32::Foundation::CloseHandle(self.0); }
+    }
+}
+
+/// Puts process `pid` in a new kill-on-close job. What it starts from then on
+/// joins too, detached consoles included, unless it asks to break away. ponytail: assigned just after the
+/// spawn, so a child started in that instant stays out; a suspended start
+/// needs a spawn portable-pty doesn't offer.
+fn contain(pid: u32) -> Result<Job, String> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+    unsafe {
+        let job = Job(CreateJobObjectW(None, windows::core::PCWSTR::null()).map_err(|e| e.to_string())?);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        // Breakaway stays possible, for a program that asks for it on purpose.
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of_val(&limits) as u32).map_err(|e| e.to_string())?;
+        let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid).map_err(|e| e.to_string())?;
+        let joined = AssignProcessToJobObject(job.0, process);
+        let _ = CloseHandle(process);
+        joined.map_err(|e| e.to_string())?;
+        Ok(job)
     }
 }
 
@@ -346,6 +384,8 @@ fn pty_spawn(
 
     let killer = child.clone_killer();
     let pid = child.process_id();
+    // First, before the process has long to start anything outside it.
+    let job = pid.and_then(|pid| contain(pid).map_err(|e| eprintln!("pane {id}: no job object, so its detached processes outlive it: {e}")).ok());
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
     // Keystrokes reach the pane through its own thread, in order. A child that
@@ -421,6 +461,7 @@ fn pty_spawn(
             launch,
             flow,
             _cache_lease: cache_lease,
+            _job: job,
         },
     );
     std::thread::spawn(move || {
@@ -1895,7 +1936,7 @@ mod tests {
         let (input, inputs) = std::sync::mpsc::channel();
         ptys.0.lock().unwrap().insert("pane".into(), Session {
             master: Arc::new(Mutex::new(pair.master)), resizes: Arc::default(), _writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
-            input, killer: Box::new(Killer), pid: None, launch: None, flow: Arc::default(), _cache_lease: None,
+            input, killer: Box::new(Killer), pid: None, launch: None, flow: Arc::default(), _cache_lease: None, _job: None,
         });
         let (entered, entry) = std::sync::mpsc::channel();
         let (release, held) = std::sync::mpsc::channel();
@@ -2329,6 +2370,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_pane_job_ends_its_whole_tree() {
+        use windows::Win32::System::JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
+        use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // A shell that starts a child a second in, as an agent starts a server.
+        let mut root = std::process::Command::new("cmd").args(["/d", "/c", "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -Command Start-Sleep -Milliseconds 300 & %SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -Command Start-Sleep 60"])
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+        let job = super::contain(root.id()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3000));
+        #[repr(C)]
+        struct List { head: JOBOBJECT_BASIC_PROCESS_ID_LIST, more: [usize; 15] }
+        let mut list: List = unsafe { std::mem::zeroed() };
+        unsafe { QueryInformationJobObject(Some(job.0), JobObjectBasicProcessIdList, (&mut list as *mut List).cast(), std::mem::size_of::<List>() as u32, None).unwrap() };
+        let pids: Vec<u32> = unsafe { std::slice::from_raw_parts(list.head.ProcessIdList.as_ptr(), list.head.NumberOfProcessIdsInList as usize) }.iter().map(|&p| p as u32).collect();
+        assert!(pids.len() >= 2, "the shell and what it started are in the job: {pids:?}");
+        drop(job);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        for pid in pids {
+            let running = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.is_ok_and(|h| {
+                let mut code = 0;
+                let alive = unsafe { GetExitCodeProcess(h, &mut code) }.is_ok() && code == 259; // STILL_ACTIVE
+                unsafe { let _ = windows::Win32::Foundation::CloseHandle(h); }
+                alive
+            });
+            assert!(!running, "process {pid} outlived its pane's job");
+        }
+        let _ = root.wait();
+    }
     #[test]
     fn walks_through_a_link_loop_end() {
         use std::os::windows::process::CommandExt;
