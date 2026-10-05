@@ -367,6 +367,7 @@ struct CodexReader {
     pending: Vec<u8>,
     oversized: bool,
     usage: Usage,
+    last_used: Option<std::time::Instant>,
 }
 
 fn file_identity(file: &std::fs::File) -> Option<(u64, u64)> {
@@ -405,6 +406,7 @@ impl CodexReader {
             self.offset = first.len() as u64;
             self.usage.sid = sid.into();
         }
+        self.last_used = Some(std::time::Instant::now());
         self.size = meta.len();
         self.modified = modified;
         file.seek(SeekFrom::Start(self.offset)).ok()?;
@@ -458,7 +460,6 @@ pub fn codex_session(path: &Path, sid: &str) -> Option<Usage> {
 
 pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String)>) -> HashMap<String, Usage> {
     let mut cache = state.0.lock().unwrap();
-    cache.retain(|sid, _| panes.iter().any(|(_, wanted)| wanted == sid));
     let mut out = HashMap::new();
     let mut missing = Vec::new();
     for (id, sid) in panes {
@@ -487,6 +488,12 @@ pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String
                 let mut reader = CodexReader::default();
                 if let Some(u) = reader.read(&path, sid) {
                     out.insert(id.clone(), u);
+                    // Scoped queries are not the live-session set. Keep progress
+                    // across them, with a fixed bound and least-recently-read eviction.
+                    if cache.len() >= 128 {
+                        let oldest = cache.iter().min_by_key(|(_, (_, r))| r.last_used).map(|(sid, _)| sid.clone());
+                        if let Some(oldest) = oldest { cache.remove(&oldest); }
+                    }
                     cache.insert(sid.clone(), (path.clone(), reader));
                 }
             }
@@ -1196,6 +1203,34 @@ mod tests {
         server.join().unwrap();
         assert_eq!(plan.plan.retry_after_seconds, Some(7200));
         assert_eq!(serde_json::to_value(plan).unwrap(), serde_json::from_str::<serde_json::Value>(include_str!("../../src/fixtures/codex-detail-cooldown.json")).unwrap());
+    }
+
+    #[test]
+    fn scoped_usage_reads_retain_other_sessions_progress() {
+        use std::io::Write;
+        let root = std::env::temp_dir().join(format!("loom-scoped-read-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let a = "11111111-1111-1111-1111-111111111111";
+        let b = "22222222-2222-2222-2222-222222222222";
+        for sid in [a, b] {
+            let mut file = std::fs::File::create(root.join("sessions").join(format!("rollout-{sid}.jsonl"))).unwrap();
+            writeln!(file, "{}", serde_json::json!({"type":"session_meta","payload":{"id":sid,"source":"cli"}})).unwrap();
+            writeln!(file, "{}", serde_json::json!({"type":"turn_context","payload":{"model":"old"}})).unwrap();
+            if sid == a {
+                file.write_all(b"{\"type\":\"tool\",\"payload\":\"").unwrap();
+                std::io::copy(&mut std::io::Read::take(std::io::repeat(b'x'), 34 * 1024 * 1024), &mut file).unwrap();
+                file.write_all(b"\"}\n").unwrap();
+                writeln!(file, "{}", serde_json::json!({"type":"turn_context","payload":{"model":"current"}})).unwrap();
+            }
+        }
+        let cache = super::CodexScanned::default();
+        let mut model = String::new();
+        for _ in 0..4 {
+            model = super::codex_usage(&cache, &root, vec![("a".into(), a.into())])["a"].model.clone();
+            super::codex_usage(&cache, &root, vec![("b".into(), b.into())]);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(model, "current", "scoped B reads must not reset A's bounded scan");
     }
 
     #[test]
