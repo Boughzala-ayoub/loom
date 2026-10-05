@@ -28,7 +28,7 @@ pub fn statusline() -> i32 {
         // Line 1: the effort env var, since payloads have not always carried
         // effort. usage.rs prefers the payload's effort.level.
         let effort = std::env::var("CLAUDE_EFFORT").unwrap_or_default();
-        let _ = std::fs::write(dir.join(pane), format!("{effort}\n{}", String::from_utf8_lossy(&input)));
+        let _ = std::fs::write(dir.join(marker_name(&pane, launch())), format!("{effort}\n{}", String::from_utf8_lossy(&input)));
     }
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
@@ -51,8 +51,20 @@ pub fn session_start() -> i32 {
     let Some(path) = payload["transcript_path"].as_str().filter(|p| !p.is_empty()) else { return 0 };
     let dir = std::env::temp_dir().join("loom-tx");
     let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join(pane), path);
+    let _ = std::fs::write(dir.join(marker_name(&pane, launch())), path);
     0
+}
+
+/// Which launch of its pane this process is (LOOM_LAUNCH), if Loom said.
+fn launch() -> Option<u64> {
+    std::env::var("LOOM_LAUNCH").ok().and_then(|l| l.parse().ok())
+}
+
+/// What a Claude marker (loom-tx, loom-status) is named: its pane and launch,
+/// so a replaced process's late write is never read as its replacement's, which
+/// reuses the pane id. Loom asks for `<pane>.<launch>` (main.ts claudeMarker).
+pub(crate) fn marker_name(pane: &str, launch: Option<u64>) -> String {
+    launch.map_or_else(|| pane.to_string(), |l| format!("{pane}.{l}"))
 }
 
 /// The statusline command the user configured. Project settings beat user

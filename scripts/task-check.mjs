@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -222,6 +222,8 @@ const setup = () => {
     // What the stopped panes reported as they went (lib.rs pty_shutdown): qa.shutdownEvents, once.
     if (cmd === 'pty_shutdown') return (qa.shutdownEvents ?? []).splice(0);
     if (cmd === 'model_options') return [];
+    // qa.holdUsage: Claude's usage read waits for qa.releaseUsage(usage), given for every pane it named.
+    if (cmd === 'session_usage' && qa.holdUsage) return new Promise((resolve) => { qa.releaseUsage = (u) => { qa.releaseUsage = null; resolve(Object.fromEntries(args.panes.map(([key]) => [key, u]))); }; });
     if (cmd === 'session_usage' || cmd === 'last_messages') return {};
     if (cmd === 'has_session' || cmd === 'pane_booted' || cmd === 'has_codex_session') return true;
     if (cmd === 'git_run') return args.args.includes('--show-toplevel') ? args.dir : args.args[0] === 'rev-parse' ? 'main' : '';
@@ -561,6 +563,20 @@ try {
     await second.release();
     assert.notEqual(await paneState(), 'exited', 'The last launch\'s exit marked the next one dead');
     ok('A launch\'s exit counts before its spawn replies, and an older launch\'s never does');
+  }
+  if (review('claude-launch-usage')) {
+    // A usage read for one launch answers after the pane restarted: its session
+    // is the old process's, and must not become the pane's (review RF7).
+    await resetReview();
+    const sids = () => page.evaluate(() => window.qa.calls.filter((c) => c.cmd === 'save_state').map((c) => JSON.parse(c.args.json).threads[0].panes[0].sid));
+    await qa({ holdUsage: true });
+    await page.waitForFunction(() => window.qa.releaseUsage, null, { timeout: 10000 }); // the 4 s poll asked
+    await qa({ holdUsage: false });
+    assert.equal((await cli('restart', 'work:1', '--yes')).ok, true);
+    await page.evaluate(() => window.qa.releaseUsage({ sid: 'old-launch-session', ctx: 1000, window: 200000, turns: 1 }));
+    await page.waitForTimeout(500);
+    assert.ok(!(await sids()).includes('old-launch-session'), 'A restarted pane took its old launch\'s session');
+    ok('A usage answer for a replaced launch leaves the pane\'s session alone');
   }
   if (review('shutdown-reports')) {
     // A turn ends as Loom closes: its report lands after the first drain, and

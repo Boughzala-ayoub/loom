@@ -1467,6 +1467,9 @@ async function bootSlot(first: boolean): Promise<() => void> {
     bootWaiting.shift()?.();
   };
 }
+/** The name this launch's Claude markers go under (helper.rs `marker_name`):
+ * a replaced launch's transcript and status never read as its replacement's. */
+const claudeMarker = (p: Pane, launch = p.launched) => `${p.id}.${launch}`;
 async function booted(pane: string) {
   for (let i = 0; i < 60; i++) {
     if (await invoke<boolean>("pane_booted", { pane }).catch(() => true)) return;
@@ -2026,7 +2029,7 @@ class Pane {
       this.dead = true;
       this.term.write(`\r\n\x1b[31m${ok}\x1b[0m — Enter retries\r\n`);
     }
-    if (release) void (ok === true ? booted(this.id) : Promise.resolve()).then(release);
+    if (release) void (ok === true ? booted(claudeMarker(this, gen)) : Promise.resolve()).then(release);
     this.paint();
     return ok;
   }
@@ -3135,7 +3138,7 @@ async function refreshDashboardMessages(force = false) {
   const requests = threads.flatMap(t => t.panes).filter(p => p.agent !== "shell" && dashboardSession(p) && !dashboardMessagesBusy.has(p.id))
     // busy: a read in the moment after Enter can miss the new prompt; once the
     // agent is working, it is written. A reply sent from a card is no keystroke.
-    .map(p => ({ p, session: dashboardSession(p), input: p.lastIn, busy: p.busySince, waiting: p.waitingSince, dead: p.dead }))
+    .map(p => ({ p, session: dashboardSession(p), input: p.lastIn, busy: p.busySince, waiting: p.waitingSince, dead: p.dead, key: claudeMarker(p) }))
     .filter(({ p, session, input, busy, waiting, dead }) => {
       const old = dashboardMessages.get(p.id);
       return force || !old || old.session !== session || old.input !== input || old.busy !== busy || old.waiting !== waiting || old.dead !== dead;
@@ -3148,13 +3151,13 @@ async function refreshDashboardMessages(force = false) {
   await Promise.all(batches.filter(b => b.length).map(async batch => {
     try {
       const got = await invoke<Record<string, DashboardMessages>>("last_messages", {
-        panes: batch.map(({ p, session }) => [p.id, opencodeCommand(p.startup) || p.agent, p.th.dir, session]),
+        panes: batch.map(({ p, session, key }) => [key, opencodeCommand(p.startup) || p.agent, p.th.dir, session]),
       });
-      for (const { p, session, input, busy, waiting, dead } of batch) {
+      for (const { p, session, input, busy, waiting, dead, key } of batch) {
         if (gone(p) || dashboardSession(p) !== session) continue; // closed meanwhile: nothing to keep
         // A field left empty (a turn's tool output past what native reads back) keeps this session's last one.
         const was = dashboardMessages.get(p.id)?.session === session ? dashboardMessages.get(p.id) : undefined;
-        dashboardMessages.set(p.id, { session, input, busy, waiting, dead, user: got[p.id]?.user || was?.user || "", agent: got[p.id]?.agent || was?.agent || "" });
+        dashboardMessages.set(p.id, { session, input, busy, waiting, dead, user: got[key]?.user || was?.user || "", agent: got[key]?.agent || was?.agent || "" });
       }
       dashboardSignature = "";
       if (dashboardOpen) renderDashboard();
@@ -6968,7 +6971,7 @@ async function loadProfile(p: Pane) {
   renderMenu(); // the section says it's reading while it reads
   place();
   const got = await invoke<Profile | null>("context_profile", {
-    pane: p.id,
+    pane: claudeMarker(p),
     dir: p.th.dir,
     sid: p.sid,
   }).catch(() => null);
@@ -9095,12 +9098,15 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
     await pollProviderUsage();
     const panes = threads.flatMap((t) => t.panes).filter((p) => p.isClaude);
     if (!panes.length) return;
+    const asked = panes.map((p) => [p, p.launched] as const);
     const got = await invoke<Record<string, Usage>>("session_usage", {
-      panes: panes.map((p) => [p.id, p.th.dir, p.sid]),
+      panes: asked.map(([p, launch]) => [claudeMarker(p, launch), p.th.dir, p.sid]),
     }).catch(() => ({}) as Record<string, Usage>);
     let moved = false;
-    for (const p of panes) {
-      const u = got[p.id] ?? null;
+    for (const [p, launch] of asked) {
+      // Relaunched while this was read: the answer, its session too, is the old process's.
+      if (p.launched !== launch) continue;
+      const u = got[claudeMarker(p, launch)] ?? null;
       // The pane's claude reported a different session than the one it booted
       // with — /clear, or a claude started by hand. Follow it, so the gauge stays
       // on the live conversation and the next launch resumes that one.

@@ -103,7 +103,8 @@ pub fn has_session(dir: String, sid: String) -> bool {
 }
 
 /// Whether the pane's claude is up: its SessionStart hook has written the
-/// loom-tx marker. Pane ids are fresh every launch, so any marker is this boot's.
+/// loom-tx marker. `pane` names the launch too (helper.rs marker_name): a
+/// restart keeps the pane id, and the last launch's marker isn't this one's.
 #[tauri::command]
 pub fn pane_booted(pane: String) -> bool {
     std::env::temp_dir().join("loom-tx").join(pane).is_file()
@@ -295,8 +296,8 @@ pub fn session_usage(
     let home: PathBuf = std::env::var_os("USERPROFILE")
         .map(Into::into)
         .unwrap_or_default();
-    // ponytail: markers are keyed by pane id, which is regenerated every launch,
-    // so dead ones linger. They're a path each, and %TEMP% gets swept anyway —
+    // ponytail: markers are keyed by pane id and launch (helper.rs marker_name),
+    // so dead ones linger until startup prunes them by age (prune_markers):
     // clearing them here would break a second Loom running beside this one.
     let marks = std::env::temp_dir().join("loom-tx");
     let statuses = std::env::temp_dir().join("loom-status");
@@ -1777,6 +1778,12 @@ mod tests {
         // Marker present: follow it instead, trailing newline and all.
         std::fs::write(marks.join("pane1"), format!("{}\r\n", live.display())).unwrap();
         assert_eq!(transcript(&marks, &home, "pane1", r"C:\p", "old"), live);
+
+        // A restart keeps the pane id: the last launch's marker is not this one's.
+        let (last, this) = (crate::helper::marker_name("pane1", Some(7)), crate::helper::marker_name("pane1", Some(8)));
+        std::fs::write(marks.join(&last), live.display().to_string()).unwrap();
+        assert_eq!(transcript(&marks, &home, &this, r"C:\p", "old"), pinned);
+        assert_eq!(transcript(&marks, &home, &last, r"C:\p", "old"), live);
 
         // Marker pointing at something deleted is worse than no marker.
         std::fs::remove_file(&live).unwrap();
