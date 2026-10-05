@@ -239,6 +239,19 @@ const CLAUDE_RETRY = /^[·✢✳*✶✻✽] .*·\s*next try in\s.*·\s*esc to in
 // • esc to interrupt)[ · …]", its clock 5s, 1m 05s or 1h 02m 05s, and cut
 // with "…" when narrow, hint and all. A transcript quote has no clock.
 const CODEX_STATUS = /^\s*(?:\S )?[^\s(][^(]* \(\d+[hms](?: \d+[hms])*(?![\w])/;
+/** Codex draws its status row's "(elapsed" dim. Its transcript can say the same
+ * words, its own "• " in front, but plain: only the cells tell them apart. The
+ * rows nearest the bottom that make up `line` (wrapped ones joined) are read. */
+function codexOwn(line: string, cells?: () => Cell[][]): boolean {
+  const rows = cells?.() ?? [], text = rows.map((r) => r.map((c) => c.ch).join(""));
+  for (let y = rows.length - 1; y >= 0; y--) {
+    let k = y, joined = text[y];
+    while (joined.length < line.length && k + 1 < rows.length) joined += text[++k];
+    if (joined.trimEnd() !== line.trimEnd()) continue;
+    return !!rows.slice(y, k + 1).flat().find((c) => c.ch === "(")?.dim;
+  }
+  return false;
+}
 
 /** An agent's "esc to interrupt" hint, or its working status, read only off
  * the rows that are the agent's own, since the transcript can quote it and a
@@ -246,7 +259,7 @@ const CODEX_STATUS = /^\s*(?:\S )?[^\s(][^(]* \(\d+[hms](?: \d+[hms])*(?![\w])/;
  * box, or the footer under the box. Codex: its status row in the few rows
  * above the "›" composer, or the footer below the composer's own rows.
  * Anything else (OpenCode's footer): the last three rows with text. */
-export function interruptHint(screen: string, agent: string): boolean {
+export function interruptHint(screen: string, agent: string, cells?: () => Cell[][]): boolean {
   const lines = screen.split("\n");
   let end = lines.length;
   while (end > 0 && !lines[end - 1].trim()) end--;
@@ -272,7 +285,9 @@ export function interruptHint(screen: string, agent: string): boolean {
     let j = i + 1;
     while (j < end && lines[j].trim()) j++;
     // ponytail: the status row within four rows of the composer (it may carry detail rows).
-    return from(j) || lines.slice(Math.max(0, i - 4), i).some((l) => CODEX_STATUS.test(l));
+    // Cut before its "(elapsed" in a pane that narrow, it reads idle: only
+    // Codex's run-state title (Pane.codexState) can say then, and it wins when present.
+    return from(j) || lines.slice(Math.max(0, i - 4), i).some((l) => CODEX_STATUS.test(l) && codexOwn(l, cells));
   }
   return from(end - 3);
 }

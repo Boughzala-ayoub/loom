@@ -708,6 +708,14 @@ to the agent's work:
 | OpenCode | the first run its plugin reports after the Enter (`sequence`) | that run succeeding, failing or being interrupted | its plugin's permission and question events, until all are answered | its plugin's interrupted |
 | Shell | the command line carries the task id (`token`) | that line's own exit code | | the command's exit code |
 
+Loom asks Codex for that run-state title, and the title decides whenever
+Codex sets one. A Codex without it is read off its status row: Loom counts the
+row only where Codex draws it, its elapsed time dim, so an answer quoting
+"Working (3s • esc to interrupt)" is not work. A pane too narrow to show the
+row's elapsed time can't be read that way, and Codex then looks idle while it
+works: its task still ends `unknown`, never `completed`, without Codex's own
+notification.
+
 Loom compares a prompt by a hash of its text with each run of spacing made
 one space, because Claude turns CRLF into LF and tabs into spaces, and wraps
 a long paste in tags of its own. `edit foo bar` and `edit foobar` still

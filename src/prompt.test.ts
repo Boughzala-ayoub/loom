@@ -344,15 +344,23 @@ check("Claude: a retry banner quoted in the transcript isn't its own", interrupt
 check("Claude: a message that is the banner isn't the spinner's row", interruptHint(claudeQuote.replace(/^✻ Worked.*$/m, `● ${bannerQuote}`), "claude"), false);
 
 // The hint where Codex and OpenCode draw it, not quoted in the transcript.
+// Codex draws its status row's "(elapsed • " and " to interrupt)" dim ({d}).
+const codexHint = (rows: string[]) => interruptHint(rows.map((r) => r.replace(/\{[dic-]+\}/g, "")).join("\n") + "\n", "codex", () => rows.map(styled));
 const codexIdle = "• Press esc to interrupt a long run.\n\n• Done.\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n\n";
 check("Codex: the hint quoted in the transcript isn't its status row", interruptHint(codexIdle, "codex"), false);
-check("Codex: its status row above the composer", interruptHint("• Done.\n\nWorking (5s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n", "codex"), true);
+check("Codex: its status row above the composer", codexHint(["• Done.", "", "{-}• Working {d}(5s • {-}esc{d} to interrupt)", "", "› Ask Codex to do anything", "", "  ? for shortcuts"]), true);
+// Review R14-8: the answer ends quoting that row, in the transcript's plain text, Codex idle.
+check("Codex: its status row quoted at the transcript's end isn't its own", codexHint(["{-}• Working (3s • esc to interrupt)", "", "› Ask Codex to do anything", "", "  ? for shortcuts"]), false);
 check("Codex: its footer under the composer", interruptHint("• Done.\n\n› fix it\n\n  gpt-5 high\n  esc to interrupt\n", "codex"), true);
 check("Codex: a menu's \"›\" is not the composer", interruptHint("› 1. Yes\n  2. No\n\n  esc to interrupt\n", "codex"), true);
 check("Codex: the transcript's last row quoting the hint isn't its status row", interruptHint("• You can press esc to interrupt.\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n", "codex"), false);
 check("Codex: a draft quoting the hint isn't its status row", interruptHint("• Done.\n\n› Explain esc to interrupt\n\n  ? for shortcuts\n", "codex"), false);
-check("Codex: a status row cut short before its hint still works", interruptHint("• Done.\n\nWorking (5m 17s • esc to inte…\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n", "codex"), true);
-check("Codex: a status row without its hint still works", interruptHint("• Done.\n\n◦ Planning the fix (12s)\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n", "codex"), true);
+// A pane narrower than the row wraps it: the screen's text joins the rows, its cells keep them apart.
+const wrappedStatus = ["• Done.", "", "{-}• Working {d}(5s • ", "{-}esc{d} to interrupt)", "", "› Ask Codex to do anything"];
+const unstyled = (r: string) => r.replace(/\{[dic-]+\}/g, "");
+check("Codex: its status row wrapped onto two rows", interruptHint(["• Done.", "", unstyled(wrappedStatus[2]) + unstyled(wrappedStatus[3]), "", "› Ask Codex to do anything", ""].join("\n"), "codex", () => wrappedStatus.map(styled)), true);
+check("Codex: a status row cut short before its hint still works", codexHint(["• Done.", "", "Working {d}(5m 17s • esc to inte…", "", "› Ask Codex to do anything", "", "  ? for shortcuts"]), true);
+check("Codex: a status row without its hint still works", codexHint(["• Done.", "", "{d}◦ {-}Planning the fix {d}(12s)", "", "› Ask Codex to do anything", "", "  ? for shortcuts"]), true);
 check("OpenCode: its footer", interruptHint("text\n┃ input ┃\n  esc interrupt  ctrl+p commands\n", "opencode"), true);
 check("OpenCode: a quote far above its footer", interruptHint("esc to interrupt\n\n\n\n┃ input ┃\n  ctrl+p commands\n", "opencode"), false);
 

@@ -2105,7 +2105,7 @@ class Pane {
       // Clear busy when it goes, even without a ring. Read the live screen
       // after xterm joins PTY chunks, not scrolled history. An unanswered
       // approval runs nothing, whatever the title says.
-      const running = this.agent === "codex" && this.codexState !== undefined ? codexRunning(this.codexState) : interruptHint(this.screen(true, true), this.agent);
+      const running = this.agent === "codex" && this.codexState !== undefined ? codexRunning(this.codexState) : interruptHint(this.screen(true, true), this.agent, () => screenCells(this));
       const status = running && !this.codexAsking;
       if (!status && this.busy) ((this.busy = false), this.paint());
       // An alert or Esc can clear busy while the hint stays visible. Reconcile
@@ -4450,7 +4450,7 @@ function sweepTasks(closing = false) {
     // alone does. A hint is read only where the agent draws it (interruptHint).
     const screen = p.screen(true);
     const busy = p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
-      : (p.agent === "claude" && claudeWorking(screen)) || interruptHint(p.screen(true, true), p.agent);
+      : (p.agent === "claude" && claudeWorking(screen)) || interruptHint(p.screen(true, true), p.agent, () => screenCells(p));
     // Esc or Ctrl-C after the Enter and after any Stop, judged once, 2 s on.
     const esc = p.interruptAt;
     const escNew = esc > (t.submittedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;

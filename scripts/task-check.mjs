@@ -353,7 +353,8 @@ try {
       await look();
       assert.equal((await pane()).state, 'idle', 'An unanswered approval is not work, once seen');
       await cli('keys', 'work:2', 'enter');
-      const working = '\x1b[2J\x1b[HWorking (5m 17s  esc to interrupt)  2 background terminals running  /ps to view  /stop to close\r\n\r\n\u203a Ask Codex to do anything\r\n\r\n  1 warning  f2 to view';
+      // Codex draws the row's "(elapsed • " and " to interrupt)" dim (status_indicator_widget.rs).
+      const working = '\x1b[2J\x1b[HWorking \x1b[2m(5m 17s • \x1b[22mesc\x1b[2m to interrupt)\x1b[22m  2 background terminals running  /ps to view  /stop to close\r\n\r\n\u203a Ask Codex to do anything\r\n\r\n  1 warning  f2 to view';
       await agent(codex, { codexRaw: working });
       await page.waitForTimeout(100);
       assert.equal((await pane()).state, 'working', 'Answered Codex must recover with the same visible interrupt hint');
