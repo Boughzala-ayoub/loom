@@ -1,7 +1,7 @@
 import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
 const claudeComposer = claudeCapture.lines.join("\n");
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import { readMenu, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 
 let fails = 0;
@@ -62,6 +62,8 @@ Would you like to run the following command?
 `;
 check("Codex approval", readMenu(codex)?.options.length, 3);
 check("Codex question", readMenu(codex)?.question, ["Would you like to run the following command?", "$ npm test"]);
+check("Codex approval keys: its numbers and the letters it names", menuKeys(readMenu(codex)!), ["1", "2", "3", "y", "a"]);
+check("Claude permission keys: its numbers", menuKeys(readMenu(claude)!), ["1", "2", "3"]);
 
 const ask = `
  Which layout should the overview use?

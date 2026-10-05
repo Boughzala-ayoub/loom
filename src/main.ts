@@ -18,7 +18,7 @@ import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { claudeDivider, claudeComposer, readMenu, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
+import { claudeDivider, claudeComposer, readMenu, menuKeys, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
@@ -1817,16 +1817,16 @@ class Pane {
       const release = holdForEnter(this, mark);
       this.inputSeq++;
       this.usePrompt(d);
-      const waitingSince = this.waitingSince;
+      const waitingSince = this.waitingSince, answer = this.answers(d);
       void invoke("pty_write", { id: this.id, data: d }).then(() => {
-        this.wrote(d, true);
+        this.wrote(d, true, answer);
         release();
         if (this.waitingSince === waitingSince) this.seen(); // A failed write must leave the attention signal intact.
         if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint());
       }, e => {
         if (mark) manualFailed(mark);
         release();
-        this.wrote(d, false);
+        this.wrote(d, false, answer);
         toast(`Could not write to ${this.agent}: ${String(e)}`);
       });
     });
@@ -2437,21 +2437,32 @@ class Pane {
   lastTurnAt = 0;
   /** The one signal that counts turns for this launch: the first that did. */
   turnSource: WakeSource | undefined;
+  /** Whether `d` answers the question on screen: Enter, or one key the prompt
+   * takes, a number or the letter an option names. Read as it's typed, before
+   * the agent redraws. A key the prompt ignores, the first letter of a typed
+   * answer, arrows and pastes answer nothing. */
+  answers(d: string) {
+    if (d.startsWith("\x1b[200~")) return false;
+    if (d.includes("\r")) return true;
+    if (!/^[0-9a-z]$/i.test(d)) return false;
+    const menu = readMenu(liveScreen(this, false)) ?? (this.agent === "claude" ? readSurvey(liveScreen(this, true, true)) : null);
+    return !!menu && menuKeys(menu).includes(d.toLowerCase());
+  }
   /** When Esc or Ctrl-C last went in, by anyone. Agents report no end for a
    * turn they were interrupted in (Claude Code runs no Stop hook), so a task
    * there ends on this and the agent no longer working (sweepTasks). */
   interruptAt = 0;
   /** A write to the process finished: `delivered`, or it failed and may or
    * may not have gone in. Only what went in moves a task. Esc or Ctrl-C may
-   * have interrupted a turn (sweepTasks judges it). Enter or a one-key answer
-   * answers a question, which neither Claude nor Codex reports, so a task
-   * asking here works again; arrows and other navigation answer nothing, nor
-   * does a paste. An answer that failed leaves the question asked, and the
-   * task says the answer is in doubt (`answerInDoubt`, not `uncertain`: an
-   * answer says nothing about the task's own Enter). */
-  wrote(data: string, delivered: boolean) {
+   * have interrupted a turn (sweepTasks judges it). An answer (`answer`, what
+   * answers() said as it was typed) answers a question, which neither Claude
+   * nor Codex reports, so a task asking here works again. An answer that
+   * failed leaves the question asked, and the task says the answer is in
+   * doubt (`answerInDoubt`, not `uncertain`: an answer says nothing about the
+   * task's own Enter). */
+  wrote(data: string, delivered: boolean, answer: boolean) {
     if (delivered && (data === "\x1b" || data === "\x03")) (this.interruptAt = Date.now()), (this.codexAsking = false);
-    if (data.startsWith("\x1b[200~") || !(data.includes("\r") || /^[0-9a-z]$/i.test(data))) return;
+    if (!answer) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
     this.codexAsking = false;
@@ -3573,8 +3584,9 @@ function keys(p: Pane, data: string) {
   if (data === "\r") (p.typed = null), (p.manual = p.manual.filter((m) => m.match !== null));
   p.inputSeq++;
   p.usePrompt(data);
-  return invoke("pty_write", { id: p.id, data }).then(() => p.wrote(data, true), (e) => {
-    p.wrote(data, false);
+  const answer = p.answers(data);
+  return invoke("pty_write", { id: p.id, data }).then(() => p.wrote(data, true, answer), (e) => {
+    p.wrote(data, false, answer);
     throw e;
   });
 }

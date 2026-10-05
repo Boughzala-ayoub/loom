@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|invalid-key|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -402,6 +402,24 @@ try {
     await page.waitForTimeout(50);
     assert.equal((await pane()).state, 'working', 'An answer goes in with or without a task tracking it');
     ok('An untracked approval answered through keys shows the pane working again');
+  }
+  if (review('invalid-key')) {
+    // A key the approval menu ignores, or a typed answer's first letter, answers
+    // nothing: the pane still waits on its question (review RF9).
+    await resetReview();
+    await agent(codex, { codexShape: true });
+    await page.evaluate(id => window.qa.out(id, '\x1b]0;Working\x07\x1b]9;Approval requested: rm -rf build\x07'), codex);
+    const pane = async () => (await cli('panes')).data.find(p => p.id === codex);
+    await agent(codex, { codexRaw: '\x1b[2J\x1b[H  Would you like to run the following command?\r\n\r\n  $ rm -rf build\r\n\r\n› 1. Yes, proceed (y)\r\n  2. No, and tell Codex what to do differently (esc)\r\n\r\n  Press enter to confirm or esc to cancel' });
+    await page.waitForTimeout(50);
+    assert.equal((await pane()).state, 'waiting');
+    assert.equal((await cli('keys', 'work:2', 'x')).ok, true);
+    await page.waitForTimeout(50);
+    assert.equal((await pane()).state, 'waiting', 'A key the menu ignores is no answer');
+    assert.equal((await cli('keys', 'work:2', 'y')).ok, true);
+    await page.waitForTimeout(50);
+    assert.equal((await pane()).state, 'working', 'The letter the menu names answers it');
+    ok('Only Enter or a key the question takes answers it');
   }
   if (review('claude-hint')) {
     // An answer that quotes the hint is transcript: the Stop still ends the turn.

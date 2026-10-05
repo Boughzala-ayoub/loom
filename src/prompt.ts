@@ -34,6 +34,13 @@ const CHECKBOX = /^(\[[ xX✔✓]\]|[☐☑☒◯◉○●])\s/;
 const unbox = (line: string) => line.replace(/^[\s│┃║]+|[\s│┃║]+$/g, "");
 const isRule = (line: string) => RULE.test(line) && !!line.trim();
 
+/** The single keys that answer `menu` at once: its numbers (or its own keys),
+ * and a letter an option names as its shortcut, Codex's "Yes, proceed (y)". */
+export const menuKeys = (menu: Menu) => [
+  ...(menu.keys ?? menu.options.map((_, i) => String(i + 1))),
+  ...menu.options.flatMap((o) => /\(([a-z])\)\s*$/i.exec(o)?.[1].toLowerCase() ?? []),
+];
+
 export function readMenu(screen: string): Menu | null {
   const lines = screen.split("\n").map(unbox);
   // The highlighted option nearest the bottom: menus sit under the transcript.
