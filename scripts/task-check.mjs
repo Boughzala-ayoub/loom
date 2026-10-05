@@ -121,7 +121,7 @@ const mocks = readFileSync('node_modules/@tauri-apps/api/mocks.js', 'utf8').repl
 const setup = () => {
   const repo = 'C:\\projects\\loom';
   const state = { repos: [repo], threads: [{ repo, dir: `${repo}\\work`, branch: 'loom/work', name: 'work', panes: [{ cmd: 'claude' }, { cmd: 'codex' }, { cmd: 'claude' }] }], ui: { thread: 0 } };
-  const qa = window.qa = { calls: [], panes: [], agents: {}, batch: 0, prompts: [], journalHeld: [], heldWrites: [], failWriteIf: null, noEcho: false, ignoreEsc: false, idleAfterEnter: false, shellHang: false };
+  const qa = window.qa = { calls: [], panes: [], agents: {}, batch: Number(localStorage.getItem('qa-batch-kept')), prompts: [], journalHeld: [], heldWrites: [], failWriteIf: null, noEcho: false, ignoreEsc: false, idleAfterEnter: false, shellHang: false };
   const out = (id) => qa.panes.filter((a) => a.id === id).at(-1).onOut;
   qa.out = (id, data) => out(id).onmessage(data);
   // An agent's screen: transcript line, a rule, its input, a rule, a footer that says busy.
@@ -219,6 +219,8 @@ const setup = () => {
     if (cmd === 'plugin:path|join') return args.paths.join('\\');
     // Codex's notify and OpenCode's plugin hand a pane its session id (lib.rs take_sessions): qa.sessions, once.
     if (cmd === 'take_sessions') return (qa.sessions ?? []).splice(0).filter(([id]) => args.ids.includes(id));
+    // The last batch Rust sent (lib.rs agent_batch_base). qa-batch-kept: a reload that kept Loom running, and its count.
+    if (cmd === 'agent_batch_base') return qa.batch;
     // What the stopped panes reported as they went (lib.rs pty_shutdown): qa.shutdownEvents, once.
     // qa.lateBatch: reports a drainer sent just before shutdown took over (batch 1), landing after its reply.
     if (cmd === 'pty_shutdown') {
@@ -729,6 +731,24 @@ try {
     await qa({ lateBatch: [[codex, { t: Date.now(), kind: 'end', matches: [promptMatch(text)], turn: 'late-turn', launch: await gen(codex) }]] });
     assert.equal((await closeNow()).tasks.get(sent.data.task)?.state, 'completed', 'A report sent before shutdown, landing after it, was lost');
     ok('Reports sent before shutdown or returned by it, Claude\'s Stop too, are judged and journaled before the window goes');
+  }
+  if (review('shutdown-reload')) {
+    // Review R16-5: Ctrl+R reloads the page while Loom runs on, so Rust's batch
+    // count goes on from the batches the page before it had.
+    await resetReview();
+    for (let i = 0; i < 2; i++) await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: ++window.qa.batch, events: [] } }));
+    await page.evaluate(() => localStorage.setItem('qa-batch-kept', String(window.qa.batch)));
+    await reboot();
+    await page.evaluate(() => localStorage.removeItem('qa-batch-kept'));
+    await agent(codex, { codexShape: true });
+    const text = 'finish after a reload';
+    const sent = await cli('submit', 'work:2', text);
+    await until(sent.data.task, 'working');
+    await report(codex, { kind: 'end', matches: [promptMatch(text)], turn: 'after-reload' });
+    await until(sent.data.task, 'completed', 1500);
+    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'), null, { timeout: 2500 });
+    ok('A reloaded page routes the batches Rust sends next and closes in one attempt');
   }
   if (review('hangup-wait')) {
     // Review R14-6: loomctl hangs up in the middle of a long wait. Rust drops

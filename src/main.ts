@@ -4371,10 +4371,19 @@ const agentBatches = new Map<number, [string, unknown][]>();
 function receiveAgentBatch(batch: { seq: number; events: [string, unknown][] }) {
   if (batch.seq <= agentBatch) return;
   agentBatches.set(batch.seq, batch.events);
-  while (agentBatches.has(agentBatch + 1)) {
-    agentEvents(agentBatches.get(agentBatch + 1)!);
-    agentBatches.delete(++agentBatch);
+  // ponytail: a batch that never lands holds back at most 64 behind it, then is given up on.
+  routeAgentBatches(agentBatches.size > 64 ? Math.min(...agentBatches.keys()) : agentBatch);
+}
+/** Routes the held batches in order: every one up to `skipTo`, a missing one
+ * below it given up on, then those that follow on without a gap. */
+function routeAgentBatches(skipTo: number) {
+  for (const seq of [...agentBatches.keys()].sort((a, b) => a - b)) {
+    if (seq > skipTo && seq !== Math.max(agentBatch, skipTo) + 1) break;
+    agentEvents(agentBatches.get(seq)!);
+    agentBatches.delete(seq);
+    agentBatch = seq;
   }
+  agentBatch = Math.max(agentBatch, skipTo);
 }
 /** An agent's report from its event file (lib.rs send_task_events). */
 /** Reports from the agents, as Rust hands them over (send_task_events, pty_shutdown). */
@@ -8852,7 +8861,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   diffFull = saved.ui?.diffFull ?? false;
   $("#diff-full").classList.toggle("on", diffFull);
   if (saved.ui?.panel === "files") setPanel("files");
-  let closing = false;
+  let closing = false, expired = false;
   let shut: { events: [string, unknown][]; emitted: number } | undefined;
   await getCurrentWindow().onCloseRequested(async e => {
     e.preventDefault();
@@ -8876,7 +8885,12 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
         for (const p of threads.flatMap(t => t.panes)) { p.dead = true; p.busy = false; p.waiting = false; p.paint(); }
       }
       for (const end = Date.now() + 3000; agentBatch < shut.emitted && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
-      if (agentBatch < shut.emitted) throw new Error(`Timed out waiting for agent report batch ${agentBatch + 1} of ${shut.emitted}`);
+      if (agentBatch < shut.emitted) {
+        // A batch that never lands must not keep the window open for good:
+        // the next close journals what arrived and goes on without it.
+        if (!expired) { expired = true; throw new Error(`Timed out waiting for agent report batch ${agentBatch + 1} of ${shut.emitted}; closing again goes on without it`); }
+        routeAgentBatches(shut.emitted);
+      }
       agentEvents(shut.events.splice(0));
       sweepTasks(true);
       await drainJournal();
@@ -9146,9 +9160,11 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
 
   // What the agents report for loomctl's tasks: Claude's hooks and Codex's
   // notify through loom.exe, and OpenCode's plugin (lib.rs send_task_events).
+  // Then which batch Rust sent last: a reloaded page starts at 0 while Rust's
+  // count goes on, and must not wait for batches the page before it had.
   void listen<{ seq: number; events: [string, unknown][] }>("agent-events", (e) => {
     receiveAgentBatch(e.payload);
-  });
+  }).then(() => invoke<number>("agent_batch_base")).then(routeAgentBatches);
 
   // Codex's notify script and the opencode plugin drop the session id a pane is
   // really on (agent.ts). Only the next launch needs it, so it rides the 4 s

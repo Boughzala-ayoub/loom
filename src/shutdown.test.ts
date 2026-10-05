@@ -10,7 +10,7 @@ import ts from "typescript";
 const text = readFileSync("src/main.ts", "utf8");
 const source = ts.createSourceFile("main.ts", text, ts.ScriptTarget.Latest, true);
 const handlers = source.statements.filter(n => ts.isFunctionDeclaration(n) && ["runCli", "createThread"].includes(n.name?.text ?? "")).map(n => n.getText(source));
-const close = text.slice(text.indexOf("  let closing = false;"), text.indexOf('  for (const id of ["#new-thread", "#open-first"])'));
+const close = text.slice(text.indexOf("  let closing = false"), text.indexOf('  for (const id of ["#new-thread", "#open-first"])'));
 assert.ok(close.includes("onCloseRequested"));
 const code = ts.transpileModule(handlers.join("\n") + "\nglobalThis.create = createThread; globalThis.cli = runCli;\n(async () => {\n" + close + "\n})();", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
@@ -45,10 +45,11 @@ assert.ok(destroyed && pendingWrites.length === 0);
 assert.equal(shutdowns, 1, "retry must retain the committed shutdown instead of killing again");
 console.log("ok   R15-4 final journal failure keeps killed panes stopped, blocks new work and retries close");
 
-const receive = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === "receiveAgentBatch")!;
+const named = (names: string[]) => source.statements.filter(n => ts.isFunctionDeclaration(n) && names.includes(n.name?.text ?? "")).map(n => n.getText(source)).join("\n");
+const router = named(["receiveAgentBatch", "routeAgentBatches"]);
 const ordered: string[] = [];
 const batches = createContext({ agentBatch: 0, agentBatches: new Map(), agentEvents: (events: [string, unknown][]) => ordered.push(...events.map(e => e[0])) });
-runInContext(ts.transpileModule(receive.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, batches);
+runInContext(ts.transpileModule(router, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, batches);
 batches.receiveAgentBatch({ seq: 2, events: [["second", {}]] });
 assert.equal(batches.agentBatch, 0, "a later batch does not satisfy a missing earlier batch");
 batches.receiveAgentBatch({ seq: 1, events: [["first", {}]] });
@@ -57,3 +58,41 @@ assert.equal(batches.agentBatch, 2);
 batches.receiveAgentBatch({ seq: 1, events: [["duplicate", {}]] });
 assert.equal(ordered.length, 2);
 console.log("ok   R15-5 numbered reports route in contiguous order even when delivery is reversed");
+
+// R16-5: Ctrl+R reloads the page, which starts again at batch 0 while Rust has
+// already sent batches 1 and 2 to the page before it. The page runs its real
+// close callback and report listener, on a clock that skips the waits.
+const listening = text.slice(text.indexOf("  // What the agents report for loomctl's tasks"), text.indexOf("  // Codex's notify script"));
+assert.ok(listening.includes('"agent-events"'));
+async function page(sentBefore: number, emitted: number) {
+  let clock = 0, onBatch = (_: { payload: unknown }) => {}, request = async () => {};
+  const routed: string[] = [], toasts: string[] = [];
+  const sandbox = createContext({ console, Date: { now: () => clock }, setTimeout: (f: () => void, ms: number) => { clock += ms; setTimeout(f, 0); },
+    agentBatch: 0, agentBatches: new Map(), shuttingDown: false, document: { body: { inert: false } }, threads: [{ panes: [{ id: "p", paint() {} }] }],
+    pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
+    invoke: async (cmd: string) => cmd === "agent_batch_base" ? sentBefore : { events: [["p", "final"]], emitted },
+    listen: async (_: string, f: typeof onBatch) => { onBatch = f; return () => {}; },
+    agentEvents: (events: [string, unknown][]) => routed.push(...events.map(e => String(e[1]))), sweepTasks: () => {}, toast: (m: string) => toasts.push(m),
+    getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => { routed.push("destroyed"); } }),
+  });
+  await runInContext(ts.transpileModule(router + "\n(async () => {\n" + close + listening + "\n})();", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, sandbox);
+  await new Promise(r => setTimeout(r, 0));
+  return { routed, toasts, close: () => request(), deliver: (seq: number) => onBatch({ payload: { seq, events: [["p", `batch ${seq}`]] } }) };
+}
+const reloaded = await page(2, 3);
+reloaded.deliver(3);
+await reloaded.close();
+assert.deepEqual(reloaded.routed, ["batch 3", "final", "destroyed"], "a reloaded page must route Rust's next batch and close in one attempt");
+console.log("ok   R16-5 a reloaded page starts after the batches Rust already sent, and closes");
+
+const lost = await page(0, 2);
+lost.deliver(2);
+await lost.close();
+assert.deepEqual(lost.routed, [], "a missing batch must cancel the first close");
+assert.match(lost.toasts[0], /batch 1 of 2/);
+await lost.close();
+assert.deepEqual(lost.routed, ["batch 2", "final", "destroyed"], "a batch that never lands must not keep the window open for good");
+const behind = await page(0, 0);
+for (let seq = 2; seq <= 66; seq++) behind.deliver(seq);
+assert.equal(behind.routed.length, 65, "batches behind one that never lands must not pile up without bound");
+console.log("ok   R16-5 a batch that never lands is given up on by the second close, or after 64 later ones");

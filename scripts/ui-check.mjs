@@ -87,6 +87,7 @@ try {
           return mine;
         }
         if (cmd === 'pty_shutdown') return { events: [], emitted: 0 }; // what the stopped panes reported as they went (lib.rs)
+        if (cmd === 'agent_batch_base') return 0; // the last report batch Rust sent (lib.rs)
         if (cmd === 'read_file') return 'export const answer = 42;\n// ' + args.path + '\n';
         if (cmd === 'read_image') {
           if (qa.failImage) throw new Error('Image file not found');
