@@ -63,6 +63,9 @@ try {
     if ((Get-FileHash -LiteralPath $backup -Algorithm SHA256).Hash -ne $previous) {
         throw "Backup checksum mismatch: $backup"
     }
+    # Earlier runs' backups. One a running Loom still maps stays until a later run.
+    Get-ChildItem -LiteralPath $install -Filter 'loom-before-update-*.exe' | Where-Object { $_.FullName -ne $backup } |
+        Remove-Item -ErrorAction SilentlyContinue
     Write-Output "Updated: $destination"
     Write-Output "Backup: $backup"
     Write-Output 'Running Loom and its terminals stay open. The update takes effect on the next normal launch.'

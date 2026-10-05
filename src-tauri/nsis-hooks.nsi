@@ -15,17 +15,21 @@
 ; leaves a loom.exe. The template's own check then finds nothing to kill.
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  !insertmacro LoomMoveAside "$INSTDIR\${MAINBINARYNAME}.exe"
+  !insertmacro LoomMoveAside "$INSTDIR\${MAINBINARYNAME}.exe" main
+  ; A `loomctl watch --follow` (the mail bridge keeps one) outlives Loom and
+  ; holds loomctl.exe: the File below would stop at abort/retry/ignore.
+  !insertmacro LoomMoveAside "$INSTDIR\loomctl.exe" ctl
 !macroend
 
 ; Old images are deleted once nothing holds them: here and after the install.
-!macro LoomMoveAside path
+; `id` keeps each insertion's label its own.
+!macro LoomMoveAside path id
   Delete "${path}.*.old"
-  IfFileExists "${path}" 0 loom_aside_done
+  IfFileExists "${path}" 0 loom_aside_done_${id}
   System::Call 'kernel32::GetTickCount()i.R9'
   Rename "${path}" "${path}.$R9.old"
   CopyFiles /SILENT "${path}.$R9.old" "${path}"
-  loom_aside_done:
+  loom_aside_done_${id}:
 !macroend
 
 ; loomctl.exe controls a running Loom from a terminal (src/bin/loomctl.rs). The
@@ -34,6 +38,7 @@
 ; defines MAINBINARYSRCPATH, so its folder is known here at compile time.
 !macro NSIS_HOOK_POSTINSTALL
   Delete "$INSTDIR\${MAINBINARYNAME}.exe.*.old"
+  Delete "$INSTDIR\loomctl.exe.*.old"
   !searchreplace LOOMCTL_SRC "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\loomctl.exe"
   SetOutPath "$INSTDIR"
   File "/oname=loomctl.exe" "${LOOMCTL_SRC}"
@@ -43,5 +48,9 @@
 !macro NSIS_HOOK_POSTUNINSTALL
   Delete "$INSTDIR\${MAINBINARYNAME}.exe.*.old"
   Delete "$INSTDIR\loomctl.exe"
+  Delete "$INSTDIR\loomctl.exe.*.old"
+  ; What scripts/update.ps1 leaves: its backups and its lock.
+  Delete "$INSTDIR\loom-before-update-*.exe"
+  Delete "$INSTDIR\.update.lock"
   nsExec::Exec `powershell -NoProfile -Command "$$c=[Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path',(($$c -split ';' | Where-Object {$$_ -ne '$INSTDIR'}) -join ';'),'User')"`
 !macroend
