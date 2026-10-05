@@ -1027,10 +1027,11 @@ fn shape_codex(value: &serde_json::Value, live: bool) -> Option<CodexPlan> {
     })
 }
 
+/// Codex's folder, found as Codex, codex_home in lib.rs and the notify helper find it.
 fn codex_homes() -> Vec<PathBuf> {
-    let mut homes = Vec::new();
-    if let Some(home) = std::env::var_os("USERPROFILE") { homes.push(PathBuf::from(home).join(".codex")); }
-    homes
+    std::env::var_os("CODEX_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|h| PathBuf::from(h).join(".codex")))
+        .into_iter().collect()
 }
 
 fn codex_local(homes: &[PathBuf]) -> Option<CodexPlan> {
@@ -1391,6 +1392,15 @@ mod tests {
         assert_eq!(read(), None, "16 MiB in, the early model isn't the session's");
         assert_eq!(read().as_deref(), Some("gpt-now"));
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_plan_reads_codex_home() {
+        let home = std::env::temp_dir().join("loom-codex-home-test");
+        std::env::set_var("CODEX_HOME", &home);
+        let homes = super::codex_homes();
+        std::env::remove_var("CODEX_HOME");
+        assert_eq!(homes, vec![home]);
     }
 
     #[test]
