@@ -2427,11 +2427,6 @@ class Pane {
   }
 }
 
-/** The hint agents draw while they work: Codex's "Working (3s • esc to
- * interrupt)", Claude Code's footer, OpenCode's "esc interrupt" ("esc again
- * to interrupt" after one press). */
-const INTERRUPT_HINT = /\besc\s+(?:again\s+)?(?:to\s+)?interrupt/i;
-
 /** A thread, as Orca has them: one branch of work in its own git worktree,
  * with the agent (or agents) running there. `dir` is the worktree, `repo` the
  * checkout it was cut from — the same path when the thread IS the checkout.
@@ -4365,8 +4360,8 @@ function sweepTasks() {
     // its title's run state says the turn still runs, and once it has one, it
     // alone does. A hint is read only where the agent draws it (interruptHint).
     const screen = p.screen(true);
-    const busy = p.agent === "claude" ? INTERRUPT_HINT.test(screen) || claudeWorking(screen)
-      : p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState) : interruptHint(p.screen(true, true), p.agent);
+    const busy = p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
+      : (p.agent === "claude" && claudeWorking(screen)) || interruptHint(p.screen(true, true), p.agent);
     // Esc or Ctrl-C after the Enter and after any Stop, judged once, 2 s on.
     const esc = p.interruptAt;
     const escNew = esc > (t.submittedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;

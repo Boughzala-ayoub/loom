@@ -218,17 +218,32 @@ function readCodexInput(rows: Cell[][], cursor: Cursor | undefined): Input {
   return unknown("Codex's composer mixes plain and dim text, or the cursor isn't where its placeholder puts it.");
 }
 
+// Codex's "Working (3s • esc to interrupt)", OpenCode's "esc interrupt" ("esc again to interrupt" after one press).
 const HINT = /\besc\s+(?:again\s+)?(?:to\s+)?interrupt/i;
+// Claude Code 2.1.288+ keeps the hint only in its API retry banner's own row.
+const CLAUDE_RETRY = /·\s*next try in\s.*·\s*esc to interrupt\s*$/m;
 
 /** An agent's "esc to interrupt" hint, read only off the rows its input owns,
- * since the transcript above can quote it. Codex: from its status row, two
- * above the "›" composer, down. Anything else (OpenCode's footer): the last
- * three rows with text. */
+ * since the transcript above can quote it. Claude: its retry banner, or the
+ * footer under its input box. Codex: from its status row, two above the "›"
+ * composer, down. Anything else (OpenCode's footer): the last three rows with
+ * text. */
 export function interruptHint(screen: string, agent: string): boolean {
   const lines = screen.split("\n");
   let end = lines.length;
   while (end > 0 && !lines[end - 1].trim()) end--;
   const from = (i: number) => lines.slice(Math.max(0, i), end).some((l) => HINT.test(l));
+  if (agent === "claude") {
+    if (CLAUDE_RETRY.test(screen)) return true;
+    // The input box: the last prompt row right under a rule, to the rule under it.
+    for (let i = end - 1; i > 0; i--) {
+      if (!PROMPT.test(unbox(lines[i])) || !isRule(unbox(lines[i - 1]))) continue;
+      let j = i + 1;
+      while (j < end && !isRule(unbox(lines[j]))) j++;
+      return from(j + 1);
+    }
+    return false;
+  }
   if (agent === "codex") for (let i = end - 1; i >= 0; i--) if (CODEX_PROMPT.test(lines[i]) && !OPTION.test(lines[i])) return from(i - 2);
   return from(end - 3);
 }

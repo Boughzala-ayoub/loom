@@ -317,6 +317,13 @@ check("The line a turn leaves: not working", claudeWorking(claudeBusy.replace(/^
 check("A tool still running, indented: not the working line", claudeWorking(claudeBusy.replace(/^✢ .*\n/m, "")), false);
 check("A truncated line ending in …: not working", claudeWorking("● Read(src/main.ts…)\n* a bullet that ends here…ish\n"), false);
 
+// The hint where Claude draws it, not quoted in the transcript.
+const claudeQuote = claudeBusy.replace(/^✢ .*$/m, "✻ Worked for 22m 17s").replace("  ⎿  Running…", "Press esc to interrupt a long run.");
+check("Claude: the hint quoted in the transcript isn't work", interruptHint(claudeQuote, "claude"), false);
+check("Claude: its footer under the input box", interruptHint(claudeQuote.replace("← for agents", "esc to interrupt"), "claude"), true);
+check("Claude: its API retry banner", interruptHint(claudeBusy.replace(/^✢ .*$/m, "✻ Overloaded · next try in 12s · attempt 3 · esc to interrupt"), "claude"), true);
+check("Claude: no input box, no footer to read", interruptHint("Press esc to interrupt a long run.\n", "claude"), false);
+
 // The hint where Codex and OpenCode draw it, not quoted in the transcript.
 const codexIdle = "• Press esc to interrupt a long run.\n\n• Done.\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n\n";
 check("Codex: the hint quoted in the transcript isn't its status row", interruptHint(codexIdle, "codex"), false);
