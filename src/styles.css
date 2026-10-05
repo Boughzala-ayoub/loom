@@ -2843,6 +2843,7 @@ dialog :is(input:not([type="radio"], [type="checkbox"]), select) {
   scrollbar-width: auto;
   scrollbar-color: var(--muted) var(--panel);
 }
+#diff-body > .menu-note { white-space: normal; overflow-wrap: anywhere; }
 #diff-body.image-preview {
   display: flex; align-items: center; justify-content: center;
   min-height: 0; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
@@ -2861,6 +2862,7 @@ dialog :is(input:not([type="radio"], [type="checkbox"]), select) {
 #changes-body .file, #changes-body .dir { content-visibility: auto; contain-intrinsic-size: auto 22px; }
 #diff-body .line i {
   flex: none;
+  min-width: max-content;
   width: 44px;
   padding-right: 8px;
   text-align: right;

@@ -5482,12 +5482,12 @@ async function showTab() {
   body.textContent = "";
   const CAP = 50_000;
   const parsed = isFile ? fileRows(text, CAP) : undefined;
-  const rows = parsed?.rows ?? diffRows(text);
+  const rows = parsed?.rows ?? diffRows(text, CAP + 1);
   const count = parsed?.count ?? rows.length;
   // Which way a hunk moves depends on the side the tab is showing: an unstaged
   // hunk goes into the index or out of the file, a staged one comes back out.
   const moves: [string, string, string[]][] =
-    t.sec === "unstaged"
+    !isFile && rows.length > CAP ? [] : t.sec === "unstaged"
       ? [
           ["Stage", "Stage this hunk", ["apply", "--cached"]],
           ["Discard", "Throw this hunk away", ["apply", "--reverse"]],
@@ -5514,7 +5514,7 @@ async function showTab() {
     return d;
   };
   disposeDiffRows = renderRows(body, body, end, 18, i => line(rows[i], i));
-  if (count > CAP) note(body, `… ${count - CAP} more lines`);
+  if (count > CAP) note(body, !isFile ? "Preview limited to 50,000 lines. Open in an editor; hunk actions are disabled." : `… ${count - CAP} more lines`);
   if (!rows.length) note(body, "no differences");
   rulerFit();
 }
@@ -5527,8 +5527,13 @@ async function showTab() {
 const diffOf = (th: Thread, sec: Sec, paths: string[]) => async () => {
   if (sec !== "untracked") return git(th.dir, "diff", ...ctx(), ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
   const parts: string[] = [];
-  for (const u of paths)
-    parts.push(await gitOk(th.dir, [1], "diff", "--no-index", "--", "/dev/null", u).catch((e) => String(e)));
+  let bytes = 0;
+  for (const u of paths) {
+    const part = await gitOk(th.dir, [1], "diff", "--no-index", "--", "/dev/null", u);
+    bytes += new TextEncoder().encode(part).length + 1;
+    if (bytes > 4 * 1024 * 1024) throw new Error("Diff preview exceeds 4 MiB. Open the files in an editor.");
+    parts.push(part);
+  }
   return parts.join("\n");
 };
 

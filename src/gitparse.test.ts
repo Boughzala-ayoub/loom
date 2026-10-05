@@ -149,5 +149,6 @@ check("worktree loss: nothing", lossInventory(""), { tracked: [], untracked: [],
 check("upstream labels", [["origin/main", "2\t1"], ["origin/main", "0\t0"], ["main", "0\t3"], ["", ""]].map(([u, s]) => upstreamLabel(u, s)),
   ["→ origin/main  ↓2 ↑1", "→ origin/main", "→ main   ↑3", "→ not pushed yet"]);
 
+check("diff parser stops before allocating rows beyond its limit", diffRows("+line\n".repeat(60000), 50000).length, 50000);
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");

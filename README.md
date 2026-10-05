@@ -262,6 +262,11 @@ with counts, each file with its line counts and status letter, and each with a
 **View all** that opens the whole section as one diff. Commits sits folded at
 the bottom; a commit opens as its own diff.
 
+Diff previews capture at most 4 MiB from Git and stop after five seconds.
+The page parses at most 50,001 rows and displays the first 50,000. Larger
+previews disable hunk actions; open the file in an editor to inspect the rest.
+Preview reads disable external diff commands and text conversion.
+
 A diff opens as a **tab** beside the panes, the way Orca does it: the strip
 above the stage shows `▦ <thread>` for the panes and one tab per diff, with
 old and new line numbers in the gutter. Tabs re-read git every time they are

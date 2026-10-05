@@ -125,6 +125,7 @@ try {
         if (cmd === 'plugin:path|resolve_directory') return 'C:\\Users\\test';
         if (cmd === 'plugin:path|join') return args.paths.join('\\');
         if (cmd === 'git_midway') return '';
+        if (cmd === 'worktree_fingerprint') return qa.fingerprint || 'fixture-contents';
         if (cmd === 'git_run') {
           const a = args.args;
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');

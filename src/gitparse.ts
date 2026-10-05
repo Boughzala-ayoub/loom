@@ -111,12 +111,12 @@ export function fileRows(text: string, limit: number): { rows: DiffRow[]; count:
   return { rows, count };
 }
 
-export function diffRows(text: string): DiffRow[] {
+export function diffRows(text: string, limit = Infinity): DiffRow[] {
   const rows: DiffRow[] = [];
   let o = 0;
   let n = 0;
   let inHunk = false;
-  for (const line of text.split("\n")) {
+  for (const line of text.split("\n", Number.isFinite(limit) ? limit : undefined)) {
     if (line.startsWith("diff --git")) inHunk = false;
     const kind = diffClass(line, inHunk);
     if (kind === "hunk") {

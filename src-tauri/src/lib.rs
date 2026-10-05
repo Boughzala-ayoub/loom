@@ -544,12 +544,16 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
 /// porcelain lives in the frontend, so this stays one function.
 /// `ok`: extra exit codes to treat as success — `git diff --no-index` answers 1
 /// when the files differ, which is the whole point of asking.
-fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
+fn git_run(dir: String, mut args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
+    if matches!(args.first().map(String::as_str), Some("diff" | "show")) {
+        args.splice(1..1, ["--no-ext-diff".into(), "--no-textconv".into()]);
+    }
     // The polls skip the cmd\git.exe wrapper's own process. Anything that may
     // commit, push or ask for credentials keeps it.
     let read = matches!(args.first().map(String::as_str), Some("status" | "diff" | "log" | "rev-parse" | "rev-list"));
-    let out = read.then(git_direct).flatten().unwrap_or_else(|| std::process::Command::new("git"))
+    let mut command = read.then(git_direct).flatten().unwrap_or_else(|| std::process::Command::new("git"));
+    command
         .arg("-C")
         .arg(&dir)
         .args(&args)
@@ -564,9 +568,10 @@ fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<Strin
         // persist the refreshed stat cache.
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(std::process::Stdio::null())
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
+        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    let out = if matches!(args.first().map(String::as_str), Some("diff" | "show")) {
+        diff_output(&mut command, 4 * 1024 * 1024)?
+    } else { command.output().map_err(|e| format!("git: {e}"))? };
     let fine = out.status.success()
         || out.status.code().is_some_and(|c| ok.as_deref().unwrap_or(&[]).contains(&c));
     if fine {
@@ -575,6 +580,44 @@ fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<Strin
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if err.is_empty() { format!("git exited {:?}", out.status.code()) } else { err })
     }
+}
+
+fn diff_output(command: &mut std::process::Command, limit: usize) -> Result<std::process::Output, String> {
+    use std::{process::Stdio, time::{Duration, Instant}};
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let (send, receive) = std::sync::mpsc::channel();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    for (is_out, stream, cap) in [(true, Box::new(stdout) as Box<dyn Read + Send>, limit),
+        (false, Box::new(stderr) as Box<dyn Read + Send>, 64 * 1024)] {
+        let send = send.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stream.take(cap as u64 + 1).read_to_end(&mut bytes)
+                .map_err(|e| e.to_string()).and_then(|_| if bytes.len() > cap {
+                    Err("Diff preview exceeds its output limit (4 MiB stdout, 64 KiB stderr). Open the file in an editor.".into())
+                } else { Ok(bytes) });
+            let _ = send.send((is_out, result));
+        });
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = (|| {
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        for _ in 0..2 {
+            let (is_out, bytes) = receive.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|_| "Diff preview exceeded five seconds. Open the file in an editor.".to_string())?;
+            if is_out { stdout = bytes?; } else { stderr = bytes?; }
+        }
+        loop {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                return Ok(std::process::Output { status, stdout, stderr });
+            }
+            if Instant::now() >= deadline { return Err("Diff preview exceeded five seconds".into()); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
+    if result.is_err() { let _ = child.kill(); let _ = child.wait(); }
+    result
 }
 
 /// Git for Windows' real git.exe, with the environment its cmd\git.exe wrapper
@@ -1646,6 +1689,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diff_output_refuses_excess_bytes_before_ipc() {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/d", "/c", "echo 0123456789012345678901234567890123456789"]).creation_flags(0x0800_0000);
+        assert!(super::diff_output(&mut command, 16).is_err());
+    }
     #[test]
     fn workspace_read_errors_preserve_the_original() {
         let dir = std::env::temp_dir().join(format!("loom-workspace-read-{}", std::process::id()));

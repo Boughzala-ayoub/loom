@@ -11,7 +11,7 @@ mkdirSync(out, { recursive: true });
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 const results = [];
 try {
-  for (const [mode, count, wrapped] of [['file', 1000], ['file', 50000], ['file', 250000], ['tree', 1000], ['tree', 20000], ['file', 5000, true], ['diff', 5000, true]]) {
+  for (const [mode, count, wrapped] of [['file', 1000], ['file', 50000], ['file', 250000], ['tree', 1000], ['tree', 20000], ['file', 5000, true], ['diff', 5000, true], ['diff', 60000]]) {
     if (process.argv.length > 2 && !process.argv.slice(2).includes(mode)) continue;
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const setup = ({ mode, count, wrapped }) => {
@@ -86,6 +86,12 @@ try {
         const root = document.documentElement, el = document.querySelector(body);
         return root.scrollWidth <= root.clientWidth && el.scrollWidth <= el.clientWidth;
       }, body), `No horizontal overflow in ${mode}/${label}`);
+      if (mode === 'diff') assert.ok(await page.locator('#diff-body .line i').evaluateAll(cells => cells.every(cell => {
+        if (!cell.textContent) return true;
+        const range = document.createRange(); range.selectNodeContents(cell);
+        const text = range.getBoundingClientRect(), box = cell.getBoundingClientRect();
+        return text.left >= box.left - 0.5 && text.right <= box.right + 0.5;
+      })), `Line numbers must fit their gutters at ${label}`);
       await page.screenshot({ path: `${out}/${mode}-${count}-${wrapped ? 'wrap' : 'short'}-${label}.png` });
     };
     const widths = process.env.UI_WIDTHS ? process.env.UI_WIDTHS.split(',').map(Number)
@@ -103,12 +109,15 @@ try {
         await audit(`${width}-${ratio}`);
         if (ratio === 1) {
           if (mode === 'tree') assert.equal(await page.locator('#changes-body .file').last().getAttribute('title'), `file-${String(count - 1).padStart(6, '0')}.txt`);
-          else assert.equal(await page.locator('#diff-body .line i + i').last().textContent(), String(Math.min(count, 50000)));
+          else if (mode !== 'diff' || count <= 50000) assert.equal(await page.locator('#diff-body .line i + i').last().textContent(), String(Math.min(count, 50000)));
         }
         if (ratio === 0 && mode !== 'tree') assert.ok(await page.locator('#diff-body .line').first().textContent(), 'Top rows return after eviction');
       }
     }
-    if (count > 50000) assert.ok((await page.locator(body).textContent()).includes(`${count - 50000} more lines`));
+    if (count > 50000) {
+      assert.ok((await page.locator(body).textContent()).includes(mode === 'diff' ? 'Preview limited to 50,000 lines' : `${count - 50000} more lines`));
+      if (mode === 'diff') assert.equal(await page.locator('#diff-body .line button').count(), 0, 'A truncated hunk must not be applied');
+    }
     if (mode === 'file') {
       const selected = await page.locator(body).evaluate(el => {
         const spans = el.querySelectorAll('.line > span');
@@ -131,7 +140,7 @@ try {
       await audit('file-context-menu');
       assert.ok((await page.locator('#pane-menu').textContent()).includes('Copy path'));
     }
-    if (mode === 'diff') {
+    if (mode === 'diff' && count <= 50000) {
       await page.locator(body).evaluate(el => {
         const block = [...el.querySelectorAll('.row-block')].find(b => +b.dataset.start <= 4904 && +b.dataset.start + 100 > 4904);
         el.scrollTop = block.offsetTop;
