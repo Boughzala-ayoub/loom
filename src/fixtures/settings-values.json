@@ -14,7 +14,16 @@
     "vendor/maizaabcdefghijklmnopqrstuvwxyz0123456789",
     "vendor/github_pat_preview"
   ],
-  "efforts": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "auto"],
+  "efforts": [
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "auto"
+  ],
   "private": [
     "github_pat_dddddddddddddddddddddddddddddddddddddddd",
     "AIzaeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -23,8 +32,33 @@
     "vendor/github_pat_dddddddddddddddddddddddddddddddddddddddd:model",
     "vendor/AIzaeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee:model",
     "vendor/ASIAFFFFFFFFFFFFFFFF:model",
-    "vendor/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.signature:model"
+    "vendor/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzeW50aGV0aWMifQ.signature:model",
+    "glpat-bbbbbbbbbbbbbbbbbbbb",
+    "hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "vendor/glpat-bbbbbbbbbbbbbbbbbbbb:model",
+    "vendor/hf_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:model"
   ],
-  "invalidModels": ["", "model\n", "model\r\n", "model\u0000", "model name", "model[1m]extra", "model[1m][1m]", "model[]", "model[1x]", "C:/private/model", "/private/model", "model\\name", "modèl"],
-  "invalidEfforts": ["", "AUTO", "auto\n", "high\n", " high", "higher"]
+  "invalidModels": [
+    "",
+    "model\n",
+    "model\r\n",
+    "model\u0000",
+    "model name",
+    "model[1m]extra",
+    "model[1m][1m]",
+    "model[]",
+    "model[1x]",
+    "C:/private/model",
+    "/private/model",
+    "model\\name",
+    "modèl"
+  ],
+  "invalidEfforts": [
+    "",
+    "AUTO",
+    "auto\n",
+    "high\n",
+    " high",
+    "higher"
+  ]
 }
