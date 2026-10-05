@@ -451,7 +451,7 @@ impl CodexReader {
             let complete = bytes[n - 1] == b'\n';
             if !self.oversized {
                 if self.pending.len() + n <= 256 * 1024 { self.pending.extend_from_slice(&bytes[..n]); }
-                else { self.pending.clear(); self.oversized = true; }
+                else { self.pending = Vec::new(); self.oversized = true; }
             }
             self.offset += n as u64;
             reader.consume(n);
@@ -466,7 +466,8 @@ impl CodexReader {
                         }
                     }
                 }
-                self.pending.clear();
+                // A large record grew the buffer: don't hold that for the session's life.
+                if self.pending.capacity() > 64 * 1024 { self.pending = Vec::new(); } else { self.pending.clear(); }
                 self.oversized = false;
             }
         }
@@ -1341,6 +1342,23 @@ mod tests {
         std::fs::rename(replacement, &path).unwrap();
         assert_eq!(reader.read(&path, "selected").unwrap().model, "replacement");
         assert!(reader.read(&path, "other").is_none());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_readers_drop_the_buffer_a_large_record_grew() {
+        let path = std::env::temp_dir().join(format!("loom-reader-buffer-{}.jsonl", std::process::id()));
+        for size in [200_000, 300_000] { // buffered whole, and past the 256 KiB cap
+            let rows = [
+                serde_json::json!({"type":"session_meta","payload":{"id":"buffer","source":"cli"}}),
+                serde_json::json!({"type":"response_item","payload":{"output":"x".repeat(size)}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"gpt-5","effort":"high"}}),
+            ];
+            std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+            let mut reader = super::CodexReader::default();
+            assert_eq!(reader.read(&path, "buffer").unwrap().model, "gpt-5");
+            assert!(reader.pending.capacity() <= 64 * 1024, "{size}: kept {} bytes", reader.pending.capacity());
+        }
         std::fs::remove_file(path).unwrap();
     }
 
