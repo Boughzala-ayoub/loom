@@ -1562,7 +1562,6 @@ class Pane {
   private out = new Channel<string>();
   private idle = 0;
   private disposed = false;
-  private interruptHint = false; // codex and opencode: their "esc … interrupt" hint was on screen
   private opencodeStatus = false; // Plugin events take precedence over the TUI footer.
   private resumeNotice?: HTMLElement;
   private startupOutput = "";
@@ -1950,7 +1949,6 @@ class Pane {
     if (!resume) this.sessionId = undefined;
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
-    this.interruptHint = false;
     this.opencodeStatus = false;
     const can =
       resume &&
@@ -2069,8 +2067,9 @@ class Pane {
       // chunks, not scrolled history.
       const status = INTERRUPT_HINT.test(this.screen(true)) || (this.agent === "codex" && codexRunning(this.codexState));
       if (!status && this.busy) ((this.busy = false), this.paint());
-      if (status && !this.interruptHint && !this.waiting) ((this.busy = true), this.paint());
-      this.interruptHint = status;
+      // An alert or Esc can clear busy while the hint stays visible. Reconcile
+      // current state on every draw, including after the alert is acknowledged.
+      if (status && !this.busy && !this.waiting) ((this.busy = true), this.paint());
       return;
     }
     if (Date.now() - this.lastIn < 300) return;
@@ -2217,6 +2216,7 @@ class Pane {
   seen() {
     if (!this.waiting) return;
     this.waiting = false;
+    if (this.agent === "codex" || this.agent === "opencode") this.activity();
     this.paint();
     if (dashboardOpen) renderDashboard();
   }
@@ -2409,6 +2409,8 @@ class Pane {
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
     taskSignal(this, { kind: "resume", at: Date.now() });
+    // A known approval was answered; preserve any newer alert raised by the write.
+    if (asking.length && this.waitingSince <= this.lastIn) this.seen();
   }
 }
 
@@ -3516,8 +3518,8 @@ function stepDashboardPreview(step: 1 | -1 | "waiting") {
   if (next && next !== p) openDashboardPreview(next);
 }
 
-/** Keys straight to the agent. Unlike typing, they leave the waiting alert
- * alone, so an answer that stops part-way still shows as waiting. */
+/** Keys straight to the agent. Navigation leaves the waiting alert alone;
+ * wrote() acknowledges a delivered answer to a tracked approval. */
 function keys(p: Pane, data: string) {
   p.lastIn = Date.now(); // The echo is not the agent working.
   // An Enter Loom writes itself (loomctl's, the Overview reply's) explains the

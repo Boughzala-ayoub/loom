@@ -2357,7 +2357,10 @@ try {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     assert.equal(await spinning(), false, 'Reduced motion stops the spinner');
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage('\x1b]133;D\x07')));
+    // Idle TUIs remove their working row; only the shell reports OSC 133.
+    await page.evaluate(() => window.qa.panes.forEach(p => p.onOut.onmessage(
+      '\x1b[2J\x1b[H' + (p.argv[0] === 'powershell.exe' ? '\x1b]133;D\x07' : 'Ready for input\r\n'),
+    )));
     await page.waitForFunction(() => !document.querySelector('.agent[data-state=busy]'));
     // Codex's idle prompt animates: output without its working line must not read as busy.
     await page.evaluate(() => window.qa.panes.filter(p => p.argv.join(' ').includes('codex')).forEach(p => { p.onOut.onmessage('\x1b[2;3H·\x1b[4;9H✦'); p.onOut.onmessage('\x1b[2;3H \x1b[5;1H·'); }));

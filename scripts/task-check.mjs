@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -269,6 +269,61 @@ try {
     await page.evaluate(() => localStorage.clear());
     await reboot();
   };
+  if (review('pane-state')) {
+    for (const title of ['', 'Ready', 'Working', 'Thinking', 'Waiting']) {
+      await resetReview();
+      await agent(codex, { codexShape: true });
+      const sent = await cli('submit', 'work:2', 'Question: Why?');
+      assert.equal(sent.ok, true, JSON.stringify(sent));
+      await until(sent.data.task, 'working');
+      const pane = async () => (await cli('panes')).data.find(p => p.id === codex);
+      assert.equal((await pane()).state, 'working', 'A submitted question is work, not an approval');
+      const workingPane = await pane();
+      assert.deepEqual([workingPane.model, workingPane.effort, workingPane.context], [null, null, null], 'Activity needs no usage metadata');
+      assert.equal((await state(sent.data.task)).detail, null);
+      if (title) await page.evaluate(([id, title]) => window.qa.out(id, `\x1b]0;${title}\x07`), [codex, title]);
+      // An approval interrupts a running turn. Its title can keep saying Waiting
+      // and its interrupt hint need not disappear before the answer redraws it.
+      await page.evaluate(id => window.qa.out(id, '\x1b]9;Question: which version?\x07'), codex);
+      await until(sent.data.task, 'approval');
+      assert.equal((await pane()).state, 'waiting');
+      await cli('keys', 'work:2', 'down');
+      assert.equal((await pane()).state, 'waiting', 'Navigation must leave the approval waiting');
+      await qa({ failWriteIf: 'fn:return d === "\\r"' });
+      assert.equal((await cli('keys', 'work:2', 'enter')).ok, false);
+      assert.equal((await pane()).state, 'waiting', 'A failed answer must leave the approval waiting');
+      await qa({ failWriteIf: null });
+      await cli('keys', 'work:2', 'enter');
+      const working = '\x1b[2J\x1b[HWorking (5m 17s  esc to interrupt)  2 background terminals running  /ps to view  /stop to close\r\n\r\n\u203a Ask Codex to do anything\r\n\r\n  1 warning  f2 to view';
+      await agent(codex, { codexRaw: working });
+      await page.waitForTimeout(100);
+      assert.equal((await pane()).state, 'working', 'Answered Codex must recover with the same visible interrupt hint');
+      assert.equal((await state(sent.data.task)).state, 'working');
+      assert.equal((await state(sent.data.task)).detail, null, 'An answered question must not label running work');
+      assert.ok((await state(sent.data.task)).events.some(e => e.state === 'approval' && e.detail === 'Question: which version?'), 'Keep the question in task history');
+      assert.equal(await page.locator(`.pane[data-id="${codex}"]`).evaluate(el => el.classList.contains('busy')), true);
+      if (['Working', 'Thinking', 'Waiting'].includes(title)) {
+        await agent(codex, { codexRaw: '\x1b[2J\x1b[HStreaming an answer without the status row' });
+        await page.waitForTimeout(50);
+        assert.equal((await pane()).state, 'working', 'The title keeps a streaming answer busy');
+        await agent(codex, { codexRaw: working });
+      }
+      // A separate completion alert is acknowledged by focusing, without a new
+      // interrupt-hint edge. Subsequent draws must still report running work.
+      await page.evaluate(id => window.qa.out(id, '\x1b]9;Agent turn complete\x07'), codex);
+      await page.waitForTimeout(50);
+      assert.equal((await pane()).state, 'waiting');
+      await page.locator(`.pane[data-id="${codex}"] .pane-head`).click();
+      await agent(codex, { codexRaw: working });
+      await page.waitForTimeout(50);
+      assert.equal((await pane()).state, 'working');
+      await page.evaluate(id => window.qa.out(id, '\x1b]0;Ready\x07'), codex);
+      await agent(codex, { codexRaw: null, busy: false });
+      await page.waitForTimeout(50);
+      assert.equal((await pane()).state, 'idle', 'A quiet Ready screen clears busy');
+    }
+    ok('Codex resumes after approval; submitted questions and warning footers do not mark it waiting');
+  }
   if (review('claude-extra-prompts')) {
     await resetReview();
     const first = await cli('submit', 'work:1', 'original long turn');
