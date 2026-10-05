@@ -1513,17 +1513,23 @@ fn save_state(app: AppHandle, json: String) -> Result<(), String> {
 /// Write beside the destination, flush it to disk, then replace it, so a crash
 /// or power cut leaves the old snapshot or the new one, never an empty file:
 /// NTFS journals the rename, not the data. The snapshot replaced stays as
-/// `.bak` (a hard link, so no copy), what a broken workspace points you to.
+/// `.bak`, what a broken workspace points you to: a hard link (no copy), or a
+/// flushed copy where links aren't supported. It is made beside the last one
+/// and then takes its place, so there is always one, and a save that can't
+/// make one doesn't happen.
 fn write_workspace(path: &std::path::Path, json: &str) -> Result<(), String> {
     use std::io::Write;
     let pending = path.with_extension("json.pending");
     let mut file = std::fs::File::create(&pending).map_err(|e| e.to_string())?;
     file.write_all(json.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
     drop(file);
-    let bak = path.with_extension("json.bak");
     if path.exists() {
-        let _ = std::fs::remove_file(&bak);
-        let _ = std::fs::hard_link(path, &bak);
+        let (next, bak) = (path.with_extension("json.bak.pending"), path.with_extension("json.bak"));
+        let _ = std::fs::remove_file(&next);
+        std::fs::hard_link(path, &next)
+            .or_else(|_| std::fs::copy(path, &next).and_then(|_| std::fs::OpenOptions::new().write(true).open(&next)?.sync_all()))
+            .and_then(|_| std::fs::rename(&next, &bak))
+            .map_err(|e| format!("couldn't keep a backup of the workspace as {}, so it wasn't saved: {e}", bak.display()))?;
     }
     std::fs::rename(pending, path).map_err(|e| e.to_string())
 }
@@ -1938,6 +1944,12 @@ mod tests {
         std::fs::write(&path, "{\"threads\": [").unwrap();
         assert!(super::read_workspace(&path).unwrap_err().contains("state.json.bak"));
         assert_eq!(std::fs::read_to_string(&bak).unwrap(), r#"{"n":1}"#);
+        // No new backup can be made: the save is refused, and the workspace and its last backup stay (review RF16).
+        std::fs::write(&path, r#"{"n":3}"#).unwrap();
+        std::fs::create_dir(dir.join("state.json.bak.pending")).unwrap();
+        assert!(super::write_workspace(&path, r#"{"n":4}"#).unwrap_err().contains("backup"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"n":3}"#);
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), r#"{"n":1}"#, "the last backup went before a new one existed");
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
