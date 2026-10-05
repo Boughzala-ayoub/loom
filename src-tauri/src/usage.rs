@@ -391,6 +391,8 @@ struct CodexReader {
     offset: u64,
     pending: Vec<u8>,
     oversized: bool,
+    /// The last read reached the end: `usage` is the session's now, not its start.
+    caught_up: bool,
     usage: Usage,
     last_used: Option<std::time::Instant>,
     prefix: Option<ReadCheckpoint>,
@@ -472,6 +474,7 @@ impl CodexReader {
             }
         }
         drop(reader);
+        self.caught_up = self.offset >= self.size;
         let edge = self.offset.min(4096) as usize;
         self.prefix = Some(ReadCheckpoint::read(&mut file, 0, edge)?);
         self.boundary = Some(ReadCheckpoint::read(&mut file, self.offset - edge as u64, edge)?);
@@ -507,13 +510,19 @@ pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String
     let mut missing = Vec::new();
     for (id, sid) in panes {
         if sid.len() != 36 || !sid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') { continue; }
+        // A reader still short of the end (a resumed 80 MB rollout takes several
+        // refreshes) holds its reading back: it is the session's start, not now.
         if let Some((path, reader)) = cache.get_mut(&sid) {
-            if let Some(u) = reader.read(path, &sid) { out.insert(id, u); continue; }
+            if let Some(u) = reader.read(path, &sid) {
+                if reader.caught_up { out.insert(id, u); }
+                continue;
+            }
         }
         cache.remove(&sid);
         missing.push((id, sid));
     }
     if missing.is_empty() { return out; }
+    let mut found = std::collections::HashSet::new();
     let mut dirs = vec![(home.join("sessions"), 0)];
     let mut visited = std::collections::HashSet::new();
     let mut budget = 20_000usize;
@@ -527,10 +536,11 @@ pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String
             let path = entry.path();
             if path.is_dir() { dirs.push((path, depth + 1)); continue; }
             for (id, sid) in &missing {
-                if out.contains_key(id) || !super::rollout_is(&path, sid) { continue; }
+                if found.contains(id) || !super::rollout_is(&path, sid) { continue; }
                 let mut reader = CodexReader::default();
                 if let Some(u) = reader.read(&path, sid) {
-                    out.insert(id.clone(), u);
+                    found.insert(id.clone());
+                    if reader.caught_up { out.insert(id.clone(), u); }
                     // Scoped queries are not the live-session set. Keep progress
                     // across them, with a fixed bound and least-recently-read eviction.
                     if cache.len() >= 128 {
@@ -540,7 +550,7 @@ pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String
                     cache.insert(sid.clone(), (path.clone(), reader));
                 }
             }
-            if missing.iter().all(|(id, _)| out.contains_key(id)) { return out; }
+            if missing.iter().all(|(id, _)| found.contains(id)) { return out; }
         }
     }
     out
@@ -1269,7 +1279,8 @@ mod tests {
         let cache = super::CodexScanned::default();
         let mut model = String::new();
         for _ in 0..4 {
-            model = super::codex_usage(&cache, &root, vec![("a".into(), a.into())])["a"].model.clone();
+            // Held back until A's reader reaches the end, which a reset would keep it from.
+            if let Some(u) = super::codex_usage(&cache, &root, vec![("a".into(), a.into())]).get("a") { model = u.model.clone(); }
             super::codex_usage(&cache, &root, vec![("b".into(), b.into())]);
         }
         std::fs::remove_dir_all(root).unwrap();
@@ -1360,6 +1371,26 @@ mod tests {
             assert!(reader.pending.capacity() <= 64 * 1024, "{size}: kept {} bytes", reader.pending.capacity());
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_usage_holds_back_a_rollout_read_part_way() {
+        let home = std::env::temp_dir().join(format!("loom-codex-partial-{}", std::process::id()));
+        let day = home.join("sessions/2026/10/05");
+        std::fs::create_dir_all(&day).unwrap();
+        let sid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+        let rows = [
+            serde_json::json!({"type":"session_meta","payload":{"id":sid,"source":"cli"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-early","effort":"low"}}),
+            serde_json::json!({"type":"response_item","payload":{"output":"x".repeat(17 * 1024 * 1024)}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-now","effort":"high"}}),
+        ];
+        std::fs::write(day.join(format!("rollout-2026-10-05T00-00-00-{sid}.jsonl")), rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let state = super::CodexScanned::default();
+        let read = || super::codex_usage(&state, &home, vec![("pane".into(), sid.into())]).get("pane").map(|u| u.model.clone());
+        assert_eq!(read(), None, "16 MiB in, the early model isn't the session's");
+        assert_eq!(read().as_deref(), Some("gpt-now"));
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
