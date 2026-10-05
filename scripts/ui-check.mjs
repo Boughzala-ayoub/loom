@@ -71,6 +71,7 @@ try {
         if (cmd === 'pty_write' && qa.gateWrite?.(args.data)) return new Promise(resolve => qa.gated.push(() => { qa.onWrite?.(args); resolve(); }));
         if (cmd === 'pty_write' && qa.failWriteIf?.(args.data)) throw new Error('Test: the terminal write failed');
         if (cmd === 'pty_write' && qa.loseReplyIf?.(args.data)) { qa.onWrite?.(args); throw new Error('Test: the terminal answered, and the answer was lost'); }
+        if (cmd === 'dictate_start' && qa.holdDictateStart) return new Promise(resolve => { qa.pendingDictateStart = () => { qa.pendingDictateStart = null; resolve(); }; });
         if (cmd === 'dictate_stop' && qa.holdDictation) return new Promise(resolve => { qa.pendingDictation = () => resolve(qa.dictation ?? ''); });
         if (cmd === 'dictate_stop') return qa.dictation ?? '';
         if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
@@ -300,6 +301,17 @@ try {
       await page.waitForTimeout(400);
       const typedOld = await page.evaluate(id => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data.includes('words for the old launch')), stopped.data.id);
       assert.equal(typedOld, false, 'Dictation for a replaced launch is not typed into the new one');
+      // Restarted while the microphone was still opening: that recording began for the old launch too.
+      await page.evaluate(() => { window.qa.dictation = 'words begun before a restart'; window.qa.holdDictateStart = true; });
+      await page.keyboard.down('F4');
+      await page.waitForFunction(() => window.qa.pendingDictateStart);
+      assert.equal((await cli('restart', 'search-polish:1', '--yes')).ok, true);
+      await page.evaluate(() => { window.qa.holdDictateStart = false; window.qa.pendingDictateStart(); });
+      await page.waitForTimeout(150);
+      await page.keyboard.up('F4');
+      await page.waitForTimeout(400);
+      const typedBegun = await page.evaluate(id => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data.includes('words begun before a restart')), stopped.data.id);
+      assert.equal(typedBegun, false, 'A recording begun before a restart is not typed into the new launch');
       await page.evaluate(() => { window.qa.dictation = ''; });
       assert.deepEqual(errors, []);
       checks++;

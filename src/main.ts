@@ -1376,10 +1376,17 @@ async function micStart() {
   // A config command is being typed into a pane right now — a dictation prefix
   // pasted into the middle of it mangles both. Clears on the next press.
   if (cfgBusy) return micState("err", "model/effort change in progress — try again");
+  // The launch you began dictating to, before the microphone takes its time to open.
+  const gen = pane.generation;
   try {
     await invoke("dictate_start");
+    if (changed(pane, gen)) {
+      // Restarted, stopped or closed meanwhile: close the microphone, and what it caught goes nowhere.
+      await invoke("dictate_stop", { lang: null }).catch(() => "");
+      return micState("err", `${pane.agent} ${changed(pane, gen)} while the microphone opened — try again`);
+    }
     if (prefix.text) pane.term.paste(prefix.text);
-    recording = { pane, prefix, lang, gen: pane.generation, seq: pane.inputSeq };
+    recording = { pane, prefix, lang, gen, seq: pane.inputSeq };
     micState("rec");
     chime(660, 990, 0.09, 0.18); // rising: mic open
   } catch (e) {
