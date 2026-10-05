@@ -6,7 +6,7 @@
 use crate::pipe::PROTOCOL;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -21,6 +21,19 @@ pub struct Pending {
     waiting: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     /// Set once the page has its handler: until then a request waits for it.
     ready: AtomicBool,
+}
+
+/// How long a client may take to send its hello or its request line, or to
+/// take an answer: a stuck one would hold a pipe instance and a task for good.
+const FRAME: Duration = Duration::from_secs(10);
+/// Connections served at once; past it a new one is closed unanswered.
+/// ponytail: one shared cap; per-client limits if one script ever floods it.
+const MAX_ACTIVE: usize = 64;
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// `step`, or TimedOut once `limit` passes.
+async fn within<T>(limit: Duration, step: impl std::future::Future<Output = std::io::Result<T>>) -> std::io::Result<T> {
+    tokio::time::timeout(limit, step).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
 }
 
 /// Serves `name` for the app's life. A second Loom on the same workspace
@@ -55,9 +68,14 @@ pub fn serve(app: AppHandle, name: String) {
             if server.connect().await.is_err() {
                 continue;
             }
+            if ACTIVE.fetch_add(1, Ordering::AcqRel) >= MAX_ACTIVE {
+                ACTIVE.fetch_sub(1, Ordering::AcqRel);
+                continue; // dropped: closed unanswered, and loomctl says nothing was sent
+            }
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = answer(app, server).await;
+                ACTIVE.fetch_sub(1, Ordering::AcqRel);
             });
         }
     });
@@ -116,7 +134,7 @@ async fn answer(app: AppHandle, pipe: NamedPipeServer) -> std::io::Result<()> {
     let (read, mut write) = tokio::io::split(pipe);
     let mut read = BufReader::new(read.take(1 << 20));
     let mut line = String::new();
-    read.read_line(&mut line).await?;
+    within(FRAME, read.read_line(&mut line)).await?;
     let theirs = serde_json::from_str::<Value>(&line).ok().and_then(|v| v["hello"].as_u64()).unwrap_or(1);
     let hello = if theirs == PROTOCOL {
         json!({ "ok": true, "protocol": PROTOCOL, "version": app.package_info().version.to_string(), "pid": std::process::id(), "pipe": crate::pipe::instance_pipe() })
@@ -128,21 +146,20 @@ async fn answer(app: AppHandle, pipe: NamedPipeServer) -> std::io::Result<()> {
         };
         json!({ "ok": false, "protocol": PROTOCOL, "error": error })
     };
-    write.write_all(format!("{hello}\n").as_bytes()).await?;
-    write.flush().await?;
+    within(FRAME, async { write.write_all(format!("{hello}\n").as_bytes()).await?; write.flush().await }).await?;
     if theirs != PROTOCOL {
         return Ok(());
     }
     line.clear();
-    if read.read_line(&mut line).await? == 0 {
+    if within(FRAME, read.read_line(&mut line)).await? == 0 {
         return Ok(());
     }
     let reply = match request(&line) {
         Ok(request) => ask(&app, request).await,
         Err(error) => json!({ "ok": false, "error": error }),
     };
-    write.write_all(format!("{reply}\n").as_bytes()).await?;
-    write.flush().await
+    // The wait was the page's; only the answer's write has a deadline.
+    within(FRAME, async { write.write_all(format!("{reply}\n").as_bytes()).await?; write.flush().await }).await
 }
 
 /// The command in loomctl's request line, if it is one to run: whole, JSON, a
@@ -164,6 +181,17 @@ fn request(line: &str) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::request;
+
+    #[test]
+    fn a_silent_client_is_let_go() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let (_client, server) = tokio::io::duplex(64);
+        let mut line = String::new();
+        let started = std::time::Instant::now();
+        let got = tauri::async_runtime::block_on(super::within(std::time::Duration::from_millis(200), BufReader::new(server).read_line(&mut line)));
+        assert_eq!(got.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 
     #[test]
     fn loom_owns_the_pipes_it_serves() {
