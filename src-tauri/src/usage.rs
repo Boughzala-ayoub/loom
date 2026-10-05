@@ -358,6 +358,29 @@ fn setting_value(value: &str, effort: bool) -> String {
 #[derive(Default)]
 pub struct CodexScanned(Mutex<HashMap<String, (PathBuf, CodexReader)>>);
 
+struct ReadCheckpoint {
+    offset: u64,
+    len: usize,
+    hash: [u8; 32],
+}
+
+impl ReadCheckpoint {
+    fn bytes(offset: u64, bytes: &[u8]) -> Self {
+        use sha2::Digest;
+        Self { offset, len: bytes.len(), hash: sha2::Sha256::digest(bytes).into() }
+    }
+    fn read(file: &mut std::fs::File, offset: u64, len: usize) -> Option<Self> {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut bytes = vec![0; len];
+        file.read_exact(&mut bytes).ok()?;
+        Some(Self::bytes(offset, &bytes))
+    }
+    fn matches(&self, file: &mut std::fs::File) -> bool {
+        Self::read(file, self.offset, self.len).is_some_and(|now| now.hash == self.hash)
+    }
+}
+
 #[derive(Default)]
 struct CodexReader {
     identity: Option<(u64, u64)>,
@@ -368,6 +391,10 @@ struct CodexReader {
     oversized: bool,
     usage: Usage,
     last_used: Option<std::time::Instant>,
+    prefix: Option<ReadCheckpoint>,
+    boundary: Option<ReadCheckpoint>,
+    settings: Option<ReadCheckpoint>,
+    tokens: Option<ReadCheckpoint>,
 }
 
 fn file_identity(file: &std::fs::File) -> Option<(u64, u64)> {
@@ -392,10 +419,12 @@ impl CodexReader {
         let identity = file_identity(&file)?;
         let modified = meta.modified().ok();
         if self.identity != Some(identity) || self.usage.sid != sid || meta.len() < self.size
-            || (meta.len() == self.size && modified != self.modified) {
+            || (meta.len() == self.size && modified != self.modified)
+            || ![&self.prefix, &self.boundary, &self.settings, &self.tokens].into_iter().flatten().all(|c| c.matches(&mut file)) {
             *self = Self::default();
         }
         if self.identity.is_none() {
+            file.seek(SeekFrom::Start(0)).ok()?;
             let mut first = String::new();
             std::io::BufReader::new((&mut file).take(64 * 1024)).read_line(&mut first).ok()?;
             if !first.ends_with('\n') { return None; }
@@ -412,7 +441,7 @@ impl CodexReader {
         file.seek(SeekFrom::Start(self.offset)).ok()?;
         // Bound both work per refresh and storage for a single record. Continue
         // huge tool output on the next refresh without retaining its contents.
-        let mut reader = std::io::BufReader::new(file.take(16 * 1024 * 1024));
+        let mut reader = std::io::BufReader::new((&mut file).take(16 * 1024 * 1024));
         loop {
             let bytes = reader.fill_buf().ok()?;
             if bytes.is_empty() { break; }
@@ -428,12 +457,21 @@ impl CodexReader {
                 if !self.oversized {
                     if let Ok(row) = serde_json::from_slice::<serde_json::Value>(&self.pending) {
                         fold_codex(&mut self.usage, &row);
+                        if row["type"] == "turn_context" {
+                            self.settings = Some(ReadCheckpoint::bytes(self.offset - self.pending.len() as u64, &self.pending));
+                        } else if row["type"] == "event_msg" && row["payload"]["type"] == "token_count" {
+                            self.tokens = Some(ReadCheckpoint::bytes(self.offset - self.pending.len() as u64, &self.pending));
+                        }
                     }
                 }
                 self.pending.clear();
                 self.oversized = false;
             }
         }
+        drop(reader);
+        let edge = self.offset.min(4096) as usize;
+        self.prefix = Some(ReadCheckpoint::read(&mut file, 0, edge)?);
+        self.boundary = Some(ReadCheckpoint::read(&mut file, self.offset - edge as u64, edge)?);
         Some(self.usage.clone())
     }
 }
@@ -1231,6 +1269,32 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(model, "current", "scoped B reads must not reset A's bounded scan");
+    }
+
+    #[test]
+    fn codex_reader_resets_after_truncate_and_regrow() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("loom-regrow-{}.jsonl", std::process::id()));
+        let write = |model: &str, size: u64, partial: bool| {
+            let mut file = std::fs::File::create(&path).unwrap();
+            writeln!(file, "{}", serde_json::json!({"type":"session_meta","payload":{"id":"selected","source":"cli"}})).unwrap();
+            writeln!(file, "{}", serde_json::json!({"type":"tool","payload":"x".repeat(8192)})).unwrap();
+            writeln!(file, "{}", serde_json::json!({"type":"turn_context","payload":{"model":model,"effort":"high"}})).unwrap();
+            file.write_all(b"{\"type\":\"tool\",\"payload\":\"").unwrap();
+            std::io::copy(&mut std::io::Read::take(std::io::repeat(b'x'), size), &mut file).unwrap();
+            file.write_all(b"\"}\n").unwrap();
+            if partial { file.write_all(b"{\"type\":\"turn_context\"").unwrap(); }
+        };
+        for size in [300_000, 34 * 1024 * 1024] {
+            for partial in [false, true] {
+                write("gpt-old", size, partial);
+                let mut reader = super::CodexReader::default();
+                assert_eq!(reader.read(&path, "selected").unwrap().model, "gpt-old");
+                write("gpt-new", size + 10_000, false);
+                assert_eq!(reader.read(&path, "selected").unwrap().model, "gpt-new", "rewrite of consumed settings must invalidate state even inside an oversized row");
+            }
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
