@@ -253,6 +253,10 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   eq("a task with no events is refused", /isn't shaped/.test(refused('{"task":{"id":"broken"}}')), true);
   eq("a change that breaks one is refused", /isn't shaped/.test(refused(writeJournal([a], 1, 0) + '{"update":"j1","set":{"events":5}}\n')), true);
   eq("a change that isn't an object is refused", /isn't shaped/.test(refused(writeJournal([a], 1, 0) + '{"update":"j1","set":"abc"}\n')), true);
+  // A field that is there counts whatever it holds: skipping it would drop that record (review RF15).
+  for (const bad of ['"corrupt"', "null", "false", "7"]) eq(`a task record of ${bad} is refused`, /isn't shaped/.test(refused(`{"seq":42}\n{"task":${bad}}\n`)), true);
+  eq("an event that isn't one is refused", /isn't shaped/.test(refused(writeJournal([a], 1, 0) + '{"event":"lost"}\n')), true);
+  eq("a change naming no task is refused", /isn't shaped/.test(refused(writeJournal([a], 1, 0) + '{"update":5,"set":{"state":"failed"}}\n')), true);
   eq("what Loom writes reads back", refused(text), "");
 }
 {

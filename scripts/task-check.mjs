@@ -636,7 +636,7 @@ try {
     // Valid JSON of the wrong shape: startup finishes (boot waits for cli_ready),
     // history reads as unavailable, and the file stays as it was.
     await resetReview();
-    for (const broken of ['{"seq":3,"pruned":0}\n{"task":{"id":"broken"}}\n', '{"task":{"id":"t","pane":"p","state":"working","events":[]}}\n{"update":"t","set":{"events":5}}\n']) {
+    for (const broken of ['{"seq":3,"pruned":0}\n{"task":{"id":"broken"}}\n', '{"seq":42}\n{"task":"corrupt"}\n','{"task":{"id":"t","pane":"p","state":"working","events":[]}}\n{"update":"t","set":{"events":5}}\n']) {
       await page.evaluate((b) => localStorage.setItem('qa-journal', b), broken);
       await reboot();
       const sent = await cli('send', 'work:1', 'after a broken journal');

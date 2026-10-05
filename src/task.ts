@@ -438,7 +438,11 @@ export function readJournal(text: string): { tasks: Map<string, Task>; seq: numb
       notify.push({ at: rec.at, on: n.on, kinds: { ...DEFAULT_NOTIFY.kinds, ...n.kinds }, panes: { ...n.panes },
         ...(n.owners && typeof n.owners === "object" ? { owners: Object.fromEntries(Object.entries(n.owners).filter(([, v]) => v === "held" || v === "released" || v === "muted")) } : {}) });
     if (rec?.set !== undefined && (typeof rec.set !== "object" || rec.set === null || Array.isArray(rec.set))) throw new Error("a journal change isn't shaped as Loom writes them");
-    if (rec?.task && typeof rec.task === "object") {
+    // A field that is there is checked whatever it holds: skipped, its record would be gone.
+    if (rec?.update !== undefined && typeof rec.update !== "string") throw new Error("a journal change isn't shaped as Loom writes them");
+    const ev = rec?.event as TaskEvent | undefined;
+    if (ev !== undefined && !(ev && typeof ev === "object" && typeof ev.task === "string")) throw new Error("a journal event isn't shaped as Loom writes them");
+    if (rec?.task !== undefined) {
       const t = rec.task as Task;
       shaped(t, "");
       tasks.set(t.id, t);
