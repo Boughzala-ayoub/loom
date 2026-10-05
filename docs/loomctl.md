@@ -131,6 +131,7 @@ shows one.
 | `tasks [--pane P] [--state S]` | Every open task and the last 500 to finish. |
 | `watch [task] [--after N] [--follow] [--metadata [--policy \| --policy-v4] [--notification-context]]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
 | `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
+| `trash [list]` | Deleted worktrees waiting in Loom's trash, and where their folders and Git records went. See [Undoing a deletion](#undoing-a-deletion). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
 | `usage [claude\|codex]` | Fetch account limits and banked resets on demand. |
 | `help [command]` | The commands, or one command. |
@@ -276,6 +277,30 @@ folder step didn't finish), `failed` or `null`. A thread whose panes closed is
 gone from Loom even when its folder stayed: close what uses the folder, delete
 it in Explorer, and run `git worktree prune`. Not `git worktree remove`: on
 Windows it empties the folders that junctions inside point to.
+
+### Undoing a deletion
+
+`loomctl trash` lists what waits in the trash, with where each folder went
+and where Git's record of it went. `--json` gives each record as saved:
+`folder` moved to `at`, `entry` moved to `entry_at`, and the `branch` and
+`commit` it was on. To undo a deletion before its day is up, stop whatever
+uses those paths and move both back:
+
+```powershell
+Move-Item <at> <folder>
+Move-Item <entry_at> <entry>
+git -C <folder> worktree repair
+git update-ref <branch> <commit>   # only if the branch was deleted too
+```
+
+If another checkout now has the old path or the old record name, move the
+folder somewhere else, put the record under another name in
+`.git\worktrees`, write `gitdir: <that record>` into the folder's `.git`
+file, and run `git worktree repair <folder>` from the repository. Once Git
+has the record back, at either path, Loom's purge leaves the folder alone and
+drops the trash entry. A `pending` record stopped between its two moves:
+deleting the same worktree again, or creating a thread at its path, finishes
+it.
 
 ### Typing into panes
 

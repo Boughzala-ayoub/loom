@@ -8562,17 +8562,12 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   trash: {
-    usage: "trash [list|restore ID] [--to ABSOLUTE_PATH]",
-    help: "List retained worktrees, or restore one before its day in trash expires. Restore repairs its Git links, recreates its deleted branch, and cancels expiry before returning. --to chooses a free destination on the retained folder's volume. Existing folders and changed branch refs are never overwritten.",
-    options: { to: "string" },
+    usage: "trash [list]",
+    help: "List deleted worktrees waiting in Loom's trash: where each folder and Git's record of it went. Move both back by hand to undo one (docs/loomctl.md).",
     run: async (a) => {
-      if ((!a._.length || a._[0] === "list") && a._.length <= 1 && a.to === undefined) {
-        const data = await invoke<{ id: string; folder: string; at: string; pending: boolean; restoring?: string }[]>("trash_list");
-        return { data, text: data.length ? table(data.map(r => [r.id, r.folder, r.restoring ? "restoring" : r.pending ? "pending" : "retained", r.at])) : "Loom's trash is empty." };
-      }
-      if (a._[0] !== "restore" || a._.length !== 2) throw new Error("Use loomctl trash list, or loomctl trash restore ID [--to ABSOLUTE_PATH].");
-      const dir = await invoke<string>("trash_restore", { id: a._[1], destination: str(a, "to") ?? null });
-      return { data: { restored: a._[1], dir }, text: `Restored ${dir}. Trash expiry is cancelled.`, note: `loomctl restored ${dir}` };
+      if (a._.length > 1 || (a._.length && a._[0] !== "list")) throw new Error("Use loomctl trash list.");
+      const data = await invoke<{ id: string; folder: string; at: string; entry: string; entry_at: string; pending: boolean }[]>("trash_list");
+      return { data, text: data.length ? table(data.flatMap(r => [[r.id, r.pending ? "pending" : "retained", "folder", `${r.folder} -> ${r.at}`], ["", "", "git", `${r.entry} -> ${r.entry_at}`]])) : "Loom's trash is empty." };
     },
   },
   "close-plan": {

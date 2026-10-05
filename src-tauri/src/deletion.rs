@@ -96,7 +96,6 @@ struct Trashed {
     #[serde(default)] from: Option<PathBuf>,
     #[serde(default)] branch: Option<String>,
     #[serde(default)] commit: Option<String>,
-    #[serde(default)] restoring: Option<PathBuf>,
 }
 
 const PENDING: &str = "Loom trash transaction pending\n";
@@ -155,13 +154,11 @@ fn resume(trash: &Path, worktrees: &Path, dir: &Path, pending_only: bool) -> Res
         let (mut file, mut r) = open_record(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         if (!pending_only || r.pending) && spelled(&r.folder) == spelled(dir) && r.entry.parent().is_some_and(|p| spelled(p) == spelled(worktrees))
             && (r.pending || !dir.try_exists().map_err(|e| e.to_string())?) {
-            if r.restoring.is_some() { return Err("This trash record is being restored; finish its restore first".into()); }
             if r.pending { return finish_record(&mut file, &mut r).map(Some); }
             let stamp = file.metadata().and_then(|m| m.modified()).map_err(|e| e.to_string())?;
             if completed.as_ref().is_none_or(|(last, _)| stamp > *last) {
                 completed = Some((stamp, r.at.to_string_lossy().into_owned()));
             }
-
         }
     }
     // A later worktree at the same path may have independently disappeared.
@@ -236,7 +233,7 @@ fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Resul
             Err(e) => return Err(e.to_string()),
         }
     };
-    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit), restoring: None };
+    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit) };
     write_record(&mut held, &record).map_err(|e| e.to_string())?;
     // Git itself honors this lock, including a blanket prune from another instance.
     let mut lock = fs::OpenOptions::new().write(true).create_new(true).open(entry.join("locked")).map_err(|e| {
@@ -298,55 +295,6 @@ pub fn trash_records(trash: &Path) -> Result<serde_json::Value, String> {
     Ok(records.into())
 }
 
-/// Restore and cancel expiry under the same record lock used by purge. Keep
-/// an interrupted restore recorded and excluded from purge until it is retried.
-pub fn restore(trash: &Path, id: &str, destination: Option<&Path>) -> Result<String, String> {
-    if id.is_empty() || id.contains(['/', '\\', ':']) || id == "." || id == ".." { return Err("Invalid trash id".into()); }
-    let path = trash.join(format!("{id}.json"));
-    let (mut held, mut r) = open_record(&path).map_err(|e| e.to_string())?;
-    if r.pending { finish_record(&mut held, &mut r)?; }
-    let dest = destination.map(Path::to_path_buf).or_else(|| r.restoring.clone()).unwrap_or_else(|| r.folder.clone());
-    if !dest.is_absolute() { return Err("Restore destination must be an absolute path".into()); }
-    let exists = |p: &Path| p.try_exists().map_err(|e| e.to_string());
-    if let Some(prior) = &r.restoring {
-        if spelled(prior) != spelled(&dest) { return Err(format!("Resume this restore at {}", prior.display())); }
-    } else {
-        if spelled(&dest) != spelled(&r.at) && exists(&dest)? { return Err(format!("{} already exists; choose another destination", dest.display())); }
-        if !exists(&r.at)? || !exists(&r.entry_at)? { return Err("The retained checkout or administration is unavailable".into()); }
-        let original_entry = r.entry.clone();
-        let name = original_entry.file_name().ok_or("No administration name")?.to_string_lossy();
-        for suffix in 1.. {
-            if !exists(&r.entry)? { break; }
-            r.entry = original_entry.with_file_name(format!("{name}-restored-{suffix}"));
-        }
-        r.restoring = Some(dest.clone());
-        write_record(&mut held, &r).map_err(|e| e.to_string())?;
-    }
-    let common = r.entry.parent().and_then(Path::parent).ok_or("Invalid administration path")?.to_string_lossy().into_owned();
-    if let (Some(branch), Some(commit)) = (&r.branch, &r.commit) {
-        let current = crate::git_run(common.clone(), vec!["rev-parse".into(), "--verify".into(), "--quiet".into(), branch.clone()], Some(vec![1]), false)?;
-        if !current.trim().is_empty() && current.trim() != commit { return Err(format!("{branch} now points elsewhere; it was not overwritten")); }
-        if current.trim().is_empty() {
-            // The zero old value refuses a branch created by someone else meanwhile.
-            crate::git_run(common.clone(), vec!["update-ref".into(), branch.clone(), commit.clone(), "0".repeat(commit.len())], None, false)?;
-        }
-    }
-    if spelled(&dest) != spelled(&r.at) && exists(&r.at)? {
-        if exists(&dest)? { return Err(format!("{} already exists", dest.display())); }
-        fs::create_dir_all(dest.parent().ok_or("No destination parent")?).map_err(|e| e.to_string())?;
-        fs::rename(&r.at, &dest).map_err(|e| e.to_string())?;
-    }
-    if exists(&r.entry_at)? {
-        if exists(&r.entry)? { return Err(format!("{} already exists", r.entry.display())); }
-        fs::create_dir_all(r.entry.parent().unwrap()).and_then(|_| fs::rename(&r.entry_at, &r.entry)).map_err(|e| e.to_string())?;
-    }
-    // Repair both links explicitly, including old records with relative paths.
-    fs::write(dest.join(".git"), format!("gitdir: {}\n", r.entry.display())).map_err(|e| e.to_string())?;
-    crate::git_run(common, vec!["worktree".into(), "repair".into(), dest.to_string_lossy().into_owned()], None, false)?;
-    fs::remove_file(path).map_err(|e| e.to_string())?;
-    Ok(dest.to_string_lossy().into_owned())
-}
-
 /// Erase what went into `trash` more than `keep` ago: the folder each record
 /// names, git's record of it, then the record. One put back by hand isn't
 /// where its record says any more, so it stays. A failure waits for the next
@@ -357,7 +305,7 @@ pub fn purge(trash: &Path, keep: Duration) {
         let due = fs::metadata(&file).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= keep));
         if !due { continue; }
         let Ok((_held, r)) = open_record(&file) else { continue };
-        if r.pending || r.restoring.is_some() { continue; }
+        if r.pending { continue; }
         match restored(&r) {
             Ok(true) => { let _ = fs::remove_file(&file); continue; }
             Err(_) => continue,
@@ -534,51 +482,7 @@ mod tests {
         purge(&trash, Duration::ZERO);
         assert_eq!(fs::read_to_string(at.join("a")).unwrap(), "recovered working data", "purge erased a repaired live checkout");
         assert_eq!(git(&at, &["show", ":a"]), "staged");
-        assert!(!file.exists(), "restore must cancel expiry");
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn restore_to_another_path_recovers_the_deleted_branch_and_index() {
-        let dir = std::env::temp_dir().join(format!("loom-restore-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
-        fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q"]);
-        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
-        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
-        fs::write(wt.join("a"), "committed").unwrap();
-        git(&wt, &["add", "a"]);
-        git(&wt, &["commit", "-qm", "branch only"]);
-        let commit = git(&wt, &["rev-parse", "HEAD"]);
-        fs::write(wt.join("a"), "staged").unwrap();
-        git(&wt, &["add", "a"]);
-        fs::write(wt.join("a"), "working").unwrap();
-        remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap();
-        git(&repo, &["branch", "-D", "t"]);
-        let list = trash_records(&trash).unwrap();
-        let id = list[0]["id"].as_str().unwrap();
-        assert_eq!(list[0]["branch"], "refs/heads/t");
-        assert_eq!(list[0]["commit"], commit.trim());
-        git(&repo, &["worktree", "add", "-q", "-b", "replacement", wt.to_str().unwrap()]);
-        fs::write(wt.join("replacement"), "keep").unwrap();
-        assert!(restore(&trash, id, None).is_err(), "restore must refuse an occupied destination");
-        let dest = dir.join("recovered");
-        let file = trash.join(format!("{id}.json"));
-        // Restore/purge share the record lock, even across different instances.
-        let held = open_record(&file).unwrap();
-        purge(&trash, Duration::ZERO);
-        assert!(file.exists());
-        drop(held);
-        restore(&trash, id, Some(&dest)).unwrap();
-        assert!(!file.exists(), "expiry must be cancelled before normal use");
-        assert_eq!(git(&dest, &["rev-parse", "HEAD"]), commit);
-        assert_eq!(git(&dest, &["show", ":a"]), "staged");
-        assert_eq!(fs::read_to_string(dest.join("a")).unwrap(), "working");
-        assert_eq!(fs::read_to_string(wt.join("replacement")).unwrap(), "keep");
-        assert_eq!(git(&wt, &["branch", "--show-current"]).trim(), "replacement");
-        purge(&trash, Duration::ZERO);
-        assert!(dest.join("a").is_file());
+        assert!(!file.exists(), "a checkout put back by hand must cancel expiry");
         fs::remove_dir_all(dir).unwrap();
     }
 
