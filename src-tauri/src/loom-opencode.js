@@ -31,16 +31,27 @@ function loomPane(lookup) {
   const pending = new Set();
   // A marker names the launch that wrote it (LOOM_LAUNCH), so a replaced process's late one moves nothing.
   const launchLine = (text) => (/^\d+$/.test(process.env.LOOM_LAUNCH ?? "") ? `${text}\n${process.env.LOOM_LAUNCH}` : text);
-  const select = (id) => {
+  // Loom consumes a marker by opening it alone (lib.rs claim), so a write in
+  // that instant meets a sharing violation: try again, or the update is lost.
+  const publish = async (file, text) => {
+    for (let tries = 0; !stopped; tries++) {
+      try {
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, text);
+        return true;
+      } catch (e) {
+        if (tries >= 40 || !["EBUSY", "EPERM", "EACCES"].includes(e?.code)) return false;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return false;
+  };
+  const select = async (id) => {
     if (stopped || !validID(id)) return;
     if (id !== selected) { state = undefined; pending.clear(); }
     selected = id;
     const file = process.env.LOOM_SESSION_FILE;
-    if (!file) return;
-    try {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, launchLine(id));
-    } catch {}
+    if (file) await publish(file, launchLine(id));
   };
   // One file per report in %TEMP%\loom-task, named so a pane's sort in order
   // (16 digits, as loom.exe names Claude's and Codex's), written beside and
@@ -58,14 +69,9 @@ function loomPane(lookup) {
       fs.renameSync(`${name}.tmp`, `${name}.json`);
     } catch {}
   };
-  const signal = (next) => {
+  const signal = async (next) => {
     if (stopped || next === state) return;
-    try {
-      const dir = path.join(os.tmpdir(), "loom-wait");
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, process.env.LOOM_PANE), launchLine(`opencode:${next}`));
-      state = next;
-    } catch {}
+    if (await publish(path.join(os.tmpdir(), "loom-wait", process.env.LOOM_PANE), launchLine(`opencode:${next}`))) state = next;
   };
   // Hooks and events use the same queue: asynchronous lookups must preserve order.
   const enqueue = (fn) => queue = queue.then(() => {
@@ -78,7 +84,7 @@ function loomPane(lookup) {
       seen.add(id);
       const session = await lookup(id);
       if (!session || stopped) return false;
-      if (!selected && !session.parentID) { select(id); return true; }
+      if (!selected && !session.parentID) { await select(id); return true; }
       if (!descendants || !session.parentID) return false;
       id = session.parentID;
     }
@@ -89,11 +95,11 @@ function loomPane(lookup) {
     message: (id) => enqueue(async () => {
       if (!validID(id)) return;
       const session = await lookup(id);
-      if (session && !session.parentID) select(id);
+      if (session && !session.parentID) await select(id);
     }),
     event: (type, data) => enqueue(async () => {
       if (type === "session.created") {
-        if (!data.parentID) select(data.sessionID);
+        if (!data.parentID) await select(data.sessionID);
         return;
       }
       // The root session's own text only: a child's answer isn't the run's.
@@ -107,7 +113,7 @@ function loomPane(lookup) {
         if (!await selectedSession(id, true)) return;
         const key = `${id}:${form.id || form.requestID || type.split('.')[0]}`;
         if (WAKES.has(type)) pending.add(key); else pending.delete(key);
-        signal(pending.size ? "waiting" : "busy");
+        await signal(pending.size ? "waiting" : "busy");
         // Working again only once nothing is left to answer, as the pane marker says.
         if (WAKES.has(type)) report("approval", type);
         else if (!pending.size) report("resume", type);
@@ -117,8 +123,8 @@ function loomPane(lookup) {
         : type === "session.status" ? data.status?.type : undefined;
       if (!status || !await selectedSession(data.sessionID)) return;
       const was = state;
-      if (status === "idle") { pending.clear(); signal("waiting"); }
-      else if (status === "busy" || status === "retry") signal(pending.size ? "waiting" : "busy");
+      if (status === "idle") { pending.clear(); await signal("waiting"); }
+      else if (status === "busy" || status === "retry") await signal(pending.size ? "waiting" : "busy");
       // 2.x reports each run's start and outcome; 1.x only its status, so a
       // start is the move to busy and an end the move to idle.
       const error = type === "session.error" ? data.error?.name || "error" : undefined;

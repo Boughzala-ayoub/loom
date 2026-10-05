@@ -108,9 +108,23 @@ pub fn codex_notify(event: Option<&str>) -> i32 {
         }
         // With its launch, so a replaced process's late report is told apart.
         let launch = std::env::var("LOOM_LAUNCH").ok().filter(|l| l.parse::<u64>().is_ok());
-        let _ = std::fs::write(file, launch.map_or_else(|| id.clone(), |l| format!("{id}\n{l}")));
+        publish(&file, &launch.map_or_else(|| id.clone(), |l| format!("{id}\n{l}")));
     }
     0
+}
+
+/// Write a marker Loom consumes by opening it alone (lib.rs `claim`): a write
+/// in that instant meets a sharing violation, waited out rather than lost.
+pub fn publish(path: &Path, text: &str) -> bool {
+    for _ in 0..40 {
+        match std::fs::write(path, text) {
+            Ok(()) => return true,
+            // ERROR_ACCESS_DENIED while the claimed one's delete is pending, ERROR_SHARING_VIOLATION.
+            Err(e) if matches!(e.raw_os_error(), Some(5 | 32)) => std::thread::sleep(std::time::Duration::from_millis(25)),
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 /// A finished Codex turn as a task event: the end of the turn that carried
@@ -483,6 +497,20 @@ mod tests {
         let first: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join(&names[0])).unwrap()).unwrap();
         assert_eq!((first["kind"].as_str(), first["launch"].as_u64(), first["src"].as_str()), (Some("start"), Some(7), Some("claude")), "written first, sorted first");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_marker_written_while_loom_takes_the_last_one_lands_after() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = std::env::temp_dir().join(format!("loom-publish-test-{}", std::process::id()));
+        std::fs::write(&path, "old").unwrap();
+        // Loom's claim (lib.rs): read and delete access, opened alone, deleted on close.
+        let held = std::fs::OpenOptions::new().access_mode(0x8001_0000).share_mode(0).custom_flags(0x0400_0000).open(&path).unwrap();
+        let release = std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_millis(200)); drop(held); });
+        assert!(publish(&path, "new"));
+        release.join().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        std::fs::remove_file(path).unwrap();
     }
 
     /// Against this machine's own npm codex: `cargo test -- --ignored codex_direct_real`.

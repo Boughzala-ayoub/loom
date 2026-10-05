@@ -1078,17 +1078,18 @@ fn take_sessions(app: AppHandle, ids: Vec<String>) -> Vec<(String, String, Optio
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
             continue;
         }
-        let path = base.join(&id);
-        // "sid", or "sid\nlaunch" from a writer that knows its launch (LOOM_LAUNCH).
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            let mut lines = text.lines().map(str::trim);
-            if let Some(sid) = lines.next().filter(|s| !s.is_empty()) {
-                out.push((id, sid.to_string(), lines.next().and_then(|l| l.parse().ok())));
-                let _ = std::fs::remove_file(path);
-            }
-        }
+        if let Some((sid, launch)) = take_session(&base.join(&id)) { out.push((id, sid, launch)); }
     }
     out
+}
+
+/// A session mark: "sid", or "sid\nlaunch" from a writer that knows its launch (LOOM_LAUNCH).
+/// Consumed whole by `claim`: a newer mark written after it was read is never the one deleted.
+fn take_session(path: &std::path::Path) -> Option<(String, Option<u64>)> {
+    let text = claim(path)?;
+    let mut lines = text.lines().map(str::trim);
+    let sid = lines.next().filter(|s| !s.is_empty())?.to_string();
+    Some((sid, lines.next().and_then(|l| l.parse().ok())))
 }
 
 fn opencode_sessions(dir: String, command: Option<String>) -> Result<Vec<serde_json::Value>, String> {
@@ -2458,6 +2459,19 @@ mod tests {
         super::prune_markers(&[dir.clone(), dir.join("missing")], std::time::Duration::from_secs(7 * 86_400));
         assert!(!old.exists() && new.exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_mark_being_written_waits_for_the_next_poll() {
+        let path = std::env::temp_dir().join(format!("loom-session-take-{}", std::process::id()));
+        std::fs::write(&path, "ses_new\n7").unwrap();
+        // Its writer still has it open: reading now and deleting after could delete a newer mark.
+        let writing = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert_eq!(super::take_session(&path), None);
+        assert!(path.exists(), "a mark still being written was deleted");
+        drop(writing);
+        assert_eq!(super::take_session(&path), Some(("ses_new".into(), Some(7))));
+        assert!(!path.exists());
     }
 
     #[test]

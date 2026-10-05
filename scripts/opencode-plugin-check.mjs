@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, existsSync, unlinkSync, rmSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import plugin, { Loom } from '../src-tauri/src/loom-opencode.js';
 import { promptMatch } from '../src/task.ts';
 
@@ -16,6 +17,13 @@ const first = (path) => existsSync(path) ? readFileSync(path, 'utf8').split('\n'
 const read = () => first(marker);
 // The task reports since the last call, in the order Loom drains them (by name), consumed.
 const tasks = join(tmpdir(), 'loom-task');
+// Loom consuming a marker (lib.rs claim): opened alone for `ms`. Resolves once held, with the release.
+const claimFor = (path, ms) => new Promise((held, fail) => {
+  const ps = spawn(join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-Command',
+    `$f = [IO.FileStream]::new('${path}', 'Open', 'Read', 'None', 4096, 'DeleteOnClose'); 'held'; Start-Sleep -Milliseconds ${ms}; $f.Close()`]);
+  ps.stdout.once('data', () => held({ released: new Promise(done => ps.on('exit', done)) }));
+  ps.stderr.on('data', d => fail(new Error(String(d))));
+});
 const reports = (whole = false) => (existsSync(tasks) ? readdirSync(tasks) : []).filter(f => f.startsWith(`${pane}.`) && f.endsWith('.json')).sort()
   .map(f => { const v = JSON.parse(readFileSync(join(tasks, f), 'utf8')); unlinkSync(join(tasks, f)); assert.equal(v.launch, 3, 'Each report names its launch'); return whole ? v : v.kind; });
 try {
@@ -107,6 +115,13 @@ try {
       ? ['approval', 'resume', 'approval', 'resume', 'end', 'end', 'start', 'fail', 'fail', 'start']
       : ['approval', 'resume', 'approval', 'resume', 'end', 'end', 'start', 'fail', 'fail', 'start', 'interrupt', 'interrupt', 'start'],
       'Each run reports its start and outcome');
+    // The run ends while Loom is consuming the busy marker: the idle one is written after, not lost.
+    assert.equal(read(), 'opencode:busy');
+    const { released } = await claimFor(marker, 300);
+    await status('idle');
+    await released;
+    assert.equal(read(), 'opencode:waiting', 'A state written while Loom held the marker was lost');
+    reports();
     // 2.x names a run's final text on its end, by match, never the text: the root's last block, not a child's.
     if (version === 2) {
       reports();
