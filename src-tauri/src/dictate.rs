@@ -74,9 +74,11 @@ pub fn dictate_start(app: AppHandle, state: State<Dictation>) -> Result<(), Stri
 /// `0.0` when nothing is recording.
 // ponytail: polled, not emitted. The webview asks ~16 times a second; an event
 // per audio buffer would be an order of magnitude more IPC for the same wave.
+// A sync command, on the main thread: try_lock, since dictate_start holds the
+// slot while the audio device starts, and a poll must not wait that out.
 #[tauri::command]
 pub fn dictate_level(state: State<Dictation>) -> f32 {
-    let mut slot = state.rec.lock().unwrap();
+    let Ok(mut slot) = state.rec.try_lock() else { return 0.0 };
     let Some(rec) = slot.as_mut() else {
         return 0.0;
     };

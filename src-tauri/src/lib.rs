@@ -929,10 +929,35 @@ fn drain_task_events(dir: &std::path::Path, ids: &[String]) -> Vec<(String, serd
     }
     files.sort();
     files.into_iter().filter_map(|(_, id, path)| {
-        let text = std::fs::read_to_string(&path).ok();
-        let _ = std::fs::remove_file(&path);
-        Some((id, serde_json::from_str(&text?).ok()?))
+        let text = claim(&path)?;
+        Some((id, serde_json::from_str(&text).ok()?))
     }).collect()
+}
+
+/// Hook markers are named by pane ids, which change every run, so nothing reads
+/// one after its pane is gone. ponytail: by age, at startup. A pane up for over
+/// `age` loses its marker until its session next starts, resumes or compacts.
+fn prune_markers(dirs: &[PathBuf], age: std::time::Duration) {
+    for e in dirs.iter().flat_map(std::fs::read_dir).flatten().flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > age);
+        if old { let _ = std::fs::remove_file(e.path()); }
+    }
+}
+
+/// A marker's text, consumed. The 250 ms poll and a pane's exit thread drain
+/// the same folders: opened alone (no sharing) and deleted on close, a file
+/// goes to one of them. A rename can't claim it: std renames through a handle,
+/// which moves the file wherever the other drainer just put it.
+fn claim(path: &std::path::Path) -> Option<String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    let mut file = std::fs::OpenOptions::new().access_mode(GENERIC_READ | DELETE).share_mode(0)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE).open(path).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// loomctl's task journal (task.ts), beside the state file it belongs to:
@@ -1288,9 +1313,8 @@ fn drain_wakes(dir: &std::path::Path, ids: &[String]) -> Vec<(String, String)> {
             }
             continue;
         }
-        let Ok(effort) = std::fs::read_to_string(e.path()) else { continue };
+        let Some(effort) = claim(&e.path()) else { continue };
         woke.push((id.to_string(), effort.trim().to_string()));
-        let _ = std::fs::remove_file(e.path());
     }
     woke
 }
@@ -1658,6 +1682,8 @@ pub fn run() {
                     std::process::exit(1);
                 }
             }
+            let marks = [std::env::temp_dir().join("loom-status"), std::env::temp_dir().join("loom-tx"), data_dir(app.handle()).join("session-marks")];
+            std::thread::spawn(move || prune_markers(&marks, std::time::Duration::from_secs(7 * 86_400)));
             // The plugin accepts an absolute filename. Keep geometry beside the
             // workspace so dev, release, and explicit profiles stay independent.
             let window_file = std::path::absolute(state_file(app.handle()))?.with_extension("window.json");
@@ -2269,6 +2295,34 @@ mod tests {
         assert!(dir.join("q-2.1700000000100.9.json").exists(), "another Loom's event is left for it");
         assert!(dir.join("p-1.1700000000300.9.tmp").exists(), "a half-written event waits for its rename");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_drainers_take_each_event_once() {
+        let dir = std::env::temp_dir().join(format!("loom-task-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = ["p-1".to_string()];
+        for i in 0..400u64 { std::fs::write(dir.join(format!("p-1.{}.9.json", 1_700_000_000_000 + i)), r#"{"kind":"end"}"#).unwrap(); }
+        // The 250 ms poll and a pane's exit thread, at once.
+        let (a, b) = std::thread::scope(|s| {
+            let (a, b) = (s.spawn(|| super::drain_task_events(&dir, &mine).len()), s.spawn(|| super::drain_task_events(&dir, &mine).len()));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_eq!(a + b, 400, "{a} + {b}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn stale_markers_are_pruned() {
+        let dir = std::env::temp_dir().join(format!("loom-marks-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old, new) = (dir.join("gone-pane"), dir.join("live-pane"));
+        std::fs::write(&old, "x").unwrap();
+        std::fs::write(&new, "x").unwrap();
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400)).unwrap();
+        super::prune_markers(&[dir.clone(), dir.join("missing")], std::time::Duration::from_secs(7 * 86_400));
+        assert!(!old.exists() && new.exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -6625,10 +6625,14 @@ type Sent = "ok" | "sent" | "lost";
  * "sent" rather than stall the queue — and give up much sooner when another
  * pick is already waiting behind this one). */
 async function slash(p: Pane, cmd: string, confirmed: () => boolean): Promise<Sent> {
-  p.term.paste(cmd);
-  await p.settle(150, 1000); // let the input take it before the Enter
-  p.inputSeq++;
-  await invoke("pty_write", { id: p.id, data: "\r" });
+  // The pane's input turn: a loomctl send waiting on its echo would otherwise go with this Enter.
+  await inTurn(p, async (live) => {
+    p.term.paste(cmd);
+    await p.settle(150, 1000); // let the input take it before the Enter
+    live(true);
+    p.inputSeq++;
+    await invoke("pty_write", { id: p.id, data: "\r" });
+  });
   for (const t0 = Date.now(); ; ) {
     if (confirmed()) return "ok";
     if (Date.now() - t0 >= (cfgQueued ? 1000 : 8000)) return "sent";
