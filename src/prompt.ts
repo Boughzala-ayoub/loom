@@ -227,31 +227,48 @@ function readCodexInput(rows: Cell[][], cursor: Cursor | undefined): Input {
 
 // Codex's "Working (3s • esc to interrupt)", OpenCode's "esc interrupt" ("esc again to interrupt" after one press).
 const HINT = /\besc\s+(?:again\s+)?(?:to\s+)?interrupt/i;
-// Claude Code 2.1.288+ keeps the hint only in its API retry banner's own row.
-const CLAUDE_RETRY = /·\s*next try in\s.*·\s*esc to interrupt\s*$/m;
+// Claude Code 2.1.288+ keeps the hint only in its API retry banner, which takes
+// its spinner's row: a frame in column 0, never the transcript's "●".
+const CLAUDE_RETRY = /^[·✢✳*✶✻✽] .*·\s*next try in\s.*·\s*esc to interrupt\s*$/;
+// Codex's status row, shown only while a turn runs: "[frame ]<header> (<clock>
+// • esc to interrupt)[ · …]", its clock 5s, 1m 05s or 1h 02m 05s, and cut
+// with "…" when narrow, hint and all. A transcript quote has no clock.
+const CODEX_STATUS = /^\s*(?:\S )?[^\s(][^(]* \(\d+[hms](?: \d+[hms])*(?![\w])/;
 
-/** An agent's "esc to interrupt" hint, read only off the rows its input owns,
- * since the transcript above can quote it. Claude: its retry banner, or the
- * footer under its input box. Codex: from its status row, two above the "›"
- * composer, down. Anything else (OpenCode's footer): the last three rows with
- * text. */
+/** An agent's "esc to interrupt" hint, or its working status, read only off
+ * the rows that are the agent's own, since the transcript can quote it and a
+ * draft can say it. Claude: its retry banner in the live rows above its input
+ * box, or the footer under the box. Codex: its status row in the few rows
+ * above the "›" composer, or the footer below the composer's own rows.
+ * Anything else (OpenCode's footer): the last three rows with text. */
 export function interruptHint(screen: string, agent: string): boolean {
   const lines = screen.split("\n");
   let end = lines.length;
   while (end > 0 && !lines[end - 1].trim()) end--;
   const from = (i: number) => lines.slice(Math.max(0, i), end).some((l) => HINT.test(l));
   if (agent === "claude") {
-    if (CLAUDE_RETRY.test(screen)) return true;
     // The input box: the last prompt row right under a rule, to the rule under it.
     for (let i = end - 1; i > 0; i--) {
       if (!PROMPT.test(unbox(lines[i])) || !isRule(unbox(lines[i - 1]))) continue;
       let j = i + 1;
       while (j < end && !isRule(unbox(lines[j]))) j++;
-      return from(j + 1);
+      if (from(j + 1)) return true;
+      // The live rows: the block above the box, past the blank row between.
+      let k = i - 2;
+      while (k >= 0 && !lines[k].trim()) k--;
+      for (; k >= 0 && lines[k].trim(); k--) if (CLAUDE_RETRY.test(lines[k])) return true;
+      return false;
     }
     return false;
   }
-  if (agent === "codex") for (let i = end - 1; i >= 0; i--) if (CODEX_PROMPT.test(lines[i]) && !OPTION.test(lines[i])) return from(i - 2);
+  if (agent === "codex") for (let i = end - 1; i >= 0; i--) {
+    if (!CODEX_PROMPT.test(lines[i]) || OPTION.test(lines[i])) continue;
+    // Below: the composer's own rows (its draft, wrapped) to a blank row, then the footer.
+    let j = i + 1;
+    while (j < end && lines[j].trim()) j++;
+    // ponytail: the status row within four rows of the composer (it may carry detail rows).
+    return from(j) || lines.slice(Math.max(0, i - 4), i).some((l) => CODEX_STATUS.test(l));
+  }
   return from(end - 3);
 }
 

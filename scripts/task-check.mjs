@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|invalid-key|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|invalid-key|hint-rows|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -420,6 +420,28 @@ try {
     await page.waitForTimeout(50);
     assert.equal((await pane()).state, 'working', 'The letter the menu names answers it');
     ok('Only Enter or a key the question takes answers it');
+  }
+  if (review('hint-rows')) {
+    // Rows that aren't the agent's: Codex's last transcript row right above its
+    // composer, its draft, and Claude's retry banner quoted in its transcript (review RF10).
+    for (const screen of ['• You can press esc to interrupt.\r\n\r\n› Ask Codex to do anything\r\n\r\n  ? for shortcuts', '• Done.\r\n\r\n› Explain esc to interrupt\r\n\r\n  ? for shortcuts']) {
+      await resetReview();
+      await agent(codex, { codexShape: true });
+      await page.evaluate(id => window.qa.out(id, '\x1b]9;Agent turn complete\x07'), codex);
+      await agent(codex, { codexRaw: `\x1b[2J\x1b[H${screen}` });
+      await page.locator(`.pane[data-id="${codex}"] .pane-head`).click();
+      await page.waitForTimeout(50);
+      assert.equal((await cli('panes')).data.find(p => p.id === codex).state, 'idle', `Not work: ${JSON.stringify(screen)}`);
+    }
+    await resetReview();
+    await agent(claude, { v288: true });
+    const sent = await cli('submit', 'work:1', 'quote the retry banner');
+    await report(claude, { kind: 'start', match: promptMatch('quote the retry banner') });
+    await until(sent.data.task, 'working');
+    await agent(claude, { say: 'It said: Overloaded · next try in 12s · attempt 3 · esc to interrupt' });
+    await stops(claude);
+    await until(sent.data.task, 'completed');
+    ok('The hint in Codex\'s last row or draft, and Claude\'s retry banner quoted, are not work');
   }
   if (review('claude-hint')) {
     // An answer that quotes the hint is transcript: the Stop still ends the turn.
