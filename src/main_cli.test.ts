@@ -16,7 +16,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -278,10 +278,11 @@ if (check(103)) {
 
 if (check(104)) {
   const t = { id: "held", pane: "p", state: "accepted", events: [] };
-  const p = { id: "p", generation: 1 };
-  const r = { pane: p, gen: 1, ref: "work:1", unsent: false };
+  // The receipt's pane is still up; the task finds none by its own id (paneById), as before receipts kept ids.
+  const p = { id: "receipt-pane", generation: 1 };
+  const r = { pane: p.id, gen: 1, ref: "work:1", unsent: false };
   const c = fixture({ tasks: new Map([[t.id, t]]), receipts: new Map([[t.id, r]]),
-    heldEnter: new Map([[t.id, { receipt: r }]]), paneById: () => undefined, requireJournal() {}, journal: async () => {}, gone: () => false,
+    heldEnter: new Map([[t.id, { receipt: r }]]), paneById: (id: string) => (id === p.id ? p : undefined), requireJournal() {}, journal: async () => {}, gone: () => false,
     until: async (ready: () => boolean) => {
       assert.equal(ready(), false);
       await c.task.run({ _: [t.id], end: "unknown" });
