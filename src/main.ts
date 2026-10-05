@@ -1832,7 +1832,11 @@ class Pane {
     this.term.onBell(() => this.wake(undefined, "bell"));
     this.fit.fit();
 
-    const unlisten = await listen<number>(`pty-exit:${this.id}`, (e) => this.exited(e.payload));
+    // An exit names its launch: one queued for a process a relaunch replaced isn't this one's.
+    const unlisten = await listen<number | { code: number; launch: number | null }>(`pty-exit:${this.id}`, ({ payload: p }) => {
+      if (typeof p === "number") return this.exited(p);
+      if (p.launch === null || p.launch === this.launched) this.exited(p.code);
+    });
     if (this.disposed) { unlisten(); return; }
     this.unlisten.push(unlisten);
     // Channel, not an event: stdout is the hot path and channels skip the
@@ -1857,9 +1861,10 @@ class Pane {
    * the map before killing it, so no pty-exit follows: the exit is marked here.
    * A launch still starting gives up, and kills what it started (see spawn). */
   async stop() {
-    this.launchGen++;
-    await invoke("pty_kill", { id: this.id });
-    this.exited(1, "stopped");
+    const gen = ++this.launchGen;
+    await invoke("pty_kill", { id: this.id, launch: this.launched });
+    // A launch that began while the kill was in flight is the pane now: it stays up.
+    if (gen === this.launchGen) this.exited(1, "stopped");
   }
 
   /** Start (or restart) the pane's process. `resume` = pick the session up
@@ -1890,6 +1895,8 @@ class Pane {
     }
   }
   private launchGen = 0;
+  /** The launch whose process runs (or ran last): what a stop kills and an exit is for. */
+  private launched = 0;
   private launching: Promise<void> = Promise.resolve();
   private starts = 0;
   /** A launch hasn't finished. A dead pane can be starting again (a restart
@@ -2000,9 +2007,10 @@ class Pane {
     if (stale()) {
       // Stopped, closed or relaunched while this process was starting: it must not stay up.
       release?.();
-      if (ok === true) await invoke("pty_kill", { id: this.id }).catch(() => {});
+      if (ok === true) await invoke("pty_kill", { id: this.id, launch: gen }).catch(() => {});
       return gaveUp();
     }
+    if (ok === true) this.launched = gen;
     if (ok !== true) {
       this.dead = true;
       this.term.write(`\r\n\x1b[31m${ok}\x1b[0m — Enter retries\r\n`);

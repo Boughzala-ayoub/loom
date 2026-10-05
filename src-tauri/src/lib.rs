@@ -48,6 +48,9 @@ struct Session {
     resizes: Arc<Mutex<Resizes>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
+    /// The page's launch (Pane.generation) this process is: a stop or an exit
+    /// for an older one must not end or mark the one that replaced it.
+    launch: Option<u64>,
     flow: Arc<output::Flow>,
     _cache_lease: Option<std::fs::File>,
 }
@@ -415,6 +418,7 @@ fn pty_spawn(
             input,
             killer,
             pid,
+            launch,
             flow,
             _cache_lease: cache_lease,
         },
@@ -434,7 +438,7 @@ fn pty_spawn(
             // marker would wake this pane's next launch, which reuses the id.
             send_wakes(&app, std::slice::from_ref(&id));
             send_task_events(&app, std::slice::from_ref(&id));
-            let _ = app.emit(&format!("pty-exit:{id}"), code);
+            let _ = app.emit(&format!("pty-exit:{id}"), serde_json::json!({ "code": code, "launch": launch }));
         }
         // Release the input pipe and console even if the exited pane stays open.
         // ClosePseudoConsole may drain output, so keep it outside the map lock.
@@ -509,7 +513,9 @@ fn resize_pty(ptys: &Ptys, id: &str, cols: u16, rows: u16,
     }
 }
 
-fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String) -> Result<(), String> {
+fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String, launch: Option<u64>) -> Result<(), String> {
+    // A stop for an older launch must not end the one that replaced it.
+    if launch.is_some() && ptys.0.lock().unwrap().get(&id).is_some_and(|s| s.launch != launch) { return Ok(()); }
     // A child can exit before its final output is parsed. Closing that pane
     // must also release its emitter when no Session remains in the map.
     for (pane, flow) in flows.0.lock().unwrap().values() {
@@ -1461,8 +1467,8 @@ mod commands {
         blocking(move || super::pty_spawn(app.clone(), app.state(), id, cwd, argv, codex_state_id, cols, rows, on_out, bus == Some(true), launch)).await
     }
     #[tauri::command]
-    pub async fn pty_kill(app: AppHandle, id: String) -> Result<(), String> {
-        blocking(move || super::pty_kill(app.state(), app.state(), id)).await
+    pub async fn pty_kill(app: AppHandle, id: String, launch: Option<u64>) -> Result<(), String> {
+        blocking(move || super::pty_kill(app.state(), app.state(), id, launch)).await
     }
     #[tauri::command]
     pub async fn pty_shutdown(app: AppHandle) {
@@ -1863,7 +1869,7 @@ mod tests {
         let (input, inputs) = std::sync::mpsc::channel();
         ptys.0.lock().unwrap().insert("pane".into(), Session {
             master: Arc::new(Mutex::new(pair.master)), resizes: Arc::default(), _writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
-            input, killer: Box::new(Killer), pid: None, flow: Arc::default(), _cache_lease: None,
+            input, killer: Box::new(Killer), pid: None, launch: None, flow: Arc::default(), _cache_lease: None,
         });
         let (entered, entry) = std::sync::mpsc::channel();
         let (release, held) = std::sync::mpsc::channel();

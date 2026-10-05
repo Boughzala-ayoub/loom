@@ -82,7 +82,7 @@ try {
     window.codexResults = {};
     await Promise.all(panes.map(async ({ id, argv }) => {
       const result = window.codexResults[id] = { output: '', code: null };
-      await window.__TAURI__.event.listen(`pty-exit:${id}`, e => result.code = e.payload);
+      await window.__TAURI__.event.listen(`pty-exit:${id}`, e => result.code = e.payload.code);
       const out = new Channel();
       out.onmessage = data => {
         void invoke('pty_ack', { channel: out.id });

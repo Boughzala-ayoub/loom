@@ -271,6 +271,20 @@ try {
       const restarted = await cli('restart', 'search-polish:1');
       assert.equal(restarted.ok, true, JSON.stringify(restarted));
       assert.equal(await spawns(stopped.data.id), 2, 'The failed start, then the one that worked');
+      // A stop whose kill returns after a newer launch started leaves that launch running (Astra's full review, F7).
+      await page.evaluate(() => { window.qa.holdKills = true; });
+      const slowStop = cli('stop', 'search-polish:1', '--yes');
+      await page.waitForFunction(() => window.qa.pendingKills.length === 1);
+      const relaunch = cli('restart', 'search-polish:1', '--yes');
+      await page.waitForFunction(() => window.qa.pendingKills.length === 2);
+      await page.evaluate(() => { window.qa.holdKills = false; window.qa.pendingKills.splice(1, 1)[0](); });
+      assert.equal((await relaunch).ok, true);
+      await page.evaluate(() => window.qa.pendingKills.splice(0).forEach(r => r()));
+      assert.equal((await slowStop).ok, true);
+      const live = (await cli('panes')).data.find(p => p.ref === 'search-polish:1');
+      assert.notEqual(live.state, 'exited', JSON.stringify(live));
+      const kills = await page.evaluate(id => window.qa.calls.filter(c => c.cmd === 'pty_kill' && c.args.id === id).map(c => c.args.launch), stopped.data.id);
+      assert.equal(new Set(kills.slice(-2)).size, 1, 'Both stops name the launch that was running, not whatever runs later');
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl stop while starting, failed restart ${width}px`);
