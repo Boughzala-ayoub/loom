@@ -1903,8 +1903,9 @@ class Pane {
     }
   }
   private launchGen = 0;
-  /** The launch whose process runs (or ran last): what a stop kills and an exit is for. */
-  private launched = 0;
+  /** The launch whose process runs (or ran last): what a stop kills, and what
+   * an exit, a session marker or a wake must name to count. */
+  launched = 0;
   private launching: Promise<void> = Promise.resolve();
   private starts = 0;
   /** A launch hasn't finished. A dead pane can be starting again (a restart
@@ -9030,8 +9031,11 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   void listen<[string, string][]>("wakes", (e) => {
     const effortById = new Map(e.payload);
     for (const p of threads.flatMap((t) => t.panes)) {
-      const effort = effortById.get(p.id);
-      if (effort !== undefined) p.wake(effort, "hook");
+      const marker = effortById.get(p.id);
+      if (marker === undefined) continue;
+      // "effort", or "effort\nlaunch" from a writer that knows its launch: a replaced one's wakes nothing.
+      const [effort, launch] = marker.split("\n");
+      if (launch === undefined || Number(launch) === p.launched) p.wake(effort, "hook");
     }
   });
 
@@ -9051,11 +9055,12 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   const pollSessions = () => sessionPoll ??= (async () => {
     const panes = threads.flatMap((t) => t.panes).filter((p) => p.agent === "codex" || p.agent === "opencode");
     if (!panes.length) return;
-    const got = await invoke<[string, string][]>("take_sessions", { ids: panes.map((p) => p.id) }).catch(() => []);
+    const got = await invoke<[string, string, number | null][]>("take_sessions", { ids: panes.map((p) => p.id) }).catch(() => []);
     let changed = false;
-    for (const [id, sid] of got) {
+    for (const [id, sid, launch] of got) {
       const p = panes.find((x) => x.id === id);
-      if (p && validSessionId(sid) && sid !== p.sessionId) (p.sessionId = sid), (changed = true);
+      // A replaced process's late marker is not the resume target of the one that replaced it.
+      if (p && (launch == null || launch === p.launched) && validSessionId(sid) && sid !== p.sessionId) (p.sessionId = sid), (changed = true);
     }
     if (changed) save();
   })().finally(() => { sessionPoll = undefined; });

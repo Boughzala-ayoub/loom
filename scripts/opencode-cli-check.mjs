@@ -79,7 +79,7 @@ for (const [index, exe] of exes.entries()) {
     }
     assert.ok(sid);
     for (let i = 0; i < 30 && !existsSync(env.LOOM_SESSION_FILE); i++) await new Promise(resolve => setTimeout(resolve, 100));
-    assert.equal(readFileSync(env.LOOM_SESSION_FILE, 'utf8'), sid, `V${version} really loads the plugin and captures session.created`);
+    assert.equal(readFileSync(env.LOOM_SESSION_FILE, 'utf8').split('\n')[0], sid, `V${version} really loads the plugin and captures session.created`);
     if (version === 2) {
       for (let i = 0; i < 30 && !existsSync(join(dir, 'lookup.json')); i++) await new Promise(resolve => setTimeout(resolve, 100));
       assert.equal(JSON.parse(readFileSync(join(dir, 'lookup.json'), 'utf8')).id, sid, 'V2 plugin lookup returns the session directly');
@@ -89,7 +89,7 @@ for (const [index, exe] of exes.entries()) {
     const data = JSON.parse(run(version === 2 ? ['session', 'export', sid, '--standalone'] : ['export', sid, '--pure']));
     assert.equal(data.info.id, sid);
     assert.ok(Array.isArray(data.messages));
-    assert.equal(readFileSync(env.LOOM_SESSION_FILE, 'utf8'), sid, 'Helper reads do not change the pane marker');
+    assert.equal(readFileSync(env.LOOM_SESSION_FILE, 'utf8').split('\n')[0], sid, 'Helper reads do not change the pane marker');
     console.log(`PASS OpenCode ${version}: actual plugin load, session capture, listing and export`);
   } finally {
     if (server?.pid) spawnSync('taskkill', ['/PID', String(server.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });

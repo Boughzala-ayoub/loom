@@ -1017,7 +1017,7 @@ fn append_journal(path: &std::path::Path, text: &str) -> Result<(), String> {
 /// launch needs these, and on the 250 ms tick this was a file open per pane
 /// under the pty lock every keystroke waits on.
 #[tauri::command(async)]
-fn take_sessions(app: AppHandle, ids: Vec<String>) -> Vec<(String, String)> {
+fn take_sessions(app: AppHandle, ids: Vec<String>) -> Vec<(String, String, Option<u64>)> {
     let base = data_dir(&app).join("session-marks");
     let mut out = Vec::new();
     for id in ids {
@@ -1026,9 +1026,11 @@ fn take_sessions(app: AppHandle, ids: Vec<String>) -> Vec<(String, String)> {
             continue;
         }
         let path = base.join(&id);
-        if let Ok(sid) = std::fs::read_to_string(&path) {
-            if !sid.trim().is_empty() {
-                out.push((id, sid.trim().to_string()));
+        // "sid", or "sid\nlaunch" from a writer that knows its launch (LOOM_LAUNCH).
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            let mut lines = text.lines().map(str::trim);
+            if let Some(sid) = lines.next().filter(|s| !s.is_empty()) {
+                out.push((id, sid.to_string(), lines.next().and_then(|l| l.parse().ok())));
                 let _ = std::fs::remove_file(path);
             }
         }

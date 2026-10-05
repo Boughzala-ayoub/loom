@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|close-drain|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|stale-markers|close-drain|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -459,6 +459,31 @@ try {
       await agent(codex, { busy: false });
     }
     ok('Manual task settlement is durable, sends no pane input and emits no completion notice');
+  }
+  if (review('stale-markers')) {
+    // Session and wake markers name the launch that wrote them; a replaced
+    // launch's late ones move nothing (Astra's full review, F14).
+    await resetReview();
+    const g = await gen(codex);
+    const sessionOf = async () => (await cli('panes')).data.find((p) => p.id === codex).sessionId;
+    const taken = () => page.waitForFunction(() => !(window.qa.sessions ?? []).length, null, { timeout: 8000 });
+    await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-000000000001', g - 1]] });
+    await taken();
+    await page.waitForTimeout(100);
+    assert.notEqual(await sessionOf(), '0199a1b2-c3d4-7e5f-8a9b-000000000001', 'A replaced launch\'s session is not the resume target');
+    await qa({ sessions: [[codex, '0199a1b2-c3d4-7e5f-8a9b-000000000002', g]] });
+    await taken();
+    await page.waitForTimeout(100);
+    assert.equal(await sessionOf(), '0199a1b2-c3d4-7e5f-8a9b-000000000002');
+    const wake = (body) => page.evaluate(([id, body]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, body]] }), [claude, body]);
+    const state = async () => (await cli('panes')).data.find((p) => p.id === claude).state;
+    await wake(`high\n${(await gen(claude)) - 1}`);
+    await page.waitForTimeout(100);
+    assert.notEqual(await state(), 'waiting', 'A replaced launch\'s wake raises nothing');
+    await wake(`high\n${await gen(claude)}`);
+    await page.waitForTimeout(100);
+    assert.equal(await state(), 'waiting');
+    ok('Session and wake markers from a replaced launch are dropped');
   }
   if (review('close-drain')) {
     // Closing waits for journal writes still in flight, and a write that keeps

@@ -106,7 +106,9 @@ pub fn codex_notify(event: Option<&str>) -> i32 {
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(file, id);
+        // With its launch, so a replaced process's late report is told apart.
+        let launch = std::env::var("LOOM_LAUNCH").ok().filter(|l| l.parse::<u64>().is_ok());
+        let _ = std::fs::write(file, launch.map_or_else(|| id.clone(), |l| format!("{id}\n{l}")));
     }
     0
 }

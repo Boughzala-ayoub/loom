@@ -11,7 +11,9 @@ const previous = { pane: process.env.LOOM_PANE, session: process.env.LOOM_SESSIO
 const pane = `opencode-check-${process.pid}`;
 const marker = join(tmpdir(), 'loom-wait', pane);
 const sessionFile = join(dir, 'session');
-const read = () => existsSync(marker) ? readFileSync(marker, 'utf8') : '';
+// A marker's first line; a second names the launch that wrote it (LOOM_LAUNCH).
+const first = (path) => existsSync(path) ? readFileSync(path, 'utf8').split('\n')[0] : '';
+const read = () => first(marker);
 // The task reports since the last call, in the order Loom drains them (by name), consumed.
 const tasks = join(tmpdir(), 'loom-task');
 const reports = (whole = false) => (existsSync(tasks) ? readdirSync(tasks) : []).filter(f => f.startsWith(`${pane}.`) && f.endsWith('.json')).sort()
@@ -58,12 +60,13 @@ try {
     reports();
     await status('busy');
     assert.equal(read(), 'opencode:busy');
-    assert.equal(readFileSync(sessionFile, 'utf8'), 'ses_main', 'Resume recovers the root session');
+    assert.deepEqual([readFileSync(marker, 'utf8'), readFileSync(sessionFile, 'utf8')], ['opencode:busy\n3', 'ses_main\n3'], 'Both markers name their launch');
+    assert.equal(first(sessionFile), 'ses_main', 'Resume recovers the root session');
     assert.deepEqual(reports(), ['start'], 'A run starting is a task start');
     await status('idle', 'ses_child');
     assert.equal(read(), 'opencode:busy', 'Child completion cannot finish the root');
     await event('session.created', { sessionID: 'ses_child', parentID: 'ses_main' });
-    assert.equal(readFileSync(sessionFile, 'utf8'), 'ses_main');
+    assert.equal(first(sessionFile), 'ses_main');
     await event('permission.asked', { sessionID: 'ses_other', id: 'other' });
     assert.equal(read(), 'opencode:busy', 'An unrelated session cannot ring this pane');
     await event('permission.asked', { sessionID: 'ses_child', id: 'p1' });
@@ -127,20 +130,20 @@ try {
     const working = status('busy', 'ses_next');
     const finished = status('idle', 'ses_next');
     release(); await Promise.all([selection, working, finished]);
-    assert.equal(readFileSync(sessionFile, 'utf8'), 'ses_next');
+    assert.equal(first(sessionFile), 'ses_next');
     assert.equal(read(), 'opencode:waiting');
     // Disposal must also stop in-flight lookups from writing stale markers.
     gate = new Promise(resolve => release = resolve);
     const late = hook({ sessionID: 'ses_late' });
     await new Promise(resolve => setTimeout(resolve, 0));
     dispose(); release(); await late;
-    assert.equal(readFileSync(sessionFile, 'utf8'), 'ses_next');
+    assert.equal(first(sessionFile), 'ses_next');
     if (version === 2) assert.equal(aborted, true);
     delete process.env.LOOM_PANE;
     assert.equal(await plugin.setup({}), undefined, 'Outside Loom the V2 plugin is inert');
     const noLoom = await Loom({ client: {} });
     await noLoom.event({ event: { type: 'session.created', properties: { info: { id: 'ses_external' } } } });
-    assert.equal(readFileSync(sessionFile, 'utf8'), 'ses_next');
+    assert.equal(first(sessionFile), 'ses_next');
     console.log(`PASS OpenCode ${version}: session identity, states, prompts, child isolation, event order, task reports, cleanup, no-op outside Loom`);
   }
 } finally {

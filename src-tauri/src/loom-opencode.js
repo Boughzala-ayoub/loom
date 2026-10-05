@@ -29,6 +29,8 @@ let reports = 0;
 function loomPane(lookup) {
   let selected, state, answer, stopped = false, queue = Promise.resolve();
   const pending = new Set();
+  // A marker names the launch that wrote it (LOOM_LAUNCH), so a replaced process's late one moves nothing.
+  const launchLine = (text) => (/^\d+$/.test(process.env.LOOM_LAUNCH ?? "") ? `${text}\n${process.env.LOOM_LAUNCH}` : text);
   const select = (id) => {
     if (stopped || !validID(id)) return;
     if (id !== selected) { state = undefined; pending.clear(); }
@@ -37,7 +39,7 @@ function loomPane(lookup) {
     if (!file) return;
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, id);
+      fs.writeFileSync(file, launchLine(id));
     } catch {}
   };
   // One file per report in %TEMP%\loom-task, named so a pane's sort in order
@@ -61,7 +63,7 @@ function loomPane(lookup) {
     try {
       const dir = path.join(os.tmpdir(), "loom-wait");
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, process.env.LOOM_PANE), `opencode:${next}`);
+      fs.writeFileSync(path.join(dir, process.env.LOOM_PANE), launchLine(`opencode:${next}`));
       state = next;
     } catch {}
   };
