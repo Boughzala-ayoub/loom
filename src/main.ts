@@ -5249,9 +5249,10 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
     const deleting = mode !== "close" && th.isWorktree;
     let expected = approved ?? null;
     if (approved === undefined) {
-      const seen = deleting ? await inventory(th, mode === "all").catch(() => null) : null;
+      let why = "";
+      const seen = deleting ? await inventory(th, mode === "all").catch((e) => ((why = `: ${String(e)}`), null)) : null;
       if (deleting && !seen) {
-        const error = "Could not inspect the complete worktree. Nothing was closed or deleted.";
+        const error = `Could not inspect the complete worktree${why}. Nothing was closed or deleted.`;
         toast(error);
         return { removed: false, error };
       }

@@ -54,7 +54,12 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
         }
         children.sort_by(|a, b| a.0.cmp(&b.0));
         for (path, meta) in children {
-            if dir == root && path.file_name().is_some_and(|n| n == ".git") { continue; }
+            if path.file_name().is_some_and(|n| n.eq_ignore_ascii_case(".git")) {
+                if dir == root { continue; }
+                // Another worktree or repository, with its own changes, commits and
+                // lock: no approval of this folder covers it, not even --force.
+                return Err(format!("{} holds another checkout at {}; move or delete that one first", root.display(), dir.display()));
+            }
             name(&mut hash, path.strip_prefix(root).map_err(|e| e.to_string())?.as_os_str());
             if meta.file_attributes() & 0x400 != 0 { hash.update([2]); }
             else if meta.is_dir() { hash.update([1]); pending.push(path); }
@@ -96,6 +101,7 @@ pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
         return Err(format!("{} is a link or not a folder; Loom deletes only a worktree's own folder", dir.display()));
     }
     let entry = entry_of(dir, &worktrees)?;
+    fingerprint(dir, None, &[])?; // the walk refuses a folder holding another checkout
     fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
     fs::remove_dir_all(&entry).map_err(|e| format!("removed {} but not git's record of it, {}: {e}", dir.display(), entry.display()))
 }
@@ -258,6 +264,34 @@ mod tests {
         assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"));
         assert!(dir.join("wt-aside").join(".git").is_file());
         fs::remove_dir_all(dir).unwrap(); // removes the junctions, not their targets
+    }
+
+    #[test]
+    fn a_worktree_holding_another_checkout_stays() {
+        let dir = std::env::temp_dir().join(format!("loom-remove-nested-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, outer) = (dir.join("repo"), dir.join("outer"));
+        let inner = outer.join("nested");
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "outer", outer.to_str().unwrap()]);
+        git(&repo, &["worktree", "add", "-q", "-b", "inner", inner.to_str().unwrap()]);
+        fs::write(inner.join("work.txt"), "unsaved").unwrap();
+        git(&repo, &["worktree", "lock", inner.to_str().unwrap()]);
+        let repo_s = repo.to_str().unwrap();
+        assert!(remove_worktree(repo_s, outer.to_str().unwrap()).is_err(), "a worktree inside went with it");
+        assert!(inner.join("work.txt").is_file());
+        assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/inner"));
+        // Another repository's checkout, which this repository's worktree list never shows.
+        fs::remove_file(inner.join("work.txt")).unwrap();
+        git(&repo, &["worktree", "unlock", inner.to_str().unwrap()]);
+        git(&repo, &["worktree", "remove", inner.to_str().unwrap()]);
+        fs::create_dir_all(outer.join("vendor/lib")).unwrap();
+        git(&outer.join("vendor/lib"), &["init", "-q"]);
+        assert!(remove_worktree(repo_s, outer.to_str().unwrap()).is_err(), "another repository inside went with it");
+        assert!(outer.join("vendor/lib/.git").is_dir());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
