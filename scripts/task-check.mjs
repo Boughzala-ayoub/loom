@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|invalid-key|hint-rows|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|shutdown-barrier|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|invalid-key|hint-rows|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|shutdown-barrier|hangup-wait|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -670,6 +670,25 @@ try {
     await qa({ lateBatch: [[codex, { t: Date.now(), kind: 'end', matches: [promptMatch(text)], turn: 'late-turn', launch: await gen(codex) }]] });
     assert.equal((await closeNow()).tasks.get(sent.data.task)?.state, 'completed', 'A report sent before shutdown, landing after it, was lost');
     ok('Reports sent before shutdown or returned by it, Claude\'s Stop too, are judged and journaled before the window goes');
+  }
+  if (review('hangup-wait')) {
+    // Review R14-6: loomctl hangs up in the middle of a long wait. Rust drops
+    // its waiter and says so (cli-cancel), and the page ends the wait's polling
+    // and the watch's listener. A keyed request is also a retry's answer: it goes on.
+    await resetReview();
+    const start = (id, cmd, argv, key = null) => page.evaluate(([id, cmd, argv, key]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin: null, cwd: null, timeout: 600, key } }), [id, cmd, argv, key]);
+    const hangUp = (id) => page.evaluate((id) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli-cancel', payload: id }), id);
+    const replied = (id) => page.evaluate((id) => window.qa.calls.find((c) => c.cmd === 'cli_reply' && c.args.id === id)?.args.reply ?? null, id);
+    await start(9001, 'wait', ['work:1', '--state', 'exited']);
+    await start(9002, 'watch', ['--after', '0']);
+    await start(9003, 'wait', ['work:1', '--state', 'exited'], 'kept-key');
+    await page.waitForTimeout(300);
+    for (const id of [9001, 9002, 9003]) await hangUp(id);
+    await page.waitForTimeout(600);
+    assert.match((await replied(9001))?.error ?? '', /hung up/, 'A wait whose loomctl hung up kept polling');
+    assert.match((await replied(9002))?.error ?? '', /hung up/, 'A watch whose loomctl hung up kept its listener and timer');
+    assert.equal(await replied(9003), null, 'A keyed wait was cancelled');
+    ok('A wait or watch whose loomctl hung up stops, and a keyed one goes on');
   }
   if (review('malformed-journal')) {
     // Valid JSON of the wrong shape: startup finishes (boot waits for cli_ready),

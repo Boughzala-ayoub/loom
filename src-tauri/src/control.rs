@@ -168,8 +168,8 @@ async fn answer(app: AppHandle, pipe: NamedPipeServer) -> std::io::Result<()> {
 
 /// `work`'s output, or None once the client hangs up: loomctl sends nothing
 /// after its request, so its end of the pipe reads EOF (or an error) only when
-/// it's gone. Dropping `work` then frees the slot a long wait would hold.
-/// ponytail: the page's own wait for that request polls on until its timeout.
+/// it's gone. Dropping `work` then frees the slot a long wait would hold, and
+/// tells the page to stop that wait (ask's Waiter).
 async fn unless_gone<T>(read: &mut (impl tokio::io::AsyncRead + Unpin), work: impl std::future::Future<Output = T>) -> Option<T> {
     use std::{future::Future, task::Poll};
     let mut byte = [0u8; 1];
@@ -269,12 +269,15 @@ async fn ask(app: &AppHandle, request: Value) -> Value {
     let id = pending.next.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     pending.waiting.lock().unwrap().insert(id, tx);
-    // However this ends, answered, timed out or dropped with its client, the waiter goes.
-    struct Waiter<'a>(&'a Pending, u64);
+    // However this ends, answered, timed out or dropped with its client, the
+    // waiter goes. Unanswered, the page hears of it, so a wait stops there too.
+    struct Waiter<'a>(&'a Pending, u64, &'a AppHandle);
     impl Drop for Waiter<'_> {
-        fn drop(&mut self) { self.0.waiting.lock().unwrap().remove(&self.1); }
+        fn drop(&mut self) {
+            if self.0.waiting.lock().unwrap().remove(&self.1).is_some() { let _ = self.2.emit("cli-cancel", self.1); }
+        }
     }
-    let _waiter = Waiter(&pending, id);
+    let _waiter = Waiter(&pending, id, app);
     let secs = request["timeout"].as_f64().unwrap_or(30.0).clamp(1.0, 86_400.0);
     // The words go to the page unparsed: only it knows which options each
     // command takes. Standard input comes apart from them, so text starting

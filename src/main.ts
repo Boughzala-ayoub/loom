@@ -7517,7 +7517,8 @@ function countFinds(p: Pane) {
 type CliResult = { data?: unknown; text?: string; note?: string; replayed?: boolean };
 /** How long the caller waits, the folder its terminal was in, its --key,
  * and the hash of the request the key names. */
-type CliContext = { seconds: number; cwd?: string; key?: string; what?: string };
+/** `signal`: aborted when loomctl hangs up (Rust's cli-cancel), for the read-only waits to stop on. */
+type CliContext = { seconds: number; cwd?: string; key?: string; what?: string; signal?: AbortSignal };
 /** `options`: every --option the command takes (cli.ts parseArgs checks them). */
 type CliCommand = { usage: string; help: string; options?: Options; run: (a: Args, ctx: CliContext) => CliResult | Promise<CliResult> };
 /** A wait that ran out: loomctl exits 3 for it rather than 1. `details`:
@@ -7670,9 +7671,10 @@ function cliCommand(a: Args) {
 }
 
 /** Resolves once `ok()` holds. Polled: states change in a dozen places. */
-async function until(ok: () => boolean, seconds: number, what: string) {
+async function until(ok: () => boolean, seconds: number, what: string, signal?: AbortSignal) {
   const end = Date.now() + seconds * 1000;
   while (!ok()) {
+    signal?.throwIfAborted();
     if (Date.now() > end) throw new CliTimeout(`Waited ${seconds} s for ${what}.`);
     await new Promise((r) => setTimeout(r, 200));
   }
@@ -7732,13 +7734,13 @@ function receiptRecord(token: string, r: Receipt) {
 }
 
 /** wait --receipt: the outcome of what send --receipt sent, once it's in. */
-async function waitReceipt(token: string, seconds: number) {
+async function waitReceipt(token: string, seconds: number, signal?: AbortSignal) {
   const r = cliReceipt(token);
   if (r.unsent && !r.result) throw new Error(`Loom ${r.uncertain === "type" ? "may have typed part of" : "typed"} ${token}'s text into ${r.ref} but didn't press Enter, so no outcome will come. loomctl read ${r.ref} shows the input.`);
   // The result is recorded by the launch the receipt went to (finishReceipt),
   // so it stands after a restart, and a later launch can't supply one.
   const lost = () => receiptLost(r);
-  await until(() => !!r.result || !!r.unsent || lost(), seconds, `receipt ${token} on ${r.ref}`);
+  await until(() => !!r.result || !!r.unsent || lost(), seconds, `receipt ${token} on ${r.ref}`, signal);
   const p = paneById(r.pane);
   if (r.unsent && !r.result) throw new Error(`Loom ${r.uncertain === "type" ? "may have typed part of" : "typed"} ${token}'s text into ${r.ref} but didn't press Enter, so no outcome will come. loomctl read ${r.ref} shows the input.`);
   const result = r.result;
@@ -7948,7 +7950,7 @@ function taskStates(value: string, what: string): TaskState[] {
 
 /** wait --task: until the task is in one of `until`'s states or finished;
  * by default until it finishes or asks for approval. */
-async function waitTask(t: Task, upTo: string | undefined, seconds: number, orIdle = false) {
+async function waitTask(t: Task, upTo: string | undefined, seconds: number, orIdle = false, signal?: AbortSignal) {
   const want = upTo === undefined ? (["approval"] as TaskState[]) : taskStates(upTo, "--until");
   const ended = () => isFinal(t.state) || want.includes(t.state);
   const idle = () => {
@@ -7956,7 +7958,7 @@ async function waitTask(t: Task, upTo: string | undefined, seconds: number, orId
     return !!p && p.generation === t.gen && ["idle", "waiting"].includes(cliState(p));
   };
   try {
-    await until(() => ended() || (orIdle && idle()), seconds, `task ${t.id}`);
+    await until(() => ended() || (orIdle && idle()), seconds, `task ${t.id}`, signal);
   } catch (e) {
     if (e instanceof CliTimeout) e.details = { task: t.id, state: t.state };
     throw e;
@@ -8300,21 +8302,21 @@ const CLI: Record<string, CliCommand> = {
     options: { state: "string", "turn-after": "int", gen: "int", receipt: "string", task: "string", until: "string", "or-idle": "bool" },
     run: async (a, ctx) => {
       const id = str(a, "task");
-      if (id !== undefined) return waitTask(cliTask(id), str(a, "until"), ctx.seconds, flag(a, "or-idle"));
+      if (id !== undefined) return waitTask(cliTask(id), str(a, "until"), ctx.seconds, flag(a, "or-idle"), ctx.signal);
       if (a["or-idle"] !== undefined) throw new Error("--or-idle is for --task.");
       if (a.until !== undefined) throw new Error("--until is for --task.");
       const token = str(a, "receipt");
-      if (token !== undefined) return waitReceipt(token, ctx.seconds);
+      if (token !== undefined) return waitReceipt(token, ctx.seconds, ctx.signal);
       const p = cliPane(a._[0]);
       if (a["turn-after"] !== undefined) {
         const after = num(a, "turn-after", 0, 0, Number.MAX_SAFE_INTEGER), gen = cliGen(a) ?? p.generation;
         if (p.agent === "shell") throw new Error("--turn-after is for agent panes. A shell counts commands (loomctl panes --json), and send --receipt waits for one.");
-        await until(() => gone(p) || p.dead || p.generation !== gen || p.turns > after, ctx.seconds, `${paneName(p)} to finish turn ${after + 1}`);
+        await until(() => gone(p) || p.dead || p.generation !== gen || p.turns > after, ctx.seconds, `${paneName(p)} to finish turn ${after + 1}`, ctx.signal);
         if (p.turns <= after || p.generation !== gen) throw new Error(`${paneName(p)} ${gone(p) ? "was closed" : p.dead ? "exited" : "restarted"} before turn ${after + 1}.`);
         return { data: paneData(p), text: `${paneName(p)} finished turn ${p.turns}` };
       }
       const want = cliStates(str(a, "state"), "waiting");
-      await until(() => gone(p) || want.includes(cliState(p)), ctx.seconds, `${paneName(p)} to be ${want.join(" or ")}`);
+      await until(() => gone(p) || want.includes(cliState(p)), ctx.seconds, `${paneName(p)} to be ${want.join(" or ")}`, ctx.signal);
       if (gone(p)) throw new Error("The pane was closed.");
       return { data: paneData(p), text: `${paneName(p)} is ${cliState(p)}` };
     },
@@ -8448,7 +8450,7 @@ const CLI: Record<string, CliCommand> = {
       const end = Date.now() + Math.max(0, ctx.seconds - 1) * 1000;
       // A gap alone doesn't end the wait: one that stays (a task's events all
       // before a pruned one) would have `watch <task> --follow` ask again at once, forever.
-      await taskEventGate.waitUntil(() => pick().length > 0 || finished(), Math.max(0, end - Date.now()));
+      await taskEventGate.waitUntil(() => pick().length > 0 || finished(), Math.max(0, end - Date.now()), ctx.signal);
       const events = pick();
       // `one`, not tasks.get: it may have been pruned while this waited.
       const owner = (id: string) => one ?? tasks.get(id)!;
@@ -8491,7 +8493,7 @@ const CLI: Record<string, CliCommand> = {
       await until(() => {
         for (const p of skip) if (!want.includes(cliState(p))) skip.delete(p);
         return !!(hit = pool().find((p) => !skip.has(p) && want.includes(cliState(p))));
-      }, ctx.seconds, `a pane to be ${want.join(" or ")}`);
+      }, ctx.seconds, `a pane to be ${want.join(" or ")}`, ctx.signal);
       return { data: paneData(hit!), text: `${paneName(hit!)} (${hit!.agent}) is ${cliState(hit!)}` };
     },
   },
@@ -8664,7 +8666,7 @@ const CLI: Record<string, CliCommand> = {
 type CliRequest = { id: number; cmd: string; argv: string[] | null; stdin: string | null; cwd: string | null; timeout: number; key: string | null; what?: string };
 
 /** One loomctl request, run: its answer, failures included. */
-async function runCli(payload: CliRequest): Promise<Record<string, unknown>> {
+async function runCli(payload: CliRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const { cmd, timeout, stdin } = payload;
   try {
     const command = Object.prototype.hasOwnProperty.call(CLI, cmd) ? CLI[cmd] : undefined;
@@ -8674,7 +8676,7 @@ async function runCli(payload: CliRequest): Promise<Record<string, unknown>> {
     const args = parseArgs(payload.argv, command.options ?? {}, cmd);
     // Standard input comes apart from the words and goes in only now, so text starting with -- stays text.
     if (typeof stdin === "string") args._ = args._.map((w) => (w === "-" ? stdin.replace(/\r?\n$/, "") : w));
-    const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined, key: payload.key ?? undefined, what: payload.what });
+    const result = await command.run(args, { seconds: timeout, cwd: payload.cwd ?? undefined, key: payload.key ?? undefined, what: payload.what, signal });
     if (result.note) toast(result.note);
     return { ok: true, data: result.data ?? null, text: result.text, ...(result.replayed ? { replayed: true } : {}) };
   } catch (e) {
@@ -8694,9 +8696,13 @@ async function runCli(payload: CliRequest): Promise<Record<string, unknown>> {
  * ponytail: in memory, per Loom; a store on disk if retries must survive a
  * restart. */
 const keyed = new Map<string, { what: string; reply: Promise<Record<string, unknown>>; doneAt?: number }>();
+/** Requests running, by id, that a hang-up stops: only the waits read their
+ * signal, so a mutation runs on, and a keyed one, a retry's answer too, isn't here. */
+const hangups = new Map<number, AbortController>();
 
 /** Answers loomctl for as long as the window is up. */
 function installCli() {
+  void listen<number>("cli-cancel", ({ payload }) => hangups.get(payload)?.abort(new Error("loomctl hung up, so Loom stopped waiting.")));
   void listen<CliRequest>("cli", async ({ payload }) => {
     const { id, key } = payload;
     // Hashed first: from here to keyed.set nothing awaits, so a retry arriving
@@ -8709,7 +8715,9 @@ function installCli() {
     } else if (key && [...keyed.values()].filter((k) => k.doneAt === undefined).length >= 1024) {
       reply = { ok: false, error: "1024 requests with --key are still running, so this one didn't run. Try again once some finish." };
     } else {
-      const run = runCli({ ...payload, what: what || undefined });
+      const stop = key ? undefined : new AbortController();
+      if (stop) hangups.set(id, stop);
+      const run = runCli({ ...payload, what: what || undefined }, stop?.signal).finally(() => hangups.delete(id));
       if (key) {
         const entry: { what: string; reply: typeof run; doneAt?: number } = { what, reply: run };
         keyed.set(key, entry);

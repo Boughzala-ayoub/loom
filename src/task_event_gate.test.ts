@@ -64,6 +64,14 @@ const waiting = (g: TaskEventGate) => (g as unknown as { listeners: Set<unknown>
   const err = await w.then(() => null, (e: Error) => e.message);
   check("a throwing condition rejects and leaves", err === "fixture" && waiting(g) === 0);
 }
+{
+  // loomctl hung up: the day-long wait ends now, its timer with it (the process would stay up otherwise).
+  const g = new TaskEventGate(), stop = new AbortController();
+  const w = g.waitUntil(() => false, 86_400_000, stop.signal);
+  stop.abort(new Error("hung up"));
+  const err = await w.then(() => null, (e: Error) => e.message);
+  check("an aborted wait rejects with its reason and leaves", err === "hung up" && waiting(g) === 0);
+}
 
 if (fails) throw new Error(`${fails} failed`);
 console.log("all ok");
