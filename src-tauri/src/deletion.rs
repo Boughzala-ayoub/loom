@@ -1,6 +1,6 @@
 //! Identity of what deleting a worktree loses, for destructive approval. Never follow reparse points.
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read, path::Path, time::{Duration, Instant}};
+use std::{fs, io::Read, path::{Path, PathBuf}, time::{Duration, Instant}};
 use std::os::windows::{ffi::OsStrExt, fs::{MetadataExt, OpenOptionsExt}};
 
 /// One hash over the worktree at `root`. `hashed` (git's tracked changes and
@@ -80,21 +80,66 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
 
 /// Delete `dir`, a linked worktree of `repo`. Git for Windows' `worktree remove`
 /// recurses through junctions and empties their targets, so git never walks it:
-/// std's remove_dir_all removes each link itself, then git drops its record of
-/// the folder, which it does once the folder is gone.
+/// std's remove_dir_all removes each link inside as itself, then the worktree's
+/// entry in `repo` goes, as `git worktree remove` drops it. The folder itself
+/// is taken as it is, never resolved: a link there goes nowhere.
 pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
-    let git = |args: &[&str]| crate::git_run(repo.into(), args.iter().map(|a| a.to_string()).collect(), None, false);
-    if let Ok(real) = fs::canonicalize(dir) {
-        let list = git(&["worktree", "list", "--porcelain"])?;
-        // The first entry is the main checkout, never removed here.
-        let entry = list.split("\n\n").skip(1).find(|e| {
-            e.lines().next().and_then(|l| l.strip_prefix("worktree ")).and_then(|p| fs::canonicalize(p).ok()).as_ref() == Some(&real)
-        });
-        let entry = entry.ok_or_else(|| format!("{dir} isn't a worktree of {repo}"))?;
-        if entry.lines().any(|l| l == "locked" || l.starts_with("locked ")) { return Err(format!("{dir} is a locked worktree")); }
-        fs::remove_dir_all(&real).map_err(|e| e.to_string())?;
+    let dir = Path::new(dir);
+    let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
+    let worktrees = Path::new(repo).join(common.trim()).join("worktrees");
+    let meta = match fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return forget(&worktrees, dir),
+        Err(e) => return Err(format!("{}: {e}", dir.display())),
+        Ok(m) => m,
+    };
+    if meta.file_attributes() & 0x400 != 0 || !meta.is_dir() {
+        return Err(format!("{} is a link or not a folder; Loom deletes only a worktree's own folder", dir.display()));
     }
-    git(&["worktree", "remove", "--force", dir]).map(drop)
+    let entry = entry_of(dir, &worktrees)?;
+    fs::remove_dir_all(dir).map_err(|e| e.to_string())?;
+    fs::remove_dir_all(&entry).map_err(|e| format!("removed {} but not git's record of it, {}: {e}", dir.display(), entry.display()))
+}
+
+/// The entry in `worktrees` that `dir` is, by git's own two links: dir\.git
+/// names the entry and the entry's gitdir names that same .git back. Compared
+/// as files, not spellings, so a folder put at the worktree's path, or behind
+/// a redirected parent, isn't taken for it. A locked entry is refused.
+fn entry_of(dir: &Path, worktrees: &Path) -> Result<PathBuf, String> {
+    let not = || format!("{} isn't a linked worktree of this repository", dir.display());
+    let id = |path: &Path| -> Result<(u64, u64), String> {
+        // FILE_FLAG_BACKUP_SEMANTICS: folders open too.
+        let f = fs::OpenOptions::new().access_mode(0x80).share_mode(7).custom_flags(0x0200_0000).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        crate::usage::file_identity(&f).ok_or_else(|| format!("{}: no file identity", path.display()))
+    };
+    let dot = dir.join(".git");
+    // The main checkout's .git is a folder.
+    if !fs::symlink_metadata(&dot).is_ok_and(|m| m.is_file() && m.file_attributes() & 0x400 == 0) { return Err(not()); }
+    let named = fs::read_to_string(&dot).map_err(|e| format!("{}: {e}", dot.display()))?;
+    let entry = dir.join(named.trim().strip_prefix("gitdir:").ok_or_else(not)?.trim());
+    if id(entry.parent().ok_or_else(not)?)? != id(worktrees)? { return Err(not()); }
+    let back = fs::read_to_string(entry.join("gitdir")).map_err(|_| not())?;
+    if id(&entry.join(back.trim()))? != id(&dot)? { return Err(not()); }
+    if entry.join("locked").exists() { return Err(format!("{} is a locked worktree", dir.display())); }
+    Ok(entry)
+}
+
+/// `dir` is gone already: drop the entry whose gitdir names dir\.git, if any.
+// ponytail: absolute gitdir text only; a relative one (git 2.48 worktree.useRelativePaths) isn't matched and its entry stays for `git worktree prune`.
+fn forget(worktrees: &Path, dir: &Path) -> Result<(), String> {
+    let key = |p: &Path| p.to_string_lossy().replace('\\', "/").to_lowercase();
+    let want = key(&dir.join(".git"));
+    let entries = match fs::read_dir(worktrees) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        r => r.map_err(|e| format!("{}: {e}", worktrees.display()))?,
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?.path();
+        let Ok(back) = fs::read_to_string(entry.join("gitdir")) else { continue };
+        if key(Path::new(back.trim())) != want { continue; }
+        if entry.join("locked").exists() { return Err(format!("{} is a locked worktree", dir.display())); }
+        return fs::remove_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -174,6 +219,47 @@ mod tests {
         assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t"));
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn a_redirected_worktree_path_is_never_what_goes() {
+        let dir = std::env::temp_dir().join(format!("loom-remove-redirected-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, outside) = (dir.join("repo"), dir.join("wt"), dir.join("outside"));
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), "keep").unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        let repo_s = repo.to_str().unwrap();
+        // Moved aside, and a junction to another folder put in its place: git still lists the path.
+        fs::rename(&wt, dir.join("wt-aside")).unwrap();
+        junction(&wt, &outside);
+        assert!(remove_worktree(repo_s, wt.to_str().unwrap()).is_err());
+        assert!(outside.join("keep.txt").is_file(), "the junction's target was deleted");
+        assert!(dir.join("wt-aside").join(".git").is_file());
+        // An ancestor redirected: the folder now at the worktree's path is someone else's.
+        let (anc, other) = (dir.join("anc"), dir.join("other"));
+        let wt2 = anc.join("wt2");
+        git(&repo, &["worktree", "add", "-q", "-b", "t2", wt2.to_str().unwrap()]);
+        fs::rename(&anc, dir.join("anc-aside")).unwrap();
+        fs::create_dir_all(other.join("wt2")).unwrap();
+        fs::write(other.join("wt2").join("keep.txt"), "keep").unwrap();
+        junction(&anc, &other);
+        assert!(remove_worktree(repo_s, wt2.to_str().unwrap()).is_err());
+        assert!(other.join("wt2").join("keep.txt").is_file(), "an unrelated folder behind a redirected parent was deleted");
+        // A junction to the moved worktree itself: git's links check out, the link still isn't the folder.
+        fs::remove_dir(&wt).unwrap();
+        junction(&wt, &dir.join("wt-aside"));
+        assert!(remove_worktree(repo_s, wt.to_str().unwrap()).is_err());
+        assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"), "git's record of a worktree that still exists went");
+        // Already gone: only git's record of it goes.
+        fs::remove_dir(&wt).unwrap();
+        remove_worktree(repo_s, wt.to_str().unwrap()).unwrap();
+        assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"));
+        assert!(dir.join("wt-aside").join(".git").is_file());
+        fs::remove_dir_all(dir).unwrap(); // removes the junctions, not their targets
+    }
+
     #[test]
     fn approval_tracks_contents_ignored_children_and_index() {
         let dir = std::env::temp_dir().join(format!("loom-delete-check-{}", std::process::id()));

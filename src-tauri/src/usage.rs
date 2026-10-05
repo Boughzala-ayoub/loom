@@ -401,7 +401,7 @@ struct CodexReader {
     tokens: Option<ReadCheckpoint>,
 }
 
-fn file_identity(file: &std::fs::File) -> Option<(u64, u64)> {
+pub(crate) fn file_identity(file: &std::fs::File) -> Option<(u64, u64)> {
     #[cfg(windows)] {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION}};
