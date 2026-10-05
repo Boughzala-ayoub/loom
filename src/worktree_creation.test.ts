@@ -31,7 +31,7 @@ try {
   const index = readFileSync(join(entry, "index"));
   renameSync(parent, join(dir, "offline"));
   const prepared: string[] = [];
-  const sandbox = createContext({ MAX_PANES: 8, threads: [], git: async (cwd: string, ...args: string[]) => git(cwd, ...args), worktreeDir: async (_: string, slug: string) => join(dir, slug),
+  const sandbox = createContext({ MAX_PANES: 8, shuttingDown: false, threads: [], git: async (cwd: string, ...args: string[]) => git(cwd, ...args), worktreeDir: async (_: string, slug: string) => join(dir, slug),
     openThread: (t: unknown) => t, invoke: async (cmd: string, args: { dir: string }) => {
       assert.equal(cmd, "worktree_prepare"); prepared.push(args.dir);
     } });

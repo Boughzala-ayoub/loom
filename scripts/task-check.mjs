@@ -17,7 +17,7 @@
 // TASK_QUICK=1 skips the 30 s idle cases.
 // TASK_REVIEW=pane-state|untracked-approval|invalid-key|hint-rows|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|shutdown-barrier|hangup-wait|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -639,6 +639,36 @@ try {
     await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
     assert.equal((await saved(sent.data.task))?.state, 'completed', 'The report found at shutdown is journaled before the window goes');
     ok('What panes report as Loom shuts them down is journaled before the window closes');
+  }
+  if (review('shutdown-journal-failure')) {
+    await resetReview();
+    await agent(codex, { codexShape: true });
+    const text = 'finish after the first journal drain';
+    const sent = await cli('submit', 'work:2', text);
+    await until(sent.data.task, 'working');
+    await qa({ journalFailIf: 'fn:return d.includes("completed")',
+      shutdownEvents: [[codex, { t: Date.now(), kind: 'end', matches: [promptMatch(text)], turn: 'disk-full-turn', launch: await gen(codex) }]] });
+    const close = () => page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+    await close();
+    await page.waitForFunction(() => document.body.textContent.includes('Could not close safely'));
+    assert.equal(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'plugin:window|destroy')), false);
+    const viewport = page.viewportSize();
+    const shots = resolve('node_modules/.cache/fix15');
+    mkdirSync(shots, { recursive: true });
+    for (const width of [320, 375, 768, 1024, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true, `close retry overflow at ${width}`);
+      await page.screenshot({ path: join(shots, `close-retry-${width}.png`) });
+    }
+    await page.setViewportSize(viewport);
+    assert.equal((await cli('restart', 'work:2', '--yes')).ok, false, 'New work was admitted with report delivery closed');
+    await qa({ journalFailIf: null });
+    await close();
+    await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'plugin:window|destroy'));
+    const saved = readJournal(await page.evaluate(() => window.qa.journalAtDestroy)).tasks.get(sent.data.task);
+    assert.equal(saved?.state, 'completed', 'The retained final write was lost on retry');
+    assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'pty_shutdown').length), 1);
+    ok('A failed final journal drain blocks new work and a close retry saves the retained reports');
   }
   if (review('shutdown-barrier')) {
     // Review R14-4. Claude's Stop comes back from shutdown: on an idle screen

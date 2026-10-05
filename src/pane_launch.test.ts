@@ -28,7 +28,7 @@ function fixture() {
       return void native.delete(a.id);
     }
   };
-  const s = createContext({ invoke, console, restoring: false, outs: new Map(), ackOutput() {}, ownSession: () => false,
+  const s = createContext({ invoke, console, restoring: false, shuttingDown: false, outs: new Map(), ackOutput() {}, ownSession: () => false,
     Channel: class { id = Math.random(); onmessage?: unknown }, launch: () => ["claude"], booted: async () => {}, claudeMarker: () => "" });
   runInContext(code, s);
   const p = Object.assign(new s.P(), {

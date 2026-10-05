@@ -1900,6 +1900,7 @@ class Pane {
    * may begin. pty_spawn replaces a pane's session by id, so two in flight
    * could leave the wrong one running. */
   async spawn(resume: boolean, retry = false): Promise<true | string> {
+    if (shuttingDown) return "Loom has stopped its panes for shutdown. Retry closing the window.";
     const gen = ++this.launchGen;
     const before = this.launching;
     let done!: () => void;
@@ -1933,7 +1934,7 @@ class Pane {
   }
 
   private async launch(gen: number, resume: boolean, retry: boolean): Promise<true | string> {
-    const stale = () => this.disposed || gen !== this.launchGen;
+    const stale = () => this.disposed || shuttingDown || gen !== this.launchGen;
     const gaveUp = () => (this.disposed ? "The pane was closed." : "A stop or another launch came first.");
     if (stale()) return gaveUp();
     this.starting = true;
@@ -2850,6 +2851,8 @@ class Thread {
 
 // --- app state ------------------------------------------------------------
 const threads: Thread[] = [];
+/** Native shutdown committed: preserve its reports and allow only a close retry. */
+let shuttingDown = false;
 let current: Thread | null = null;
 /** Checkouts threads get cut from, in sidebar order. Kept past their last
  * thread so the new-thread form still offers them. */
@@ -4402,6 +4405,7 @@ function sweepSoon() {
  * Stop is judged on the screen they left now, and one it can't confirm ends
  * unknown rather than wait for a next sweep that won't come. */
 function sweepTasks(closing = false) {
+  if (shuttingDown && !closing) return;
   const now = Date.now();
   let open = 0;
   for (const t of tasks.values()) {
@@ -6384,6 +6388,7 @@ async function refExists(repo: string, ref: string) {
  * thread is created on it, off HEAD. */
 /** The thread it opened, or the one already open on that folder. */
 async function createThread(repo: string, name: string, cmd: string, base: string, n: number, startupSettings?: PaneState["startupSettings"]): Promise<Thread> {
+  if (shuttingDown) throw new Error("Loom is closing. Retry closing the window before starting new work.");
   // Before git touches anything: a bad count must not leave a worktree behind.
   if (!Number.isInteger(n) || n < 1 || n > MAX_PANES) throw new Error(`A thread takes 1 to ${MAX_PANES} panes, not ${n}.`);
   let dir = repo;
@@ -8683,6 +8688,7 @@ type CliRequest = { id: number; cmd: string; argv: string[] | null; stdin: strin
 async function runCli(payload: CliRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const { cmd, timeout, stdin } = payload;
   try {
+    if (shuttingDown) throw new Error("Loom has stopped its panes for shutdown. Retry closing the window; pending reports are retained.");
     const command = Object.prototype.hasOwnProperty.call(CLI, cmd) ? CLI[cmd] : undefined;
     if (!command) throw new Error(`Unknown command "${cmd}". loomctl help lists them.`);
     // Missing words are a loomctl that doesn't match, never "no arguments": that would aim at the pane in front.
@@ -8838,29 +8844,38 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   $("#diff-full").classList.toggle("on", diffFull);
   if (saved.ui?.panel === "files") setPanel("files");
   let closing = false;
+  let shut: { events: [string, unknown][]; emitted: number } | undefined;
   await getCurrentWindow().onCloseRequested(async e => {
     e.preventDefault();
     if (closing) return;
     closing = true;
     try {
-      await pollSessions();
-      await flushSave();
-      await saveQueue; // flushSave swallows the error into a toast; this rethrows it, so a failed save cancels the close
-      await drainJournal(); // as with the save: a journal that can't be written cancels the close, panes still up
-      // What the panes reported as they stopped comes back with the call, and
-      // a batch already sent before it is waited for, so all of it is handled,
-      // and its journal writes queued, before the drain below. A Claude Stop
-      // still waiting for its idle screen is judged on the last one.
-      const shut = await invoke<{ events: [string, unknown][]; emitted: number }>("pty_shutdown", { ids: threads.flatMap((t) => t.panes.map((p) => p.id)) });
-      agentEvents(shut.events);
-      for (const end = Date.now() + 3000; agentBatch < shut.emitted && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
+      if (!shut) {
+        await pollSessions();
+        await flushSave();
+        await saveQueue; // flushSave swallows the error into a toast; this rethrows it, so a failed save cancels the close
+        await drainJournal(); // as with the save: a journal that can't be written cancels the close, panes still up
+        // What the panes reported as they stopped comes back with the call, and
+        // a batch already sent before it is waited for, so all of it is handled,
+        // and its journal writes queued, before the drain below. A Claude Stop
+        // still waiting for its idle screen is judged on the last one.
+        shuttingDown = true;
+        document.body.inert = true;
+        shut = await invoke("pty_shutdown", { ids: threads.flatMap((t) => t.panes.map((p) => p.id)) });
+      }
+      agentEvents(shut!.events.splice(0));
+      for (const end = Date.now() + 3000; agentBatch < shut!.emitted && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
       sweepTasks(true);
+      for (const p of threads.flatMap(t => t.panes)) p.exited(0, "stopped for shutdown");
       await drainJournal();
 
       await getCurrentWindow().destroy();
     } catch (e) {
-      toast(`Could not close safely: ${String(e)}`);
-    } finally { closing = false; }
+      toast(`Could not close safely: ${String(e)}${shut ? ". Panes are stopped; retry closing the window to save the retained reports." : ""}`);
+    } finally {
+      closing = false;
+      if (!shut) { shuttingDown = false; document.body.inert = false; }
+    }
   });
 
   for (const id of ["#new-thread", "#open-first"]) $(id).onclick = () => newThread();

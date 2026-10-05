@@ -406,6 +406,10 @@ fn pty_spawn(
         }
     }
 
+    // Shutdown closes admission under the report lock before taking Sessions.
+    // An in-flight launch must publish its Session before shutdown can commit.
+    let reports = app.state::<Reports>();
+    let admission = reports.admit()?;
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     drop(pair.slave); // else the reader never sees EOF on Windows
 
@@ -478,6 +482,8 @@ fn pty_spawn(
             _job: job,
         },
     );
+    drop(admission);
+    drop(reports);
     std::thread::spawn(move || {
         let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
         let ptys = app.state::<Ptys>();
@@ -995,6 +1001,11 @@ fn send_task_events(app: &AppHandle, ids: &[String]) {
 #[derive(Default)]
 struct Reports(Mutex<(bool, u64)>);
 impl Reports {
+    fn admit(&self) -> Result<std::sync::MutexGuard<'_, (bool, u64)>, String> {
+        let r = self.0.lock().unwrap();
+        if r.0 { return Err("Loom has stopped its panes for shutdown; retry closing the window".into()); }
+        Ok(r)
+    }
     fn send(&self, dir: &std::path::Path, ids: &[String], send: impl FnOnce(u64, Vec<(String, serde_json::Value)>)) {
         let mut r = self.0.lock().unwrap();
         if r.0 { return; }
@@ -2477,6 +2488,18 @@ mod tests {
         reports.send(&dir, &mine, |_, _| panic!("a batch went out after shutdown"));
         assert_eq!(super::drain_task_events(&dir, &mine).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shutdown_waits_for_admitted_spawns_and_refuses_new_ones() {
+        let reports = std::sync::Arc::new(super::Reports::default());
+        let admitted = reports.admit().unwrap();
+        let closing = { let r = reports.clone(); std::thread::spawn(move || r.close()) };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!closing.is_finished(), "shutdown missed an admitted spawn");
+        drop(admitted);
+        closing.join().unwrap();
+        assert!(reports.admit().is_err(), "a failed final journal drain must not admit new work");
     }
 
     #[test]
