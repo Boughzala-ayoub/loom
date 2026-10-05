@@ -3800,6 +3800,16 @@ const unsaved = new Set<string>();
 const pendingJournal = new Map<string, number>();
 /** Policy-only writes have no task ids, but a failed one still needs recovery. */
 let journalDirty = false;
+/** Every journal write queued so far, landed, for a close: a failed one is
+ * retried as a whole rewrite, and one that still fails rejects. A journal
+ * that was never readable has nothing of its own to lose. */
+async function drainJournal() {
+  for (let q = journalQueue; ; q = journalQueue) {
+    await q;
+    if (q === journalQueue) break;
+  }
+  if (journalLoaded && !journalUnreadable && (journalDirty || unsaved.size)) await journal([], []);
+}
 /** Tasks that were reserved, the ones the journal keeps. */
 const typedTasks = () => [...tasks.values()].filter((t) => t.events.length);
 /** Writes to the journal, in order: appends, or the whole journal after a
@@ -8756,7 +8766,10 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       await pollSessions();
       await flushSave();
       await saveQueue; // flushSave swallows the error into a toast; this rethrows it, so a failed save cancels the close
+      await drainJournal(); // as with the save: a journal that can't be written cancels the close, panes still up
       await invoke("pty_shutdown");
+      await drainJournal(); // and what they reported as they stopped
+
       await getCurrentWindow().destroy();
     } catch (e) {
       toast(`Could not close safely: ${String(e)}`);

@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|close-drain|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -459,6 +459,32 @@ try {
       await agent(codex, { busy: false });
     }
     ok('Manual task settlement is durable, sends no pane input and emits no completion notice');
+  }
+  if (review('close-drain')) {
+    // Closing waits for journal writes still in flight, and a write that keeps
+    // failing keeps the window open (Astra's full review, F8).
+    const destroyed = () => page.evaluate(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
+    const close = () => page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+    for (const failing of [false, true]) {
+      await resetReview();
+      const text = `finish before close ${failing}`;
+      const sent = await cli('submit', 'work:1', text);
+      await report(claude, { kind: 'start', match: promptMatch(text) });
+      await until(sent.data.task, 'working');
+      await qa(failing ? { journalFailIf: 'fn:return d.includes("completed")' } : { journalHold: 'fn:return d.includes("completed")' });
+      await stops(claude);
+      if (!failing) await page.waitForFunction(() => window.qa.journalHeld.length > 0);
+      else await until(sent.data.task, 'completed');
+      await close();
+      await page.waitForTimeout(400);
+      assert.equal(await destroyed(), false, failing ? 'A journal that can\'t be written keeps the window open' : 'The page stays until its journal writes land');
+      if (failing) continue;
+      await page.evaluate(() => window.qa.journalHeld.splice(0).forEach((r) => r()));
+      await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
+      assert.equal((await saved(sent.data.task)).state, 'completed', 'The completion is in the journal');
+    }
+    await qa({ journalFailIf: null, journalHold: null });
+    ok('Closing drains the task journal first, and stays open while it can\'t be written');
   }
   if (review('malformed-journal')) {
     // Valid JSON of the wrong shape: startup finishes (boot waits for cli_ready),
