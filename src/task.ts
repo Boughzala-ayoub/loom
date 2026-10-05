@@ -59,9 +59,12 @@ export const LOOM_TITLES = { shell: "Terminal", agent: "Agent session" } as cons
  * obvious, not a promise that free text holds none. */
 const PRIVATE = /^(?:[a-z]:[\\/]|\/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]/i;
 
+const CREDENTIAL = /(?:^|[^a-zA-Z0-9])(?:glpat-[a-zA-Z0-9_-]{20,}|hf_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{20,}|AIza[a-zA-Z0-9_-]{30,}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)/;
+const privateValue = (value: string) => PRIVATE.test(value) || CREDENTIAL.test(value);
+
 /** Validate the whole value before any export, including restored fallbacks. */
 export function settingValue(value: unknown, kind: "model" | "effort"): string | null {
-  if (typeof value !== "string" || PRIVATE.test(value) || /(?:^|[^a-zA-Z0-9])(?:glpat-[a-zA-Z0-9_-]{20,}|hf_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{20,}|AIza[a-zA-Z0-9_-]{30,}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)/.test(value)) return null;
+  if (typeof value !== "string" || privateValue(value)) return null;
   if (kind === "effort") return /^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(value) ? value : null;
   return value.length <= 160 && /^[a-z0-9][a-z0-9._:/-]*(?:\[[0-9]+[km]\])?$/i.test(value) ? value : null;
 }
@@ -81,7 +84,7 @@ const plain = (s: string) => s.normalize("NFC")
  * check), cut to 128 Unicode scalar values and 256 UTF-8 bytes. */
 function label(s: string, issues: Set<ContextIssue>): string | null {
   const text = plain(s);
-  const left = !text ? "missing-name" : PRIVATE.test(text) ? "private-label" : null;
+  const left = !text ? "missing-name" : privateValue(text) ? "private-label" : null;
   if (left) {
     issues.add(left);
     return null;
@@ -107,7 +110,7 @@ export function taskContext(raw: unknown): TaskContext {
   const bad = () => (issues.add("invalid-context"), null);
   if (r.issues !== undefined && (!Array.isArray(r.issues) || r.issues.some((i) => !ISSUES.includes(i)))) bad();
   const text = (v: unknown) => (v === null || v === undefined ? null : typeof v === "string" ? v : bad());
-  const threadId = r.threadId == null ? null : typeof r.threadId === "string" && /^[\x21-\x7e]{1,96}$/.test(r.threadId) && !PRIVATE.test(r.threadId) ? r.threadId : bad();
+  const threadId = r.threadId == null ? null : typeof r.threadId === "string" && /^[\x21-\x7e]{1,96}$/.test(r.threadId) && !privateValue(r.threadId) ? r.threadId : bad();
   const name = text(r.threadName);
   const threadName = name === null ? null : label(name, issues);
   const paneNumber = r.paneNumber == null ? null : typeof r.paneNumber !== "number" ? bad() : Number.isSafeInteger(r.paneNumber) && r.paneNumber > 0 ? r.paneNumber : (issues.add("missing-number"), null);

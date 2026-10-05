@@ -1,3 +1,4 @@
+import settings from "./fixtures/settings-values.json" with { type: "json" };
 // Self-check for loomctl's tasks. Run: node src/task.test.ts
 import { allows, changeFields, claimManual, codexAsks, CONTEXT_BATCH, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, notifies, notifyDisposition, parseSignal, promptMatch, readJournal, route, taskContext, taskFields, taskRecord, writeJournal, type Change, type NotifySnapshot, type Signal, type Task, type TaskState } from "./task.ts";
 
@@ -415,6 +416,16 @@ eq("junk", [parseSignal(null), parseSignal("x"), parseSignal({ kind: "explode", 
   eq("one byte more and the 512th stays out", fitBatch(rows(2000, 1024)), 511);
   eq("an event bigger than the limit still goes, alone", fitBatch(rows(3, 600_000)), 1);
   eq("other limits", fitBatch(rows(10, 10), { events: 3, bytes: 1000 }), 3);
+}
+
+for (const value of settings.private) {
+  const raw = { threadId: value, threadName: value, paneNumber: 1, paneTitle: "Agent session", capturedAt: 1, origin: "event", issues: [] };
+  const context = taskContext(raw);
+  check("N2 capture removes recognized credentials from labels and IDs", context.threadId === null && context.threadName === null);
+  const t = task("synthetic", "completed", { context: raw as Task["context"], events: [{ seq: 1, task: "t", state: "completed", at: 1, signal: "turn-end", context: raw as Task["context"] }] });
+  const journal = writeJournal([t], 1, 0);
+  const replay = [...readJournal(journal).tasks.values()][0];
+  check("N2 replay and enriched watch projection preserve redaction", !JSON.stringify(contextRecord(replay, replay.events[0].context)).includes(value));
 }
 
 if (fails) throw new Error(`${fails} failed`);
