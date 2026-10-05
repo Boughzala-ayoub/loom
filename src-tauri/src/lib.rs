@@ -1298,8 +1298,17 @@ fn state_file(app: &AppHandle) -> PathBuf {
 }
 
 #[tauri::command]
-fn load_state(app: AppHandle) -> String {
-    std::fs::read_to_string(state_file(&app)).unwrap_or_default()
+fn load_state(app: AppHandle) -> Result<String, String> {
+    read_workspace(&state_file(&app))
+}
+
+fn read_workspace(path: &std::path::Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.trim_start_matches('\u{feff}').trim().is_empty() => Err(format!("{}: workspace is empty", path.display())),
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".into()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 fn save_state(app: AppHandle, json: String) -> Result<(), String> {
@@ -1615,6 +1624,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_read_errors_preserve_the_original() {
+        let dir = std::env::temp_dir().join(format!("loom-workspace-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(super::read_workspace(&dir).is_err());
+        let path = dir.join("state.json");
+        assert_eq!(super::read_workspace(&path).unwrap(), "{}");
+        std::fs::write(&path, b"\xff").unwrap();
+        assert!(super::read_workspace(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"\xff");
+        std::fs::write(&path, "").unwrap();
+        assert!(super::read_workspace(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
     #[test]
     fn stalled_resize_releases_registry_for_input_and_stop() {
         use super::*;

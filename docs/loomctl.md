@@ -41,6 +41,11 @@ Loom refuses remote connections.
 After an update, restart Loom. A `loomctl` and a Loom on different protocol
 versions refuse each other before running anything (exit 2, `code: version`).
 
+If Loom cannot read or parse its workspace file, startup stops and shows an
+error. It does not replace the file with an empty workspace or accept CLI
+mutations. Close that window, repair the file or restore a backup, then reopen
+it. A missing file still creates a new workspace.
+
 ## The command line
 
 ```

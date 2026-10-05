@@ -3,7 +3,7 @@ import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, UserAttentionType } from "@tauri-apps/api/window";
 import { homeDir, join } from "@tauri-apps/api/path";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { open as pickFolder, message } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -8596,6 +8596,14 @@ function installCli() {
   }).then(() => invoke("cli_ready"));
 }
 
+async function loadWorkspace() {
+  // Native distinguishes a missing file from an unreadable or empty one.
+  const raw = (await invoke<string>("load_state")).replace(/^﻿/, "").trim();
+  const saved = JSON.parse(raw || "{}");
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)) throw new Error("Workspace must be a JSON object");
+  return saved;
+}
+
 async function main() {
   // panes: PaneState[]; a bare string is the pre-session format, a number the
   // pre-list one before that. `spaces` is the pre-thread format: a folder and
@@ -8628,11 +8636,13 @@ async function main() {
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
   } = {};
-  try {
-    // strip a BOM: the file is hand-editable and Notepad/PowerShell add one
-    const raw = (await invoke<string>("load_state")).replace(/^﻿/, "").trim();
-    saved = JSON.parse(raw || "{}");
-  } catch {}
+  try { saved = await loadWorkspace(); }
+  catch (e) {
+    await message(`Could not open the workspace. Its file has not been changed. Close Loom, repair the file or restore a backup, then reopen it.
+
+${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
+    return; // Keep restoring true: no workspace save or CLI mutation is allowed.
+  }
   if (saved.startups?.length) startups = saved.startups;
   if (saved.prefixes?.length) prefixes = saved.prefixes;
   prefix = prefixes[saved.prefix ?? 0] ?? prefixes[0];
