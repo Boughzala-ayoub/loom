@@ -345,6 +345,21 @@ try {
     }
     ok('Codex resumes after approval; submitted questions and warning footers do not mark it waiting; an unanswered approval or a quoted hint is not work');
   }
+  if (review('untracked-approval')) {
+    // An approval in a turn Loom tracks no task for, answered through keys: the
+    // answer acknowledges the alert, so the running turn shows again.
+    await resetReview();
+    await agent(codex, { codexShape: true });
+    assert.equal((await untracked('work:2', 'clean the build')).ok, true);
+    await page.evaluate(id => window.qa.out(id, '\x1b]0;Working\x07\x1b]9;Approval requested: rm -rf build\x07'), codex);
+    const pane = async () => (await cli('panes')).data.find(p => p.id === codex);
+    await page.waitForTimeout(50);
+    assert.equal((await pane()).state, 'waiting');
+    assert.equal((await cli('keys', 'work:2', 'enter')).ok, true);
+    await page.waitForTimeout(50);
+    assert.equal((await pane()).state, 'working', 'An answer goes in with or without a task tracking it');
+    ok('An untracked approval answered through keys shows the pane working again');
+  }
   if (review('claude-hint')) {
     // An answer that quotes the hint is transcript: the Stop still ends the turn.
     await resetReview();

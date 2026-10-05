@@ -2422,8 +2422,9 @@ class Pane {
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
     this.codexAsking = false;
     taskSignal(this, { kind: "resume", at: Date.now() });
-    // A known approval was answered; preserve any newer alert raised by the write.
-    if (asking.length && this.waitingSince <= this.lastIn) this.seen();
+    // An answer went in, to a tracked task's question or a turn Loom hasn't
+    // adopted yet; an alert the write itself raised stays.
+    if (this.waitingSince <= this.lastIn) this.seen();
   }
 }
 
@@ -3527,7 +3528,7 @@ function stepDashboardPreview(step: 1 | -1 | "waiting") {
 }
 
 /** Keys straight to the agent. Navigation leaves the waiting alert alone;
- * wrote() acknowledges a delivered answer to a tracked approval. */
+ * wrote() acknowledges a delivered answer (Enter or one key). */
 function keys(p: Pane, data: string) {
   p.lastIn = Date.now(); // The echo is not the agent working.
   // An Enter Loom writes itself (loomctl's, the Overview reply's) explains the
