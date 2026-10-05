@@ -711,17 +711,20 @@ fn git_dir(dir: &std::path::Path) -> Option<PathBuf> {
 fn list_files(dir: String) -> Vec<String> {
     let root = std::path::PathBuf::from(&dir);
     let mut out = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(d) = stack.pop() {
+    let mut walk = Walk::default();
+    let mut stack = vec![(root.clone(), 0)];
+    while let Some((d, depth)) = stack.pop() {
+        if !walk.enter(&d, depth) { continue; }
         let Ok(rd) = std::fs::read_dir(&d) else { continue };
         for e in rd.flatten() {
+            if !walk.entry() { return out; }
             let p = e.path();
             // Reuse the listing's type; only links need a lookup of their target.
             let folder = e.file_type().map_or_else(|_| p.is_dir(), |t| if t.is_symlink() { p.is_dir() } else { t.is_dir() });
             if folder {
                 let name = e.file_name().to_string_lossy().into_owned();
                 if !matches!(name.as_str(), ".git" | "node_modules" | "target" | ".build") {
-                    stack.push(p);
+                    stack.push((p, depth + 1));
                 }
             } else if let Ok(rel) = p.strip_prefix(&root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
@@ -1120,16 +1123,37 @@ fn codex_session_rows(home: &std::path::Path, dir: &str, sid: Option<&str>) -> R
 }
 
 fn codex_rollouts(dir: &std::path::Path, out: &mut Vec<(std::time::SystemTime, PathBuf)>) {
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let p = e.path();
-        // The listing already says what each entry is. Only a link (a symlink or
-        // junction) needs a look at its target, so linked folders are still walked.
-        let folder = e.file_type().map_or_else(|_| p.is_dir(), |t| if t.is_symlink() { p.is_dir() } else { t.is_dir() });
-        if folder {
-            codex_rollouts(&p, out);
-        } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
-            out.push((e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p));
+    let mut walk = Walk::default();
+    let mut stack = vec![(dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = stack.pop() {
+        if !walk.enter(&d, depth) { continue; }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if !walk.entry() { return; }
+            let p = e.path();
+            // The listing already says what each entry is. Only a link (a symlink or
+            // junction) needs a look at its target, so linked folders are still walked.
+            let folder = e.file_type().map_or_else(|_| p.is_dir(), |t| if t.is_symlink() { p.is_dir() } else { t.is_dir() });
+            if folder {
+                stack.push((p, depth + 1));
+            } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
+                out.push((e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p));
+            }
         }
+    }
+}
+
+/// A walk that follows links but enters each real folder once: a junction
+/// back to an ancestor would otherwise repeat the tree until paths overflow.
+/// ponytail: 64 deep and 200,000 entries, then the walk stops where it is.
+#[derive(Default)]
+struct Walk { seen: std::collections::HashSet<PathBuf>, entries: usize }
+impl Walk {
+    fn enter(&mut self, dir: &std::path::Path, depth: usize) -> bool {
+        depth <= 64 && dir.canonicalize().is_ok_and(|real| self.seen.insert(real))
+    }
+    fn entry(&mut self) -> bool {
+        self.entries += 1;
+        self.entries <= 200_000
     }
 }
 
@@ -2305,6 +2329,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn walks_through_a_link_loop_end() {
+        use std::os::windows::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("loom-walk-loop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let day = dir.join("sessions").join("2026").join("10");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(day.join("rollout-a.jsonl"), "").unwrap();
+        // A junction back to an ancestor: followed blindly, the tree repeats until paths overflow.
+        let made = std::process::Command::new("cmd").args(["/d", "/c", "mklink", "/J"]).arg(day.join("loop")).arg(dir.join("sessions"))
+            .creation_flags(0x0800_0000).output().unwrap();
+        assert!(made.status.success());
+        let (done, finished) = std::sync::mpsc::channel();
+        let root = dir.clone();
+        std::thread::spawn(move || {
+            let mut rollouts = Vec::new();
+            super::codex_rollouts(&root.join("sessions"), &mut rollouts);
+            let _ = done.send((rollouts.len(), super::list_files(root.to_string_lossy().into())));
+        });
+        let (rollouts, files) = finished.recv_timeout(std::time::Duration::from_secs(20)).expect("a walk followed the loop");
+        assert_eq!(rollouts, 1);
+        assert_eq!(files, ["sessions/2026/10/rollout-a.jsonl"]);
+        std::fs::remove_dir(day.join("loop")).unwrap(); // the link alone, never what it points at
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn two_drainers_take_each_event_once() {
         let dir = std::env::temp_dir().join(format!("loom-task-race-{}", std::process::id()));
