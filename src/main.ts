@@ -8567,9 +8567,11 @@ const CLI: Record<string, CliCommand> = {
     run: async (a) => {
       if (a._.length > 1 || (a._.length && a._[0] !== "list")) throw new Error("Use loomctl trash list.");
       // `error`: a record cut short as it was written, or held by an operation right now.
-      const data = await invoke<{ id: string; folder: string; at: string; entry: string; entry_at: string; pending: boolean; error?: string }[]>("trash_list");
+      // `restoring`: an older Loom's restore stopped on its way there; finished by hand.
+      const data = await invoke<{ id: string; folder: string; at: string; entry: string; entry_at: string; pending: boolean; restoring?: string; error?: string }[]>("trash_list");
       return { data, text: data.length ? table(data.flatMap(r => r.error ? [[r.id, "unreadable", r.error]]
-        : [[r.id, r.pending ? "pending" : "retained", "folder", `${r.folder} -> ${r.at}`], ["", "", "git", `${r.entry} -> ${r.entry_at}`]])) : "Loom's trash is empty." };
+        : [[r.id, r.restoring ? "restoring" : r.pending ? "pending" : "retained", "folder", `${r.folder} -> ${r.at}`], ["", "", "git", `${r.entry} -> ${r.entry_at}`],
+          ...(r.restoring ? [["", "", "restore", `stopped on its way to ${r.restoring}`]] : [])])) : "Loom's trash is empty." };
     },
   },
   "close-plan": {

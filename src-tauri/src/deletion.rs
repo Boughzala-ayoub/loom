@@ -96,6 +96,10 @@ struct Trashed {
     #[serde(default)] from: Option<PathBuf>,
     #[serde(default)] branch: Option<String>,
     #[serde(default)] commit: Option<String>,
+    /// An older Loom's `trash restore` stopped on its way here: the folder may
+    /// be there already, git's record still in the trash. Only a hand repair
+    /// finishes it (docs/loomctl.md), so nothing here takes or erases it.
+    #[serde(default, skip_serializing_if = "Option::is_none")] restoring: Option<PathBuf>,
 }
 
 const PENDING: &str = "Loom trash transaction pending\n";
@@ -169,6 +173,9 @@ fn resume(trash: &Path, worktrees: &Path, dir: &Path, pending_only: bool) -> Res
         let Ok((mut file, mut r)) = open_record(&path) else { continue };
         if (!pending_only || r.pending) && spelled(&r.folder) == spelled(dir) && r.entry.parent().is_some_and(|p| spelled(p) == spelled(worktrees))
             && (r.pending || !dir.try_exists().map_err(|e| e.to_string())?) {
+            if let Some(to) = &r.restoring {
+                return Err(format!("{} was being restored to {} by an older Loom; finish or clear that by hand first (loomctl trash)", r.folder.display(), to.display()));
+            }
             if r.pending { return finish_record(&mut file, &path, &mut r).map(Some); }
             let stamp = file.metadata().and_then(|m| m.modified()).map_err(|e| e.to_string())?;
             if completed.as_ref().is_none_or(|(last, _)| stamp > *last) {
@@ -248,7 +255,7 @@ fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Resul
             Err(e) => return Err(e.to_string()),
         }
     };
-    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit.clone()) };
+    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit.clone()), restoring: None };
     // Git itself honors this lock, including a blanket prune from another
     // instance, and the ref keeps the commit. Until both hold, nothing has
     // moved: a reservation that can't be written goes again rather than stay
@@ -335,7 +342,7 @@ pub fn purge(trash: &Path, keep: Duration) {
         let due = fs::metadata(&file).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= keep));
         if !due { continue; }
         let Ok((_held, r)) = open_record(&file) else { continue };
-        if r.pending { continue; }
+        if r.pending || r.restoring.is_some() { continue; }
         // The repository is the one that held the administration.
         let unkeep = || r.entry.parent().and_then(Path::parent).is_none_or(|common| crate::git_run(common.to_string_lossy().into_owned(),
             vec!["update-ref".into(), "-d".into(), keep_ref(&file.file_stem().unwrap().to_string_lossy())], None, false).is_ok());
@@ -517,6 +524,34 @@ mod tests {
         assert_eq!(git(&at, &["show", ":a"]), "staged");
         assert!(!file.exists(), "a checkout put back by hand must cancel expiry");
         assert_eq!(git(&repo, &["for-each-ref", "refs/loom-trash"]), "", "a cancelled record left its ref");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_older_restore_stopped_halfway_is_never_purged() {
+        let dir = std::env::temp_dir().join(format!("loom-half-restored-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        fs::write(wt.join("a"), "staged").unwrap();
+        git(&wt, &["add", "a"]);
+        remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap();
+        let file = fs::read_dir(&trash).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == "json")).unwrap().path();
+        // The removed `loomctl trash restore` moved the folder out, then git's
+        // record couldn't follow: the index is only in the trash now.
+        let mut saved: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        let dest = dir.join("restored");
+        fs::rename(saved["at"].as_str().unwrap(), &dest).unwrap();
+        saved["restoring"] = dest.to_str().unwrap().into();
+        fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let index = Path::new(saved["entry_at"].as_str().unwrap()).join("index");
+        purge(&trash, Duration::ZERO);
+        assert!(index.is_file() && file.exists(), "purge erased a half-restored checkout's index");
+        assert_eq!(trash_records(&trash).unwrap()[0]["restoring"], dest.to_str().unwrap(), "trash list hides where the restore went");
+        assert!(remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).is_err(), "deleting its path again took the half restore as done");
         fs::remove_dir_all(dir).unwrap();
     }
 

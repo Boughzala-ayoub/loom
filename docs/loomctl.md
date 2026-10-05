@@ -303,6 +303,15 @@ deleting the same worktree again, or creating a thread at its path, finishes
 it. A record shown `unreadable` was cut short as it was written, or
 another operation holds it right then; it holds up nothing else.
 
+A record shown `restoring` was left partway by an earlier Loom's
+`loomctl trash restore`: its folder may already be at the destination the
+list names, with Git's record still at `entry_at`. Purge never expires it and
+deleting that worktree again refuses, so finish it by hand: move `<at>` to
+that destination if it is still in the trash, move `<entry_at>` to `<entry>`,
+write `gitdir: <entry>` into the destination's `.git` file, run
+`git worktree repair <destination>` from the repository, then delete
+`<id>.json` from the trash.
+
 Until purge, a ref named `refs/loom-trash/<id>` (any character other than a
 letter, digit, `-` or `_` spelled `%XX`) keeps the commit the worktree was
 on, so `git gc` can't collect it after its branch is deleted. Purge, or Git
