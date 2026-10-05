@@ -127,6 +127,7 @@ try {
         if (cmd === 'git_midway') return '';
         if (cmd === 'worktree_fingerprint') return qa.fingerprint || 'fixture-contents';
         if (cmd === 'worktree_remove' && qa.failRemove) throw new Error('Test: the worktree folder is in use');
+        if (cmd === 'worktree_remove' && qa.failRemoveOnce === args.dir) { qa.failRemoveOnce = null; qa.fingerprint = 'partly-deleted'; throw new Error('Test: a file in it is in use'); }
         if (cmd === 'git_run') {
           const a = args.args;
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
@@ -853,6 +854,13 @@ try {
         assert.deepEqual(await hashedFor(), ['src/a.ts', 'notes.txt']);
         const discarded = await cli('close-thread', e.id, '--yes', '--delete', 'worktree', '--discard', 'all');
         assert.deepEqual([discarded.ok, await hashedFor()], [true, []], JSON.stringify(discarded));
+        // A removal that stops part-way changed the folder itself: failed and maybe partly deleted, never kept.
+        const f = await worktree('cleanup-f');
+        await page.evaluate(dir => { window.qa.failRemoveOnce = dir; }, f.dir);
+        const torn = await cli('close-thread', f.id, '--yes', '--delete', 'worktree');
+        await page.evaluate(() => { window.qa.fingerprint = null; });
+        assert.deepEqual([torn.ok, torn.steps], [false, { panes: 'closed', worktree: 'failed', branch: null }], JSON.stringify(torn));
+        assert.match(torn.error, /may be partly deleted/);
         await page.evaluate(() => { window.qa.onKill = null; delete window.qa.statusFor; });
       }
       // Pane 7 review (2026-10-01).

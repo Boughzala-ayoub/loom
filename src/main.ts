@@ -5247,8 +5247,9 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
       // delete a folder that is still some process's cwd — retry a few times.
       for (let n = 0; ; n++) {
         try {
+          // A failed attempt may have deleted part of the tree, which changes it too.
           if (n > 0 && expected && inventoryDiff(expected, await inventory(th, mode === "all", expected.discard))) {
-            return partial({ removed: true, worktree: "kept", branch, error: "worktree changed during deletion retries" });
+            return partial({ removed: true, worktree: "failed", branch, error: `couldn't remove its worktree folder, which changed during deletion retries and may be partly deleted${branch ? ", so its branch was kept" : ""}.` });
           }
           // Not `git worktree remove`: it follows junctions and empties their targets.
           await invoke("worktree_remove", { repo: th.repo, dir: th.dir });
