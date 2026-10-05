@@ -143,7 +143,14 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
 fn connect(name: &str) -> Result<std::fs::File, (&'static str, String)> {
     for _ in 0..100 {
         match std::fs::OpenOptions::new().read(true).write(true).open(name) {
-            Ok(f) => return Ok(f),
+            Ok(f) => {
+                let owner = pipe::owner_is(&f, &pipe::current_user().map_err(|e| ("unreachable", e))?).map_err(|e| format!("can't tell who serves {name}: {e}"));
+                return match owner {
+                    Ok(true) => Ok(f),
+                    Ok(false) => Err(("unreachable", format!("{name} belongs to another Windows account, not this Loom, so nothing was sent."))),
+                    Err(e) => Err(("unreachable", e)),
+                };
+            }
             // All pipe instances are serving other commands: they free up in milliseconds.
             Err(e) if e.raw_os_error() == Some(231) => std::thread::sleep(std::time::Duration::from_millis(50)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -500,6 +507,23 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pipe_counts_only_when_this_account_owns_it() {
+        use windows::Win32::Security::{Authorization::ConvertStringSidToSidW, PSID, SID_AND_ATTRIBUTES, TOKEN_USER};
+        let name = format!(r"\\.\pipe\loomctl-owner-test-{}", std::process::id());
+        let _server = tauri::async_runtime::block_on(async {
+            tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(&name)
+        }).unwrap();
+        let client = std::fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
+        assert!(pipe::owner_is(&client, &pipe::current_user().unwrap()).unwrap(), "a pipe this account made is its own");
+        // As if another account had made it first: SYSTEM stands in for that owner.
+        let mut system = PSID::default();
+        unsafe { ConvertStringSidToSidW(windows::core::w!("S-1-5-18"), &mut system).unwrap() };
+        let other = TOKEN_USER { User: SID_AND_ATTRIBUTES { Sid: system, Attributes: 0 } };
+        let other = unsafe { std::slice::from_raw_parts(&other as *const TOKEN_USER as *const u8, std::mem::size_of::<TOKEN_USER>()) };
+        assert!(!pipe::owner_is(&client, other).unwrap(), "an owner that isn't this account is refused");
+    }
 
     fn p(words: &[&str]) -> Parsed {
         let args: Vec<String> = words.iter().map(|s| s.to_string()).collect();

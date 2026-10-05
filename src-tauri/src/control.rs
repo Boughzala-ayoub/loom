@@ -36,7 +36,13 @@ pub fn serve(app: AppHandle, name: String) {
         loop {
             let server = match create(&name, first, security) {
                 Ok(s) => s,
-                Err(e) if first => return eprintln!("control pipe {name} is taken, likely by another Loom on this workspace: {e}"),
+                Err(e) if first => {
+                    // A GUI build shows no stderr: say it where it's seen, since loomctl now can't reach this Loom.
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    app.dialog().message(format!("loomctl can't reach this Loom: another program already holds its pipe, {name} ({e}). Close it and restart Loom."))
+                        .title("loomctl unavailable").kind(MessageDialogKind::Warning).show(|_| {});
+                    return;
+                }
                 // ponytail: a fixed 1 s back-off. A failure here is transient (out
                 // of resources); giving up would leave loomctl no listener until restart.
                 Err(e) => {
@@ -82,10 +88,13 @@ fn owner_only() -> Result<usize, String> {
         let _ = CloseHandle(token);
         got.map_err(|e| e.to_string())?;
         let user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut sid = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut sid).map_err(|e| e.to_string())?;
-        let sddl = format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", sid.to_string().unwrap_or_default());
-        let _ = LocalFree(Some(HLOCAL(sid.0.cast())));
+        let mut raw = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut raw).map_err(|e| e.to_string())?;
+        // Owned by this account, stated, not left to the token's default owner
+        // (Administrators when elevated): loomctl checks the owner (pipe.rs owner_is).
+        let sid = raw.to_string().unwrap_or_default();
+        let sddl = format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GA;;;SY)");
+        let _ = LocalFree(Some(HLOCAL(raw.0.cast())));
         let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(wide.as_ptr()), SDDL_REVISION_1, &mut descriptor, None)
@@ -155,6 +164,15 @@ fn request(line: &str) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::request;
+
+    #[test]
+    fn loom_owns_the_pipes_it_serves() {
+        let name = format!(r"\\.\pipe\loom-owner-test-{}", std::process::id());
+        let security = super::owner_only().unwrap();
+        let _server = tauri::async_runtime::block_on(async { super::create(&name, true, security) }).unwrap();
+        let client = std::fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
+        assert!(crate::pipe::owner_is(&client, &crate::pipe::current_user().unwrap()).unwrap(), "loomctl must accept it");
+    }
 
     #[test]
     fn only_a_whole_request_line_runs() {

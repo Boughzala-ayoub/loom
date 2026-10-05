@@ -54,6 +54,47 @@ fn fnv1a(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
 }
 
+/// This account's SID, as the bytes of its TOKEN_USER (the SID points inside).
+#[allow(dead_code)] // Loom checks its own pipes only in tests
+pub fn current_user() -> Result<Vec<u8>, String> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let fail = |e: windows::core::Error| format!("can't read this account's identity: {e}");
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).map_err(fail)?;
+        let mut len = 0;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+        let mut user = vec![0u8; len as usize];
+        let got = GetTokenInformation(token, TokenUser, Some(user.as_mut_ptr().cast()), len, &mut len);
+        let _ = CloseHandle(token);
+        got.map_err(fail)?;
+        Ok(user)
+    }
+}
+
+/// Whether the pipe is owned by `user` (a TOKEN_USER from current_user). Loom
+/// makes its pipes owned by its account (control.rs). A name is only a name:
+/// another account could create it first, so the owner is checked before
+/// anything is sent; only that account or an administrator can set it.
+#[allow(dead_code)]
+pub fn owner_is(pipe: &std::fs::File, user: &[u8]) -> Result<bool, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows::Win32::Security::{EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_USER};
+    unsafe {
+        let (mut owner, mut descriptor) = (PSID::default(), PSECURITY_DESCRIPTOR::default());
+        let got = GetSecurityInfo(HANDLE(pipe.as_raw_handle()), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+            Some(&mut owner), None, None, None, Some(&mut descriptor));
+        if got.is_err() { return Err(format!("{got:?}")); }
+        let same = EqualSid(owner, (*(user.as_ptr() as *const TOKEN_USER)).User.Sid).is_ok();
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        Ok(same)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
