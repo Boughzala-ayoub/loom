@@ -341,12 +341,17 @@ pub fn session_usage(
 
 fn setting_value(value: &str, effort: bool) -> String {
     static PRIVATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(
-        r"(?i)(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]"
+        r"(?i)^(?:[a-z]:[\\/]|/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]"
     ).unwrap());
-    let valid = if effort { matches!(value, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") }
-        else { !value.is_empty() && value.len() <= 160 && value.as_bytes()[0].is_ascii_alphanumeric()
-            && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b)) };
-    if valid && !PRIVATE.is_match(value) { value.into() } else { String::new() }
+    static CREDENTIAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(
+        r"(?:^|[^a-zA-Z0-9])(?:github_pat_[a-zA-Z0-9_]{20,}|AIza[a-zA-Z0-9_-]{30,}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)"
+    ).unwrap());
+    static MODEL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(
+        r"(?i)\A[a-z0-9][a-z0-9._:/-]*(?:\[[0-9]+[km]\])?\z"
+    ).unwrap());
+    let valid = if effort { matches!(value, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto") }
+        else { value.is_ascii() && value.len() <= 160 && MODEL.is_match(value) };
+    if valid && !PRIVATE.is_match(value) && !CREDENTIAL.is_match(value) { value.into() } else { String::new() }
 }
 
 /// Bounded discovery once per selected session; readers fold only appended bytes.
@@ -1239,7 +1244,9 @@ mod tests {
     #[test]
     fn codex_settings_reject_private_metadata() {
         let path = std::env::temp_dir().join(format!("loom-private-settings-{}.jsonl", std::process::id()));
-        for value in [format!("sk-{}", "a".repeat(40)), format!("ghp_{}", "b".repeat(30)), format!("AKIA{}", "C".repeat(16)), "xoxb-synthetic".into(), "password=synthetic".into(), "model\ncontrol".into(), "a".repeat(161)] {
+        let settings: serde_json::Value = serde_json::from_str(include_str!("../../src/fixtures/settings-values.json")).unwrap();
+        for value in [format!("sk-{}", "a".repeat(40)), format!("ghp_{}", "b".repeat(30)), format!("AKIA{}", "C".repeat(16)), "xoxb-synthetic".into(), "password=synthetic".into(), "model\ncontrol".into(), "a".repeat(161)]
+            .into_iter().chain(settings["private"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned())) {
             let rows = [serde_json::json!({"type":"session_meta","payload":{"id":"selected","source":"cli"}}), serde_json::json!({"type":"turn_context","payload":{"model":value,"effort":value}})];
             std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
             let u = super::codex_session(&path, "selected").unwrap();
@@ -1247,6 +1254,20 @@ mod tests {
             assert!(!serde_json::to_string(&u).unwrap().contains(&value), "private metadata must not serialize");
         }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn codex_settings_preserve_models_and_efforts() {
+        let settings: serde_json::Value = serde_json::from_str(include_str!("../../src/fixtures/settings-values.json")).unwrap();
+        for (key, effort, valid) in [("models", false, true), ("efforts", true, true), ("invalidModels", false, false), ("invalidEfforts", true, false)] {
+            for value in settings[key].as_array().unwrap() {
+                let value = value.as_str().unwrap();
+                let mut usage = super::Usage::default();
+                let field = if effort { "effort" } else { "model" };
+                super::fold_codex(&mut usage, &serde_json::json!({"type":"turn_context", "payload":{field:value}}));
+                assert_eq!(if effort { usage.effort } else { usage.model }, if valid { value } else { "" }, "{key}: {value:?}");
+            }
+        }
     }
 
 

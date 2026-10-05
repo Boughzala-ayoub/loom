@@ -1,4 +1,5 @@
 import detailCooldown from "./fixtures/codex-detail-cooldown.json" with { type: "json" };
+import settings from "./fixtures/settings-values.json" with { type: "json" };
 import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
 const claudeComposer = claudeCapture.lines.join("\n");
 // Production command handlers, with only native/window boundaries replaced.
@@ -65,20 +66,31 @@ if (check(201)) {
   const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
   const p = { id: "p", th, agent: "codex", sessionId: "selected" } as any;
   th.panes.push(p);
-  const c = fixture({ threads: [th], paneRows: () => "" });
-  for (const value of ["sk-" + "a".repeat(40), "ghp_" + "b".repeat(30), "AKIA" + "C".repeat(16), "xoxb-synthetic", "password=synthetic", "custom\nmodel", "a".repeat(161)]) {
+  Object.assign(th, { active: p });
+  const c = fixture({ threads: [th], current: th, dashboardOpen: false, paneRows: () => "" });
+  for (const value of ["sk-" + "a".repeat(40), "ghp_" + "b".repeat(30), "AKIA" + "C".repeat(16), "xoxb-synthetic", ...settings.private, "password=synthetic", "custom\nmodel", "a".repeat(161)]) {
     for (const field of ["providerUsage", "startupSettings"]) {
       p.providerUsage = null; p.startupSettings = null;
       p[field] = { sid: "selected", model: value, effort: value };
       const data = (await c.panes.run({ _: [] })).data[0];
       assert.ok(data.model === null && data.effort === null, "private settings must be absent");
-      assert.ok(!JSON.stringify(await c.threads.run()).includes(value), "nested settings must be absent");
+      for (const reply of [await c.threads.run(), await c.status.run()])
+        assert.ok(!JSON.stringify(reply).includes(value), "nested settings must be absent");
     }
   }
-  p.startupSettings = { model: "vendor/custom-model:v2", effort: "xhigh" };
-  assert.equal((await c.panes.run({ _: [] })).data[0].model, "vendor/custom-model:v2");
-  p.startupSettings.model = "claude-opus-5-5[1m]";
-  assert.equal((await c.panes.run({ _: [] })).data[0].model, "claude-opus-5-5[1m]");
+  for (const field of ["providerUsage", "startupSettings"]) {
+    p.providerUsage = null; p.startupSettings = null;
+    for (const model of settings.models) {
+      p[field] = { sid: "selected", model };
+      assert.equal((await c.panes.run({ _: [] })).data[0].model, model);
+    }
+    for (const effort of settings.efforts) {
+      p[field] = { sid: "selected", effort };
+      assert.equal((await c.panes.run({ _: [] })).data[0].effort, effort);
+    }
+  }
+  for (const value of settings.invalidModels) assert.equal(task.settingValue(value, "model"), null);
+  for (const value of settings.invalidEfforts) assert.equal(task.settingValue(value, "effort"), null);
   console.log("ok   R1 settings reject recognizable secrets and malformed restored values");
 }
 if (check(14)) {

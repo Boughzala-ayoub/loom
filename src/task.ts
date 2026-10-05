@@ -61,8 +61,8 @@ const PRIVATE = /^(?:[a-z]:[\\/]|\/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0
 
 /** Validate the whole value before any export, including restored fallbacks. */
 export function settingValue(value: unknown, kind: "model" | "effort"): string | null {
-  if (typeof value !== "string" || PRIVATE.test(value)) return null;
-  if (kind === "effort") return /^(none|minimal|low|medium|high|xhigh|max)$/.test(value) ? value : null;
+  if (typeof value !== "string" || PRIVATE.test(value) || /(?:^|[^a-zA-Z0-9])(?:github_pat_[a-zA-Z0-9_]{20,}|AIza[a-zA-Z0-9_-]{30,}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)/.test(value)) return null;
+  if (kind === "effort") return /^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(value) ? value : null;
   return value.length <= 160 && /^[a-z0-9][a-z0-9._:/-]*(?:\[[0-9]+[km]\])?$/i.test(value) ? value : null;
 }
 
