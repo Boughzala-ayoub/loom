@@ -544,7 +544,7 @@ try {
       assert.match(sent.data.warning, /history is unavailable/i);
       assert.equal(await page.evaluate(() => localStorage.getItem('qa-journal')), broken, 'The broken journal is kept as it was');
     }
-    await page.evaluate(() => localStorage.removeItem('qa-journal'));
+    await resetReview(); // the next case starts from a readable journal
     ok('A journal record of the wrong shape leaves history unavailable, not startup stuck');
   }
   if (review('unreadable')) {
