@@ -1311,7 +1311,9 @@ let lang: Lang = langs[0];
 /** The running recording: which pane it belongs to, and the prefix and language
  * it opened with — swapping either mid-sentence must not change how this one
  * ends. */
-let recording: { pane: Pane; prefix: Prefix; lang: Lang } | null = null;
+/** `gen` and `seq`: the launch it records for, and the input count once the
+ * prefix went in, so a transcript never lands in a restarted pane. */
+let recording: { pane: Pane; prefix: Prefix; lang: Lang; gen: number; seq: number } | null = null;
 /** Start and stop run one at a time: a push-to-talk tap outruns the IPC round
  * trip, and a stop dropped for being "too early" leaves the mic open for good. */
 let micChain: Promise<void> = Promise.resolve();
@@ -1376,8 +1378,8 @@ async function micStart() {
   if (cfgBusy) return micState("err", "model/effort change in progress — try again");
   try {
     await invoke("dictate_start");
-    recording = { pane, prefix, lang };
     if (prefix.text) pane.term.paste(prefix.text);
+    recording = { pane, prefix, lang, gen: pane.generation, seq: pane.inputSeq };
     micState("rec");
     chime(660, 990, 0.09, 0.18); // rising: mic open
   } catch (e) {
@@ -1388,7 +1390,7 @@ async function micStart() {
 async function micStop() {
   const r = recording;
   if (!r) return;
-  const { pane: p, prefix: pre } = r;
+  const { pane: p, prefix: pre, gen } = r;
   // null, not "": whisper takes Option<&str> and None is what means "detect".
   const code = r.lang.code || null;
   recording = null;
@@ -1397,12 +1399,19 @@ async function micStop() {
   try {
     const text = await invoke<string>("dictate_stop", { lang: code });
     micState("");
+    // Restarted, stopped or closed while whisper ran: the text was for a process that's gone.
+    const offer = (why: string) => {
+      if (text) void navigator.clipboard.writeText(text).catch(() => {});
+      toast(`${p.agent} ${why} while you dictated, so nothing was typed.${text ? " The dictation is on the clipboard." : ""}`);
+    };
+    if (changed(p, gen)) return offer(changed(p, gen));
     if (text) {
       p.term.paste(text); // not pty_write: paste honors bracketed-paste mode
       if (pre.enter) {
         // Codex reads an Enter that lands right behind pasted text as part of
         // the paste (a newline in the composer), so let the input settle first.
         await p.settle(150, 1000);
+        if (changed(p, gen)) return offer(changed(p, gen));
         const mark = manualEnter(p);
         p.typed = null;
         const release = holdForEnter(p, mark);
@@ -1413,12 +1422,11 @@ async function micStop() {
           toast(`Could not write to ${p.agent}: ${String(e)}`);
         });
       }
-    } else if (pre.text) {
+    } else if (pre.text && p.inputSeq === r.seq) {
       // A mis-tapped F4 with nothing said: take the prefix back out instead of
       // leaving a bare "/prompt " in the input. Backspaces have to go raw — a
-      // DEL inside a bracketed paste is literal text, not a keypress.
-      // ponytail: blind, so it eats anything you typed into the pane while
-      // dictating. You weren't typing, you were talking.
+      // DEL inside a bracketed paste is literal text, not a keypress. Only
+      // when nothing went in since: they would eat that instead.
       p.inputSeq++;
       invoke("pty_write", { id: p.id, data: "\x7f".repeat(pre.text.length) });
     }

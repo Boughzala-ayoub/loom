@@ -71,6 +71,7 @@ try {
         if (cmd === 'pty_write' && qa.gateWrite?.(args.data)) return new Promise(resolve => qa.gated.push(() => { qa.onWrite?.(args); resolve(); }));
         if (cmd === 'pty_write' && qa.failWriteIf?.(args.data)) throw new Error('Test: the terminal write failed');
         if (cmd === 'pty_write' && qa.loseReplyIf?.(args.data)) { qa.onWrite?.(args); throw new Error('Test: the terminal answered, and the answer was lost'); }
+        if (cmd === 'dictate_stop' && qa.holdDictation) return new Promise(resolve => { qa.pendingDictation = () => resolve(qa.dictation ?? ''); });
         if (cmd === 'dictate_stop') return qa.dictation ?? '';
         if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
         if (cmd === 'pty_kill' && qa.controlKill) return window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${args.id}`, payload: 1 });
@@ -285,6 +286,20 @@ try {
       assert.notEqual(live.state, 'exited', JSON.stringify(live));
       const kills = await page.evaluate(id => window.qa.calls.filter(c => c.cmd === 'pty_kill' && c.args.id === id).map(c => c.args.launch), stopped.data.id);
       assert.equal(new Set(kills.slice(-2)).size, 1, 'Both stops name the launch that was running, not whatever runs later');
+      // Dictation whose pane restarted while whisper ran types nothing into the new launch (Astra's full review, F9).
+      assert.equal((await cli('overview', 'close')).ok, true);
+      assert.equal((await cli('show', 'search-polish:1')).ok, true);
+      await page.evaluate(() => { window.qa.dictation = 'words for the old launch'; window.qa.holdDictation = true; });
+      await page.keyboard.down('F4');
+      await page.waitForTimeout(150);
+      await page.keyboard.up('F4');
+      await page.waitForFunction(() => window.qa.pendingDictation);
+      assert.equal((await cli('restart', 'search-polish:1', '--yes')).ok, true);
+      await page.evaluate(() => { window.qa.holdDictation = false; window.qa.pendingDictation(); });
+      await page.waitForTimeout(400);
+      const typedOld = await page.evaluate(id => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data.includes('words for the old launch')), stopped.data.id);
+      assert.equal(typedOld, false, 'Dictation for a replaced launch is not typed into the new one');
+      await page.evaluate(() => { window.qa.dictation = ''; });
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS loomctl stop while starting, failed restart ${width}px`);
