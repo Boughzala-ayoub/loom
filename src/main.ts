@@ -5184,11 +5184,13 @@ const gitPreview = (dir: string, ok: number[], ...args: string[]) =>
  * holds. HEAD rides along, so a new commit is a change too. Throws when git
  * can't say: unknown is never "nothing to lose". */
 type Inventory = { fingerprint: string; head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number; discard: Loss[] };
+/** Contents count only for the files the approval names and doesn't discard;
+ * the rest (ignored build output above all) count by name, size and time. */
+const hashedFiles = (status: { tracked: string[]; untracked: string[] }, discard: Loss[]) =>
+  (["tracked", "untracked"] as const).flatMap((k) => (discard.includes(k) ? [] : status[k]));
 async function inventory(th: Thread, branch: boolean, discard: Loss[] = []): Promise<Inventory> {
   const status = lossInventory(await git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--ignored=matching"));
-  // Contents only for the files the approval names and doesn't discard; the
-  // rest (ignored build output above all) count by name, size and time.
-  const hashed = (["tracked", "untracked"] as const).flatMap((k) => (discard.includes(k) ? [] : status[k]));
+  const hashed = hashedFiles(status, discard);
   const [head, commits, fingerprint] = await Promise.all([
     git(th.dir, "rev-parse", "HEAD").then((s) => s.trim(), () => ""), // no commits yet
     branch && th.branch
@@ -5302,7 +5304,9 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
             return partial({ removed: true, worktree: "failed", branch, error: `couldn't remove its worktree folder, which changed during deletion retries and may be partly deleted${branch ? ", so its branch was kept" : ""}.` });
           }
           // Not `git worktree remove`: it follows junctions and empties their targets.
-          await invoke("worktree_remove", { repo: th.repo, dir: th.dir });
+          // The approval goes along: the folder must still match it where it's deleted.
+          const approved = expected && { fingerprint: expected.fingerprint, hashed: hashedFiles(expected, expected.discard) };
+          await invoke("worktree_remove", { repo: th.repo, dir: th.dir, approved });
           break;
         } catch (e) {
           if (n === 10) throw e;

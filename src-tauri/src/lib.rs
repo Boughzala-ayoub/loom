@@ -1556,8 +1556,8 @@ mod commands {
         blocking(move || super::canonical_directory(path)).await
     }
     #[tauri::command]
-    pub async fn worktree_remove(repo: String, dir: String) -> Result<(), String> {
-        blocking(move || deletion::remove_worktree(&repo, &dir)).await
+    pub async fn worktree_remove(repo: String, dir: String, approved: Option<deletion::Approval>) -> Result<(), String> {
+        blocking(move || deletion::remove_worktree(&repo, &dir, approved.as_ref())).await
     }
     #[tauri::command]
     pub async fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>, preview: Option<bool>) -> Result<String, String> {

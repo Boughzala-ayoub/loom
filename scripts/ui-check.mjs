@@ -854,6 +854,9 @@ try {
         const done = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan2.rev, '--discard', 'ignored');
         assert.equal(done.ok, true, JSON.stringify(done));
         assert.deepEqual(done.data.steps, { panes: 'closed', worktree: 'removed', branch: 'deleted' });
+        // The native delete gets what was approved, to check the folder against where it deletes it.
+        const approvals = dir => page.evaluate(dir => window.qa.calls.filter(c => c.cmd === 'worktree_remove' && c.args.dir === dir).map(c => c.args.approved), dir);
+        assert.deepEqual(await approvals(a.dir), [{ fingerprint: 'fixture-contents', hashed: [] }]);
         assert.ok(!(await open(a.id)));
         // The folder won't go: the panes are closed, the folder failed, the branch is kept.
         const b = await worktree('cleanup-b');
@@ -868,6 +871,7 @@ try {
         await page.evaluate(() => { window.qa.failRemove = false; window.qa.failBranch = true; });
         const branchStuck = await cli('close-thread', c.id, '--yes', '--delete', 'branch', '--force');
         assert.deepEqual([branchStuck.ok, branchStuck.steps], [false, { panes: 'closed', worktree: 'removed', branch: 'failed' }], JSON.stringify(branchStuck));
+        assert.deepEqual(await approvals(c.dir), [null], '--force approves nothing in advance');
         // Something writes as the panes stop: the folder is kept, and the answer says why.
         const d = await worktree('cleanup-d');
         await page.evaluate(([dir, ids]) => { window.qa.failBranch = false; window.qa.onKill = id => { if (ids.includes(id)) window.qa.statusFor[dir] = '?? crash.log\0'; }; }, [d.dir, d.panes.map(p => p.id)]);
