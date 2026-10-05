@@ -189,6 +189,11 @@ pub fn prepare_worktree(repo: &str, dir: &str, trash: &Path) -> Result<(), Strin
 /// is, never resolved: a link there goes nowhere. Returns where it went, or ""
 /// when both the folder and git's record were gone already.
 pub fn remove_worktree(repo: &str, dir: &str, trash: &Path) -> Result<String, String> {
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    remove_worktree_at(repo, dir, trash, stamp)
+}
+
+fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Result<String, String> {
     let dir = Path::new(dir);
     let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
     let common = Path::new(repo).join(common.trim());
@@ -217,15 +222,21 @@ pub fn remove_worktree(repo: &str, dir: &str, trash: &Path) -> Result<String, St
         let Some(entry) = missing_entry(&worktrees, dir)? else { return Ok(String::new()) };
         entry
     };
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
-    let id = format!("{stamp}-{name}");
-    let file = trash.join(format!("{id}.json"));
     let head = fs::read_to_string(entry.join("HEAD")).map_err(|e| e.to_string())?;
     let branch = head.trim().strip_prefix("ref: ").map(str::to_owned);
     let commit = crate::git_run(repo.into(), vec!["rev-parse".into(), "--verify".into(), branch.as_deref().unwrap_or(head.trim()).into()], None, false)?.trim().to_owned();
-    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit), restoring: None };
     fs::create_dir_all(trash).map_err(|e| e.to_string())?;
-    let mut held = fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).share_mode(4).open(&file).map_err(|e| e.to_string())?;
+    let mut suffix = 0u64;
+    let (id, file, mut held) = loop {
+        let id = format!("{stamp}-{name}-{suffix}");
+        let file = trash.join(format!("{id}.json"));
+        match fs::OpenOptions::new().read(true).write(true).create_new(true).share_mode(4).open(&file) {
+            Ok(held) => break (id, file, held),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => suffix += 1,
+            Err(e) => return Err(e.to_string()),
+        }
+    };
+    let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit), restoring: None };
     write_record(&mut held, &record).map_err(|e| e.to_string())?;
     // Git itself honors this lock, including a blanket prune from another instance.
     let mut lock = fs::OpenOptions::new().write(true).create_new(true).open(entry.join("locked")).map_err(|e| {
@@ -558,6 +569,35 @@ mod tests {
         assert_eq!(git(&wt, &["branch", "--show-current"]).trim(), "replacement");
         purge(&trash, Duration::ZERO);
         assert!(dest.join("a").is_file());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn same_millisecond_deletions_never_replace_another_record() {
+        let dir = std::env::temp_dir().join(format!("loom-trash-collision-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let trash = dir.join("trash");
+        let mut retained = Vec::new();
+        for n in 0..3 {
+            let repo = dir.join(n.to_string()).join("repo");
+            let wt = dir.join(n.to_string()).join("login");
+            fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "-q"]);
+            git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+            git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+            fs::write(wt.join("a"), format!("work {n}")).unwrap();
+            // Same central trash, same basename and clock tick. The last move
+            // fails independently, and must remove only its own reservation.
+            let held = (n == 2).then(|| fs::OpenOptions::new().read(true).share_mode(1).open(wt.join("a")).unwrap());
+            let moved = remove_worktree_at(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash, 12345);
+            if n == 2 { assert!(moved.is_err()); }
+            else { retained.push(PathBuf::from(moved.expect("a collision must reserve another id"))); }
+            drop(held);
+            let records = trash_records(&trash).unwrap();
+            assert_eq!(records.as_array().unwrap().len(), retained.len(), "a colliding deletion overwrote or removed another record");
+        }
+        assert_ne!(retained[0], retained[1]);
+        for (n, at) in retained.iter().enumerate() { assert_eq!(fs::read_to_string(at.join("a")).unwrap(), format!("work {n}")); }
         fs::remove_dir_all(dir).unwrap();
     }
 
