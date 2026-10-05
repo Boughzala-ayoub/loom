@@ -64,6 +64,20 @@ check("Codex approval", readMenu(codex)?.options.length, 3);
 check("Codex question", readMenu(codex)?.question, ["Would you like to run the following command?", "$ npm test"]);
 check("Codex approval keys: its numbers and the letters it names", menuKeys(readMenu(codex)!), ["1", "2", "3", "y", "a"]);
 check("Claude permission keys: its numbers", menuKeys(readMenu(claude)!), ["1", "2", "3"]);
+// Review R14-7: a narrow pane wraps the shortcut onto the option's next row.
+const codexWrapped = `
+Would you like to run the following command?
+
+  $ npm test
+
+› 1. Yes, proceed
+     (y)
+  2. No, and tell
+     Codex what to do
+     differently (esc)
+`;
+check("Codex approval wrapped: (y) on its option's next row still answers", menuKeys(readMenu(codexWrapped)!), ["1", "2", "y"]);
+check("... and the options read as before", readMenu(codexWrapped)?.options, ["Yes, proceed", "No, and tell"]);
 
 const ask = `
  Which layout should the overview use?

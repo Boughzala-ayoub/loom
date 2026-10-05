@@ -4,7 +4,8 @@
  * numbered list with a cursor glyph on the highlighted option. Text pasted into
  * one of those is not an answer, and the Enter after it picks whatever is
  * highlighted, so the overview offers the options as buttons instead. */
-export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[]; keys?: string[] };
+/** `options` are each option's first row; `full`, each with the rows it wraps onto. */
+export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[]; keys?: string[]; full?: string[] };
 
 export const claudeDivider = (line: string) => /^[ \t\u00a0]*[\u2500\u2501\u2550-]{3,}[ \t\u00a0]*$/.test(line);
 export const claudeComposer = (line: string) => /^[ \t]*[\u276f>]([ \t\u00a0]|$)/.test(line);
@@ -35,10 +36,11 @@ const unbox = (line: string) => line.replace(/^[\s│┃║]+|[\s│┃║]+$/g,
 const isRule = (line: string) => RULE.test(line) && !!line.trim();
 
 /** The single keys that answer `menu` at once: its numbers (or its own keys),
- * and a letter an option names as its shortcut, Codex's "Yes, proceed (y)". */
+ * and a letter an option names as its shortcut, Codex's "Yes, proceed (y)",
+ * also where a narrow pane wrapped it onto the option's next row. */
 export const menuKeys = (menu: Menu) => [
   ...(menu.keys ?? menu.options.map((_, i) => String(i + 1))),
-  ...menu.options.flatMap((o) => /\(([a-z])\)\s*$/i.exec(o)?.[1].toLowerCase() ?? []),
+  ...(menu.full ?? menu.options).flatMap((o) => /\(([a-z])\)\s*$/i.exec(o)?.[1].toLowerCase() ?? []),
 ];
 
 export function readMenu(screen: string): Menu | null {
@@ -81,12 +83,15 @@ export function readMenu(screen: string): Menu | null {
   while (top > 0 && !isRule(lines[top - 1])) top--;
   while (end + 1 < lines.length && lines[end + 1].trim() && !isRule(lines[end + 1])) end++;
   const prompt = lines.slice(top, end + 1).map(l => (OPTION.test(l) ? l.replace(CURSOR, "") : l).trim()).filter(Boolean);
+  // Each option through the rows before the next one (the last: to the prompt's end).
+  const full = options.map((o, k) => [o.text, ...lines.slice(o.line + 1, options[k + 1]?.line ?? end + 1).map(l => l.trim())].filter(Boolean).join(" "));
   return {
     question,
     options: options.map(o => o.text),
     selected: options.findIndex(o => o.cursor),
     multi: options.some(o => CHECKBOX.test(o.text)),
     prompt,
+    full,
   };
 }
 
