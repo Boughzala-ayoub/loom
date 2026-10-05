@@ -1,7 +1,7 @@
 import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
 const claudeComposer = claudeCapture.lines.join("\n");
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import { readMenu, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 
 let fails = 0;
@@ -316,6 +316,15 @@ check("Its frame before the timer shows: working", claudeWorking("* Thinking…\
 check("The line a turn leaves: not working", claudeWorking(claudeBusy.replace(/^✢ .*$/m, "✻ Worked for 22m 17s")), false);
 check("A tool still running, indented: not the working line", claudeWorking(claudeBusy.replace(/^✢ .*\n/m, "")), false);
 check("A truncated line ending in …: not working", claudeWorking("● Read(src/main.ts…)\n* a bullet that ends here…ish\n"), false);
+
+// The hint where Codex and OpenCode draw it, not quoted in the transcript.
+const codexIdle = "• Press esc to interrupt a long run.\n\n• Done.\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n\n";
+check("Codex: the hint quoted in the transcript isn't its status row", interruptHint(codexIdle, "codex"), false);
+check("Codex: its status row above the composer", interruptHint("• Done.\n\nWorking (5s • esc to interrupt)\n\n› Ask Codex to do anything\n\n  ? for shortcuts\n", "codex"), true);
+check("Codex: its footer under the composer", interruptHint("• Done.\n\n› fix it\n\n  gpt-5 high\n  esc to interrupt\n", "codex"), true);
+check("Codex: a menu's \"›\" is not the composer", interruptHint("› 1. Yes\n  2. No\n\n  esc to interrupt\n", "codex"), true);
+check("OpenCode: its footer", interruptHint("text\n┃ input ┃\n  esc interrupt  ctrl+p commands\n", "opencode"), true);
+check("OpenCode: a quote far above its footer", interruptHint("esc to interrupt\n\n\n\n┃ input ┃\n  ctrl+p commands\n", "opencode"), false);
 
 for (const screen of ["How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss", "How is Claude doing this session?\n  1: Bad   2: Fine\n 3: Good  0: Dismiss"]) {
   const m = readSurvey(claudeComposer + "\n" + screen);

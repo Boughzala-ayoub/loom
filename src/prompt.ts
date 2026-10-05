@@ -218,6 +218,21 @@ function readCodexInput(rows: Cell[][], cursor: Cursor | undefined): Input {
   return unknown("Codex's composer mixes plain and dim text, or the cursor isn't where its placeholder puts it.");
 }
 
+const HINT = /\besc\s+(?:again\s+)?(?:to\s+)?interrupt/i;
+
+/** An agent's "esc to interrupt" hint, read only off the rows its input owns,
+ * since the transcript above can quote it. Codex: from its status row, two
+ * above the "›" composer, down. Anything else (OpenCode's footer): the last
+ * three rows with text. */
+export function interruptHint(screen: string, agent: string): boolean {
+  const lines = screen.split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1].trim()) end--;
+  const from = (i: number) => lines.slice(Math.max(0, i), end).some((l) => HINT.test(l));
+  if (agent === "codex") for (let i = end - 1; i >= 0; i--) if (CODEX_PROMPT.test(lines[i]) && !OPTION.test(lines[i])) return from(i - 2);
+  return from(end - 3);
+}
+
 // Long pastes show as one of these instead of the text: Claude's and Codex's.
 const PASTED = /\[Pastedtext#\d+(?:\+\d+lines)?\]|\[PastedContent\d+chars\]/g;
 

@@ -18,7 +18,7 @@ import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { claudeDivider, claudeComposer, readMenu, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, type Cell, type Menu as AgentMenu } from "./prompt";
+import { claudeDivider, claudeComposer, readMenu, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
@@ -1508,6 +1508,9 @@ class Pane {
    * shows. Unset until this launch titles one, as a Codex older than
    * run-state never does: then its "esc to interrupt" alone says busy. */
   codexState: string | undefined;
+  /** Codex asked (an approval or a question, OSC 9) and no answer went in
+   * since. Its title says Working all through one, but nothing runs. */
+  codexAsking = false;
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
   /** Where it was when it left its thread (keepContext). Every copy after is this one, last known. */
   left?: TaskContext;
@@ -1819,7 +1822,8 @@ class Pane {
     // CODEX_FLAGS in agent.ts. OSC 99 is the kitty notification opentui TUIs
     // use; "p=?" there is a capability probe, not news.
     this.term.parser.registerOscHandler(9, (d) => {
-      if (this.agent === "codex" && codexAsks(d)) taskSignal(this, { kind: "approval", at: Date.now(), detail: d.slice(0, 200) });
+      if (this.agent === "codex") this.codexAsking = codexAsks(d);
+      if (this.codexAsking) taskSignal(this, { kind: "approval", at: Date.now(), detail: d.slice(0, 200) });
       this.wake(undefined, "osc9");
       return true;
     });
@@ -1915,6 +1919,7 @@ class Pane {
     this.atPrompt = false;
     this.receiptRunning = undefined;
     this.codexState = undefined;
+    this.codexAsking = false;
     this.providerUsage = null;
     this.startupStarted = Date.now();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
@@ -2060,12 +2065,15 @@ class Pane {
     if (this.opencodeStatus) return;
     if (this.agent === "codex" || this.agent === "opencode") {
       // ponytail: both keep drawing while idle (codex's star field, opencode's
-      // TUI), so output alone says nothing. Their interrupt hint is the tell:
-      // codex's "Working (3s • esc to interrupt)", opencode's "esc interrupt"
-      // footer ("esc again to interrupt" after one press). Clear busy when it
-      // goes, even without a ring. Read the live screen after xterm joins PTY
-      // chunks, not scrolled history.
-      const status = INTERRUPT_HINT.test(this.screen(true)) || (this.agent === "codex" && codexRunning(this.codexState));
+      // TUI), so output alone says nothing. Codex's title says whether a turn
+      // runs, status row shown or not; without one, the interrupt hint where
+      // the input is: codex's "Working (3s • esc to interrupt)", opencode's
+      // "esc interrupt" footer ("esc again to interrupt" after one press).
+      // Clear busy when it goes, even without a ring. Read the live screen
+      // after xterm joins PTY chunks, not scrolled history. An unanswered
+      // approval runs nothing, whatever the title says.
+      const running = this.agent === "codex" && this.codexState !== undefined ? codexRunning(this.codexState) : interruptHint(this.screen(true, true), this.agent);
+      const status = running && !this.codexAsking;
       if (!status && this.busy) ((this.busy = false), this.paint());
       // An alert or Esc can clear busy while the hint stays visible. Reconcile
       // current state on every draw, including after the alert is acknowledged.
@@ -2251,13 +2259,17 @@ class Pane {
   }
 
   /** What the pane is showing, so a command can be checked for having taken.
-   * Defaults to visible rows; live reads ignore the user's scrollback position. */
-  screen(live = false) {
+   * Defaults to visible rows; live reads ignore the user's scrollback position.
+   * `joined`: a row the terminal wrapped continues the line above it. */
+  screen(live = false, joined = false) {
     const buf = this.term.buffer.active;
     const start = live ? buf.baseY : buf.viewportY;
     let s = "";
-    for (let y = 0; y < this.term.rows; y++)
-      s += (buf.getLine(start + y)?.translateToString(true) ?? "") + "\n";
+    for (let y = 0; y < this.term.rows; y++) {
+      const line = buf.getLine(start + y);
+      if (joined && y && line?.isWrapped) s = s.slice(0, -1);
+      s += (line?.translateToString(!joined) ?? "") + "\n";
+    }
     return s;
   }
 
@@ -2404,10 +2416,11 @@ class Pane {
    * task says the answer is in doubt (`answerInDoubt`, not `uncertain`: an
    * answer says nothing about the task's own Enter). */
   wrote(data: string, delivered: boolean) {
-    if (delivered && (data === "\x1b" || data === "\x03")) this.interruptAt = Date.now();
+    if (delivered && (data === "\x1b" || data === "\x03")) (this.interruptAt = Date.now()), (this.codexAsking = false);
     if (data.startsWith("\x1b[200~") || !(data.includes("\r") || /^[0-9a-z]$/i.test(data))) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
+    this.codexAsking = false;
     taskSignal(this, { kind: "resume", at: Date.now() });
     // A known approval was answered; preserve any newer alert raised by the write.
     if (asking.length && this.waitingSince <= this.lastIn) this.seen();
@@ -4349,9 +4362,11 @@ function sweepTasks() {
     // Claude Code 2.1.288 draws no hint while it works: its working line says so instead.
     // Codex hides its status row, hint and all, while it streams an answer (seen
     // live 2026-10-04: two turns ended unknown mid-answer, after web searches):
-    // its title's run state says the turn still runs.
+    // its title's run state says the turn still runs, and once it has one, it
+    // alone does. A hint is read only where the agent draws it (interruptHint).
     const screen = p.screen(true);
-    const busy = INTERRUPT_HINT.test(screen) || (p.agent === "claude" && claudeWorking(screen)) || (p.agent === "codex" && codexRunning(p.codexState));
+    const busy = p.agent === "claude" ? INTERRUPT_HINT.test(screen) || claudeWorking(screen)
+      : p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState) : interruptHint(p.screen(true, true), p.agent);
     // Esc or Ctrl-C after the Enter and after any Stop, judged once, 2 s on.
     const esc = p.interruptAt;
     const escNew = esc > (t.submittedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;

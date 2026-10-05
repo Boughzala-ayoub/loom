@@ -270,13 +270,16 @@ try {
     await reboot();
   };
   if (review('pane-state')) {
-    for (const title of ['', 'Ready', 'Working', 'Thinking', 'Waiting']) {
+    const pane = async () => (await cli('panes')).data.find(p => p.id === codex);
+    const look = async () => { await page.locator(`.pane[data-id="${codex}"] .pane-head`).click(); await page.waitForTimeout(50); };
+    // Codex keeps its title at Working through an approval, so a Ready title
+    // never shows with its status row: Ready has its own case below.
+    for (const title of ['', 'Working', 'Thinking', 'Waiting']) {
       await resetReview();
       await agent(codex, { codexShape: true });
       const sent = await cli('submit', 'work:2', 'Question: Why?');
       assert.equal(sent.ok, true, JSON.stringify(sent));
       await until(sent.data.task, 'working');
-      const pane = async () => (await cli('panes')).data.find(p => p.id === codex);
       assert.equal((await pane()).state, 'working', 'A submitted question is work, not an approval');
       const workingPane = await pane();
       assert.deepEqual([workingPane.model, workingPane.effort, workingPane.context], [null, null, null], 'Activity needs no usage metadata');
@@ -293,6 +296,10 @@ try {
       assert.equal((await cli('keys', 'work:2', 'enter')).ok, false);
       assert.equal((await pane()).state, 'waiting', 'A failed answer must leave the approval waiting');
       await qa({ failWriteIf: null });
+      // Looking acknowledges the alert, not the question: the title and the
+      // footer's hint still say busy, and nothing runs until it's answered.
+      await look();
+      assert.equal((await pane()).state, 'idle', 'An unanswered approval is not work, once seen');
       await cli('keys', 'work:2', 'enter');
       const working = '\x1b[2J\x1b[HWorking (5m 17s  esc to interrupt)  2 background terminals running  /ps to view  /stop to close\r\n\r\n\u203a Ask Codex to do anything\r\n\r\n  1 warning  f2 to view';
       await agent(codex, { codexRaw: working });
@@ -322,7 +329,19 @@ try {
       await page.waitForTimeout(50);
       assert.equal((await pane()).state, 'idle', 'A quiet Ready screen clears busy');
     }
-    ok('Codex resumes after approval; submitted questions and warning footers do not mark it waiting');
+    // A finished turn whose answer quotes the hint: idle once seen, under a Ready title or none.
+    for (const title of ['', 'Ready']) {
+      await resetReview();
+      await agent(codex, { codexShape: true });
+      if (title) await page.evaluate(([id, title]) => window.qa.out(id, `\x1b]0;${title}\x07`), [codex, title]);
+      await page.evaluate(id => window.qa.out(id, '\x1b]9;Agent turn complete\x07'), codex);
+      await agent(codex, { codexRaw: '\x1b[2J\x1b[H• Press esc to interrupt a long run.\r\n\r\n• Done.\r\n\r\n› Ask Codex to do anything\r\n\r\n  ? for shortcuts' });
+      await page.waitForTimeout(50);
+      assert.equal((await pane()).state, 'waiting');
+      await look();
+      assert.equal((await pane()).state, 'idle', `The hint quoted in the transcript${title ? ' under a Ready title' : ''} is not work`);
+    }
+    ok('Codex resumes after approval; submitted questions and warning footers do not mark it waiting; an unanswered approval or a quoted hint is not work');
   }
   if (review('claude-extra-prompts')) {
     await resetReview();
