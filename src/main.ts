@@ -5234,7 +5234,8 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
           if (n > 0 && expected && inventoryDiff(expected, await inventory(th, mode === "all"))) {
             return partial({ removed: true, worktree: "kept", branch, error: "worktree changed during deletion retries" });
           }
-          await git(th.repo, "worktree", "remove", "--force", th.dir);
+          // Not `git worktree remove`: it follows junctions and empties their targets.
+          await invoke("worktree_remove", { repo: th.repo, dir: th.dir });
           break;
         } catch (e) {
           if (n === 10) throw e;

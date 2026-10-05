@@ -126,12 +126,12 @@ try {
         if (cmd === 'plugin:path|join') return args.paths.join('\\');
         if (cmd === 'git_midway') return '';
         if (cmd === 'worktree_fingerprint') return qa.fingerprint || 'fixture-contents';
+        if (cmd === 'worktree_remove' && qa.failRemove) throw new Error('Test: the worktree folder is in use');
         if (cmd === 'git_run') {
           const a = args.args;
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
           if (a[0] === 'status' && qa.statusFor?.[args.dir] !== undefined) return qa.statusFor[args.dir]; // one worktree's own status
           if (a[0] === 'status') return (a.includes('--branch') ? '## main...origin/main [ahead 2]\0' : '') + (qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0') + (a.includes('--ignored=matching') ? qa.ignored ?? '' : '');
-          if (a[0] === 'worktree' && a[1] === 'remove' && qa.failRemove) throw new Error('Test: the worktree folder is in use');
           if (a[0] === 'branch' && a[1] === '-D' && qa.failBranch) throw new Error('Test: the branch is checked out elsewhere');
           if (a.includes('--numstat')) return '18\t4\tsrc/main.ts\n7\t2\tsrc/styles.css\n';
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
@@ -790,6 +790,7 @@ try {
         const open = async id => (await cli('threads')).data.some(t => t.id === id);
         const killed = ids => page.evaluate(ids => window.qa.calls.some(c => c.cmd === 'pty_kill' && ids.includes(c.args.id)), ids);
         const gitCalls = (verb, dir) => page.evaluate(([verb, dir]) => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args.slice(0, 2).join(' ') === verb && (!dir || c.args.args.includes(dir))).length, [verb, dir]);
+        const removals = dir => page.evaluate(dir => window.qa.calls.filter(c => c.cmd === 'worktree_remove' && (!dir || c.args.dir === dir)).length, dir);
         const a = await worktree('cleanup-a');
         const paneIds = a.panes.map(p => p.id);
         await statusOf(a.dir, '!! .env\0!! node_modules/\0');
@@ -817,7 +818,7 @@ try {
         assert.equal(morePanes.ok, false, JSON.stringify(morePanes));
         assert.match(morePanes.error, /changed since plan/);
         assert.ok(await open(a.id) && !(await killed([...paneIds, extra.data.id])), 'Still open, every pane still running');
-        assert.equal(await gitCalls('worktree remove') + await gitCalls('branch -D'), 0);
+        assert.equal(await removals() + await gitCalls('branch -D'), 0);
         // With the plan as it now is and the ignored files allowed, it goes, step by step.
         const plan2 = (await cli('close-plan', a.id, '--delete', 'branch')).data;
         const done = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan2.rev, '--discard', 'ignored');
@@ -843,7 +844,7 @@ try {
         const racing = await cli('close-thread', d.id, '--yes', '--delete', 'worktree');
         assert.deepEqual([racing.ok, racing.steps], [false, { panes: 'closed', worktree: 'kept', branch: null }], JSON.stringify(racing));
         assert.match(racing.error, /kept its worktree folder: its untracked files changed while its panes closed/);
-        assert.equal(await gitCalls('worktree remove', d.dir), 0);
+        assert.equal(await removals(d.dir), 0);
         await page.evaluate(() => { window.qa.onKill = null; delete window.qa.statusFor; });
       }
       // Pane 7 review (2026-10-01).

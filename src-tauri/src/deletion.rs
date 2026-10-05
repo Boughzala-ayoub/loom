@@ -61,9 +61,70 @@ pub fn fingerprint(root: &Path, index: Option<&Path>) -> Result<String, String> 
     Ok(format!("{:x}", hash.finalize()))
 }
 
+/// Delete `dir`, a linked worktree of `repo`. Git for Windows' `worktree remove`
+/// recurses through junctions and empties their targets, so git never walks it:
+/// std's remove_dir_all removes each link itself, then git drops its record of
+/// the folder, which it does once the folder is gone.
+pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
+    let git = |args: &[&str]| crate::git_run(repo.into(), args.iter().map(|a| a.to_string()).collect(), None);
+    if let Ok(real) = fs::canonicalize(dir) {
+        let list = git(&["worktree", "list", "--porcelain"])?;
+        // The first entry is the main checkout, never removed here.
+        let entry = list.split("\n\n").skip(1).find(|e| {
+            e.lines().next().and_then(|l| l.strip_prefix("worktree ")).and_then(|p| fs::canonicalize(p).ok()).as_ref() == Some(&real)
+        });
+        let entry = entry.ok_or_else(|| format!("{dir} isn't a worktree of {repo}"))?;
+        if entry.lines().any(|l| l == "locked" || l.starts_with("locked ")) { return Err(format!("{dir} is a locked worktree")); }
+        fs::remove_dir_all(&real).map_err(|e| e.to_string())?;
+    }
+    git(&["worktree", "remove", "--force", dir]).map(drop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=check", "-c", "user.email=check@loom"]).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+    fn junction(link: &Path, target: &Path) {
+        assert!(Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target).output().unwrap().status.success());
+    }
+
+    #[test]
+    fn removing_a_worktree_never_follows_its_links() {
+        let dir = std::env::temp_dir().join(format!("loom-remove-worktree-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, outside) = (dir.join("repo"), dir.join("wt"), dir.join("outside"));
+        fs::create_dir_all(outside.join("deep")).unwrap();
+        fs::write(outside.join("keep.txt"), "keep").unwrap();
+        fs::write(outside.join("deep/keep.txt"), "keep").unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        fs::create_dir(repo.join("sub")).unwrap();
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        fs::create_dir_all(wt.join("a/b")).unwrap();
+        junction(&wt.join("node_modules"), &outside);
+        junction(&wt.join("a").join("b").join("link"), &outside.join("deep")); // mklink reads "/" as a switch
+        fs::write(wt.join("ro.txt"), "x").unwrap();
+        let mut ro = fs::metadata(wt.join("ro.txt")).unwrap().permissions();
+        ro.set_readonly(true);
+        fs::set_permissions(wt.join("ro.txt"), ro).unwrap();
+        let (repo_s, wt_s) = (repo.to_str().unwrap(), wt.to_str().unwrap());
+        // Only a worktree git lists goes: never the checkout itself or a folder in it.
+        assert!(remove_worktree(repo_s, repo.join("sub").to_str().unwrap()).is_err());
+        assert!(remove_worktree(repo_s, repo_s).is_err());
+        assert!(repo.join("sub").is_dir());
+        remove_worktree(repo_s, wt_s).unwrap();
+        assert!(outside.join("keep.txt").is_file() && outside.join("deep/keep.txt").is_file(), "a junction's target was emptied");
+        assert!(!wt.exists());
+        assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t"));
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn approval_tracks_contents_ignored_children_and_index() {
         let dir = std::env::temp_dir().join(format!("loom-delete-check-{}", std::process::id()));

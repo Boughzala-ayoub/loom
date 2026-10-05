@@ -1407,6 +1407,10 @@ mod commands {
         }).await
     }
     #[tauri::command]
+    pub async fn worktree_remove(repo: String, dir: String) -> Result<(), String> {
+        blocking(move || deletion::remove_worktree(&repo, &dir)).await
+    }
+    #[tauri::command]
     pub async fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
         blocking(move || super::git_run(dir, args, ok)).await
     }
@@ -1676,7 +1680,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
-            commands::worktree_fingerprint, commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
+            commands::worktree_fingerprint, commands::worktree_remove, commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,
