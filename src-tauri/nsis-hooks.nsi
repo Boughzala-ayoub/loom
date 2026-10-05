@@ -1,9 +1,22 @@
 ; Put the install dir on the *user* PATH so `loom` / `loom --help` / `loom
 ; --reset` work from any terminal. Loom installs per-user (LOCALAPPDATA), so
-; HKCU is the right hive and no admin is needed. .NET's SetEnvironmentVariable
-; also broadcasts WM_SETTINGCHANGE, so newly opened terminals see it.
+; HKCU is the right hive and no admin is needed. The folder reaches PowerShell
+; as LOOM_INSTDIR, data and never source, so an apostrophe in it is just a
+; character. The value is read unexpanded and written back REG_EXPAND_SZ, so
+; %VAR% entries stay variables; WM_SETTINGCHANGE tells new terminals.
 ; ponytail: PowerShell instead of NSIS string plugins — split/filter/join in
 ; NSI needs StrFunc gymnastics; one PS line is idempotent and readable.
+!macro LoomUserPath script
+  Push $0
+  StrCpy $0 $INSTDIR
+  System::Call 'kernel32::SetEnvironmentVariable(t "LOOM_INSTDIR", t r0)'
+  nsExec::Exec `powershell -NoProfile -Command "$$k=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment'); $$d=$$env:LOOM_INSTDIR; $$c=[string]$$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $$p=@($$c -split ';' | Where-Object { $$_ }); ${script}; $$k.SetValue('Path',($$p -join ';'),[Microsoft.Win32.RegistryValueKind]::ExpandString)"`
+  Pop $0
+  StrCmp $0 0 +2
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Loom couldn't update your PATH for $INSTDIR (PowerShell: $0). Add or remove that folder in your user PATH by hand." /SD IDOK
+  SendMessage 0xFFFF 0x1A 0 "STR:Environment" /TIMEOUT=5000 ; HWND_BROADCAST, WM_SETTINGCHANGE
+  Pop $0
+!macroend
 
 ; Tauri's template kills a running Loom, sleeps 500 ms and writes loom.exe. The
 ; write fails ("Error opening file for writing") while any process still has
@@ -27,7 +40,11 @@
   Delete "${path}.*.old"
   IfFileExists "${path}" 0 loom_aside_done_${id}
   System::Call 'kernel32::GetTickCount()i.R9'
+  ClearErrors
   Rename "${path}" "${path}.$R9.old"
+  IfErrors 0 +3
+    DetailPrint "Couldn't move ${path} aside; the install writes over it in place."
+    Goto loom_aside_done_${id}
   CopyFiles /SILENT "${path}.$R9.old" "${path}"
   loom_aside_done_${id}:
 !macroend
@@ -42,7 +59,7 @@
   !searchreplace LOOMCTL_SRC "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\loomctl.exe"
   SetOutPath "$INSTDIR"
   File "/oname=loomctl.exe" "${LOOMCTL_SRC}"
-  nsExec::Exec `powershell -NoProfile -Command "$$c=[Environment]::GetEnvironmentVariable('Path','User'); if(($$c -split ';') -notcontains '$INSTDIR'){ if($$c){$$c=$$c.TrimEnd(';')+';'}; [Environment]::SetEnvironmentVariable('Path',$$c+'$INSTDIR','User') }"`
+  !insertmacro LoomUserPath "if ($$p -notcontains $$d) { $$p += $$d }"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
@@ -53,5 +70,5 @@
   Delete "$INSTDIR\loom-before-update-*.exe"
   Delete "$INSTDIR\loomctl-before-update-*.exe"
   Delete "$INSTDIR\.update.lock"
-  nsExec::Exec `powershell -NoProfile -Command "$$c=[Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path',(($$c -split ';' | Where-Object {$$_ -ne '$INSTDIR'}) -join ';'),'User')"`
+  !insertmacro LoomUserPath "$$p = @($$p | Where-Object { $$_ -ne $$d })"
 !macroend
