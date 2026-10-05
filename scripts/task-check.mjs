@@ -1804,8 +1804,11 @@ try {
     assert.equal((await state(t)).state, 'working');
     await page.evaluate((id) => window.qa.panes.filter((a) => a.id === id).at(-1).onOut.onmessage('\x1b]9;Approval requested: rm -rf build\x07'), codex);
     assert.equal((await until(t, 'approval')).detail, 'Approval requested: rm -rf build');
+    // Codex's approval menu, whose own "(y)" answers it.
+    await agent(codex, { codexRaw: '\x1b[2J\x1b[H  Would you like to run the following command?\r\n\r\n  $ rm -rf build\r\n\r\n› 1. Yes, proceed (y)\r\n  2. No, and tell Codex what to do differently (esc)\r\n' });
     await cli('keys', 'work:2', 'y');
     await until(t, 'working');
+    await agent(codex, { codexRaw: null });
     await report(codex, { kind: 'end', matches: [promptMatch('fix  lint\n')], turn: 'turn-b' });
     assert.equal((await until(t, 'completed')).correlation, 'prompt');
     ok('Codex: screen, OSC 9 approval, and the turn naming its prompt');
