@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -217,6 +217,8 @@ const setup = () => {
     if (cmd === 'plugin:path|join') return args.paths.join('\\');
     // Codex's notify and OpenCode's plugin hand a pane its session id (lib.rs take_sessions): qa.sessions, once.
     if (cmd === 'take_sessions') return (qa.sessions ?? []).splice(0).filter(([id]) => args.ids.includes(id));
+    // What the stopped panes reported as they went (lib.rs pty_shutdown): qa.shutdownEvents, once.
+    if (cmd === 'pty_shutdown') return (qa.shutdownEvents ?? []).splice(0);
     if (cmd === 'model_options') return [];
     if (cmd === 'session_usage' || cmd === 'last_messages') return {};
     if (cmd === 'has_session' || cmd === 'pane_booted' || cmd === 'has_codex_session') return true;
@@ -531,6 +533,20 @@ try {
     }
     await qa({ journalFailIf: null, journalHold: null });
     ok('Closing drains the task journal first, and stays open while it can\'t be written');
+  }
+  if (review('shutdown-reports')) {
+    // A turn ends as Loom closes: its report lands after the first drain, and
+    // shutdown takes the panes away before any poll could send it (review RF14).
+    await resetReview();
+    await agent(codex, { codexShape: true });
+    const text = 'finish as Loom closes';
+    const sent = await cli('submit', 'work:2', text);
+    await until(sent.data.task, 'working');
+    await qa({ shutdownEvents: [[codex, { t: Date.now(), kind: 'end', matches: [promptMatch(text)], turn: 'last-turn', launch: await gen(codex) }]] });
+    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
+    assert.equal((await saved(sent.data.task))?.state, 'completed', 'The report found at shutdown is journaled before the window goes');
+    ok('What panes report as Loom shuts them down is journaled before the window closes');
   }
   if (review('malformed-journal')) {
     // Valid JSON of the wrong shape: startup finishes (boot waits for cli_ready),

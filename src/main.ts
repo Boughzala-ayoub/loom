@@ -4335,6 +4335,13 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
  * completes nothing the second time. */
 const turnsSeen = new Set<string>();
 /** An agent's report from its event file (lib.rs send_task_events). */
+/** Reports from the agents, as Rust hands them over (send_task_events, pty_shutdown). */
+function agentEvents(events: [string, unknown][]) {
+  for (const [id, ev] of events) {
+    const p = paneById(id), s = parseSignal(ev);
+    if (p && s) agentReport(p, s);
+  }
+}
 function agentReport(p: Pane, s: Signal) {
   if (s.kind === "end" && s.turn) {
     const key = `${p.id}:${s.launch ?? p.generation}:${s.turn}`;
@@ -8792,8 +8799,10 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       await flushSave();
       await saveQueue; // flushSave swallows the error into a toast; this rethrows it, so a failed save cancels the close
       await drainJournal(); // as with the save: a journal that can't be written cancels the close, panes still up
-      await invoke("pty_shutdown");
-      await drainJournal(); // and what they reported as they stopped
+      // What the panes reported as they stopped comes back with the call, so
+      // it is handled, and its journal writes queued, before the drain below.
+      agentEvents(await invoke<[string, unknown][]>("pty_shutdown"));
+      await drainJournal();
 
       await getCurrentWindow().destroy();
     } catch (e) {
@@ -9057,12 +9066,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
 
   // What the agents report for loomctl's tasks: Claude's hooks and Codex's
   // notify through loom.exe, and OpenCode's plugin (lib.rs send_task_events).
-  void listen<[string, unknown][]>("agent-events", (e) => {
-    for (const [id, ev] of e.payload) {
-      const p = paneById(id), s = parseSignal(ev);
-      if (p && s) agentReport(p, s);
-    }
-  });
+  void listen<[string, unknown][]>("agent-events", (e) => agentEvents(e.payload));
 
   // Codex's notify script and the opencode plugin drop the session id a pane is
   // really on (agent.ts). Only the next launch needs it, so it rides the 4 s

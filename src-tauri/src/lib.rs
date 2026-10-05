@@ -578,9 +578,12 @@ fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String, launch: 
     Ok(())
 }
 
-fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
+/// Stops every pane and returns what they reported as they stopped: their exit
+/// threads find no session now, so nothing else would send it.
+fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) -> Vec<(String, serde_json::Value)> {
     for (_, flow) in flows.0.lock().unwrap().values() { flow.close(); }
     let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
+    let ids: Vec<String> = sessions.keys().cloned().collect();
     taskkill(&sessions.values().filter_map(|s| s.pid).collect::<Vec<_>>());
     // Dropping a session runs ClosePseudoConsole, which can wait for its output
     // to drain, so drop them side by side. Returns once all are gone.
@@ -592,6 +595,7 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
             });
         }
     });
+    drain_task_events(&std::env::temp_dir().join("loom-task"), &ids)
 }
 
 /// One git invocation in `dir`, stdout back, stderr as the error. The thread
@@ -1548,7 +1552,7 @@ mod commands {
         blocking(move || super::pty_kill(app.state(), app.state(), id, launch)).await
     }
     #[tauri::command]
-    pub async fn pty_shutdown(app: AppHandle) {
+    pub async fn pty_shutdown(app: AppHandle) -> Vec<(String, serde_json::Value)> {
         blocking(move || super::pty_shutdown(app.state(), app.state())).await
     }
     #[tauri::command]
