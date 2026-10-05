@@ -1877,10 +1877,11 @@ class Pane {
 
   /** Ends the process and keeps the pane. pty_kill takes the session out of
    * the map before killing it, so no pty-exit follows: the exit is marked here.
-   * A launch still starting gives up, and kills what it started (see spawn). */
+   * It names the process that runs: a launch still starting gives up, and
+   * kills what it started (see spawn). */
   async stop() {
     const gen = ++this.launchGen;
-    await invoke("pty_kill", { id: this.id, launch: this.launched });
+    await invoke("pty_kill", { id: this.id, launch: this.installed });
     // A launch that began while the kill was in flight is the pane now: it stays up.
     if (gen === this.launchGen) this.exited(1, "stopped");
   }
@@ -1913,9 +1914,12 @@ class Pane {
     }
   }
   private launchGen = 0;
-  /** The launch whose process runs (or ran last): what a stop kills, and what
-   * an exit, a session marker or a wake must name to count. */
+  /** The launch whose process runs (or ran last), or is about to: what an
+   * exit, a session marker or a wake must name to count. */
   launched = 0;
+  /** The launch pty_spawn last started: what a stop kills. `launched` names a
+   * launch while it still checks its session, before its process replaces this one. */
+  private installed = 0;
   private launching: Promise<void> = Promise.resolve();
   private starts = 0;
   /** A launch hasn't finished. A dead pane can be starting again (a restart
@@ -2035,7 +2039,7 @@ class Pane {
     if (ok !== true) {
       this.dead = true;
       this.term.write(`\r\n\x1b[31m${ok}\x1b[0m — Enter retries\r\n`);
-    }
+    } else this.installed = gen;
     if (release) void (ok === true ? booted(claudeMarker(this, gen)) : Promise.resolve()).then(release);
     this.paint();
     return ok;
