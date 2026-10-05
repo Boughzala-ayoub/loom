@@ -350,7 +350,7 @@ export function route(open: Task[], s: Signal): [Task, Change][] {
       for (const t of open) if (t.state === "working") out.push([t, { state: "approval", signal: "approval", ...(s.detail ? { detail: s.detail } : {}) }]);
       break;
     case "resume":
-      for (const t of open) if (t.state === "approval") out.push([t, { state: "working", signal: "answered", ...(t.answerInDoubt ? { answerInDoubt: false } : {}) }]);
+      for (const t of open) if (t.state === "approval") out.push([t, { state: "working", signal: "answered", detail: null, ...(t.answerInDoubt ? { answerInDoubt: false } : {}) }]);
       break;
     case "interrupt":
       for (const t of open) if (active(t) && started(t)) out.push([t, { state: "cancelled", signal: "interrupted", reason: "interrupted" }]);

@@ -88,6 +88,7 @@ check("only Claude's own tag shape is dropped", promptMatch('<pasted_content id=
   eq("a permission request asks", apply([a], { kind: "approval", at, detail: "Write" }), [[a.id, "approval"]]);
   eq("with the tool", a.detail, "Write");
   eq("answered, it works again", apply([a], { kind: "resume", at }), [[a.id, "working"]]);
+  eq("the answered question no longer labels running work", a.detail, null);
   eq("StopFailure fails it", apply([a], { kind: "fail", at, detail: "rate_limit" }), [[a.id, "failed"]]);
   eq("with Claude's error", a.detail, "rate_limit");
   eq("a final task takes no more signals", apply([a], { kind: "end", at }), []);
