@@ -29,12 +29,13 @@ try {
     # outlives Loom), so each is replaced the same way: ReplaceFile renames the
     # mapped file aside, and running processes keep using it.
     $ctlSource = Join-Path (Split-Path -LiteralPath $Source) 'loomctl.exe'
-    $files = @(@{ Name = 'loom'; Source = $Source; Destination = $destination })
-    if (Test-Path -LiteralPath $ctlSource -PathType Leaf) {
-        $files += @{ Name = 'loomctl'; Source = $ctlSource; Destination = (Join-Path $install 'loomctl.exe') }
-    } else {
-        Write-Warning "No loomctl.exe beside $Source. The installed loomctl was not changed."
+    if (-not (Test-Path -LiteralPath $ctlSource -PathType Leaf)) {
+        throw "No loomctl.exe beside $Source, and the two go in together. Installed Loom was not changed."
     }
+    $files = @(
+        @{ Name = 'loom'; Source = $Source; Destination = $destination },
+        @{ Name = 'loomctl'; Source = $ctlSource; Destination = (Join-Path $install 'loomctl.exe') }
+    )
     foreach ($f in $files) {
         $f.Expected = & $hash $f.Source
         $f.Previous = if (Test-Path -LiteralPath $f.Destination) { & $hash $f.Destination }
@@ -67,12 +68,18 @@ try {
             if ($f.Previous -and (& $hash $f.Backup) -ne $f.Previous) { throw "Backup checksum mismatch: $($f.Backup)" }
         }
     } catch {
-        # The previous pair goes back, never half of a new one.
+        # The previous pair goes back, never half of a new one: each is tried,
+        # whatever became of the other, and one that stays is named.
+        $failure = $_
+        $stuck = @()
         foreach ($f in $done) {
-            # [NullString]: PowerShell passes $null to a string as "", which Replace refuses.
-            if ($f.Previous) { [IO.File]::Replace($f.Backup, $f.Destination, [NullString]::Value) } else { Remove-Item -LiteralPath $f.Destination }
+            try {
+                # [NullString]: PowerShell passes $null to a string as "", which Replace refuses.
+                if ($f.Previous) { [IO.File]::Replace($f.Backup, $f.Destination, [NullString]::Value) } else { Remove-Item -LiteralPath $f.Destination }
+            } catch { $stuck += "$($f.Destination) (its previous copy is $($f.Backup)): $_" }
         }
-        throw "$_ Restored the previous executables."
+        if ($stuck) { throw "$failure Could not restore $($stuck -join '; ')." }
+        throw "$failure Restored the previous executables."
     }
     foreach ($f in $plan) {
         # Earlier runs' backups. One a running process still maps stays until a later run.

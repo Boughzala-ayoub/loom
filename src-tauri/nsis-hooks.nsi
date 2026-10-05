@@ -26,39 +26,102 @@
 ; way as the template, moves loom.exe aside and puts a copy back. The
 ; template's write lands on the copy, and an install that stops before it still
 ; leaves a loom.exe. The template's own check then finds nothing to kill.
+; The images moved aside are kept until both executables are in, so a failed
+; install puts the previous pair back (.onInstFailed). Paths go in variables:
+; the template defines MAINBINARYNAME after this file, so a function here
+; can't name loom.exe itself.
+Var LoomMain
+Var LoomMainOld
+Var LoomCtl
+Var LoomCtlOld
+Var LoomStuck
 !macro NSIS_HOOK_PREINSTALL
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
-  !insertmacro LoomMoveAside "$INSTDIR\${MAINBINARYNAME}.exe" main
+  StrCpy $LoomMain "$INSTDIR\${MAINBINARYNAME}.exe"
+  StrCpy $LoomCtl "$INSTDIR\loomctl.exe"
+  !insertmacro LoomMoveAside $LoomMain $LoomMainOld main
   ; A `loomctl watch --follow` (the mail bridge keeps one) outlives Loom and
-  ; holds loomctl.exe: the File below would stop at abort/retry/ignore.
-  !insertmacro LoomMoveAside "$INSTDIR\loomctl.exe" ctl
+  ; holds loomctl.exe: a write over it would stop at abort/retry/ignore.
+  !insertmacro LoomMoveAside $LoomCtl $LoomCtlOld ctl
 !macroend
 
-; Old images are deleted once nothing holds them: here and after the install.
-; `id` keeps each insertion's label its own.
-!macro LoomMoveAside path id
+; Old images are deleted once nothing holds them: here and once both new
+; executables are in. `old` gets the image kept, or "" when none is. `id`
+; keeps each insertion's labels its own.
+!macro LoomMoveAside path old id
+  StrCpy ${old} ""
   Delete "${path}.*.old"
   IfFileExists "${path}" 0 loom_aside_done_${id}
   System::Call 'kernel32::GetTickCount()i.R9'
   ClearErrors
   Rename "${path}" "${path}.$R9.old"
-  IfErrors 0 +3
+  IfErrors 0 loom_aside_moved_${id}
     DetailPrint "Couldn't move ${path} aside; the install writes over it in place."
     Goto loom_aside_done_${id}
+  loom_aside_moved_${id}:
+  ClearErrors
   CopyFiles /SILENT "${path}.$R9.old" "${path}"
+  IfErrors 0 loom_aside_copied_${id}
+    ; No copy to write over: the original goes back, and the install writes over it in place.
+    Delete "${path}"
+    Rename "${path}.$R9.old" "${path}"
+    DetailPrint "Couldn't copy ${path}; the install writes over it in place."
+    Goto loom_aside_done_${id}
+  loom_aside_copied_${id}:
+  StrCpy ${old} "${path}.$R9.old"
   loom_aside_done_${id}:
 !macroend
 
+; Puts `old` back at `path`, or names what couldn't be in $LoomStuck.
+!macro LoomPutBack path old id
+  StrCmp ${old} "" loom_back_done_${id}
+  Delete "${path}"
+  ClearErrors
+  Rename "${old}" "${path}"
+  IfErrors 0 loom_back_done_${id}
+    StrCpy $LoomStuck "$LoomStuck$\r$\n${path} (the previous one is ${old})"
+  loom_back_done_${id}:
+  StrCpy ${old} ""
+!macroend
+
+; The install stopped after an executable may have been replaced: a write
+; failed, or Abort was chosen at the template's retry prompt. The previous
+; loom.exe and loomctl.exe go back together, never one new beside one old.
+Function .onInstFailed
+  StrCpy $0 "$LoomMainOld$LoomCtlOld"
+  StrCpy $LoomStuck ""
+  !insertmacro LoomPutBack $LoomMain $LoomMainOld main
+  !insertmacro LoomPutBack $LoomCtl $LoomCtlOld ctl
+  StrCmp $LoomStuck "" 0 loom_failed_stuck
+  StrCmp $0 "" loom_failed_done
+    MessageBox MB_ICONINFORMATION|MB_OK "Loom wasn't installed. The previous loom.exe and loomctl.exe were put back." /SD IDOK
+    Goto loom_failed_done
+  loom_failed_stuck:
+    MessageBox MB_ICONSTOP|MB_OK "Loom wasn't installed, and these couldn't be put back as they were:$LoomStuck$\r$\nRun the installer again." /SD IDOK
+  loom_failed_done:
+FunctionEnd
+
 ; loomctl.exe controls a running Loom from a terminal (src/bin/loomctl.rs). The
-; same cargo run builds it beside loom.exe, so it can't be a bundle resource:
-; those must exist before cargo starts. The macro expands after the template
-; defines MAINBINARYSRCPATH, so its folder is known here at compile time.
+; template writes it beside loom.exe, and a write the user told it to ignore
+; leaves the old one: it goes in once more, without that prompt, and if that
+; fails too the install fails and the previous pair goes back. The macro
+; expands after the template defines MAINBINARYSRCPATH, so its folder is known
+; here at compile time.
 !macro NSIS_HOOK_POSTINSTALL
-  Delete "$INSTDIR\${MAINBINARYNAME}.exe.*.old"
-  Delete "$INSTDIR\loomctl.exe.*.old"
   !searchreplace LOOMCTL_SRC "${MAINBINARYSRCPATH}" "\${MAINBINARYNAME}.exe" "\loomctl.exe"
   SetOutPath "$INSTDIR"
+  SetOverwrite try
+  ClearErrors
   File "/oname=loomctl.exe" "${LOOMCTL_SRC}"
+  SetOverwrite on
+  IfErrors 0 loom_pair_in
+    Abort "Couldn't write $LoomCtl."
+  loom_pair_in:
+  ; Both are in: the images kept to put them back go.
+  StrCpy $LoomMainOld ""
+  StrCpy $LoomCtlOld ""
+  Delete "$LoomMain.*.old"
+  Delete "$LoomCtl.*.old"
   !insertmacro LoomUserPath "if ($$p -notcontains $$d) { $$p += $$d }"
 !macroend
 
