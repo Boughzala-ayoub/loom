@@ -544,7 +544,10 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) {
 /// porcelain lives in the frontend, so this stays one function.
 /// `ok`: extra exit codes to treat as success — `git diff --no-index` answers 1
 /// when the files differ, which is the whole point of asking.
-fn git_run(dir: String, mut args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
+/// `preview`: a diff to show, bounded (diff_output) so a huge one fails fast
+/// instead of crossing IPC whole. The Changes panel's numstat and the polls
+/// aren't: a big repo's take longer, and their size follows the file count.
+fn git_run(dir: String, mut args: Vec<String>, ok: Option<Vec<i32>>, preview: bool) -> Result<String, String> {
     use std::os::windows::process::CommandExt;
     if matches!(args.first().map(String::as_str), Some("diff" | "show")) {
         args.splice(1..1, ["--no-ext-diff".into(), "--no-textconv".into()]);
@@ -569,7 +572,7 @@ fn git_run(dir: String, mut args: Vec<String>, ok: Option<Vec<i32>>) -> Result<S
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(std::process::Stdio::null())
         .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    let out = if matches!(args.first().map(String::as_str), Some("diff" | "show")) {
+    let out = if preview {
         diff_output(&mut command, 4 * 1024 * 1024)?
     } else { command.output().map_err(|e| format!("git: {e}"))? };
     let fine = out.status.success()
@@ -592,11 +595,18 @@ fn diff_output(command: &mut std::process::Command, limit: usize) -> Result<std:
         (false, Box::new(stderr) as Box<dyn Read + Send>, 64 * 1024)] {
         let send = send.clone();
         std::thread::spawn(move || {
+            let mut stream = stream;
             let mut bytes = Vec::new();
-            let result = stream.take(cap as u64 + 1).read_to_end(&mut bytes)
-                .map_err(|e| e.to_string()).and_then(|_| if bytes.len() > cap {
-                    Err("Diff preview exceeds its output limit (4 MiB stdout, 64 KiB stderr). Open the file in an editor.".into())
-                } else { Ok(bytes) });
+            let result = (&mut stream).take(cap as u64 + 1).read_to_end(&mut bytes)
+                .map_err(|e| e.to_string()).and_then(|_| if bytes.len() <= cap { Ok(bytes) } else if is_out {
+                    Err("Diff preview exceeds its output limit (4 MiB). Open the file in an editor.".into())
+                } else {
+                    // Git's warnings (autocrlf prints one per file) show only on
+                    // failure: keep their start, drain the rest so git never blocks.
+                    bytes.truncate(cap);
+                    let _ = std::io::copy(&mut stream, &mut std::io::sink());
+                    Ok(bytes)
+                });
             let _ = send.send((is_out, result));
         });
     }
@@ -664,7 +674,7 @@ fn git_direct() -> Option<std::process::Command> {
 /// current patch, and neither shows a rebase bar.
 fn git_midway(dir: String) -> String {
     let Some(gd) = git_dir(std::path::Path::new(&dir)) else { return String::new() };
-    let ok = |args: &[&str]| git_run(dir.clone(), args.iter().map(|a| a.to_string()).collect(), None).is_ok();
+    let ok = |args: &[&str]| git_run(dir.clone(), args.iter().map(|a| a.to_string()).collect(), None, false).is_ok();
     if gd.join("MERGE_HEAD").exists() && ok(&["rev-parse", "-q", "--verify", "MERGE_HEAD"]) {
         return "merge".into();
     }
@@ -1401,7 +1411,7 @@ mod commands {
     #[tauri::command]
     pub async fn worktree_fingerprint(dir: String, hashed: Vec<String>) -> Result<String, String> {
         blocking(move || {
-            let index = super::git_run(dir.clone(), vec!["rev-parse".into(), "--git-path".into(), "index".into()], None)?;
+            let index = super::git_run(dir.clone(), vec!["rev-parse".into(), "--git-path".into(), "index".into()], None, false)?;
             let index = PathBuf::from(&dir).join(index.trim());
             deletion::fingerprint(std::path::Path::new(&dir), index.exists().then_some(index.as_path()), &hashed)
         }).await
@@ -1411,8 +1421,8 @@ mod commands {
         blocking(move || deletion::remove_worktree(&repo, &dir)).await
     }
     #[tauri::command]
-    pub async fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>) -> Result<String, String> {
-        blocking(move || super::git_run(dir, args, ok)).await
+    pub async fn git_run(dir: String, args: Vec<String>, ok: Option<Vec<i32>>, preview: Option<bool>) -> Result<String, String> {
+        blocking(move || super::git_run(dir, args, ok, preview == Some(true))).await
     }
     #[tauri::command]
     pub async fn git_midway(dir: String) -> String {
@@ -1693,6 +1703,29 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diff_output_keeps_going_past_noisy_stderr() {
+        use std::os::windows::process::CommandExt;
+        // Git's autocrlf warnings, one per file: only shown on failure, never a reason to fail.
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/d", "/c", "(for /l %i in (1,1,1000) do @echo warning: in the working copy of 'src/some/long/path/file.ts', LF will be replaced by CRLF 1>&2) & echo done"]).creation_flags(0x0800_0000);
+        let out = super::diff_output(&mut command, 16).unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "done");
+        assert!(out.stderr.len() <= 64 * 1024);
+    }
+    #[test]
+    fn only_previews_are_bounded() {
+        let dir = std::env::temp_dir().join(format!("loom-git-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str], preview| super::git_run(dir.to_string_lossy().into(), args.iter().map(|a| a.to_string()).collect(), None, preview);
+        run(&["init", "-q"], false).unwrap();
+        std::fs::write(dir.join("big.txt"), "a line of text\n".repeat(400_000)).unwrap();
+        run(&["add", "big.txt"], false).unwrap();
+        assert!(run(&["diff", "--cached"], false).unwrap().len() > 4 * 1024 * 1024, "the Changes panel's reads aren't previews");
+        assert!(run(&["diff", "--cached"], true).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn diff_output_refuses_excess_bytes_before_ipc() {
         use std::os::windows::process::CommandExt;

@@ -5123,9 +5123,11 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
 
 const git = (dir: string, ...args: string[]) => invoke<string>("git_run", { dir, args });
 
-/** Extra exit codes count as success — `git diff --no-index` says 1 for "they differ". */
-const gitOk = (dir: string, ok: number[], ...args: string[]) =>
-  invoke<string>("git_run", { dir, args, ok });
+/** A diff to show: bounded natively (4 MiB, 5 s), so a huge one fails fast
+ * instead of crossing IPC whole. Numstat and the polls aren't previews.
+ * Extra exit codes count as success — `git diff --no-index` says 1 for "they differ". */
+const gitPreview = (dir: string, ok: number[], ...args: string[]) =>
+  invoke<string>("git_run", { dir, args, ok, preview: true });
 
 /** What deleting a worktree destroys that exists nowhere else: changed and
  * untracked files, ignored files (.env, node_modules/: a wholly ignored folder
@@ -5326,7 +5328,7 @@ type DiffTab = { label: string; load: () => Promise<string>; source: DiffSource;
 let diffFull = false;
 const ctx = () => (diffFull ? ["-U999999"] : []);
 const diffLoader = (th: Thread, source: DiffSource) => "commit" in source
-  ? () => git(th.dir, "show", "--stat", "--patch", ...ctx(), source.commit)
+  ? () => gitPreview(th.dir, [], "show", "--stat", "--patch", ...ctx(), source.commit)
   : "file" in source
     ? () => invoke<string>("read_file", { dir: th.dir, path: source.file })
     : diffOf(th, source.sec, source.paths);
@@ -5543,11 +5545,11 @@ async function showTab() {
  * That base is also what makes a hunk button meaningful — a diff of `HEAD`
  * mixes both sides and cannot be applied to either. */
 const diffOf = (th: Thread, sec: Sec, paths: string[]) => async () => {
-  if (sec !== "untracked") return git(th.dir, "diff", ...ctx(), ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
+  if (sec !== "untracked") return gitPreview(th.dir, [], "diff", ...ctx(), ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
   const parts: string[] = [];
   let bytes = 0;
   for (const u of paths) {
-    const part = await gitOk(th.dir, [1], "diff", "--no-index", "--", "/dev/null", u);
+    const part = await gitPreview(th.dir, [1], "diff", "--no-index", "--", "/dev/null", u);
     bytes += new TextEncoder().encode(part).length + 1;
     if (bytes > 4 * 1024 * 1024) throw new Error("Diff preview exceeds 4 MiB. Open the files in an editor.");
     parts.push(part);

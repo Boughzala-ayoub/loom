@@ -83,7 +83,7 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
 /// std's remove_dir_all removes each link itself, then git drops its record of
 /// the folder, which it does once the folder is gone.
 pub fn remove_worktree(repo: &str, dir: &str) -> Result<(), String> {
-    let git = |args: &[&str]| crate::git_run(repo.into(), args.iter().map(|a| a.to_string()).collect(), None);
+    let git = |args: &[&str]| crate::git_run(repo.into(), args.iter().map(|a| a.to_string()).collect(), None, false);
     if let Ok(real) = fs::canonicalize(dir) {
         let list = git(&["worktree", "list", "--porcelain"])?;
         // The first entry is the main checkout, never removed here.
