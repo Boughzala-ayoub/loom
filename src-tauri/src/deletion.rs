@@ -148,9 +148,10 @@ pub fn remove_worktree(repo: &str, dir: &str, approved: Option<&Approval>) -> Re
 }
 
 /// The entry in `worktrees` that `dir` is, by git's own two links: dir\.git
-/// names the entry and the entry's gitdir names that same .git back. Compared
-/// as files, not spellings, so a folder put at the worktree's path, or behind
-/// a redirected parent, isn't taken for it. A locked entry is refused.
+/// names the entry, and the entry records the path git keeps that worktree
+/// at, which must be `dir`. A folder reached through a moved or redirected
+/// path names an entry that records its own path, so it isn't taken for
+/// `dir`'s. A locked entry is refused.
 fn entry_of(dir: &Path, worktrees: &Path) -> Result<PathBuf, String> {
     let not = || format!("{} isn't a linked worktree of this repository", dir.display());
     let id = |path: &Path| -> Result<(u64, u64), String> {
@@ -165,16 +166,24 @@ fn entry_of(dir: &Path, worktrees: &Path) -> Result<PathBuf, String> {
     let entry = dir.join(named.trim().strip_prefix("gitdir:").ok_or_else(not)?.trim());
     if id(entry.parent().ok_or_else(not)?)? != id(worktrees)? { return Err(not()); }
     let back = fs::read_to_string(entry.join("gitdir")).map_err(|_| not())?;
-    if id(&entry.join(back.trim()))? != id(&dot)? { return Err(not()); }
+    let kept = entry.join(back.trim());
+    if spelled(&kept) != spelled(&dot) {
+        return Err(format!("{} leads to the worktree git keeps at {}, not to its own; Loom deletes a worktree only at the path git records for it",
+            dir.display(), kept.parent().unwrap_or(&kept).display()));
+    }
     if entry.join("locked").exists() { return Err(format!("{} is a locked worktree", dir.display())); }
     Ok(entry)
 }
 
+/// One spelling of a path: absolute, with `/` and `..` resolved as text (no
+/// link followed) and case folded, as git records a worktree's path.
+fn spelled(p: &Path) -> String {
+    std::path::absolute(p).unwrap_or_else(|_| p.into()).to_string_lossy().to_lowercase()
+}
+
 /// `dir` is gone already: drop the entry whose gitdir names dir\.git, if any.
-// ponytail: absolute gitdir text only; a relative one (git 2.48 worktree.useRelativePaths) isn't matched and its entry stays for `git worktree prune`.
 fn forget(worktrees: &Path, dir: &Path) -> Result<(), String> {
-    let key = |p: &Path| p.to_string_lossy().replace('\\', "/").to_lowercase();
-    let want = key(&dir.join(".git"));
+    let want = spelled(&dir.join(".git"));
     let entries = match fs::read_dir(worktrees) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         r => r.map_err(|e| format!("{}: {e}", worktrees.display()))?,
@@ -182,7 +191,7 @@ fn forget(worktrees: &Path, dir: &Path) -> Result<(), String> {
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?.path();
         let Ok(back) = fs::read_to_string(entry.join("gitdir")) else { continue };
-        if key(Path::new(back.trim())) != want { continue; }
+        if spelled(&entry.join(back.trim())) != want { continue; }
         if entry.join("locked").exists() { return Err(format!("{} is a locked worktree", dir.display())); }
         return fs::remove_dir_all(&entry).map_err(|e| format!("{}: {e}", entry.display()));
     }
@@ -371,6 +380,27 @@ mod tests {
         remove_worktree(repo_s, wt_s, Some(&approved)).unwrap();
         assert!(!wt.exists() && !dir.join(".wt.loom-deleting").exists());
         assert!(!git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/t\n"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_parent_redirected_to_another_worktree_never_takes_it() {
+        let dir = std::env::temp_dir().join(format!("loom-remove-sibling-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, a, b) = (dir.join("repo"), dir.join("A"), dir.join("B"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "ta", a.join("wt").to_str().unwrap()]);
+        git(&repo, &["worktree", "add", "-q", "-b", "tb", b.join("wt").to_str().unwrap()]);
+        fs::write(b.join("wt").join("unsaved.txt"), "B's work").unwrap();
+        // A's folder moved aside, and a junction to B put where A was: A's thread now reaches B.
+        fs::rename(&a, dir.join("A-aside")).unwrap();
+        junction(&a, &b);
+        assert!(remove_worktree(repo.to_str().unwrap(), a.join("wt").to_str().unwrap(), None).is_err(), "B's worktree went for A's");
+        assert!(b.join("wt").join("unsaved.txt").is_file());
+        assert!(git(&repo, &["worktree", "list", "--porcelain"]).contains("refs/heads/tb\n"));
+        fs::remove_dir(&a).unwrap();
         fs::remove_dir_all(dir).unwrap();
     }
 
