@@ -1358,20 +1358,42 @@ fn load_state(app: AppHandle) -> Result<String, String> {
 }
 
 fn read_workspace(path: &std::path::Path) -> Result<String, String> {
+    let bak = path.with_extension("json.bak");
+    let fail = |why: String| {
+        let copy = if bak.is_file() { format!("\n\nThe workspace as it was before its last save is {}: rename it to {} to restore it.", bak.display(), path.display()) } else { String::new() };
+        Err(format!("{}: {why}{copy}", path.display()))
+    };
     match std::fs::read_to_string(path) {
-        Ok(text) if text.trim_start_matches('\u{feff}').trim().is_empty() => Err(format!("{}: workspace is empty", path.display())),
-        Ok(text) => Ok(text),
+        // A power cut before the data reached the disk leaves zeros.
+        Ok(text) if text.trim_matches(|c: char| c.is_whitespace() || c == '\0' || c == '\u{feff}').is_empty() => fail("workspace is empty".into()),
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) {
+            Ok(_) => Ok(text),
+            Err(e) => fail(format!("workspace isn't valid JSON ({e})")),
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok("{}".into()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+        Err(e) => fail(e.to_string()),
     }
 }
 
 fn save_state(app: AppHandle, json: String) -> Result<(), String> {
-    // Write beside the destination, then replace it, so an interrupted save
-    // leaves either the old snapshot or the new one, never half a JSON file.
-    let path = state_file(&app);
+    write_workspace(&state_file(&app), &json)
+}
+
+/// Write beside the destination, flush it to disk, then replace it, so a crash
+/// or power cut leaves the old snapshot or the new one, never an empty file:
+/// NTFS journals the rename, not the data. The snapshot replaced stays as
+/// `.bak` (a hard link, so no copy), what a broken workspace points you to.
+fn write_workspace(path: &std::path::Path, json: &str) -> Result<(), String> {
+    use std::io::Write;
     let pending = path.with_extension("json.pending");
-    std::fs::write(&pending, json).map_err(|e| e.to_string())?;
+    let mut file = std::fs::File::create(&pending).map_err(|e| e.to_string())?;
+    file.write_all(json.as_bytes()).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+    drop(file);
+    let bak = path.with_extension("json.bak");
+    if path.exists() {
+        let _ = std::fs::remove_file(&bak);
+        let _ = std::fs::hard_link(path, &bak);
+    }
     std::fs::rename(pending, path).map_err(|e| e.to_string())
 }
 
@@ -1752,6 +1774,26 @@ mod tests {
         assert!(super::read_workspace(&path).is_err());
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn workspace_saves_keep_the_snapshot_they_replace() {
+        let dir = std::env::temp_dir().join(format!("loom-workspace-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let bak = dir.join("state.json.bak");
+        super::write_workspace(&path, r#"{"n":1}"#).unwrap();
+        super::write_workspace(&path, r#"{"n":2}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"n":2}"#);
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), r#"{"n":1}"#);
+        assert!(!dir.join("state.json.pending").exists());
+        // A power cut zero-filled it: refused, naming the copy.
+        std::fs::write(&path, [0u8; 64]).unwrap();
+        let err = super::read_workspace(&path).unwrap_err();
+        assert!(err.contains("state.json.bak"), "{err}");
+        std::fs::write(&path, "{\"threads\": [").unwrap();
+        assert!(super::read_workspace(&path).unwrap_err().contains("state.json.bak"));
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), r#"{"n":1}"#);
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn stalled_resize_releases_registry_for_input_and_stop() {
