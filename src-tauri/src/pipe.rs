@@ -41,7 +41,12 @@ pub fn instance_pipe() -> String {
 /// The same file however it was spelled: absolute, backslashes, any case.
 fn normalize(file: &str) -> String {
     let path = std::path::absolute(file).unwrap_or_else(|_| file.into());
-    path.to_string_lossy().replace('/', "\\").to_lowercase()
+    let path = path.canonicalize().unwrap_or_else(|_| {
+        path.parent().and_then(|p| p.canonicalize().ok()).and_then(|p| path.file_name().map(|n| p.join(n))).unwrap_or(path)
+    });
+    let text = path.to_string_lossy();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    text.replace('/', "\\").to_lowercase()
 }
 
 /// A hash that stays the same across Rust versions, unlike std's.

@@ -25,6 +25,8 @@ Put a command's own options after it: --name value, --name=value, or --flag.
 After --, every word is an argument. An argument of - is standard input, sent
 as it is: text starting with -- stays text. Inside a Loom pane, loomctl talks to
 the Loom that owns the pane.
+--profile FILE selects a workspace. Only one Loom may write that workspace
+and its task journal; a second profile launch refuses to open it.
 
 --key NAME makes a retry safe: Loom runs a key once. The same command again
 with that key gets the first answer, failures included, waiting for it if the

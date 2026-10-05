@@ -18,6 +18,7 @@ mod usage;
 mod pipe;
 mod control;
 mod deletion;
+mod workspace;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
 /// Extra Claude Code settings, handed to each pane's `claude` via --settings.
@@ -1295,7 +1296,8 @@ fn profile_arg() -> Option<String> {
 }
 
 fn state_file(app: &AppHandle) -> PathBuf {
-    profile_arg().map_or_else(|| data_dir(app).join("workspaces.json"), PathBuf::from)
+    app.try_state::<workspace::Store>().map(|s| s.path.clone()).unwrap_or_else(||
+        profile_arg().map_or_else(|| data_dir(app).join("workspaces.json"), PathBuf::from))
 }
 
 #[tauri::command]
@@ -1512,7 +1514,7 @@ pub fn run() {
     // user-data contention — this is purely about not duplicating the app.)
     // Release-only, so `tauri dev` can run beside the installed app. Skipped
     // for profile launches so `loom.exe work` opens beside the default.
-    // ponytail: two launches of the SAME profile both open; last save wins.
+    // Profile ownership is enforced by the storage lease in setup.
     #[cfg(not(debug_assertions))]
     let builder = if profile_arg().is_some() {
         builder
@@ -1544,6 +1546,17 @@ pub fn run() {
         // white until the document's first frame, so without it startup flashes
         // white for as long as the webview takes to come up.
         .setup(|app| {
+            // Before reset, window construction, or any workspace/journal access.
+            let path = state_file(app.handle());
+            match workspace::acquire(&path) {
+                Ok(store) => { app.manage(store); }
+                Err(e) => {
+                    use tauri_plugin_dialog::DialogExt;
+                    app.dialog().message(format!("Cannot open {} for writing. Another Loom may already own this workspace, or its directory is unavailable. No workspace files were changed.\n\n{e}", path.display()))
+                        .title("Workspace unavailable").blocking_show();
+                    return Err(e.into());
+                }
+            }
             // The plugin accepts an absolute filename. Keep geometry beside the
             // workspace so dev, release, and explicit profiles stay independent.
             let window_file = std::path::absolute(state_file(app.handle()))?.with_extension("window.json");

@@ -38,6 +38,13 @@ A development build (`tauri dev`) answers on a separate pipe, so it never
 answers for the installed app. Only your Windows account can open the pipe, and
 Loom refuses remote connections.
 
+Only one Loom can write a workspace and its task journal at a time. A second
+profile launch refuses to open it, including paths through a junction to the
+same file. Close the owner before reopening that profile. The adjacent
+`.tasks.lock` file can remain on disk; ownership lasts only while Loom holds
+its handle. Profiles with the same base name and different extensions share
+a journal and therefore also share this lock.
+
 After an update, restart Loom. A `loomctl` and a Loom on different protocol
 versions refuse each other before running anything (exit 2, `code: version`).
 
