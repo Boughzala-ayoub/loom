@@ -16,14 +16,14 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`${node.declarationList.flags & ts.NodeFlags.Const ? "const" : "let"} ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
@@ -487,4 +487,16 @@ if (check(207)) {
   held.shift()!(); await second;
   assert.equal((await c.task.run({ _: [t.id] })).data.saved, true);
   console.log("ok   R7 plain reads track pending success, failure, recovery and newer same-state mutations");
+}
+
+if (check(301)) {
+  let contents = "before";
+  fixture({ git: async (_dir: string, cmd: string) => cmd === "status" ? " M important.txt\0" : "head",
+    lossInventory: () => ({ tracked: ["important.txt"], untracked: [], ignored: [] }),
+    invoke: async () => contents });
+  const before = await lastFixture.inventory({ dir: "work" }, false);
+  contents = "after";
+  const after = await lastFixture.inventory({ dir: "work" }, false);
+  assert.notEqual(lastFixture.inventoryDiff(before, after), "", "same paths with new contents must invalidate deletion approval");
+  console.log("ok   F4 deletion approval detects new contents at an already-listed path");
 }

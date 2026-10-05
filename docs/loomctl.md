@@ -228,9 +228,11 @@ loomctl close-thread $plan.thread --yes --delete branch --plan $plan.rev --disca
 
 The plan names the thread (`thread`, `dir`, `repo`, `branch`), the panes it
 stops with their generations, the worktree's HEAD, and the lists of tracked,
-untracked and ignored paths. Its `rev` covers all of it. `close-thread --plan
+untracked and ignored paths. Its `rev` also covers file contents, children of
+ignored directories, and the Git index. `close-thread --plan
 REV` reads it again before closing anything and refuses if any of it changed:
-another pane, a restart, a new file, a new commit. Without `--plan`, the check
+another pane, a restart, a new file, new contents at an existing path, or a new
+commit. Without `--plan`, the check
 uses whatever is there when the command runs.
 
 After the panes stop, Loom reads the folder once more, since a pane's process
@@ -238,6 +240,12 @@ writes until it's gone. If the folder changed, Loom keeps it and says so. The
 Delete worktree buttons in the window work the same way: their dialog lists
 what would be lost, ignored files included, and nothing goes if that changed
 before you answered.
+
+Content checks refuse unreadable files and reparse points, and stop at 20,000
+entries, 64 directory levels, 256 MiB, or five seconds. If a check cannot
+finish, Loom keeps the folder. Inspect and remove it manually instead.
+Stop external writers before deleting: a final check cannot prevent another
+program from writing immediately afterward.
 
 A cleanup that stops part-way says which steps finished, in `steps`:
 

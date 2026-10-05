@@ -5118,9 +5118,9 @@ const gitOk = (dir: string, ok: number[], ...args: string[]) =>
  * is one entry), and with `branch` the commits no other branch or remote
  * holds. HEAD rides along, so a new commit is a change too. Throws when git
  * can't say: unknown is never "nothing to lose". */
-type Inventory = { head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number };
+type Inventory = { fingerprint: string; head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number };
 async function inventory(th: Thread, branch: boolean): Promise<Inventory> {
-  const [status, head, commits] = await Promise.all([
+  const [status, head, commits, fingerprint] = await Promise.all([
     git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--ignored=matching"),
     git(th.dir, "rev-parse", "HEAD").then((s) => s.trim(), () => ""), // no commits yet
     branch && th.branch
@@ -5130,8 +5130,10 @@ async function inventory(th: Thread, branch: boolean): Promise<Inventory> {
           return n;
         })
       : 0,
+    invoke<string>("worktree_fingerprint", { dir: th.dir }),
   ]);
-  return { head, ...lossInventory(status), commits };
+  if (!fingerprint) throw new Error("Could not fingerprint the worktree; nothing was deleted");
+  return { head, ...lossInventory(status), commits, fingerprint };
 }
 const lossCounts = (inv: Inventory): Record<Loss, number> => ({ tracked: inv.tracked.length, untracked: inv.untracked.length, ignored: inv.ignored.length, commits: inv.commits });
 
@@ -5150,8 +5152,8 @@ function riskText(inv: Inventory | null, th: Thread): string {
 
 /** Which of two inventories' parts differ, for the message that says why a folder was kept. */
 const inventoryDiff = (was: Inventory, now: Inventory) =>
-  (["head", "tracked", "untracked", "ignored", "commits"] as const).filter((k) => JSON.stringify(was[k]) !== JSON.stringify(now[k]))
-    .map((k) => (k === "head" ? "a new commit" : k === "commits" ? "the branch's own commits" : `its ${k} files`)).join(", ");
+  (["head", "tracked", "untracked", "ignored", "commits", "fingerprint"] as const).filter((k) => JSON.stringify(was[k]) !== JSON.stringify(now[k]))
+    .map((k) => (k === "fingerprint" ? "file or index contents" : k === "head" ? "a new commit" : k === "commits" ? "the branch's own commits" : `its ${k} files`)).join(", ");
 
 /** Take a thread out of the list, and out of git as far as `mode` says:
  * "close" keeps the worktree on disk, "worktree" removes the folder and keeps
@@ -5180,6 +5182,11 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
     let expected = approved ?? null;
     if (approved === undefined) {
       const seen = deleting ? await inventory(th, mode === "all").catch(() => null) : null;
+      if (deleting && !seen) {
+        const error = "Could not inspect the complete worktree. Nothing was closed or deleted.";
+        toast(error);
+        return { removed: false, error };
+      }
       const risk = deleting ? riskText(seen, th) : "";
       const what =
         mode === "close"
@@ -5221,6 +5228,9 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", appr
       // delete a folder that is still some process's cwd — retry a few times.
       for (let n = 0; ; n++) {
         try {
+          if (n > 0 && expected && inventoryDiff(expected, await inventory(th, mode === "all"))) {
+            return partial({ removed: true, worktree: "kept", branch, error: "worktree changed during deletion retries" });
+          }
           await git(th.repo, "worktree", "remove", "--force", th.dir);
           break;
         } catch (e) {
@@ -8432,7 +8442,7 @@ const CLI: Record<string, CliCommand> = {
   },
   "close-thread": {
     usage: "close-thread <thread> --yes [--delete worktree|branch] [--plan REV] [--discard LIST] [--force]",
-    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Deleting refuses while it would lose anything --discard doesn't name: tracked, untracked, ignored (files git ignores, like .env or node_modules) and commits, comma-separated, or all. --plan REV (from close-plan) refuses before closing anything if the thread, its panes or its folder changed since. --force is --discard all.",
+    help: "Close a thread and its panes. --delete worktree removes its folder; --delete branch the branch too. Deleting refuses while it would lose anything --discard doesn't name: tracked, untracked, ignored (files git ignores, like .env or node_modules) and commits, comma-separated, or all. --plan REV (from close-plan) refuses before closing anything if the thread, its panes or its file or index contents changed since. Checks refuse unreadable, oversized or reparse-point trees. --force is --discard all.",
     options: { yes: "bool", delete: "string", force: "bool", plan: "string", discard: "string" },
     run: async (a) => {
       const th = cliThread(cliWord(a, 0, "a thread"));
