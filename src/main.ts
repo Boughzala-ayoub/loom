@@ -6402,9 +6402,6 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     }
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     if (!slug) throw new Error("name needs a letter or digit in it");
-    // Folders deleted by hand leave git believing the worktree is still
-    // there, which blocks the same path from ever being used again.
-    await git(repo, "worktree", "prune").catch(() => {});
     // A new thread is a new branch off `base`, the way Orca cuts one: a name
     // already taken — by a branch or by a folder — gets a numeric suffix
     // rather than silently reusing whatever was there, which would ignore the
@@ -6420,6 +6417,9 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
       branch = fresh || `loom/${cand}`;
       dir = await worktreeDir(repo, cand);
       if (taken.has(branch) || dirs.has(dir.toLowerCase())) continue;
+      // Finish only Loom's pending deletion at this path. Other missing
+      // worktrees may be on a temporarily unavailable drive; never prune them.
+      await invoke("worktree_prepare", { repo, dir });
       // git itself is the "does the folder exist" check: it refuses a
       // non-empty one, and that is the one error worth trying the next name on.
       try {

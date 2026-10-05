@@ -142,7 +142,7 @@ fn finish_record(file: &mut fs::File, r: &mut Trashed) -> Result<String, String>
     Ok(r.at.to_string_lossy().into_owned())
 }
 
-fn resume(trash: &Path, worktrees: &Path, dir: &Path) -> Result<Option<String>, String> {
+fn resume(trash: &Path, worktrees: &Path, dir: &Path, pending_only: bool) -> Result<Option<String>, String> {
     let list = match fs::read_dir(trash) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         r => r.map_err(|e| e.to_string())?,
@@ -150,7 +150,7 @@ fn resume(trash: &Path, worktrees: &Path, dir: &Path) -> Result<Option<String>, 
     let mut completed: Option<(std::time::SystemTime, String)> = None;
     for path in list.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
         let (mut file, mut r) = open_record(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if spelled(&r.folder) == spelled(dir) && r.entry.parent().is_some_and(|p| spelled(p) == spelled(worktrees))
+        if (!pending_only || r.pending) && spelled(&r.folder) == spelled(dir) && r.entry.parent().is_some_and(|p| spelled(p) == spelled(worktrees))
             && (r.pending || !dir.try_exists().map_err(|e| e.to_string())?) {
             if r.pending { return finish_record(&mut file, &mut r).map(Some); }
             let stamp = file.metadata().and_then(|m| m.modified()).map_err(|e| e.to_string())?;
@@ -163,6 +163,16 @@ fn resume(trash: &Path, worktrees: &Path, dir: &Path) -> Result<Option<String>, 
     // Its still-registered administration needs its own retained transaction.
     if completed.is_some() && missing_entry(worktrees, dir)?.is_some() { return Ok(None); }
     Ok(completed.map(|(_, at)| at))
+}
+
+/// A new thread may finish Loom's interrupted deletion at its requested path.
+/// It cannot infer approval to remove any other missing worktree's metadata.
+pub fn prepare_worktree(repo: &str, dir: &str, trash: &Path) -> Result<(), String> {
+    let dir = Path::new(dir);
+    if dir.try_exists().map_err(|e| e.to_string())? { return Ok(()); }
+    let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
+    resume(trash, &Path::new(repo).join(common.trim()).join("worktrees"), dir, true)?;
+    Ok(())
 }
 
 /// Delete `dir`, a linked worktree of `repo`, by moving it into `trash` and
@@ -178,7 +188,7 @@ pub fn remove_worktree(repo: &str, dir: &str, trash: &Path) -> Result<String, St
     let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
     let common = Path::new(repo).join(common.trim());
     let worktrees = common.join("worktrees");
-    if let Some(at) = resume(trash, &worktrees, dir)? { return Ok(at); }
+    if let Some(at) = resume(trash, &worktrees, dir, false)? { return Ok(at); }
     let name = dir.file_name().ok_or_else(|| format!("{} has no folder name", dir.display()))?.to_string_lossy();
     // An older Loom that stopped mid-deletion left the folder claimed beside its
     // path, with git's record still naming the path: that deletion goes on here.
@@ -356,6 +366,34 @@ mod tests {
         fs::rename(&wt, dir.join("temporarily-moved")).unwrap();
         let missing = remove().unwrap();
         assert!(!entry.exists() && Path::new(&missing) != at, "an older completed record hid a later missing worktree's administration");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn preparing_a_path_finishes_only_its_pending_transaction() {
+        let dir = std::env::temp_dir().join(format!("loom-prepare-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        fs::write(wt.join("a"), "staged").unwrap();
+        git(&wt, &["add", "a"]);
+        let entry = repo.join(".git/worktrees/wt");
+        let index = fs::read(entry.join("index")).unwrap();
+        let held = fs::OpenOptions::new().read(true).share_mode(1).open(entry.join("index")).unwrap();
+        assert!(remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).is_err());
+        drop(held);
+        prepare_worktree(repo.to_str().unwrap(), dir.join("unrelated").to_str().unwrap(), &trash).unwrap();
+        assert!(entry.join("index").exists());
+        prepare_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap();
+        assert!(!entry.exists());
+        let file = fs::read_dir(&trash).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == "json")).unwrap().path();
+        let r: Trashed = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
+        assert_eq!(fs::read(r.entry_at.join("index")).unwrap(), index);
+        git(&repo, &["worktree", "add", "-q", "-b", "replacement", wt.to_str().unwrap()]);
+        assert!(wt.join(".git").is_file());
         fs::remove_dir_all(dir).unwrap();
     }
 
