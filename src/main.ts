@@ -1970,6 +1970,9 @@ class Pane {
     if (!resume) this.sessionId = undefined;
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
+    // This launch is the pane's from here: its exit, wakes and session marks can
+    // come before pty_spawn replies, and an older launch's count no longer.
+    this.launched = gen;
     this.opencodeStatus = false;
     const can =
       resume &&
@@ -2019,7 +2022,6 @@ class Pane {
       if (ok === true) await invoke("pty_kill", { id: this.id, launch: gen }).catch(() => {});
       return gaveUp();
     }
-    if (ok === true) this.launched = gen;
     if (ok !== true) {
       this.dead = true;
       this.term.write(`\r\n\x1b[31m${ok}\x1b[0m — Enter retries\r\n`);

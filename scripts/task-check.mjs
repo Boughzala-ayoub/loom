@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -178,8 +178,10 @@ const setup = () => {
       const shell = args.argv[0] === 'powershell.exe';
       // Agents turn bracketed paste on, as Claude Code and Codex do, so a paste arrives as one.
       qa.agents[args.id] = shell ? { shell: true, line: '' } : { input: '', busy: false, menu: null };
-      setTimeout(() => (shell ? out(args.id).onmessage(shellPrompt) : (out(args.id).onmessage('\x1b[?2004h'), qa.draw(args.id))), 0);
-      return;
+      const started = () => setTimeout(() => (shell ? out(args.id).onmessage(shellPrompt) : (out(args.id).onmessage('\x1b[?2004h'), qa.draw(args.id))), 0);
+      // qa.holdSpawn: the process runs, and its reply waits for qa.releaseSpawn().
+      if (qa.holdSpawn) return new Promise((resolve) => { qa.releaseSpawn = () => { qa.releaseSpawn = null; resolve(); started(); }; });
+      return void started();
     }
     if (cmd === 'pty_write') {
       if (qa.failWriteIf?.(args.data)) throw new Error('Test: the terminal write failed');
@@ -533,6 +535,32 @@ try {
     }
     await qa({ journalFailIf: null, journalHold: null });
     ok('Closing drains the task journal first, and stays open while it can\'t be written');
+  }
+  if (review('early-exit')) {
+    // A launch's exit can come before its pty_spawn reply, and an older one's
+    // after the next has begun (review RF6).
+    await resetReview();
+    const exitOf = (launch) => page.evaluate(([id, launch]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${id}`, payload: { code: 0, launch } }), [claude, launch]);
+    const paneState = async () => (await cli('panes')).data.find((p) => p.id === claude).state;
+    await exitOf(await gen(claude));
+    await page.waitForTimeout(50);
+    assert.equal(await paneState(), 'exited');
+    const restartHeld = async () => {
+      await qa({ holdSpawn: true });
+      const reply = call('restart', ['work:1']);
+      await page.waitForFunction(() => window.qa.releaseSpawn);
+      await qa({ holdSpawn: false });
+      return { launch: await gen(claude), release: async () => { await page.evaluate(() => window.qa.releaseSpawn()); assert.equal((await reply).ok, true); await page.waitForTimeout(50); } };
+    };
+    const first = await restartHeld();
+    await exitOf(first.launch);
+    await first.release();
+    assert.equal(await paneState(), 'exited', 'An exit that came before its spawn\'s reply was lost');
+    const second = await restartHeld();
+    await exitOf(first.launch);
+    await second.release();
+    assert.notEqual(await paneState(), 'exited', 'The last launch\'s exit marked the next one dead');
+    ok('A launch\'s exit counts before its spawn replies, and an older launch\'s never does');
   }
   if (review('shutdown-reports')) {
     // A turn ends as Loom closes: its report lands after the first drain, and
