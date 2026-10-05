@@ -4362,6 +4362,8 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
 /** Codex turns already counted, by pane and turn id: a turn reported twice
  * completes nothing the second time. */
 const turnsSeen = new Set<string>();
+/** The last numbered batch of reports handled: closing waits for every one Rust sent before it shut the panes down. */
+let agentBatch = 0;
 /** An agent's report from its event file (lib.rs send_task_events). */
 /** Reports from the agents, as Rust hands them over (send_task_events, pty_shutdown). */
 function agentEvents(events: [string, unknown][]) {
@@ -4388,7 +4390,7 @@ function agentReport(p: Pane, s: Signal) {
 const QUIET_MS = 30_000;
 let sweepTimer = 0;
 function sweepSoon() {
-  if (!sweepTimer) sweepTimer = window.setInterval(sweepTasks, 500);
+  if (!sweepTimer) sweepTimer = window.setInterval(() => sweepTasks(), 500);
 }
 /** What no agent reports, read off the pane every half second while a task
  * is open: the pane closed, restarted or exited; a shell never started its
@@ -4396,8 +4398,10 @@ function sweepSoon() {
  * Ctrl-C interrupted it (no hint 2 s later; a turn that ended first has
  * reported by then); Claude's Stop stuck (it's idle: no other Stop hook sent
  * it on working); or an agent sat idle with no end reported (unknown, never
- * completed). */
-function sweepTasks() {
+ * completed). `closing`: Loom is shutting down and the panes are gone, so a
+ * Stop is judged on the screen they left now, and one it can't confirm ends
+ * unknown rather than wait for a next sweep that won't come. */
+function sweepTasks(closing = false) {
   const now = Date.now();
   let open = 0;
   for (const t of tasks.values()) {
@@ -4463,8 +4467,13 @@ function sweepTasks() {
     // question. An asking task holds none: an approval clears it (taskSignal),
     // and route gives it no Stop.
     const idleInput = () => readInput(screenCells(p), "claude").kind !== "unknown" && !readMenu(liveScreen(p, false));
-    if (w.stopAt !== undefined && !busy && now - w.stopAt >= 500 && !(escNew && w.escSeen !== esc) && idleInput()) {
+    if (w.stopAt !== undefined && !busy && (closing || now - w.stopAt >= 500) && !(escNew && w.escSeen !== esc) && idleInput()) {
       moveTask(t, unproven(t, { state: "completed", signal: "turn-end", ...(w.response ? { response: w.response } : {}) }));
+      continue;
+    }
+    if (closing && w.stopAt !== undefined) {
+      // Only a completed event names a final message (loomctl watch --metadata): this one keeps it in its detail.
+      moveTask(t, { state: "unknown", signal: "stop", reason: "loom-closed", detail: `Claude reported the end of its turn as Loom closed, but its screen never showed it idle${w.response ? ` (final message ${w.response})` : ""}` });
       continue;
     }
     if (t.state === "approval") continue; // an answer delivered moves it on (Pane.wrote)
@@ -8816,9 +8825,14 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       await flushSave();
       await saveQueue; // flushSave swallows the error into a toast; this rethrows it, so a failed save cancels the close
       await drainJournal(); // as with the save: a journal that can't be written cancels the close, panes still up
-      // What the panes reported as they stopped comes back with the call, so
-      // it is handled, and its journal writes queued, before the drain below.
-      agentEvents(await invoke<[string, unknown][]>("pty_shutdown"));
+      // What the panes reported as they stopped comes back with the call, and
+      // a batch already sent before it is waited for, so all of it is handled,
+      // and its journal writes queued, before the drain below. A Claude Stop
+      // still waiting for its idle screen is judged on the last one.
+      const shut = await invoke<{ events: [string, unknown][]; emitted: number }>("pty_shutdown", { ids: threads.flatMap((t) => t.panes.map((p) => p.id)) });
+      agentEvents(shut.events);
+      for (const end = Date.now() + 3000; agentBatch < shut.emitted && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
+      sweepTasks(true);
       await drainJournal();
 
       await getCurrentWindow().destroy();
@@ -9083,7 +9097,10 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
 
   // What the agents report for loomctl's tasks: Claude's hooks and Codex's
   // notify through loom.exe, and OpenCode's plugin (lib.rs send_task_events).
-  void listen<[string, unknown][]>("agent-events", (e) => agentEvents(e.payload));
+  void listen<{ seq: number; events: [string, unknown][] }>("agent-events", (e) => {
+    agentEvents(e.payload.events);
+    agentBatch = Math.max(agentBatch, e.payload.seq);
+  });
 
   // Codex's notify script and the opencode plugin drop the session id a pane is
   // really on (agent.ts). Only the next launch needs it, so it rides the 4 s

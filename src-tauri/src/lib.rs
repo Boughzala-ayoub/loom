@@ -588,12 +588,15 @@ fn pty_kill(ptys: &Ptys, flows: &output::Flows, id: String, launch: Option<u64>)
     Ok(())
 }
 
-/// Stops every pane and returns what they reported as they stopped: their exit
-/// threads find no session now, so nothing else would send it.
-fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) -> Vec<(String, serde_json::Value)> {
+/// Stops every pane and returns what they reported as they stopped, and the
+/// number of the last batch of reports already sent: the page waits for that
+/// one before it closes. From here no drainer sends any (Reports), so `ids`
+/// is every pane the page has, one whose process exited just before included.
+fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>, reports: State<Reports>, mut ids: Vec<String>) -> serde_json::Value {
+    let emitted = reports.close();
     for (_, _, flow) in flows.0.lock().unwrap().values() { flow.close(); }
     let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
-    let ids: Vec<String> = sessions.keys().cloned().collect();
+    ids.extend(sessions.keys().cloned());
     taskkill(&sessions.values().filter_map(|s| s.pid).collect::<Vec<_>>());
     // Dropping a session runs ClosePseudoConsole, which can wait for its output
     // to drain, so drop them side by side. Returns once all are gone.
@@ -605,7 +608,7 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) -> Vec<(String, 
             });
         }
     });
-    drain_task_events(&std::env::temp_dir().join("loom-task"), &ids)
+    serde_json::json!({ "events": drain_task_events(&std::env::temp_dir().join("loom-task"), &ids), "emitted": emitted })
 }
 
 /// One git invocation in `dir`, stdout back, stderr as the error. The thread
@@ -976,12 +979,36 @@ fn send_wakes(app: &AppHandle, ids: &[String]) {
 }
 
 /// What the agents reported for loomctl's tasks (helper.rs `task_event`, the
-/// OpenCode plugin), as one `agent-events` event of (pane id, event), oldest
-/// first per pane, consumed as they are read. Only this Loom's panes, as with
-/// the wakes.
+/// OpenCode plugin), as one numbered `agent-events` batch of (pane id, event),
+/// oldest first per pane, consumed as they are read. Only this Loom's panes, as
+/// with the wakes.
 fn send_task_events(app: &AppHandle, ids: &[String]) {
-    let got = drain_task_events(&std::env::temp_dir().join("loom-task"), ids);
-    if !got.is_empty() { let _ = app.emit("agent-events", got); }
+    app.state::<Reports>().send(&std::env::temp_dir().join("loom-task"), ids, |seq, events| {
+        let _ = app.emit("agent-events", serde_json::json!({ "seq": seq, "events": events }));
+    });
+}
+
+/// Task reports go to the page one numbered batch at a time, and none once Loom
+/// shuts down: pty_shutdown takes the rest itself. The 250 ms poll and an exit
+/// thread hold this while they claim and send, so shutdown waits for a batch
+/// already on its way and the page, told its number, waits for it to land.
+#[derive(Default)]
+struct Reports(Mutex<(bool, u64)>);
+impl Reports {
+    fn send(&self, dir: &std::path::Path, ids: &[String], send: impl FnOnce(u64, Vec<(String, serde_json::Value)>)) {
+        let mut r = self.0.lock().unwrap();
+        if r.0 { return; }
+        let got = drain_task_events(dir, ids);
+        if got.is_empty() { return; }
+        r.1 += 1;
+        send(r.1, got);
+    }
+    /// No batch goes out after this. The last one that did, by number.
+    fn close(&self) -> u64 {
+        let mut r = self.0.lock().unwrap();
+        r.0 = true;
+        r.1
+    }
 }
 
 /// `<pane>.<ms>.<pid>.json` files: another Loom's are left for it, and dropped
@@ -1568,8 +1595,8 @@ mod commands {
         blocking(move || super::pty_kill(&app.state(), &app.state(), id, launch)).await
     }
     #[tauri::command]
-    pub async fn pty_shutdown(app: AppHandle) -> Vec<(String, serde_json::Value)> {
-        blocking(move || super::pty_shutdown(app.state(), app.state())).await
+    pub async fn pty_shutdown(app: AppHandle, ids: Option<Vec<String>>) -> serde_json::Value {
+        blocking(move || super::pty_shutdown(app.state(), app.state(), app.state(), ids.unwrap_or_default())).await
     }
     #[tauri::command]
     pub async fn worktree_fingerprint(dir: String, hashed: Vec<String>) -> Result<String, String> {
@@ -1759,6 +1786,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Ptys::default())
         .manage(output::Flows::default())
+        .manage(Reports::default())
         .manage(output::Bus::default())
         .manage(control::Pending::default())
         .manage(WindowStateReady::default())
@@ -1859,7 +1887,7 @@ pub fn run() {
             // app running without it.
             if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
                 let _ = awake::apply(false);
-                pty_shutdown(window.state::<Ptys>(), window.state::<output::Flows>());
+                pty_shutdown(window.state::<Ptys>(), window.state::<output::Flows>(), window.state::<Reports>(), Vec::new());
                 if let Some(o) = window.app_handle().get_webview_window("overlay") {
                     let _ = o.destroy();
                 }
@@ -2408,6 +2436,34 @@ mod tests {
         assert!(drain_task_events(&dir, &mine).is_empty(), "events must not come twice");
         assert!(dir.join("q-2.1700000000100.9.json").exists(), "another Loom's event is left for it");
         assert!(dir.join("p-1.1700000000300.9.tmp").exists(), "a half-written event waits for its rename");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shutdown_waits_for_a_batch_on_its_way_and_then_takes_the_rest() {
+        use std::{sync::{mpsc, Arc}, time::Duration};
+        let dir = std::env::temp_dir().join(format!("loom-task-shutdown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = vec!["p-1".to_string()];
+        std::fs::write(dir.join("p-1.1700000000100.9.json"), r#"{"kind":"end"}"#).unwrap();
+        let reports = Arc::new(super::Reports::default());
+        // The 250 ms poll has claimed a report and is sending it as shutdown begins.
+        let (sending, on_its_way) = mpsc::channel();
+        let (go, sent) = mpsc::channel::<()>();
+        let poll = { let (r, dir, mine) = (reports.clone(), dir.clone(), mine.clone());
+            std::thread::spawn(move || r.send(&dir, &mine, |seq, got| { sending.send((seq, got.len())).unwrap(); sent.recv().unwrap(); })) };
+        assert_eq!(on_its_way.recv().unwrap(), (1, 1));
+        let shutdown = { let r = reports.clone(); std::thread::spawn(move || r.close()) };
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!shutdown.is_finished(), "shutdown went ahead of a batch still on its way");
+        go.send(()).unwrap();
+        poll.join().unwrap();
+        assert_eq!(shutdown.join().unwrap(), 1, "the page waits for batch 1");
+        // From here a drainer sends nothing: shutdown's own drain takes what's left.
+        std::fs::write(dir.join("p-1.1700000000200.9.json"), r#"{"kind":"stop"}"#).unwrap();
+        reports.send(&dir, &mine, |_, _| panic!("a batch went out after shutdown"));
+        assert_eq!(super::drain_task_events(&dir, &mine).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

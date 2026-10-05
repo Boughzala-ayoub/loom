@@ -15,7 +15,7 @@
 // review" that of ..._REVIEW_2026-10-02_120244.md.
 // Build, then `npx vite preview --port 4273 --strictPort`, then run this.
 // TASK_QUICK=1 skips the 30 s idle cases.
-// TASK_REVIEW=pane-state|untracked-approval|invalid-key|hint-rows|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
+// TASK_REVIEW=pane-state|untracked-approval|invalid-key|hint-rows|claude-hint|closed-pane-retained|stale-markers|close-drain|early-exit|claude-launch-usage|shutdown-reports|shutdown-barrier|malformed-journal|journal-history|notification-context|notification-context-startup|notification-context-startup-held|notification-context-watch|unreadable|policy-recovery|restored-notices|manual-mismatch|send-draft|legacy-owners|policy-startup|startup-turns|startup-turn-existing|startup-turn-empty|pruned-owner|owner-disposition|policy-pending|policy-combined|reserve-hole|startup-policy|startup-inherit|startup-closed|startup-closed-off|startup-closed-on|startup-held|startup-held-off|startup-held-on|replay-order|all runs selected review regressions only.
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -220,7 +220,14 @@ const setup = () => {
     // Codex's notify and OpenCode's plugin hand a pane its session id (lib.rs take_sessions): qa.sessions, once.
     if (cmd === 'take_sessions') return (qa.sessions ?? []).splice(0).filter(([id]) => args.ids.includes(id));
     // What the stopped panes reported as they went (lib.rs pty_shutdown): qa.shutdownEvents, once.
-    if (cmd === 'pty_shutdown') return (qa.shutdownEvents ?? []).splice(0);
+    // qa.lateBatch: reports a drainer sent just before shutdown took over (batch 1), landing after its reply.
+    if (cmd === 'pty_shutdown') {
+      const late = qa.lateBatch;
+      qa.lateBatch = null;
+      if (late) setTimeout(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: 1, events: late } }), 150);
+      return { events: (qa.shutdownEvents ?? []).splice(0), emitted: late ? 1 : 0 };
+    }
+    if (cmd === 'plugin:window|destroy') qa.journalAtDestroy = localStorage.getItem('qa-journal') ?? '';
     if (cmd === 'model_options') return [];
     // qa.holdUsage: Claude's usage read waits for qa.releaseUsage(usage), given for every pane it named.
     if (cmd === 'session_usage' && qa.holdUsage) return new Promise((resolve) => { qa.releaseUsage = (u) => { qa.releaseUsage = null; resolve(Object.fromEntries(args.panes.map(([key]) => [key, u]))); }; });
@@ -269,7 +276,7 @@ try {
   const report = async (id, ...events) => {
     const launch = await gen(id);
     const stamped = events.map(({ launch: l, ...e }) => (l === null ? e : { ...e, launch: l ?? launch }));
-    await page.evaluate(([id, events]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: events.map((e) => [id, { t: Date.now(), ...e }]) }), [id, stamped]);
+    await page.evaluate(([id, events]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: 0, events: events.map((e) => [id, { t: Date.now(), ...e }]) } }), [id, stamped]);
   };
   const agent = (id, set) => page.evaluate(([id, set]) => { Object.assign(window.qa.agents[id], set); window.qa.draw(id); }, [id, set]);
   /** Claude stops as it really does: idle on screen, and its Stop hook reports. */
@@ -632,6 +639,38 @@ try {
     assert.equal((await saved(sent.data.task))?.state, 'completed', 'The report found at shutdown is journaled before the window goes');
     ok('What panes report as Loom shuts them down is journaled before the window closes');
   }
+  if (review('shutdown-barrier')) {
+    // Review R14-4. Claude's Stop comes back from shutdown: on an idle screen
+    // it completes with its final message, on a busy one it ends unknown, and
+    // either way it's journaled before the window goes. And a report a drainer
+    // sent just before shutdown took over still counts, landing after its reply.
+    const closeNow = async () => {
+      await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+      await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
+      return readJournal(await page.evaluate(() => window.qa.journalAtDestroy));
+    };
+    for (const idle of [true, false]) {
+      await resetReview();
+      const text = `stop as Loom closes ${idle}`;
+      const sent = await cli('submit', 'work:1', text);
+      await report(claude, { kind: 'start', match: promptMatch(text) });
+      await until(sent.data.task, 'working');
+      if (idle) await agent(claude, { busy: false });
+      const response = promptMatch(`final answer ${idle}`);
+      await qa({ shutdownEvents: [[claude, { t: Date.now(), kind: 'stop', response, launch: await gen(claude) }]] });
+      const t = (await closeNow()).tasks.get(sent.data.task);
+      if (idle) assert.deepEqual([t?.state, t?.events.at(-1).response], ['completed', response], 'A Stop on an idle screen, back from shutdown, completes before the window goes');
+      else assert.deepEqual([t?.state, t?.reason, t?.events.at(-1).response], ['unknown', 'loom-closed', undefined], 'A Stop Claude\'s screen never confirmed ends unknown, not completed');
+    }
+    await resetReview();
+    await agent(codex, { codexShape: true });
+    const text = 'finish just before Loom closes';
+    const sent = await cli('submit', 'work:2', text);
+    await until(sent.data.task, 'working');
+    await qa({ lateBatch: [[codex, { t: Date.now(), kind: 'end', matches: [promptMatch(text)], turn: 'late-turn', launch: await gen(codex) }]] });
+    assert.equal((await closeNow()).tasks.get(sent.data.task)?.state, 'completed', 'A report sent before shutdown, landing after it, was lost');
+    ok('Reports sent before shutdown or returned by it, Claude\'s Stop too, are judged and journaled before the window goes');
+  }
   if (review('malformed-journal')) {
     // Valid JSON of the wrong shape: startup finishes (boot waits for cli_ready),
     // history reads as unavailable, and the file stays as it was.
@@ -778,7 +817,7 @@ try {
     if (mode !== 'empty') {
       // The completed turn also arrives before replay. Its signal must not be lost.
       await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-        event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'early-codex-turn' }]],
+        event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'early-codex-turn' }]] },
       }), [earlyPane, promptMatch(text)]);
     } else await qa({ journalHold: 'fn:return true' });
     await page.evaluate((unreadable) => {
@@ -1175,7 +1214,7 @@ try {
     await page.keyboard.press('Enter');
     await page.waitForTimeout(100);
     await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-      event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-policy-turn' }]],
+      event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-policy-turn' }]] },
     }), [earlyPane, promptMatch(text)]);
     await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
     await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
@@ -1298,7 +1337,7 @@ try {
       if (held) await page.waitForFunction(() => window.qa.heldWrites.length === 1);
       assert.ok((await prompts(earlyPane)).some((t) => promptMatch(t) === promptMatch(text)));
       await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-        event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'closed-startup-policy' }]],
+        event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'closed-startup-policy' }]] },
       }), [earlyPane, promptMatch(text)]);
       await page.locator(`.pane[data-id="${earlyPane}"] [title="Close pane"]`).click();
       await page.locator('#confirm-action').click();
@@ -1359,7 +1398,7 @@ try {
     await page.waitForFunction((id) => !!window.qa.agents[id], pane);
     // loomctl isn't up before the read, so reports go in as Rust would emit them.
     const emit = (e) => page.evaluate(([id, e]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-      event: 'agent-events', payload: [[id, { t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, ...e }]],
+      event: 'agent-events', payload: { seq: 0, events: [[id, { t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, ...e }]] },
     }), [pane, e]);
     const enter = async (text) => {
       await page.locator(`.pane[data-id="${pane}"] .xterm-helper-textarea`).focus();
@@ -1483,7 +1522,7 @@ try {
     await page.waitForTimeout(100);
     if (held) await page.waitForFunction(() => window.qa.heldWrites.length === 1);
     await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-      event: 'agent-events', payload: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-context' }]],
+      event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-context' }]] },
     }), [early, promptMatch(text)]);
     await page.locator(`.pane[data-id="${early}"] [title="Close pane"]`).click();
     await page.locator('#confirm-action').click();
@@ -2025,7 +2064,7 @@ try {
       assert.equal((await prompts(claude)).filter((t) => t === text).length, 1, "Claude got the earlier prompt only, not the task's");
       // As lib.rs send_task_events hands it to the page.
       await agent(claude, { input: '', busy: true });
-      await page.evaluate(([id, event]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: [[id, event]] }), [claude, event]);
+      await page.evaluate(([id, event]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: 0, events: [[id, event]] } }), [claude, event]);
       assert.equal((await until(a.task, 'working')).uncertain, 'submit', "The native start, stamped after the Enter, still proves nothing");
       await stops(claude);
       assert.equal((await until(a.task, 'unknown')).reason, 'submit-uncertain');
