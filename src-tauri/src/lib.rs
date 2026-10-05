@@ -40,6 +40,10 @@ struct Resizes {
 }
 
 struct Session {
+    /// The pane's process tree: closing it (the session dropped, or Loom gone)
+    /// ends whatever the pane started, detached or not. First to drop, so
+    /// nothing is left attached when master's Drop closes the console.
+    _job: Option<Job>,
     // Close the input pipe before ClosePseudoConsole runs in master's Drop.
     // The writer thread holds it weakly, so only a write in progress keeps it open.
     _writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -53,9 +57,6 @@ struct Session {
     launch: Option<u64>,
     flow: Arc<output::Flow>,
     _cache_lease: Option<std::fs::File>,
-    /// The pane's process tree: closing it (the session dropped, or Loom gone)
-    /// ends whatever the pane started, detached or not.
-    _job: Option<Job>,
 }
 
 impl Session {
@@ -85,8 +86,10 @@ impl Drop for Job {
 
 /// Puts process `pid` in a new kill-on-close job. What it starts from then on
 /// joins too, detached consoles included, unless it asks to break away. ponytail: assigned just after the
-/// spawn, so a child started in that instant stays out; a suspended start
-/// needs a spawn portable-pty doesn't offer.
+/// spawn, so a child started in that instant stays out: portable-pty 0.9 fixes
+/// CreateProcessW's flags and attribute list and keeps the console handle
+/// private, so neither CREATE_SUSPENDED nor a job list attribute reaches it
+/// without forking the crate.
 fn contain(pid: u32) -> Result<Job, String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
@@ -95,7 +98,8 @@ fn contain(pid: u32) -> Result<Job, String> {
     unsafe {
         let job = Job(CreateJobObjectW(None, windows::core::PCWSTR::null()).map_err(|e| e.to_string())?);
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        // Breakaway stays possible, for a program that asks for it on purpose.
+        // Breakaway stays possible, for a program that asks for it on purpose:
+        // without it, that program's CreateProcess fails outright.
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
             std::mem::size_of_val(&limits) as u32).map_err(|e| e.to_string())?;
@@ -207,6 +211,24 @@ fn take_utf8(pending: &mut Vec<u8>) -> String {
             pending.drain(..valid + skip);
             out
         }
+    }
+}
+
+/// The console's output, read until it ends, to the emitter. Once the emitter
+/// is gone (the pane closed) the rest is read and dropped: before Windows 11
+/// 24H2, ClosePseudoConsole waits while its last frames sit unread in the pipe.
+fn pump(reader: &mut dyn Read, tx: std::sync::mpsc::SyncSender<String>) {
+    let mut buf = [0u8; 8192];
+    let mut pending = Vec::new();
+    let mut open = true;
+    while let Ok(n) = reader.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        if !open { continue; }
+        pending.extend_from_slice(&buf[..n]);
+        let text = take_utf8(&mut pending);
+        open = text.is_empty() || tx.send(text).is_ok();
     }
 }
 
@@ -413,20 +435,7 @@ fn pty_spawn(
     let flow = Arc::new(output::Flow::default());
     let channel = on_out.id();
     app.state::<output::Flows>().0.lock().unwrap().insert(channel, (id.clone(), flow.clone()));
-    std::thread::spawn(move || {
-        let mut buf = [0u8; 8192];
-        let mut pending = Vec::new();
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            pending.extend_from_slice(&buf[..n]);
-            let text = take_utf8(&mut pending);
-            if !text.is_empty() && tx.send(text).is_err() {
-                break;
-            }
-        }
-    });
+    std::thread::spawn(move || pump(&mut reader, tx));
     let output_flow = flow.clone();
     let output_app = app.clone();
     std::thread::spawn(move || {
@@ -2449,6 +2458,16 @@ mod tests {
         super::prune_markers(&[dir.clone(), dir.join("missing")], std::time::Duration::from_secs(7 * 86_400));
         assert!(!old.exists() && new.exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn console_output_drains_to_its_end_without_an_emitter() {
+        // A closed pane's emitter is gone, and the console still has its last frames to write.
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        drop(rx);
+        let mut out = std::io::Cursor::new(vec![b'x'; 64 << 10]);
+        super::pump(&mut out, tx);
+        assert_eq!(out.position(), 64 << 10, "unread output can keep ClosePseudoConsole waiting");
     }
 
     #[test]
