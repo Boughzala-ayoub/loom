@@ -1131,6 +1131,7 @@ type Usage = {
   sid: string;
   model: string;
   effort: string;
+  effortObserved?: boolean;
   /** From the statusline tee: what the pane runs RIGHT NOW, ahead of the
    * transcript — follows a /model typed by hand the moment it runs. "" until
    * the tee has fired. */
@@ -7470,7 +7471,7 @@ function paneSettings(p: Pane) {
   const left = u ? Math.max(0, u.window - u.ctx) : 0;
   return {
     model: settingValue(held(p.want?.model, u?.model ?? "") || u?.liveModel || u?.model || p.startupSettings?.model, "model"),
-    effort: settingValue(held(p.want?.effort, u?.effort ?? "") || u?.liveEffort || u?.effort || p.effort || p.startupSettings?.effort, "effort"),
+    effort: settingValue(held(p.want?.effort, u?.effort ?? "") || u?.liveEffort || (u?.effortObserved ? u.effort : u?.effort || p.effort || p.startupSettings?.effort), "effort"),
     context: u && u.window > 0 ? { usedTokens: u.ctx, windowTokens: u.window, remainingTokens: left, remainingPercent: Math.round(100 * left / u.window) } : null,
   };
 }

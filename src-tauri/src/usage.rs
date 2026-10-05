@@ -34,6 +34,8 @@ pub struct Usage {
     /// What the last turn actually ran as, for the pane's config panel.
     model: String,
     effort: String,
+    /// A current Codex turn context can explicitly have no effort.
+    effort_observed: bool,
     /// What the statusline tee says the pane runs RIGHT NOW — ahead of the
     /// transcript, which only learns at the next turn. Follows a /model typed
     /// by hand the moment it runs. Empty until the tee has fired.
@@ -480,7 +482,9 @@ fn fold_codex(usage: &mut Usage, row: &serde_json::Value) {
     let p = &row["payload"];
     if row["type"] == "turn_context" {
         if let Some(model) = p["model"].as_str() { usage.model = setting_value(model, false); }
-        if let Some(effort) = p["effort"].as_str().or_else(|| p["reasoning_effort"].as_str()) { usage.effort = setting_value(effort, true); }
+        usage.effort_observed = true;
+        usage.effort = p["effort"].as_str().or_else(|| p["reasoning_effort"].as_str())
+            .map(|effort| setting_value(effort, true)).unwrap_or_default();
     }
     if row["type"] == "event_msg" && p["type"] == "token_count" {
         let info = &p["info"];
@@ -1269,6 +1273,22 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(model, "current", "scoped B reads must not reset A's bounded scan");
+    }
+
+    #[test]
+    fn new_turn_context_clears_unset_effort() {
+        use serde_json::json;
+        for payload in [json!({"model":"new", "effort":null}), json!({"model":"new"}), json!({"model":"new", "reasoning_effort":"low"})] {
+            let mut usage = super::Usage::default();
+            super::fold_codex(&mut usage, &json!({"type":"turn_context","payload":{"model":"old","effort":"high"}}));
+            super::fold_codex(&mut usage, &json!({"type":"turn_context","payload":payload}));
+            let wanted = if payload["reasoning_effort"] == "low" { "low" } else { "" };
+            assert_eq!(usage.effort, wanted);
+            super::fold_codex(&mut usage, &json!({"type":"tool","payload":"x".repeat(300_000)}));
+            super::fold_codex(&mut usage, &json!({"type":"event_msg","payload":{"type":"token_count"}}));
+            assert_eq!(usage.effort, wanted);
+            assert_eq!(serde_json::to_value(usage).unwrap()["effortObserved"], true);
+        }
     }
 
     #[test]

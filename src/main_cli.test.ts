@@ -515,3 +515,14 @@ if (check(302)) {
   assert.equal(p.providerUsage?.model, "late-current", "N3: late native results still refresh the matching launch");
   console.log("ok   N3 bounded waits retain one native scan and apply late readings");
 }
+
+if (check(303)) {
+  const th = { name: "work", panes: [] as any[] };
+  const p = { id: "p", th, agent: "codex", sessionId: "selected", generation: 1,
+    providerUsage: { sid: "selected", model: "new-model", effort: "", effortObserved: true },
+    effort: "high", startupSettings: { effort: "high" } };
+  th.panes.push(p);
+  const c = fixture({ threads: [th], paneRows: () => "" });
+  assert.equal((await c.panes.run({ _: [] })).data[0].effort, null, "N7: observed unset effort must suppress obsolete startup and hook values");
+  console.log("ok   N7 observed unset effort cannot revive a startup fallback");
+}
