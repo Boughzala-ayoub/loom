@@ -889,7 +889,7 @@ try {
         const d = await worktree('cleanup-d');
         await page.evaluate(([dir, ids]) => { window.qa.failBranch = false; window.qa.onKill = id => { if (ids.includes(id)) window.qa.statusFor[dir] = '?? crash.log\0'; }; }, [d.dir, d.panes.map(p => p.id)]);
         const racing = await cli('close-thread', d.id, '--yes', '--delete', 'worktree');
-        assert.deepEqual([racing.ok, racing.steps], [true, { panes: 'closed', worktree: 'removed', branch: null }], JSON.stringify(racing));
+        assert.deepEqual([racing.ok, racing.data?.steps], [true, { panes: 'closed', worktree: 'removed', branch: null }], JSON.stringify(racing));
         assert.equal(await removals(d.dir), 1);
         // Contents are read for changed and untracked files only, and not for what --discard gives up.
         const e = await worktree('cleanup-e');
@@ -903,7 +903,7 @@ try {
         const f = await worktree('cleanup-f');
         await page.evaluate(dir => { window.qa.failRemoveOnce = dir; }, f.dir);
         const retried = await cli('close-thread', f.id, '--yes', '--delete', 'worktree');
-        assert.deepEqual([retried.ok, retried.steps, await removals(f.dir)], [true, { panes: 'closed', worktree: 'removed', branch: null }, 2], JSON.stringify(retried));
+        assert.deepEqual([retried.ok, retried.data?.steps, await removals(f.dir)], [true, { panes: 'closed', worktree: 'removed', branch: null }, 2], JSON.stringify(retried));
         await page.evaluate(() => { window.qa.onKill = null; delete window.qa.statusFor; });
       }
       // Pane 7 review (2026-10-01).
