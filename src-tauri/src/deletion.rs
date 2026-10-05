@@ -264,7 +264,10 @@ fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Resul
 fn restored(r: &Trashed) -> std::io::Result<bool> {
     // A replacement worktree can reuse the old administration name. It is a
     // restore only when the retained administration has left the trash.
-    if !r.entry_at.try_exists()? && r.entry.try_exists()? { return Ok(true); }
+    if !r.entry_at.try_exists()? && r.entry.try_exists()? {
+        fs::read_dir(r.entry_at.parent().unwrap())?;
+        return Ok(true);
+    }
     // Manual repair may register the trash folder using another entry name.
     let dot = match fs::read_to_string(r.at.join(".git")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -360,8 +363,15 @@ pub fn purge(trash: &Path, keep: Duration) {
             Err(_) => continue,
             Ok(false) => {},
         }
+        // NotFound can mean an unplugged volume or a temporarily moved parent.
+        // Both recorded locations must be reachable before either is expired.
+        let reachable = |p: &Path| p.parent().is_some_and(|parent| fs::read_dir(parent).is_ok());
+        if !reachable(&r.at) || !reachable(&r.entry_at) { continue; }
         // remove_dir_all removes each link inside as itself, never what it points to.
-        let erase = |p: &Path| match fs::remove_dir_all(p) { Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e), _ => Ok(()) };
+        let erase = |p: &Path| match fs::remove_dir_all(p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && reachable(p) => Ok(()),
+            r => r,
+        };
         if erase(&r.at).and_then(|_| erase(&r.entry_at)).is_ok() { let _ = fs::remove_file(&file); }
     }
 }
@@ -598,6 +608,53 @@ mod tests {
         }
         assert_ne!(retained[0], retained[1]);
         for (n, at) in retained.iter().enumerate() { assert_eq!(fs::read_to_string(at.join("a")).unwrap(), format!("work {n}")); }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn purge_retains_an_unavailable_external_parent_until_it_returns() {
+        let dir = std::env::temp_dir().join(format!("loom-offline-trash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        fs::write(wt.join("a"), "retained").unwrap();
+        remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap();
+        let file = fs::read_dir(&trash).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == "json")).unwrap().path();
+        let (mut held, mut r) = open_record(&file).unwrap();
+        // The same layout as the cross-volume sibling fallback, without a
+        // second drive: moving its parent makes that whole location unavailable.
+        let external = dir.join("external");
+        fs::create_dir(&external).unwrap();
+        let sibling = external.join(".wt.loom-trash");
+        fs::rename(&r.at, &sibling).unwrap();
+        r.at = sibling;
+        write_record(&mut held, &r).unwrap();
+        drop(held);
+        fs::rename(&external, dir.join("offline")).unwrap();
+        purge(&trash, Duration::ZERO);
+        assert!(file.exists() && r.entry_at.exists(), "an offline location must keep its manifest and administration");
+        fs::rename(dir.join("offline"), &external).unwrap();
+        assert!(r.at.join("a").is_file());
+        purge(&trash, Duration::ZERO);
+        assert!(!file.exists() && !r.at.exists() && !r.entry_at.exists());
+        // The administrative trash parent can be unavailable too. Reusing
+        // its former entry name does not prove the old administration restored.
+        git(&repo, &["worktree", "add", "-q", "-b", "again", wt.to_str().unwrap()]);
+        remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap();
+        let file = fs::read_dir(&trash).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == "json")).unwrap().path();
+        let r: Trashed = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        git(&repo, &["worktree", "add", "-q", "-b", "replacement", wt.to_str().unwrap()]);
+        let admin_parent = r.entry_at.parent().unwrap();
+        fs::rename(admin_parent, dir.join("offline-admin")).unwrap();
+        purge(&trash, Duration::ZERO);
+        assert!(file.exists() && r.at.exists(), "an unavailable administration parent was mistaken for a restore");
+        fs::rename(dir.join("offline-admin"), admin_parent).unwrap();
+        purge(&trash, Duration::ZERO);
+        assert!(!file.exists() && !r.at.exists());
+        assert_eq!(git(&wt, &["branch", "--show-current"]).trim(), "replacement");
         fs::remove_dir_all(dir).unwrap();
     }
 
