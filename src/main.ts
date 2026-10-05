@@ -4367,6 +4367,15 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
 const turnsSeen = new Set<string>();
 /** The last numbered batch of reports handled: closing waits for every one Rust sent before it shut the panes down. */
 let agentBatch = 0;
+const agentBatches = new Map<number, [string, unknown][]>();
+function receiveAgentBatch(batch: { seq: number; events: [string, unknown][] }) {
+  if (batch.seq <= agentBatch) return;
+  agentBatches.set(batch.seq, batch.events);
+  while (agentBatches.has(agentBatch + 1)) {
+    agentEvents(agentBatches.get(agentBatch + 1)!);
+    agentBatches.delete(++agentBatch);
+  }
+}
 /** An agent's report from its event file (lib.rs send_task_events). */
 /** Reports from the agents, as Rust hands them over (send_task_events, pty_shutdown). */
 function agentEvents(events: [string, unknown][]) {
@@ -4430,7 +4439,7 @@ function sweepTasks(closing = false) {
       moveTask(t, { state: "cancelled", signal: "pane", reason: p.dead ? "pane-stopped" : "pane-restarted" });
       continue;
     }
-    if (p.dead) {
+    if (p.dead && !closing) {
       moveTask(t, { state: "failed", signal: "pane", reason: "exited" });
       continue;
     }
@@ -8861,12 +8870,15 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
         // still waiting for its idle screen is judged on the last one.
         shuttingDown = true;
         document.body.inert = true;
-        shut = await invoke("pty_shutdown", { ids: threads.flatMap((t) => t.panes.map((p) => p.id)) });
+        shut = await invoke<{ events: [string, unknown][]; emitted: number }>("pty_shutdown", { ids: threads.flatMap((t) => t.panes.map((p) => p.id)) });
+        // The processes are gone, including on barrier expiry. Keep their last
+        // screens intact until their ordered reports have been judged.
+        for (const p of threads.flatMap(t => t.panes)) { p.dead = true; p.busy = false; p.waiting = false; p.paint(); }
       }
-      agentEvents(shut!.events.splice(0));
-      for (const end = Date.now() + 3000; agentBatch < shut!.emitted && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
+      for (const end = Date.now() + 3000; agentBatch < shut.emitted && Date.now() < end;) await new Promise((r) => setTimeout(r, 20));
+      if (agentBatch < shut.emitted) throw new Error(`Timed out waiting for agent report batch ${agentBatch + 1} of ${shut.emitted}`);
+      agentEvents(shut.events.splice(0));
       sweepTasks(true);
-      for (const p of threads.flatMap(t => t.panes)) p.exited(0, "stopped for shutdown");
       await drainJournal();
 
       await getCurrentWindow().destroy();
@@ -9135,8 +9147,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   // What the agents report for loomctl's tasks: Claude's hooks and Codex's
   // notify through loom.exe, and OpenCode's plugin (lib.rs send_task_events).
   void listen<{ seq: number; events: [string, unknown][] }>("agent-events", (e) => {
-    agentEvents(e.payload.events);
-    agentBatch = Math.max(agentBatch, e.payload.seq);
+    receiveAgentBatch(e.payload);
   });
 
   // Codex's notify script and the opencode plugin drop the session id a pane is

@@ -121,7 +121,7 @@ const mocks = readFileSync('node_modules/@tauri-apps/api/mocks.js', 'utf8').repl
 const setup = () => {
   const repo = 'C:\\projects\\loom';
   const state = { repos: [repo], threads: [{ repo, dir: `${repo}\\work`, branch: 'loom/work', name: 'work', panes: [{ cmd: 'claude' }, { cmd: 'codex' }, { cmd: 'claude' }] }], ui: { thread: 0 } };
-  const qa = window.qa = { calls: [], panes: [], agents: {}, prompts: [], journalHeld: [], heldWrites: [], failWriteIf: null, noEcho: false, ignoreEsc: false, idleAfterEnter: false, shellHang: false };
+  const qa = window.qa = { calls: [], panes: [], agents: {}, batch: 0, prompts: [], journalHeld: [], heldWrites: [], failWriteIf: null, noEcho: false, ignoreEsc: false, idleAfterEnter: false, shellHang: false };
   const out = (id) => qa.panes.filter((a) => a.id === id).at(-1).onOut;
   qa.out = (id, data) => out(id).onmessage(data);
   // An agent's screen: transcript line, a rule, its input, a rule, a footer that says busy.
@@ -224,8 +224,9 @@ const setup = () => {
     if (cmd === 'pty_shutdown') {
       const late = qa.lateBatch;
       qa.lateBatch = null;
-      if (late) setTimeout(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: 1, events: late } }), 150);
-      return { events: (qa.shutdownEvents ?? []).splice(0), emitted: late ? 1 : 0 };
+      const emitted = late ? ++qa.batch : qa.batch;
+      if (late) setTimeout(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: emitted, events: late } }), qa.lateBatchMs ?? 150);
+      return { events: (qa.shutdownEvents ?? []).splice(0), emitted };
     }
     if (cmd === 'plugin:window|destroy') qa.journalAtDestroy = localStorage.getItem('qa-journal') ?? '';
     if (cmd === 'model_options') return [];
@@ -276,7 +277,7 @@ try {
   const report = async (id, ...events) => {
     const launch = await gen(id);
     const stamped = events.map(({ launch: l, ...e }) => (l === null ? e : { ...e, launch: l ?? launch }));
-    await page.evaluate(([id, events]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: 0, events: events.map((e) => [id, { t: Date.now(), ...e }]) } }), [id, stamped]);
+    await page.evaluate(([id, events]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: ++window.qa.batch, events: events.map((e) => [id, { t: Date.now(), ...e }]) } }), [id, stamped]);
   };
   const agent = (id, set) => page.evaluate(([id, set]) => { Object.assign(window.qa.agents[id], set); window.qa.draw(id); }, [id, set]);
   /** Claude stops as it really does: idle on screen, and its Stop hook reports. */
@@ -670,6 +671,33 @@ try {
     assert.equal(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'pty_shutdown').length), 1);
     ok('A failed final journal drain blocks new work and a close retry saves the retained reports');
   }
+  if (review('shutdown-start-stop') || review('shutdown-deadline')) {
+    const deadline = review('shutdown-deadline') && process.env.TASK_REVIEW !== 'all' && !!process.env.TASK_REVIEW;
+    for (const expired of (deadline ? [true] : [false, true])) {
+      await resetReview();
+      await qa({ idleAfterEnter: true });
+      const text = `delayed start before final stop ${expired}`;
+      const sent = await cli('submit', 'work:1', text);
+      const response = promptMatch(`final Claude response ${expired}`);
+      const launch = await gen(claude);
+      await qa({ lateBatchMs: expired ? 3500 : 150,
+        lateBatch: [[claude, { t: Date.now(), kind: 'start', match: promptMatch(text), launch }]],
+        shutdownEvents: [[claude, { t: Date.now() + 1, kind: 'stop', response, launch }]] });
+      const close = () => page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+      await close();
+      if (expired) {
+        await page.waitForTimeout(3250);
+        assert.equal(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'plugin:window|destroy')), false, 'An expired report barrier must cancel close');
+        assert.match(await page.locator('body').innerText(), /Could not close safely/);
+        await page.waitForTimeout(400);
+        await close();
+      }
+      await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'plugin:window|destroy'));
+      const t = readJournal(await page.evaluate(() => window.qa.journalAtDestroy)).tasks.get(sent.data.task);
+      assert.deepEqual([t?.state, t?.events.at(-1).response], ['completed', response], 'Returned Stop must wait for its delayed Start and survive a close retry');
+    }
+    ok('Delayed Start precedes returned Stop; an expired barrier retains both for a close retry');
+  }
   if (review('shutdown-barrier')) {
     // Review R14-4. Claude's Stop comes back from shutdown: on an idle screen
     // it completes with its final message, on a busy one it ends unknown, and
@@ -867,7 +895,7 @@ try {
     if (mode !== 'empty') {
       // The completed turn also arrives before replay. Its signal must not be lost.
       await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-        event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'early-codex-turn' }]] },
+        event: 'agent-events', payload: { seq: ++window.qa.batch, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'early-codex-turn' }]] },
       }), [earlyPane, promptMatch(text)]);
     } else await qa({ journalHold: 'fn:return true' });
     await page.evaluate((unreadable) => {
@@ -1264,7 +1292,7 @@ try {
     await page.keyboard.press('Enter');
     await page.waitForTimeout(100);
     await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-      event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-policy-turn' }]] },
+      event: 'agent-events', payload: { seq: ++window.qa.batch, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-policy-turn' }]] },
     }), [earlyPane, promptMatch(text)]);
     await page.evaluate(() => { localStorage.removeItem('qa-journal-read-hold'); window.qa.releaseRead(); });
     await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready'));
@@ -1387,7 +1415,7 @@ try {
       if (held) await page.waitForFunction(() => window.qa.heldWrites.length === 1);
       assert.ok((await prompts(earlyPane)).some((t) => promptMatch(t) === promptMatch(text)));
       await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-        event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'closed-startup-policy' }]] },
+        event: 'agent-events', payload: { seq: ++window.qa.batch, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'closed-startup-policy' }]] },
       }), [earlyPane, promptMatch(text)]);
       await page.locator(`.pane[data-id="${earlyPane}"] [title="Close pane"]`).click();
       await page.locator('#confirm-action').click();
@@ -1448,7 +1476,7 @@ try {
     await page.waitForFunction((id) => !!window.qa.agents[id], pane);
     // loomctl isn't up before the read, so reports go in as Rust would emit them.
     const emit = (e) => page.evaluate(([id, e]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-      event: 'agent-events', payload: { seq: 0, events: [[id, { t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, ...e }]] },
+      event: 'agent-events', payload: { seq: ++window.qa.batch, events: [[id, { t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, ...e }]] },
     }), [pane, e]);
     const enter = async (text) => {
       await page.locator(`.pane[data-id="${pane}"] .xterm-helper-textarea`).focus();
@@ -1572,7 +1600,7 @@ try {
     await page.waitForTimeout(100);
     if (held) await page.waitForFunction(() => window.qa.heldWrites.length === 1);
     await page.evaluate(([id, match]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {
-      event: 'agent-events', payload: { seq: 0, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-context' }]] },
+      event: 'agent-events', payload: { seq: ++window.qa.batch, events: [[id, { kind: 'end', t: Date.now(), launch: window.qa.panes.find((p) => p.id === id).launch, matches: [match], turn: 'startup-context' }]] },
     }), [early, promptMatch(text)]);
     await page.locator(`.pane[data-id="${early}"] [title="Close pane"]`).click();
     await page.locator('#confirm-action').click();
@@ -2114,7 +2142,7 @@ try {
       assert.equal((await prompts(claude)).filter((t) => t === text).length, 1, "Claude got the earlier prompt only, not the task's");
       // As lib.rs send_task_events hands it to the page.
       await agent(claude, { input: '', busy: true });
-      await page.evaluate(([id, event]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: 0, events: [[id, event]] } }), [claude, event]);
+      await page.evaluate(([id, event]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq: ++window.qa.batch, events: [[id, event]] } }), [claude, event]);
       assert.equal((await until(a.task, 'working')).uncertain, 'submit', "The native start, stamped after the Enter, still proves nothing");
       await stops(claude);
       assert.equal((await until(a.task, 'unknown')).reason, 'submit-uncertain');

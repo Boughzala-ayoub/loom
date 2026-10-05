@@ -614,7 +614,9 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>, reports: State<R
             });
         }
     });
-    serde_json::json!({ "events": drain_task_events(&std::env::temp_dir().join("loom-task"), &ids), "emitted": emitted })
+    let mut events = reports.take_pending();
+    events.extend(drain_task_events(&std::env::temp_dir().join("loom-task"), &ids));
+    serde_json::json!({ "events": events, "emitted": emitted })
 }
 
 /// One git invocation in `dir`, stdout back, stderr as the error. The thread
@@ -990,7 +992,7 @@ fn send_wakes(app: &AppHandle, ids: &[String]) {
 /// with the wakes.
 fn send_task_events(app: &AppHandle, ids: &[String]) {
     app.state::<Reports>().send(&std::env::temp_dir().join("loom-task"), ids, |seq, events| {
-        let _ = app.emit("agent-events", serde_json::json!({ "seq": seq, "events": events }));
+        app.emit("agent-events", serde_json::json!({ "seq": seq, "events": events })).is_ok()
     });
 }
 
@@ -999,26 +1001,34 @@ fn send_task_events(app: &AppHandle, ids: &[String]) {
 /// thread hold this while they claim and send, so shutdown waits for a batch
 /// already on its way and the page, told its number, waits for it to land.
 #[derive(Default)]
-struct Reports(Mutex<(bool, u64)>);
+struct ReportState { closed: bool, emitted: u64, pending: Vec<(String, serde_json::Value)> }
+#[derive(Default)]
+struct Reports(Mutex<ReportState>);
 impl Reports {
-    fn admit(&self) -> Result<std::sync::MutexGuard<'_, (bool, u64)>, String> {
+    fn admit(&self) -> Result<std::sync::MutexGuard<'_, ReportState>, String> {
         let r = self.0.lock().unwrap();
-        if r.0 { return Err("Loom has stopped its panes for shutdown; retry closing the window".into()); }
+        if r.closed { return Err("Loom has stopped its panes for shutdown; retry closing the window".into()); }
         Ok(r)
     }
-    fn send(&self, dir: &std::path::Path, ids: &[String], send: impl FnOnce(u64, Vec<(String, serde_json::Value)>)) {
+    fn send(&self, dir: &std::path::Path, ids: &[String], send: impl FnOnce(u64, &[(String, serde_json::Value)]) -> bool) {
         let mut r = self.0.lock().unwrap();
-        if r.0 { return; }
-        let got = drain_task_events(dir, ids);
-        if got.is_empty() { return; }
-        r.1 += 1;
-        send(r.1, got);
+        if r.closed { return; }
+        r.pending.extend(drain_task_events(dir, ids));
+        if r.pending.is_empty() { return; }
+        let seq = r.emitted + 1;
+        if send(seq, &r.pending) {
+            r.emitted = seq;
+            r.pending.clear();
+        }
     }
     /// No batch goes out after this. The last one that did, by number.
     fn close(&self) -> u64 {
         let mut r = self.0.lock().unwrap();
-        r.0 = true;
-        r.1
+        r.closed = true;
+        r.emitted
+    }
+    fn take_pending(&self) -> Vec<(String, serde_json::Value)> {
+        std::mem::take(&mut self.0.lock().unwrap().pending)
     }
 }
 
@@ -2475,7 +2485,7 @@ mod tests {
         let (sending, on_its_way) = mpsc::channel();
         let (go, sent) = mpsc::channel::<()>();
         let poll = { let (r, dir, mine) = (reports.clone(), dir.clone(), mine.clone());
-            std::thread::spawn(move || r.send(&dir, &mine, |seq, got| { sending.send((seq, got.len())).unwrap(); sent.recv().unwrap(); })) };
+            std::thread::spawn(move || r.send(&dir, &mine, |seq, got| { sending.send((seq, got.len())).unwrap(); sent.recv().unwrap(); true })) };
         assert_eq!(on_its_way.recv().unwrap(), (1, 1));
         let shutdown = { let r = reports.clone(); std::thread::spawn(move || r.close()) };
         std::thread::sleep(Duration::from_millis(200));
@@ -2500,6 +2510,31 @@ mod tests {
         drop(admitted);
         closing.join().unwrap();
         assert!(reports.admit().is_err(), "a failed final journal drain must not admit new work");
+    }
+
+    #[test]
+    fn failed_report_emission_is_not_acknowledged_or_lost() {
+        let dir = std::env::temp_dir().join(format!("loom-report-emit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let reports = super::Reports::default();
+        let ids = vec!["p".into()];
+        std::fs::write(dir.join("p.1.json"), r#"{"kind":"start"}"#).unwrap();
+        reports.send(&dir, &ids, |_, _| false);
+        assert_eq!(reports.close(), 0, "an emit failure cannot certify a batch as sent");
+        assert_eq!(reports.take_pending()[0].1["kind"], "start", "shutdown must return the undelivered report");
+        let reports = super::Reports::default();
+        std::fs::write(dir.join("p.1.json"), r#"{"kind":"start"}"#).unwrap();
+        reports.send(&dir, &ids, |_, _| false);
+        std::fs::write(dir.join("p.2.json"), r#"{"kind":"stop"}"#).unwrap();
+        reports.send(&dir, &ids, |seq, events| {
+            assert_eq!(seq, 1);
+            assert_eq!(events.iter().map(|e| e.1["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["start", "stop"]);
+            true
+        });
+        assert_eq!(reports.close(), 1);
+        assert!(reports.take_pending().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
