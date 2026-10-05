@@ -341,7 +341,7 @@ pub fn session_usage(
 
 fn setting_value(value: &str, effort: bool) -> String {
     static PRIVATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(
-        r"(?i)^(?:[a-z]:[\\/]|/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]"
+        r"(?i)^(?:[a-z]:[\\/]|/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin"
     ).unwrap());
     static CREDENTIAL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(
         r"(?:^|[^a-zA-Z0-9])(?:glpat-[a-zA-Z0-9_-]{20,}|hf_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{20,}|AIza[a-zA-Z0-9_-]{30,}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)"

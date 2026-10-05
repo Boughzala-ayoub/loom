@@ -12,7 +12,9 @@
     "vendor/custom-model:v2",
     "vendor/asiaabcdefghijklmnop",
     "vendor/maizaabcdefghijklmnopqrstuvwxyz0123456789",
-    "vendor/github_pat_preview"
+    "vendor/github_pat_preview",
+    "vendor/token:latest",
+    "vendor/secret:v2"
   ],
   "efforts": [
     "none",

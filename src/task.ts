@@ -57,14 +57,15 @@ const ISSUES: readonly unknown[] = ["missing-name", "missing-number", "private-l
 export const LOOM_TITLES = { shell: "Terminal", agent: "Agent session" } as const;
 /** A path, or a name that looks like it holds a secret. A filter for the
  * obvious, not a promise that free text holds none. */
-const PRIVATE = /^(?:[a-z]:[\\/]|\/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin|\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]/i;
+const PRIVATE = /^(?:[a-z]:[\\/]|\/|~[\\/])|\\|(?:^|[^a-z0-9])(?:sk|pk|rk)-[a-z0-9_-]{16,}|\bgh[pousr]_[a-z0-9]{20,}|\bakia[0-9a-z]{16}\b|\bxox[abprs]-|-----begin/i;
 
 const CREDENTIAL = /(?:^|[^a-zA-Z0-9])(?:glpat-[a-zA-Z0-9_-]{20,}|hf_[a-zA-Z0-9]{30,}|github_pat_[a-zA-Z0-9_]{20,}|AIza[a-zA-Z0-9_-]{30,}|ASIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+)/;
-const privateValue = (value: string) => PRIVATE.test(value) || CREDENTIAL.test(value);
+const credentialOrPath = (value: string) => PRIVATE.test(value) || CREDENTIAL.test(value);
+const privateValue = (value: string) => credentialOrPath(value) || /\b(?:password|passwd|secret|token|api[_-]?key)\s*[=:]/i.test(value);
 
 /** Validate the whole value before any export, including restored fallbacks. */
 export function settingValue(value: unknown, kind: "model" | "effort"): string | null {
-  if (typeof value !== "string" || privateValue(value)) return null;
+  if (typeof value !== "string" || credentialOrPath(value)) return null;
   if (kind === "effort") return /^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(value) ? value : null;
   return value.length <= 160 && /^[a-z0-9][a-z0-9._:/-]*(?:\[[0-9]+[km]\])?$/i.test(value) ? value : null;
 }
