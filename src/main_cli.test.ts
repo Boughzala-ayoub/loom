@@ -527,3 +527,17 @@ if (check(303)) {
   assert.equal((await c.panes.run({ _: [] })).data[0].effort, null, "N7: observed unset effort must suppress obsolete startup and hook values");
   console.log("ok   N7 observed unset effort cannot revive a startup fallback");
 }
+
+if (check(304)) {
+  const calls: [string, unknown][] = [];
+  const c = fixture({ table: (rows: string[][]) => rows.flat().join(" "), invoke: async (cmd: string, args: unknown) => {
+    calls.push([cmd, args]);
+    return cmd === "trash_list" ? [{ id: "record", folder: "C:/old", at: "C:/trash/record", pending: false }] : "C:/recovered";
+  } });
+  assert.equal((await c.trash.run({ _: ["list"] })).data[0].id, "record");
+  const restored = await c.trash.run({ _: ["restore", "record"], to: "C:/recovered" });
+  assert.equal(restored.data.dir, "C:/recovered");
+  assert.equal(JSON.stringify(calls[1]), JSON.stringify(["trash_restore", { id: "record", destination: "C:/recovered" }]));
+  await assert.rejects(c.trash.run({ _: ["restore"] }), /Use loomctl trash/);
+  console.log("ok   R15-3 trash lists recovery ids and restores to a requested destination");
+}

@@ -8538,6 +8538,20 @@ const CLI: Record<string, CliCommand> = {
       return { data: { closed: p.id }, text: `Closed ${name}`, note: `loomctl closed ${name}` };
     },
   },
+  trash: {
+    usage: "trash [list|restore ID] [--to ABSOLUTE_PATH]",
+    help: "List retained worktrees, or restore one before its day in trash expires. Restore repairs its Git links, recreates its deleted branch, and cancels expiry before returning. --to chooses a free destination on the retained folder's volume. Existing folders and changed branch refs are never overwritten.",
+    options: { to: "string" },
+    run: async (a) => {
+      if ((!a._.length || a._[0] === "list") && a._.length <= 1 && a.to === undefined) {
+        const data = await invoke<{ id: string; folder: string; at: string; pending: boolean; restoring?: string }[]>("trash_list");
+        return { data, text: data.length ? table(data.map(r => [r.id, r.folder, r.restoring ? "restoring" : r.pending ? "pending" : "retained", r.at])) : "Loom's trash is empty." };
+      }
+      if (a._[0] !== "restore" || a._.length !== 2) throw new Error("Use loomctl trash list, or loomctl trash restore ID [--to ABSOLUTE_PATH].");
+      const dir = await invoke<string>("trash_restore", { id: a._[1], destination: str(a, "to") ?? null });
+      return { data: { restored: a._[1], dir }, text: `Restored ${dir}. Trash expiry is cancelled.`, note: `loomctl restored ${dir}` };
+    },
+  },
   "close-plan": {
     usage: "close-plan <thread> [--delete worktree|branch]",
     help: "What close-thread would do, changing nothing: the thread and the panes it stops, and with --delete what deleting loses that exists nowhere else (changed, untracked and ignored files, the branch's own commits). Its rev is what close-thread --plan takes.",
