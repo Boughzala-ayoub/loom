@@ -155,11 +155,29 @@ async fn answer(app: AppHandle, pipe: NamedPipeServer) -> std::io::Result<()> {
         return Ok(());
     }
     let reply = match request(&line) {
-        Ok(request) => ask(&app, request).await,
+        // The pipe itself, not past the request size limit, which reads as an end once reached.
+        Ok(request) => match unless_gone(read.get_mut().get_mut(), ask(&app, request)).await {
+            Some(reply) => reply,
+            None => return Ok(()),
+        },
         Err(error) => json!({ "ok": false, "error": error }),
     };
     // The wait was the page's; only the answer's write has a deadline.
     within(FRAME, async { write.write_all(format!("{reply}\n").as_bytes()).await?; write.flush().await }).await
+}
+
+/// `work`'s output, or None once the client hangs up: loomctl sends nothing
+/// after its request, so its end of the pipe reads EOF (or an error) only when
+/// it's gone. Dropping `work` then frees the slot a long wait would hold.
+/// ponytail: the page's own wait for that request polls on until its timeout.
+async fn unless_gone<T>(read: &mut (impl tokio::io::AsyncRead + Unpin), work: impl std::future::Future<Output = T>) -> Option<T> {
+    use std::{future::Future, task::Poll};
+    let mut byte = [0u8; 1];
+    let (mut work, mut gone) = (std::pin::pin!(work), std::pin::pin!(read.read(&mut byte)));
+    std::future::poll_fn(|cx| match work.as_mut().poll(cx) {
+        Poll::Ready(out) => Poll::Ready(Some(out)),
+        Poll::Pending => gone.as_mut().poll(cx).map(|_| None),
+    }).await
 }
 
 /// The command in loomctl's request line, if it is one to run: whole, JSON, a
@@ -191,6 +209,28 @@ mod tests {
         let got = tauri::async_runtime::block_on(super::within(std::time::Duration::from_millis(200), BufReader::new(server).read_line(&mut line)));
         assert_eq!(got.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_client_that_hangs_up_mid_wait_is_let_go() {
+        let name = format!(r"\\.\pipe\loom-hangup-test-{}", std::process::id());
+        let security = super::owner_only().unwrap();
+        let (gone, answered) = tauri::async_runtime::block_on(async {
+            let connect = || async {
+                let server = super::create(&name, false, security).unwrap();
+                let client = std::fs::OpenOptions::new().read(true).write(true).open(&name).unwrap();
+                server.connect().await.unwrap();
+                (client, tokio::io::split(server))
+            };
+            // A long wait the page won't finish, and loomctl closed: its admission slot must come back.
+            let (client, (mut read, _write)) = connect().await;
+            drop(client);
+            let gone = super::within(std::time::Duration::from_secs(2), async { Ok(super::unless_gone(&mut read, std::future::pending::<()>()).await) }).await;
+            let (_client, (mut read, _write)) = connect().await;
+            (gone, super::unless_gone(&mut read, async { 7 }).await)
+        });
+        assert_eq!(gone.expect("a hung-up client kept its wait"), None);
+        assert_eq!(answered, Some(7), "a connected client gets its answer");
     }
 
     #[test]
@@ -229,21 +269,23 @@ async fn ask(app: &AppHandle, request: Value) -> Value {
     let id = pending.next.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = oneshot::channel();
     pending.waiting.lock().unwrap().insert(id, tx);
+    // However this ends, answered, timed out or dropped with its client, the waiter goes.
+    struct Waiter<'a>(&'a Pending, u64);
+    impl Drop for Waiter<'_> {
+        fn drop(&mut self) { self.0.waiting.lock().unwrap().remove(&self.1); }
+    }
+    let _waiter = Waiter(&pending, id);
     let secs = request["timeout"].as_f64().unwrap_or(30.0).clamp(1.0, 86_400.0);
     // The words go to the page unparsed: only it knows which options each
     // command takes. Standard input comes apart from them, so text starting
     // with -- is never read as an option.
     let event = json!({ "id": id, "cmd": request["cmd"], "argv": request["argv"], "stdin": request["stdin"], "cwd": request["cwd"], "timeout": secs, "key": request["key"] });
     if let Err(e) = app.emit("cli", event) {
-        pending.waiting.lock().unwrap().remove(&id);
         return json!({ "ok": false, "error": format!("Loom couldn't pass the command to its window: {e}") });
     }
     match tokio::time::timeout(Duration::from_secs_f64(secs + 5.0), rx).await {
         Ok(Ok(reply)) => reply,
-        _ => {
-            pending.waiting.lock().unwrap().remove(&id);
-            json!({ "ok": false, "timeout": true, "error": format!("Loom didn't answer within {secs} s.") })
-        }
+        _ => json!({ "ok": false, "timeout": true, "error": format!("Loom didn't answer within {secs} s.") }),
     }
 }
 
