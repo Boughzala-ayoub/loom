@@ -67,7 +67,8 @@ impl Bus {
 }
 
 #[derive(Default)]
-pub struct Flows(pub Mutex<HashMap<u32, (String, Arc<Flow>)>>);
+/// Each output channel's pane, launch and flow.
+pub struct Flows(pub Mutex<HashMap<u32, (String, Option<u64>, Arc<Flow>)>>);
 
 #[derive(Default)]
 pub struct Flow {

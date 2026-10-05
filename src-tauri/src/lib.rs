@@ -434,7 +434,7 @@ fn pty_spawn(
     let (tx, rx) = std::sync::mpsc::sync_channel::<String>(16);
     let flow = Arc::new(output::Flow::default());
     let channel = on_out.id();
-    app.state::<output::Flows>().0.lock().unwrap().insert(channel, (id.clone(), flow.clone()));
+    app.state::<output::Flows>().0.lock().unwrap().insert(channel, (id.clone(), launch, flow.clone()));
     std::thread::spawn(move || pump(&mut reader, tx));
     let output_flow = flow.clone();
     let output_app = app.clone();
@@ -511,7 +511,7 @@ async fn pty_write(ptys: State<'_, Ptys>, id: String, data: String) -> Result<()
 
 #[tauri::command]
 fn pty_ack(flows: State<output::Flows>, channel: u32) {
-    if let Some((_, flow)) = flows.0.lock().unwrap().get(&channel) { flow.ack(); }
+    if let Some((_, _, flow)) = flows.0.lock().unwrap().get(&channel) { flow.ack(); }
 }
 
 /// Where panes spawned with `bus` send their output: one message per flush for
@@ -527,7 +527,7 @@ fn output_bus(bus: State<output::Bus>, on_out: tauri::ipc::Channel<Vec<(u32, Str
 fn pty_acks(flows: State<output::Flows>, acks: Vec<(u32, usize)>) {
     let flows = flows.0.lock().unwrap();
     for (channel, n) in acks {
-        if let Some((_, flow)) = flows.get(&channel) { flow.ack_n(n); }
+        if let Some((_, _, flow)) = flows.get(&channel) { flow.ack_n(n); }
     }
 }
 
@@ -563,15 +563,20 @@ fn resize_pty(ptys: &Ptys, id: &str, cols: u16, rows: u16,
     }
 }
 
-fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String, launch: Option<u64>) -> Result<(), String> {
-    // A stop for an older launch must not end the one that replaced it.
-    if launch.is_some() && ptys.0.lock().unwrap().get(&id).is_some_and(|s| s.launch != launch) { return Ok(()); }
+fn pty_kill(ptys: &Ptys, flows: &output::Flows, id: String, launch: Option<u64>) -> Result<(), String> {
+    // A stop for an older launch must not end the one that replaced it: checked
+    // and taken under one lock, so a spawn can't put its launch in between.
+    let session = {
+        let mut map = ptys.0.lock().unwrap();
+        if launch.is_some() && map.get(&id).is_some_and(|s| s.launch != launch) { return Ok(()); }
+        map.remove(&id)
+    };
     // A child can exit before its final output is parsed. Closing that pane
-    // must also release its emitter when no Session remains in the map.
-    for (pane, flow) in flows.0.lock().unwrap().values() {
-        if pane == &id { flow.close(); }
+    // must also release its emitter when no Session remains in the map: this
+    // launch's, not a replacement's whose spawn has registered its output.
+    for (pane, of, flow) in flows.0.lock().unwrap().values() {
+        if pane == &id && (launch.is_none() || *of == launch) { flow.close(); }
     }
-    let session = ptys.0.lock().unwrap().remove(&id);
     if let Some(mut s) = session {
         s.kill();
     }
@@ -581,7 +586,7 @@ fn pty_kill(ptys: State<Ptys>, flows: State<output::Flows>, id: String, launch: 
 /// Stops every pane and returns what they reported as they stopped: their exit
 /// threads find no session now, so nothing else would send it.
 fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>) -> Vec<(String, serde_json::Value)> {
-    for (_, flow) in flows.0.lock().unwrap().values() { flow.close(); }
+    for (_, _, flow) in flows.0.lock().unwrap().values() { flow.close(); }
     let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
     let ids: Vec<String> = sessions.keys().cloned().collect();
     taskkill(&sessions.values().filter_map(|s| s.pid).collect::<Vec<_>>());
@@ -1549,7 +1554,7 @@ mod commands {
     }
     #[tauri::command]
     pub async fn pty_kill(app: AppHandle, id: String, launch: Option<u64>) -> Result<(), String> {
-        blocking(move || super::pty_kill(app.state(), app.state(), id, launch)).await
+        blocking(move || super::pty_kill(&app.state(), &app.state(), id, launch)).await
     }
     #[tauri::command]
     pub async fn pty_shutdown(app: AppHandle) -> Vec<(String, serde_json::Value)> {
@@ -2463,6 +2468,19 @@ mod tests {
         super::prune_markers(&[dir.clone(), dir.join("missing")], std::time::Duration::from_secs(7 * 86_400));
         assert!(!old.exists() && new.exists());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_old_stop_leaves_the_replacements_output_alone() {
+        use std::sync::Arc;
+        let (ptys, flows) = (super::Ptys::default(), super::output::Flows::default());
+        let (old, new) = (Arc::new(super::output::Flow::default()), Arc::new(super::output::Flow::default()));
+        // Launch 1 exited; launch 2's spawn has registered its output, not yet its session.
+        flows.0.lock().unwrap().insert(1, ("p".into(), Some(1), old.clone()));
+        flows.0.lock().unwrap().insert(2, ("p".into(), Some(2), new.clone()));
+        super::pty_kill(&ptys, &flows, "p".into(), Some(1)).unwrap();
+        assert!(!old.acquire(), "the stopped launch's emitter is let go");
+        assert!(new.acquire(), "a stop for launch 1 cut off launch 2's output");
     }
 
     #[test]
