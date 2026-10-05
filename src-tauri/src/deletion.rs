@@ -1,6 +1,6 @@
 //! Identity of what deleting a worktree loses, for destructive approval. Never follow reparse points.
 use sha2::{Digest, Sha256};
-use std::{fs, io::{Read, Seek, Write}, path::{Path, PathBuf}, time::{Duration, Instant}};
+use std::{fs, io::{Read, Write}, path::{Path, PathBuf}, time::{Duration, Instant}};
 use std::os::windows::{ffi::OsStrExt, fs::{MetadataExt, OpenOptionsExt}};
 
 /// One hash over the worktree at `root`. `hashed` (git's tracked changes and
@@ -101,22 +101,25 @@ struct Trashed {
 const PENDING: &str = "Loom trash transaction pending\n";
 
 // Deny other readers/writers while this instance resumes or purges the record.
-// Delete sharing lets the owner remove it without an unlocked read/delete gap.
+// Delete sharing lets the owner remove or replace it without an unlocked gap.
 fn open_record(path: &Path) -> std::io::Result<(fs::File, Trashed)> {
     let mut file = fs::OpenOptions::new().read(true).write(true).share_mode(4).open(path)?;
     let r = serde_json::from_reader(&mut file)?;
     Ok((file, r))
 }
 
-fn write_record(file: &mut fs::File, r: &Trashed) -> std::io::Result<()> {
-    file.rewind()?;
-    file.write_all(&serde_json::to_vec_pretty(r)?)?;
-    let len = file.stream_position()?;
-    file.set_len(len)?;
-    file.sync_all()
+/// The new state goes beside the record, then replaces it whole: a crash or a
+/// failed write leaves the old state or the new one, never part of either. The
+/// new file is held before it replaces the old, and its handle is the lock now.
+fn write_record(file: &mut fs::File, path: &Path, r: &Trashed) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    let mut next = fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).share_mode(4).open(&tmp)?;
+    let written = next.write_all(&serde_json::to_vec_pretty(r)?).and_then(|_| next.sync_all()).and_then(|_| fs::rename(&tmp, path));
+    if written.is_err() { let _ = fs::remove_file(&tmp); }
+    written.map(|_| *file = next)
 }
 
-fn finish_record(file: &mut fs::File, r: &mut Trashed) -> Result<String, String> {
+fn finish_record(file: &mut fs::File, path: &Path, r: &mut Trashed) -> Result<String, String> {
     if r.pending {
         if r.entry.try_exists().map_err(|e| e.to_string())? {
             let lock = r.entry.join("locked");
@@ -139,7 +142,7 @@ fn finish_record(file: &mut fs::File, r: &mut Trashed) -> Result<String, String>
         let lock = r.entry_at.join("locked");
         if fs::read_to_string(&lock).is_ok_and(|s| s == PENDING) { fs::remove_file(lock).map_err(|e| e.to_string())?; }
         r.pending = false;
-        write_record(file, r).map_err(|e| e.to_string())?;
+        write_record(file, path, r).map_err(|e| e.to_string())?;
     }
     Ok(r.at.to_string_lossy().into_owned())
 }
@@ -151,10 +154,12 @@ fn resume(trash: &Path, worktrees: &Path, dir: &Path, pending_only: bool) -> Res
     };
     let mut completed: Option<(std::time::SystemTime, String)> = None;
     for path in list.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
-        let (mut file, mut r) = open_record(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // A record that can't be read, or is held by another operation, holds
+        // up only its own path: trash list shows it, every other path goes on.
+        let Ok((mut file, mut r)) = open_record(&path) else { continue };
         if (!pending_only || r.pending) && spelled(&r.folder) == spelled(dir) && r.entry.parent().is_some_and(|p| spelled(p) == spelled(worktrees))
             && (r.pending || !dir.try_exists().map_err(|e| e.to_string())?) {
-            if r.pending { return finish_record(&mut file, &mut r).map(Some); }
+            if r.pending { return finish_record(&mut file, &path, &mut r).map(Some); }
             let stamp = file.metadata().and_then(|m| m.modified()).map_err(|e| e.to_string())?;
             if completed.as_ref().is_none_or(|(last, _)| stamp > *last) {
                 completed = Some((stamp, r.at.to_string_lossy().into_owned()));
@@ -234,28 +239,32 @@ fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Resul
         }
     };
     let mut record = Trashed { folder: dir.into(), at: trash.join(&id), entry: entry.clone(), entry_at: common.join("loom-trash").join(&id), pending: true, from: from.map(Path::to_path_buf), branch, commit: Some(commit) };
-    write_record(&mut held, &record).map_err(|e| e.to_string())?;
     // Git itself honors this lock, including a blanket prune from another instance.
-    let mut lock = fs::OpenOptions::new().write(true).create_new(true).open(entry.join("locked")).map_err(|e| {
+    // Until it holds, nothing has moved: a reservation that can't be written
+    // goes again rather than stay half-written.
+    let reserved = write_record(&mut held, &file, &record).and_then(|_| {
+        let lock = entry.join("locked");
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&lock)?;
+        f.write_all(PENDING.as_bytes()).and_then(|_| f.sync_all()).inspect_err(|_| { let _ = fs::remove_file(&lock); })
+    });
+    if let Err(e) = reserved {
         let _ = fs::remove_file(&file);
-        e.to_string()
-    })?;
-    lock.write_all(PENDING.as_bytes()).and_then(|_| lock.sync_all()).map_err(|e| e.to_string())?;
-    drop(lock);
+        return Err(e.to_string());
+    }
     // Windows refuses to move a folder while anything inside is open (a
     // process's cwd, a file being written), so nothing is cut off mid-write.
     let mut moved = from.map_or(Ok(()), |from| fs::rename(from, &record.at));
     if moved.as_ref().is_err_and(|e| e.raw_os_error() == Some(17)) {
         // ERROR_NOT_SAME_DEVICE: on another volume than Loom's trash, it waits beside its own path.
         record.at = dir.with_file_name(format!(".{id}.loom-trash"));
-        moved = write_record(&mut held, &record).and_then(|_| fs::rename(from.unwrap(), &record.at));
+        moved = write_record(&mut held, &file, &record).and_then(|_| fs::rename(from.unwrap(), &record.at));
     }
     if let Err(e) = moved {
         let _ = fs::remove_file(&file);
         let _ = fs::remove_file(entry.join("locked"));
         return Err(format!("couldn't move {} to Loom's trash; is something still using it? {e}", dir.display()));
     }
-    finish_record(&mut held, &mut record)
+    finish_record(&mut held, &file, &mut record)
 }
 
 fn restored(r: &Trashed) -> std::io::Result<bool> {
@@ -287,10 +296,16 @@ pub fn trash_records(trash: &Path) -> Result<serde_json::Value, String> {
     };
     let mut records = Vec::new();
     for path in list.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
-        let (_held, r) = open_record(&path).map_err(|e| e.to_string())?;
-        let mut value = serde_json::to_value(r).map_err(|e| e.to_string())?;
-        value["id"] = path.file_stem().unwrap().to_string_lossy().into_owned().into();
-        records.push(value);
+        let id = path.file_stem().unwrap().to_string_lossy().into_owned();
+        records.push(match open_record(&path) {
+            Ok((_held, r)) => {
+                let mut value = serde_json::to_value(r).map_err(|e| e.to_string())?;
+                value["id"] = id.into();
+                value
+            }
+            // Damaged (a write cut short) or held by another operation right now.
+            Err(e) => serde_json::json!({ "id": id, "error": e.to_string() }),
+        });
     }
     Ok(records.into())
 }
@@ -487,6 +502,62 @@ mod tests {
     }
 
     #[test]
+    fn a_damaged_or_busy_record_holds_up_only_itself() {
+        let dir = std::env::temp_dir().join(format!("loom-damaged-record-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, other, trash) = (dir.join("repo"), dir.join("other"), dir.join("trash"));
+        for r in [&repo, &other] {
+            fs::create_dir_all(r).unwrap();
+            git(r, &["init", "-q"]);
+            git(r, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        }
+        // Another repository's deletion, its record held by an operation still running.
+        git(&other, &["worktree", "add", "-q", "-b", "t", dir.join("other-wt").to_str().unwrap()]);
+        remove_worktree(other.to_str().unwrap(), dir.join("other-wt").to_str().unwrap(), &trash).unwrap();
+        let busy = fs::read_dir(&trash).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "json")).unwrap();
+        let held = open_record(&busy).unwrap();
+        // A reservation whose first write never happened: a crash, or a full disk.
+        fs::write(trash.join("1-lost-0.json"), "").unwrap();
+        prepare_worktree(repo.to_str().unwrap(), dir.join("new").to_str().unwrap(), &trash).expect("a damaged or busy record stopped thread creation");
+        git(&repo, &["worktree", "add", "-q", "-b", "t", dir.join("wt").to_str().unwrap()]);
+        let at = remove_worktree(repo.to_str().unwrap(), dir.join("wt").to_str().unwrap(), &trash).expect("a damaged or busy record stopped deletion");
+        let list = trash_records(&trash).expect("one damaged record hid the whole trash");
+        let list = list.as_array().unwrap();
+        assert_eq!(list.len(), 3);
+        assert!(list.iter().any(|r| r["at"] == at.as_str()));
+        assert!(list.iter().any(|r| r["id"] == "1-lost-0" && r["error"].is_string()), "the damaged record isn't reported");
+        assert!(list.iter().any(|r| r["id"] == busy.file_stem().unwrap().to_str().unwrap() && r["error"].is_string()));
+        drop(held);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_record_is_replaced_whole_and_stays_locked() {
+        let dir = std::env::temp_dir().join(format!("loom-record-write-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        // The first write fails (here its temporary name is taken by a folder):
+        // nothing moves, and neither the reservation nor git's lock stays.
+        fs::create_dir_all(trash.join("7-wt-0.json.tmp")).unwrap();
+        assert!(remove_worktree_at(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash, 7).is_err());
+        assert!(!trash.join("7-wt-0.json").exists() && !repo.join(".git/worktrees/wt/locked").exists() && wt.join(".git").is_file());
+        fs::remove_dir(trash.join("7-wt-0.json.tmp")).unwrap();
+        remove_worktree_at(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash, 7).unwrap();
+        let file = trash.join("7-wt-0.json");
+        let (mut held, mut r) = open_record(&file).unwrap();
+        r.branch = Some("refs/heads/changed".into());
+        write_record(&mut held, &file, &r).unwrap();
+        assert!(open_record(&file).is_err(), "an update released the record lock");
+        drop(held);
+        assert_eq!(open_record(&file).unwrap().1.branch.as_deref(), Some("refs/heads/changed"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn same_millisecond_deletions_never_replace_another_record() {
         let dir = std::env::temp_dir().join(format!("loom-trash-collision-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -535,7 +606,7 @@ mod tests {
         let sibling = external.join(".wt.loom-trash");
         fs::rename(&r.at, &sibling).unwrap();
         r.at = sibling;
-        write_record(&mut held, &r).unwrap();
+        write_record(&mut held, &file, &r).unwrap();
         drop(held);
         fs::rename(&external, dir.join("offline")).unwrap();
         purge(&trash, Duration::ZERO);

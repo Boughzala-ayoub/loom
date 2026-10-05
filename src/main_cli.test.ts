@@ -532,12 +532,14 @@ if (check(304)) {
   const calls: [string, unknown][] = [];
   const c = fixture({ table: (rows: string[][]) => rows.map(r => r.join(" ")).join("\n"), invoke: async (cmd: string, args: unknown) => {
     calls.push([cmd, args]);
-    return [{ id: "record", folder: "C:/old", at: "C:/trash/record", entry: "C:/repo/.git/worktrees/old", entry_at: "C:/repo/.git/loom-trash/record", pending: false }];
+    return [{ id: "record", folder: "C:/old", at: "C:/trash/record", entry: "C:/repo/.git/worktrees/old", entry_at: "C:/repo/.git/loom-trash/record", pending: false },
+      { id: "cut-short", error: "EOF while parsing a value at line 1 column 0" }];
   } });
   const listed = await c.trash.run({ _: ["list"] });
   assert.equal(listed.data[0].id, "record");
   assert.match(listed.text, /folder C:\/old -> C:\/trash\/record/);
   assert.match(listed.text, /git C:\/repo\/.git\/worktrees\/old -> C:\/repo\/.git\/loom-trash\/record/);
+  assert.match(listed.text, /cut-short unreadable EOF while parsing/);
   await assert.rejects(c.trash.run({ _: ["restore", "record"] }), /Use loomctl trash list/);
   assert.deepEqual(calls.map(([cmd]) => cmd), ["trash_list"]);
   console.log("ok   trash list says where each folder and its Git record went, to move both back by hand");

@@ -300,7 +300,8 @@ file, and run `git worktree repair <folder>` from the repository. Once Git
 has the record back, at either path, Loom's purge leaves the folder alone and
 drops the trash entry. A `pending` record stopped between its two moves:
 deleting the same worktree again, or creating a thread at its path, finishes
-it.
+it. A record shown `unreadable` was cut short as it was written, or
+another operation holds it right then; it holds up nothing else.
 
 ### Typing into panes
 

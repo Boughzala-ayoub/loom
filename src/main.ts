@@ -8566,8 +8566,10 @@ const CLI: Record<string, CliCommand> = {
     help: "List deleted worktrees waiting in Loom's trash: where each folder and Git's record of it went. Move both back by hand to undo one (docs/loomctl.md).",
     run: async (a) => {
       if (a._.length > 1 || (a._.length && a._[0] !== "list")) throw new Error("Use loomctl trash list.");
-      const data = await invoke<{ id: string; folder: string; at: string; entry: string; entry_at: string; pending: boolean }[]>("trash_list");
-      return { data, text: data.length ? table(data.flatMap(r => [[r.id, r.pending ? "pending" : "retained", "folder", `${r.folder} -> ${r.at}`], ["", "", "git", `${r.entry} -> ${r.entry_at}`]])) : "Loom's trash is empty." };
+      // `error`: a record cut short as it was written, or held by an operation right now.
+      const data = await invoke<{ id: string; folder: string; at: string; entry: string; entry_at: string; pending: boolean; error?: string }[]>("trash_list");
+      return { data, text: data.length ? table(data.flatMap(r => r.error ? [[r.id, "unreadable", r.error]]
+        : [[r.id, r.pending ? "pending" : "retained", "folder", `${r.folder} -> ${r.at}`], ["", "", "git", `${r.entry} -> ${r.entry_at}`]])) : "Loom's trash is empty." };
     },
   },
   "close-plan": {
