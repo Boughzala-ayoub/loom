@@ -90,6 +90,8 @@ const setup = () => {
   // An agent's screen: transcript line, a rule, its input, a rule, a footer that says busy.
   qa.draw = (id) => {
     const a = qa.agents[id], rule = '─'.repeat(60);
+    // a.titled: Codex's thread id. Its title then follows the turn, as Codex's own does.
+    if (a.titled) out(id).onmessage(`\x1b]0;${a.titled} | ${a.busy ? 'Working' : 'Ready'}\x07`);
     if (a.dialog) return out(id).onmessage(`\x1b[2J\x1b[H ${a.dialog}\r\n  Enter to allow · Esc to deny\r\n`); // unnumbered, no hint
     // a.codexShape: Codex 0.160's composer as captured (src/fixtures/codex-composer.json): "›"
     // in column 0, the input from column 2 (dim placeholder; a multi-line paste collapsed and
@@ -2408,7 +2410,8 @@ try {
     await title('0199a1b2-c3d4-7e5f-8a9b-0c1d2... | Ready');
     await report(codex, { kind: 'end', matches: [promptMatch(text)], turn: 'codex-long-answer', response: promptMatch('Done.') });
     await until(r.text, 'completed');
-    await agent(codex, { codexShape: false });
+    // A title with a run state is believed alone from here: keep it in step for the cases after this one.
+    await agent(codex, { codexShape: false, titled: '0199a1b2-c3d4-7e5f-8a9b-0c1d2...' });
     assert.notEqual((await pane()).state, 'working', 'Ready: the pane is no longer busy');
     ok("Codex's run state in its title keeps a task working while it hides its status row; it completes on Ready and its end report");
   }
