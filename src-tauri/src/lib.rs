@@ -91,13 +91,7 @@ struct WindowMoved(std::sync::mpsc::Sender<()>);
 /// folder share a browser process, a second folder would start another.
 struct ProfileDir(PathBuf);
 
-/// The small always-on-top list of working and waiting agents that Loom shows
-/// while it is in the background (overlay.ts). `Some(show)` builds it on first
-/// use and shows or hides it; `None` closes it when the preference is turned off.
-/// Async on purpose: building a window inside a synchronous command deadlocks
-/// on Windows, which runs those on the event-loop thread the build waits for.
 /// Resolve explicit working directories before creating a pane or thread.
-#[tauri::command]
 fn canonical_directory(path: String) -> Result<String, String> {
     let dir = std::fs::canonicalize(&path).map_err(|_| "Not an existing directory".to_string())?;
     if !dir.is_dir() { return Err("Not an existing directory".into()); }
@@ -107,6 +101,11 @@ fn canonical_directory(path: String) -> Result<String, String> {
        else { text.strip_prefix(r"\\?\").unwrap_or(&text).to_string() })
 }
 
+/// The small always-on-top list of working and waiting agents that Loom shows
+/// while it is in the background (overlay.ts). `Some(show)` builds it on first
+/// use and shows or hides it; `None` closes it when the preference is turned off.
+/// Async on purpose: building a window inside a synchronous command deadlocks
+/// on Windows, which runs those on the event-loop thread the build waits for.
 #[tauri::command]
 async fn overlay(app: AppHandle, show: Option<bool>) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
@@ -1416,6 +1415,12 @@ mod commands {
             deletion::fingerprint(std::path::Path::new(&dir), index.exists().then_some(index.as_path()), &hashed)
         }).await
     }
+    /// Off the main thread: a folder on an unreachable share waits out the SMB
+    /// timeout, and a sync command would stall the window and every request.
+    #[tauri::command]
+    pub async fn canonical_directory(path: String) -> Result<String, String> {
+        blocking(move || super::canonical_directory(path)).await
+    }
     #[tauri::command]
     pub async fn worktree_remove(repo: String, dir: String) -> Result<(), String> {
         blocking(move || deletion::remove_worktree(&repo, &dir)).await
@@ -1688,7 +1693,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            canonical_directory,
+            commands::canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, load_state, commands::save_state, commands::open_vscode,
             commands::worktree_fingerprint, commands::worktree_remove, commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
@@ -1805,6 +1810,8 @@ mod tests {
         let dir = std::env::temp_dir();
         let plain = super::canonical_directory(dir.to_string_lossy().into()).unwrap();
         assert_eq!(super::canonical_directory(dir.join(".").to_string_lossy().into()).unwrap(), plain);
+        // The command loomctl new calls runs on the blocking pool, not the window's thread.
+        assert_eq!(tauri::async_runtime::block_on(super::commands::canonical_directory(dir.to_string_lossy().into())).unwrap(), plain);
         let file = dir.join(format!("loom-cwd-test-{}.txt", std::process::id()));
         std::fs::write(&file, "test").unwrap();
         assert!(super::canonical_directory(file.to_string_lossy().into()).is_err());
