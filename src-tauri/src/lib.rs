@@ -957,11 +957,7 @@ fn read_task_journal(path: &std::path::Path) -> Result<String, String> {
 fn task_journal_write(app: AppHandle, text: String, append: bool) -> Result<(), String> {
     use std::io::Write;
     let path = task_journal_file(&app);
-    if append {
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
-        f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-        return f.sync_all().map_err(|e| e.to_string());
-    }
+    if append { return append_journal(&path, &text); }
     // A rewrite (on load, and when appends pile up) replaces the file whole, as save_state does.
     let pending = path.with_extension("jsonl.pending");
     let mut f = std::fs::File::create(&pending).map_err(|e| e.to_string())?;
@@ -969,6 +965,18 @@ fn task_journal_write(app: AppHandle, text: String, append: bool) -> Result<(), 
     f.sync_all().map_err(|e| e.to_string())?;
     drop(f);
     std::fs::rename(pending, path).map_err(|e| e.to_string())
+}
+
+/// Append records. After a torn last line (a crash mid-append) they start on
+/// a line of their own, or the next replay would skip them with the fragment.
+fn append_journal(path: &std::path::Path, text: &str) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let mut f = std::fs::OpenOptions::new().create(true).read(true).append(true).open(path).map_err(|e| e.to_string())?;
+    let mut last = [b'\n'];
+    if f.seek(SeekFrom::End(-1)).is_ok() { f.read_exact(&mut last).map_err(|e| e.to_string())?; }
+    let text = if last[0] == b'\n' { text.to_string() } else { format!("\n{text}") };
+    f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())
 }
 
 /// `(pane id, session id)` for every pane in `ids` whose codex notify script
@@ -1761,6 +1769,16 @@ mod tests {
         let mut command = std::process::Command::new("cmd");
         command.args(["/d", "/c", "echo 0123456789012345678901234567890123456789"]).creation_flags(0x0800_0000);
         assert!(super::diff_output(&mut command, 16).is_err());
+    }
+    #[test]
+    fn journal_appends_start_after_a_torn_line() {
+        let path = std::env::temp_dir().join(format!("loom-journal-torn-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        super::append_journal(&path, "{\"a\":1}\n").unwrap();
+        std::fs::OpenOptions::new().append(true).open(&path).and_then(|mut f| std::io::Write::write_all(&mut f, b"{\"torn\":")).unwrap();
+        super::append_journal(&path, "{\"notify\":false}\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\":1}\n{\"torn\":\n{\"notify\":false}\n");
+        std::fs::remove_file(path).unwrap();
     }
     #[test]
     fn workspace_read_errors_preserve_the_original() {
