@@ -3,7 +3,7 @@
  * posted to /api/cli. See docs/phone-remote-study.md. */
 import "./remote.css";
 import { $, app, closeSheet, el, findPane, go, hooks, Offline, panes, pref, run, sleep, store, toast, ui, type IconName, type Thread } from "./remote/core";
-import { drawHead, drawList, list, newView, openPane, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
+import { drawHead, drawList, list, newView, openPane, openPaneRef, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
 import { diffView, filesView, read as readChanges, showCommit, showDiff, showFile, showFiles, showSummary, summary } from "./remote/changes";
 import { contextView, read as readUsage, showContext, usageView } from "./remote/usage";
 import { closeStale, read as readSettings, settingsView, syncPush, wear } from "./remote/settings";
@@ -41,9 +41,14 @@ function view(): View {
   const [head = "", a = "", b = "", c = ""] = location.hash.replace(/^#\/?/, "").split("/").map((s) => decodeURIComponent(s));
   switch (head) {
     case "pane": {
-      // A notification from before Loom restarted names a pane id that is gone: its ref finds the agent.
-      const id = findPane(a) || !b ? a : panes().find((p) => p.ref === b)?.id ?? a;
-      return { tab: "agents", primary: list, detail: paneView, enter: () => { showPane(id); showList(id); } };
+      // A link names the pane, and the agent by its ref: once Loom restarted the id is gone and the
+      // ref finds the agent. A notification can name a pane newer than the list: that is read first.
+      const show = () => {
+        const id = findPane(a) || !b ? a : panes().find((p) => p.ref === b)?.id ?? a;
+        showPane(id);
+        showList(id);
+      };
+      return { tab: "agents", primary: list, detail: paneView, enter: () => (findPane(a) || !b ? show() : void refresh().catch(() => {}).finally(show)) };
     }
     case "new": return { tab: "agents", primary: list, detail: newView, enter: () => { showNew(); showList(null); } };
     case "changes": return { tab: "changes", primary: summary, hint: ["Pick a file", "Its diff shows here, with a button for each hunk."], enter: () => showSummary(a || null) };
@@ -109,6 +114,15 @@ async function refresh() {
   const waiting = app.threads.flatMap((t) => t.panes).filter((p) => p.state === "waiting").length;
   badge.textContent = String(waiting);
   badge.hidden = !waiting;
+  // Loom restarted under the open agent: its pane id is gone and the agent has a new one. The
+  // address follows without a new history entry, and nothing else on the page is touched.
+  const gone = openPane();
+  const again = gone && !paneView.hidden && !findPane(gone) ? panes().find((p) => p.ref === openPaneRef()) : undefined;
+  if (again) {
+    history.replaceState(null, "", `#/pane/${encodeURIComponent(again.id)}/${encodeURIComponent(again.ref)}`);
+    showPane(again.id);
+    showList(again.id);
+  }
   if (!list.hidden) drawList();
   if (!paneView.hidden) drawHead();
   if (!usageView.hidden) void readUsage(); // the PC's own reading, every minute

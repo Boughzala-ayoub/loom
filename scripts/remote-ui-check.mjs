@@ -52,6 +52,7 @@ const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 10
 /** A page whose /api answers like Loom. `hold` keeps a `git <thread> <action>` reply until state.held[it]() runs. */
 // RFC 8291's example public key: any P-256 point does for a subscription that is made up.
 const PUSH_KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8';
+/** push: true for a phone that may get notifications, 'old-key' for one subscribed before Loom's key changed. */
 async function context(width, token = true, push = false) {
   const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false };
   const ctx = await browser.newContext({ viewport: { width, height: 800 } });
@@ -59,15 +60,20 @@ async function context(width, token = true, push = false) {
   if (push) {
     await ctx.grantPermissions(['notifications'], { origin: base });
     // Headless Chrome can't reach a push service: the subscription is made up, the worker is real.
-    await ctx.addInitScript(() => {
-      let sub = null;
+    await ctx.addInitScript(oldKey => {
+      const made = (endpoint, key) => ({ endpoint, options: { applicationServerKey: key },
+        toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } }; }, async unsubscribe() { sub = null; sessionStorage.removeItem('test-sub-key'); return true; } });
+      // Kept across reloads, as a browser keeps it. 'old-key': one made with a key Loom has since replaced.
+      const kept = sessionStorage.getItem('test-sub-key');
+      let sub = kept ? made('https://push.example/sub/1', Uint8Array.from(kept.split(',').map(Number)).buffer)
+        : oldKey ? made('https://push.example/sub/old', new Uint8Array(65).fill(4).buffer) : null;
       PushManager.prototype.subscribe = async function (o) {
-        sub = { endpoint: 'https://push.example/sub/1', options: { applicationServerKey: new Uint8Array(o.applicationServerKey).buffer },
-          toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } }; }, async unsubscribe() { sub = null; return true; } };
-        return sub;
+        sessionStorage.setItem('test-subscribes', String(Number(sessionStorage.getItem('test-subscribes') ?? 0) + 1));
+        sessionStorage.setItem('test-sub-key', Array.from(new Uint8Array(o.applicationServerKey)).join());
+        return (sub = made('https://push.example/sub/1', new Uint8Array(o.applicationServerKey).buffer));
       };
       PushManager.prototype.getSubscription = async function () { return sub; };
-    });
+    }, push === 'old-key');
   }
   await ctx.route('**/api/**', async route => {
     const req = route.request(), c = req.postDataJSON();
@@ -88,10 +94,12 @@ async function context(width, token = true, push = false) {
     let data;
     const threads = [thread('a', 'Alpha'), thread('b', 'Beta', 'codex')];
     if (state.changedTitle) threads[1].panes[0].title = 'Another agent has changed its title';
+    // Loom restarted on the PC: the same agents, with new pane ids.
+    if (state.newIds) for (const t of threads) t.panes[0].id = `new-${t.panes[0].id}`;
     switch (c.cmd) {
       case 'status': data = { phone: false, agents: state.startups.map(s => s.label), booted: state.booted, updated: state.updated }; break;
       // The restarted Loom answers a moment later, started anew.
-      case 'relaunch': setTimeout(() => state.booted++, 1500); data = { stopping: [] }; break;
+      case 'relaunch': if (!state.holdRestart) setTimeout(() => state.booted++, 1500); data = { stopping: [], booted: state.booted }; break;
       case 'threads': data = threads; break;
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
       case 'menu': data = { question: ['May I change this file?'], options: ['Yes, go ahead', 'No, keep it'], keys: ['1', '2'], rev: 'menu-1' }; break;
@@ -493,6 +501,104 @@ try {
     await ctx.close();
   }
   console.log('PASS restarting Loom from the phone: the update hint, a confirm, a banner while it restarts, a reload when it is back');
+  // --- After Loom restarts on the PC -----------------------------------------------------------
+  {
+    // A warm tap on a notification sent by the new Loom: its pane id is newer than the list
+    // the page read, so the page reads the list before resolving it.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/settings', '#settings .group');
+    state.newIds = true;
+    await page.evaluate(() => (location.hash = '#/pane/new-b1/Beta%3A1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
+    await page.waitForTimeout(2500);
+    const reads = state.calls.filter(c => c.cmd === 'read').map(c => c.argv[0]);
+    assert.ok(reads.includes('new-b1') && !reads.includes('b1'), `the new pane is read, never the old one: ${reads}`);
+    assert.doesNotMatch(await page.locator('#pane .who b').innerText(), /gone/);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // Loom restarts on the PC while an agent is open: it follows the agent to its new pane id,
+    // keeps the message being typed, and adds no history entry.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/b1', '#screen .line');
+    await page.fill('#prompt textarea', 'half a message');
+    const entries = await page.evaluate(() => history.length);
+    state.newIds = true;
+    await page.waitForFunction(() => location.hash === '#/pane/new-b1/Beta%3A1', null, { timeout: 8000 });
+    await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
+    const since = state.calls.length;
+    await page.waitForTimeout(1500);
+    assert.ok(state.calls.slice(since).some(c => c.cmd === 'read' && c.argv[0] === 'new-b1'));
+    assert.ok(!state.calls.slice(since).some(c => c.cmd === 'read' && c.argv[0] === 'b1'), 'the old id is no longer read');
+    assert.equal(await page.inputValue('#prompt textarea'), 'half a message');
+    assert.equal(await page.evaluate(() => history.length), entries);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS after a PC restart: a notification opens the new pane, and an open agent follows its new id');
+
+  // --- A restart waits for the Loom that replaces the one asked ----------------------------------
+  {
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/settings', '#settings .group');
+    await page.getByRole('button', { name: 'Restart', exact: true }).waitFor();
+    // Settings read booted 1; Loom has since restarted on the PC (2). The restart asked now
+    // must wait for 3, not reload as soon as it sees 2.
+    state.booted = 2;
+    state.holdRestart = true;
+    await page.evaluate(() => (window.samePage = true));
+    await page.getByRole('button', { name: 'Restart', exact: true }).click();
+    await sheetButton(page, 'Restart').click();
+    await page.locator('#offline').filter({ hasText: 'Loom is restarting on the PC' }).waitFor();
+    await page.waitForTimeout(5000);
+    assert.equal(await page.evaluate(() => window.samePage), true, 'no reload while Loom 2, the one asked, still answers');
+    const reloaded = page.waitForEvent('load', { timeout: 10000 });
+    state.booted = 3;
+    await reloaded;
+    assert.equal(state.calls.filter(c => c.cmd === 'relaunch').length, 1);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  // Its confirm and the wait, at every width.
+  for (const width of [320, 375, 768, 901, 1024, 1280]) {
+    const { ctx, page, state } = await context(width);
+    state.updated = true;
+    state.holdRestart = true;
+    await goto(page, '#/settings', '#settings .group');
+    await page.getByRole('button', { name: 'Restart to update', exact: true }).click();
+    await page.locator('#sheet.on').filter({ hasText: 'Restart Loom?' }).waitFor();
+    await page.waitForTimeout(400);
+    await fits(page, width, 'restart-confirm');
+    await sheetButton(page, 'Restart').click();
+    await page.locator('#offline').filter({ hasText: 'Loom is restarting on the PC' }).waitFor();
+    await fits(page, width, 'restart-pending');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS a restart waits for the Loom that replaces the one asked; its confirm and wait fit every width');
+
+  // --- A subscription made with Loom's old key is replaced at start -------------------------------
+  {
+    const { ctx, page, state } = await context(375, true, 'old-key');
+    // The worker from an earlier visit, then the page as a phone opens it again.
+    await page.goto(`${base}/#/settings`);
+    await page.evaluate(() => navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready));
+    await page.reload();
+    const subscribes = () => page.evaluate(() => Number(sessionStorage.getItem('test-subscribes') ?? 0));
+    await until('the replacement reaches Loom', () => state.push.sub?.endpoint === 'https://push.example/sub/1');
+    await page.getByRole('switch', { name: 'Notifications on this phone', checked: true }).waitFor();
+    assert.equal(await subscribes(), 1, 'subscribed again once, with the current key');
+    // Already on Loom's key: kept as it is.
+    await page.reload();
+    await page.locator('#settings .group').first().waitFor();
+    await page.waitForTimeout(1500);
+    assert.equal(await subscribes(), 1, 'a subscription on the current key is kept');
+    assert.equal(state.push.sub.endpoint, 'https://push.example/sub/1');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS a subscription made with an old key is replaced at start, one on the current key is kept');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));

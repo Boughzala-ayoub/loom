@@ -613,8 +613,11 @@ if (check(308)) {
     push: async (m: any) => { sent.push(m); return { sent: 1, failed: [] }; } });
   const at = Date.now(), t = { id: "t1", pane: "p1", startedAt: at - 4 * 60_000 } as any;
   const notice = (seq: number, state: string, more = {}) => lastFixture.pushNotice(t, { seq, task: "t1", at, state, signal: "end", ...more });
-  await notice(5, "completed", { response: "All tests pass." });
-  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{ title: "work:1 · Codex finished · 4 min", body: "All tests pass.", tag: "p1", url: "/#/pane/p1/work%3A1" }]);
+  // A completion's response is its answer's promptMatch (task.ts), never words to show.
+  const response = task.promptMatch("All tests pass.");
+  assert.match(response, /^[0-9a-f]{16}$/);
+  await notice(5, "completed", { response });
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{ title: "work:1 · Codex finished · 4 min", body: "Its task is done.", tag: "p1", url: "/#/pane/p1/work%3A1" }]);
   await notice(6, "working");
   assert.equal(sent.length, 1, "working is no notice");
   await notice(7, "approval");

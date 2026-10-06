@@ -61,10 +61,16 @@ async function pushApi(change: object) {
   return reply as { key: string | null; on: boolean };
 }
 const subscribed = async () => (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription() ?? null;
-/** On when Loom has this phone's subscription and the browser still holds it. */
+/** The key a subscription was made with: a push signed with any other is refused (RFC 8292, section 4.2). */
+function keyOf(sub: PushSubscription | null) {
+  const made = sub?.options.applicationServerKey;
+  return made ? b64u(new Uint8Array(made)) : "";
+}
+/** On when Loom has this phone's subscription and the browser holds it, made with Loom's key. */
 async function pushState() {
   if (!pushable()) return;
-  pushOn = (await pushApi({})).on && Notification.permission === "granted" && !!(await subscribed());
+  const { key, on } = await pushApi({});
+  pushOn = on && Notification.permission === "granted" && !!key && keyOf(await subscribed()) === key;
 }
 /** Signs this phone up for Loom's notifications (Android asks first), or stops them. */
 async function setPush(on: boolean) {
@@ -80,8 +86,7 @@ async function setPush(on: boolean) {
   await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
   // Made with another key (Loom's remote settings were reset): sign up again.
-  const made = sub?.options.applicationServerKey;
-  if (sub && (!made || b64u(new Uint8Array(made)) !== key)) (await sub.unsubscribe(), (sub = null));
+  if (sub && keyOf(sub) !== key) (await sub.unsubscribe(), (sub = null));
   sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(key) });
   pushOn = (await pushApi({ subscription: sub.toJSON() })).on;
 }
@@ -90,8 +95,10 @@ export async function syncPush() {
   if (!pushable() || Notification.permission !== "granted") return;
   // A newer worker from an updated Loom takes over now, not a day later.
   void (await navigator.serviceWorker.getRegistration())?.update().catch(() => {});
-  const sub = await subscribed();
-  if (sub) pushOn = (await pushApi({ subscription: sub.toJSON() })).on;
+  // Checked as switching them on checks it: one made with a key Loom has since changed is replaced.
+  if (!(await subscribed())) return;
+  await setPush(true);
+  if (!settingsView.hidden) draw(); // Settings may be up already, drawn before this
 }
 /** A notification goes once its agent was seen or answered (idle or working again), 15 s after it came.
  * One for an agent that exited stays. */
@@ -110,8 +117,9 @@ async function restartLoom() {
   const detail = busy.length ? `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: restarting stops ${busy.length === 1 ? "it" : "them"}. Every agent comes back in its session.`
     : "Loom closes safely on the PC and starts again, the new version if you just updated. Every agent comes back in its session.";
   if (!(await confirmSheet("Restart Loom?", detail, "Restart", busy.length > 0))) return;
-  const was = loom.booted;
-  if (!(await act(() => run("relaunch", ["--yes"], { change: true })))) return;
+  // The Loom that takes the request says which it is: Settings' reading may be of one restarted since.
+  let was: number | undefined;
+  if (!(await act(async () => { was = (await run<{ booted: number }>("relaunch", ["--yes"], { change: true })).booted; }))) return;
   app.restarting = true;
   const banner = $("#offline");
   banner.classList.add("calm");

@@ -391,6 +391,7 @@ let wrap = pref("loom-wrap", "1") === "1";
 export function showPane(id: string) {
   if (id !== open) {
     open = id;
+    openRef = findPane(id)?.ref ?? "";
     openState = "";
     shown = null;
     question = "";
@@ -411,6 +412,8 @@ export function showPane(id: string) {
   reread();
 }
 export const openPane = () => open;
+let openRef = ""; // the open agent's ref: it finds the agent again once Loom restarts and its pane id is gone
+export const openPaneRef = () => openRef;
 
 /** Opening a waiting agent, or tapping its screen, clears the wait as a click on its pane does on the PC. */
 function seen() {

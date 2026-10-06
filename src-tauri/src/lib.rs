@@ -1529,7 +1529,16 @@ fn sweep_stale_profiles(base: &std::path::Path, keep: &std::path::Path) {
 /// no arg → the default `workspaces.json`, which a profile launch never touches.
 /// `--reset` is not a profile (see `run`), so it's filtered out here.
 fn profile_arg() -> Option<String> {
-    std::env::args().nth(1).filter(|a| a != "--reset")
+    profile_of(&std::env::args().skip(1).collect::<Vec<_>>())
+}
+fn profile_of(args: &[String]) -> Option<String> {
+    args.first().filter(|a| *a != "--reset").cloned()
+}
+
+/// What a restart starts with: the profile alone. `--reset` was for the start
+/// it came with; passed on, it would delete what this session saved.
+fn relaunch_args(args: &[String]) -> Vec<String> {
+    profile_of(args).into_iter().collect()
 }
 
 /// Restarting (main.ts relaunch, after its safe close): starts this exe again,
@@ -1541,7 +1550,7 @@ fn relaunch() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(std::env::args_os().skip(1)).env("LOOM_AFTER_PID", std::process::id().to_string());
+    cmd.args(relaunch_args(&std::env::args().skip(1).collect::<Vec<_>>())).env("LOOM_AFTER_PID", std::process::id().to_string());
     // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, and out of any job Loom itself
     // was started in, unless that job forbids it: the new Loom outlives this one.
     const DETACHED: u32 = 0x0000_0008;
@@ -2013,6 +2022,17 @@ mod tests {
         super::wait_exit(old.id());
         assert!(gone.elapsed() < std::time::Duration::from_secs(5), "a process already gone is no wait");
         assert!(!super::exe_updated(), "the test exe is the one that started");
+    }
+
+    #[test]
+    fn a_restart_keeps_the_profile_and_never_resets_it() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::relaunch_args(&args(&["C:/p/work.json", "--reset"])), args(&["C:/p/work.json"]), "what this session saved stays");
+        assert_eq!(super::relaunch_args(&args(&["C:/p/work.json"])), args(&["C:/p/work.json"]));
+        assert!(super::relaunch_args(&args(&["--reset"])).is_empty(), "the default workspace, kept");
+        assert!(super::relaunch_args(&args(&[])).is_empty());
+        // `loom --reset x.json` started on the default workspace: so does its restart.
+        assert!(super::relaunch_args(&args(&["--reset", "C:/p/work.json"])).is_empty());
     }
 
     #[test]

@@ -4071,7 +4071,8 @@ async function pushNotice(t: Task, e: TaskEvent) {
   const title = kind === "finish" ? `${ref} · ${agent} finished${took}` : kind === "blocked" ? `${ref} · ${agent} asks` : `${ref} · ${agent} failed`;
   const body = kind === "blocked"
     ? (menu ? [menu.question.join(" ").trim(), ...menu.options.map((o, i) => `${menu.keys?.[i] ?? i + 1}. ${o}`)].join("\n") : "It's waiting on you.")
-    : e.response?.trim() || e.detail || (kind === "finish" ? "Its task is done." : "Its task failed.");
+    // Never e.response: it names the agent's answer (promptMatch), it isn't the answer.
+    : e.detail || (kind === "finish" ? "Its task is done." : "Its task failed.");
   await push({ title, body: body.slice(0, 600), tag: p.id, url: `/#/pane/${encodeURIComponent(p.id)}/${encodeURIComponent(ref)}` });
 }
 
@@ -8165,7 +8166,7 @@ const CLI: Record<string, CliCommand> = {
       if (busy.length && !flag(a, "yes")) throw new Error(`${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: a restart stops ${busy.length === 1 ? "it" : "them"}. Add --yes.`);
       // After this answer has gone out.
       setTimeout(relaunch, 300);
-      return { data: { stopping: busy }, text: "Loom is restarting." };
+      return { data: { stopping: busy, booted: bootedAt }, text: "Loom is restarting." };
     },
   },
   usage: {
