@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use tokio::sync::oneshot;
@@ -293,15 +293,17 @@ pub(crate) async fn ask(app: &AppHandle, request: Value) -> Value {
 }
 
 /// The page's answer to request `id`: `{ ok, data?, text?, error? }`.
-#[tauri::command]
-pub fn cli_reply(pending: State<Pending>, id: u64, reply: Value) {
-    if let Some(tx) = pending.waiting.lock().unwrap().remove(&id) {
+/// Async so a reply doesn't queue behind other work on the window thread,
+/// where Windows runs sync commands.
+#[tauri::command(async)]
+pub fn cli_reply(app: AppHandle, id: u64, reply: Value) {
+    if let Some(tx) = app.state::<Pending>().waiting.lock().unwrap().remove(&id) {
         let _ = tx.send(reply);
     }
 }
 
 /// The page is listening: requests stop waiting for it.
-#[tauri::command]
-pub fn cli_ready(pending: State<Pending>) {
-    pending.ready.store(true, Ordering::Release);
+#[tauri::command(async)]
+pub fn cli_ready(app: AppHandle) {
+    app.state::<Pending>().ready.store(true, Ordering::Release);
 }
