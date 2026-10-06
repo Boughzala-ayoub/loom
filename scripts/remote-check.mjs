@@ -548,6 +548,27 @@ try {
   await page.locator('#list .thread-head .name', { hasText: 'alpha-renamed' }).waitFor();
   console.log('PASS renaming a thread from its menu');
 
+  // Restarting from the phone's Settings: Loom closes safely, starts again on
+  // the same profile with its threads, and the page reloads from the new one.
+  const before = ok('--json', 'status').json.booted;
+  await page.goto(`${base}/#/settings`);
+  await page.getByRole('button', { name: 'Restart', exact: true }).click();
+  const reloaded = page.waitForEvent('load', { timeout: 90000 });
+  await sheetButton(page, 'Restart').click();
+  await page.locator('#offline', { hasText: 'Loom is restarting on the PC' }).waitFor();
+  await reloaded;
+  const after = ok('--json', 'status').json;
+  assert.ok(after.booted > before, 'a new Loom answers');
+  assert.equal(after.updated, false, 'nothing replaced its exe');
+  assert.equal(ok('--json', 'threads').json[0].name, 'alpha-renamed', 'its threads came back');
+  await page.locator('#settings .group').first().waitFor();
+  // The new Loom was started by the old one: find it, so the steps below stop it.
+  const pids = spawnSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "Name='loom.exe'" | Where-Object { $_.CommandLine -like '*${profile}*' }).ProcessId`], { encoding: 'utf8' })
+    .stdout.trim().split(/\s+/).map(Number).filter(Boolean);
+  assert.equal(pids.length, 1, 'one Loom on the profile: the old one has gone');
+  child = { pid: pids[0] };
+  console.log('PASS restarting Loom from the phone: it closes, starts again on its profile, and the page reloads from it');
+
   // Revoked, the page asks to pair again.
   ok('remote', 'revoke');
   await page.locator('#pairing').waitFor({ timeout: 10000 });

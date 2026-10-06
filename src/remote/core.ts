@@ -25,6 +25,7 @@ export const app = {
   threads: [] as Thread[],
   agents: ["claude", "codex", "opencode"],
   phoneSize: false,
+  restarting: false, // Loom is restarting on the PC: the loops wait, the page reloads when it's back
 };
 export const panes = () => app.threads.flatMap((t) => t.panes);
 export const findPane = (id: string | null) => panes().find((p) => p.id === id);
@@ -67,7 +68,7 @@ export async function run<T>(cmd: string, argv: string[] = [], opts: { stdin?: s
       store("");
       hooks.unpaired();
     }
-    $("#offline").hidden = true;
+    if (!app.restarting) $("#offline").hidden = true; // a restart keeps its own banner up
     if (!reply.ok) throw new Error(reply.error ?? "Loom refused that.");
     return reply.data as T;
   }

@@ -2854,6 +2854,21 @@ class Thread {
 const threads: Thread[] = [];
 /** Native shutdown committed: preserve its reports and allow only a close retry. */
 let shuttingDown = false;
+/** This Loom's start, so a phone waiting on a restart sees the new one answer (status's `booted`). */
+const bootedAt = Date.now();
+let relaunching = false;
+/** Restarts Loom: the safe close that closing its window runs, then the exe
+ * starts again (lib.rs relaunch), after an update the new version. Every pane
+ * comes back, agents in their sessions; a turn under way stops. */
+function relaunch() {
+  relaunching = true;
+  getCurrentWindow().close().catch((e) => {
+    relaunching = false;
+    toast(`Could not restart Loom: ${String(e)}`);
+  });
+}
+/** The panes a restart would stop in the middle of something. */
+const working = () => threads.flatMap((t) => t.panes).filter((p) => cliState(p) === "working");
 let current: Thread | null = null;
 /** Checkouts threads get cut from, in sidebar order. Kept past their last
  * thread so the new-thread form still offers them. */
@@ -7552,6 +7567,12 @@ function togglePreferences(on = $("#preferences").classList.contains("hidden")) 
   if (on) {
     hideMenu();
     $("#theme").focus();
+    // An update installed since Loom started waits for a restart: say so on the button.
+    void invoke<boolean>("exe_updated").then((updated) => {
+      const b = $("#restart-loom");
+      b.textContent = updated ? "Restart to update" : "Restart Loom";
+      b.classList.toggle("primary", updated);
+    }, () => {});
   }
 }
 
@@ -8124,7 +8145,8 @@ const CLI: Record<string, CliCommand> = {
       const waiting = panes.filter((p) => cliState(p) === "waiting");
       const front = current?.active ?? current?.panes[0];
       return {
-        data: { threads: threads.length, panes: panes.length, ...count, front: front ? paneData(front) : null, overview: dashboardOpen, phone: desktopWindow !== undefined, agents: startups.map((s) => s.label), waitingPanes: waiting.map(paneData) },
+        data: { threads: threads.length, panes: panes.length, ...count, front: front ? paneData(front) : null, overview: dashboardOpen, phone: desktopWindow !== undefined, agents: startups.map((s) => s.label), waitingPanes: waiting.map(paneData),
+          booted: bootedAt, updated: await invoke<boolean>("exe_updated").catch(() => false) },
         text: [
           `${threads.length} thread${threads.length === 1 ? "" : "s"}, ${panes.length} pane${panes.length === 1 ? "" : "s"}: ` +
             CLI_STATES.filter((s) => count[s]).map((s) => `${count[s]} ${s}`).join(", "),
@@ -8132,6 +8154,18 @@ const CLI: Record<string, CliCommand> = {
           ...(waiting.length ? ["", "Waiting for you:", paneRows(waiting)] : []),
         ].join("\n"),
       };
+    },
+  },
+  relaunch: {
+    usage: "relaunch [--yes]",
+    help: "Restart Loom: it closes as closing its window does, then starts again, after an update the new version. Every pane comes back, agents in their sessions. A pane working on something stops, so with one working it wants --yes. status says updated: true while an update waits for this.",
+    options: { yes: "bool" },
+    run: (a) => {
+      const busy = working().map(paneName);
+      if (busy.length && !flag(a, "yes")) throw new Error(`${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: a restart stops ${busy.length === 1 ? "it" : "them"}. Add --yes.`);
+      // After this answer has gone out.
+      setTimeout(relaunch, 300);
+      return { data: { stopping: busy }, text: "Loom is restarting." };
     },
   },
   usage: {
@@ -9249,8 +9283,10 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       sweepTasks(true);
       await drainJournal();
 
+      if (relaunching) await invoke("relaunch");
       await getCurrentWindow().destroy();
     } catch (e) {
+      relaunching = false;
       toast(`Could not close safely: ${String(e)}${shut ? ". Panes are stopped; retry closing the window to save the retained reports." : ""}`);
     } finally {
       closing = false;
@@ -9260,6 +9296,12 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
 
   for (const id of ["#new-thread", "#open-first"]) $(id).onclick = () => newThread();
   $("#preferences-btn").onclick = () => togglePreferences();
+  $("#restart-loom").onclick = async () => {
+    const busy = working().map(paneName);
+    const detail = busy.length ? `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: restarting stops ${busy.length === 1 ? "it" : "them"}. Every pane comes back, agents in their sessions.`
+      : "It closes safely and starts again, the new version if you just updated. Every pane comes back, agents in their sessions.";
+    if (await confirm("Restart Loom?", { title: "Loom", kind: busy.length ? "warning" : "info", action: "Restart", detail })) relaunch();
+  };
   $("#phone-window").onclick = () => void phoneWindow();
   $("#preferences-close").onclick = () => (togglePreferences(false), $("#preferences-btn").focus());
   $("#shortcuts").onclick = () => {

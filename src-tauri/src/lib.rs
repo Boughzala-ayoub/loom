@@ -1532,6 +1532,52 @@ fn profile_arg() -> Option<String> {
     std::env::args().nth(1).filter(|a| a != "--reset")
 }
 
+/// Restarting (main.ts relaunch, after its safe close): starts this exe again,
+/// with the same arguments. An update replaces the file at this path, so the
+/// new version starts. The new Loom waits for this one to exit (LOOM_AFTER_PID)
+/// before taking its single-instance lock, its profile and its remote port.
+#[tauri::command]
+fn relaunch() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1)).env("LOOM_AFTER_PID", std::process::id().to_string());
+    // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, and out of any job Loom itself
+    // was started in, unless that job forbids it: the new Loom outlives this one.
+    const DETACHED: u32 = 0x0000_0008;
+    const BREAKAWAY: u32 = 0x0100_0000;
+    cmd.creation_flags(DETACHED | 0x0000_0200 | BREAKAWAY)
+        .spawn()
+        .or_else(|_| cmd.creation_flags(DETACHED | 0x0000_0200).spawn())
+        .map(drop)
+        .map_err(|e| format!("Loom couldn't start itself again: {e}"))
+}
+
+/// When the exe this Loom started from was last written.
+static EXE_WRITTEN: std::sync::OnceLock<Option<std::time::SystemTime>> = std::sync::OnceLock::new();
+fn exe_written() -> Option<std::time::SystemTime> {
+    std::env::current_exe().ok().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok())
+}
+
+/// Whether that exe has been replaced since, as an update does: it waits for a restart.
+#[tauri::command]
+fn exe_updated() -> bool {
+    let at = *EXE_WRITTEN.get_or_init(exe_written);
+    at.is_some() && exe_written() != at
+}
+
+/// Waits up to a minute for process `pid` to exit.
+fn wait_exit(pid: u32) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+    unsafe {
+        if let Ok(process) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            WaitForSingleObject(process, 60_000);
+            let _ = CloseHandle(process);
+        }
+    }
+}
+
 fn state_file(app: &AppHandle) -> PathBuf {
     app.try_state::<workspace::Store>().map(|s| s.path.clone()).unwrap_or_else(||
         profile_arg().map_or_else(|| data_dir(app).join("workspaces.json"), PathBuf::from))
@@ -1796,6 +1842,13 @@ pub fn run() {
         }
         std::process::exit(0);
     }
+    // Started by `relaunch`: the Loom it replaces exits first. Its agents and
+    // shells must not inherit the variable.
+    if let Some(pid) = std::env::var("LOOM_AFTER_PID").ok().and_then(|p| p.parse::<u32>().ok()) {
+        std::env::remove_var("LOOM_AFTER_PID");
+        wait_exit(pid);
+    }
+    EXE_WRITTEN.get_or_init(exe_written);
 
     let builder = tauri::Builder::default();
     // Must be first: a second instance should raise the live window, not
@@ -1935,7 +1988,7 @@ pub fn run() {
             commands::canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
             commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
-            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post,
+            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, relaunch, exe_updated,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,
             commands::dictate_stop,
@@ -1947,6 +2000,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_relaunched_loom_waits_for_the_one_it_replaces() {
+        use std::os::windows::process::CommandExt;
+        // About a second: two pings, one second apart.
+        let mut old = std::process::Command::new("ping").args(["-n", "2", "127.0.0.1"]).stdout(std::process::Stdio::null()).creation_flags(0x0800_0000).spawn().unwrap();
+        let start = std::time::Instant::now();
+        super::wait_exit(old.id());
+        assert!(start.elapsed() >= std::time::Duration::from_millis(500), "it waited");
+        assert!(old.try_wait().unwrap().is_some(), "until the process was gone");
+        let gone = std::time::Instant::now();
+        super::wait_exit(old.id());
+        assert!(gone.elapsed() < std::time::Duration::from_secs(5), "a process already gone is no wait");
+        assert!(!super::exe_updated(), "the test exe is the one that started");
+    }
+
     #[test]
     fn diff_output_keeps_going_past_noisy_stderr() {
         use std::os::windows::process::CommandExt;

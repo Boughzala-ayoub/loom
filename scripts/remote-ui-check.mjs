@@ -53,7 +53,7 @@ const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 10
 // RFC 8291's example public key: any P-256 point does for a subscription that is made up.
 const PUSH_KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8';
 async function context(width, token = true, push = false) {
-  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null } };
+  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false };
   const ctx = await browser.newContext({ viewport: { width, height: 800 } });
   if (token) await ctx.addInitScript(() => localStorage.setItem('loom-token', 'fixture-token'));
   if (push) {
@@ -89,7 +89,9 @@ async function context(width, token = true, push = false) {
     const threads = [thread('a', 'Alpha'), thread('b', 'Beta', 'codex')];
     if (state.changedTitle) threads[1].panes[0].title = 'Another agent has changed its title';
     switch (c.cmd) {
-      case 'status': data = { phone: false, agents: state.startups.map(s => s.label) }; break;
+      case 'status': data = { phone: false, agents: state.startups.map(s => s.label), booted: state.booted, updated: state.updated }; break;
+      // The restarted Loom answers a moment later, started anew.
+      case 'relaunch': setTimeout(() => state.booted++, 1500); data = { stopping: [] }; break;
       case 'threads': data = threads; break;
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
       case 'menu': data = { question: ['May I change this file?'], options: ['Yes, go ahead', 'No, keep it'], keys: ['1', '2'], rev: 'menu-1' }; break;
@@ -468,6 +470,29 @@ try {
     await ctx.close();
   }
   console.log('PASS notifications on this phone: subscribe, a push shows, a tap opens the agent, seen ones close, off');
+  // --- Restarting Loom from the phone ---------------------------------------------------------
+  {
+    const { ctx, page, state } = await context(375);
+    state.updated = true;
+    await goto(page, '#/settings', '#settings .group');
+    const restart = page.getByRole('button', { name: 'Restart to update', exact: true });
+    await restart.waitFor();
+    await fits(page, 375, 'settings-update-waiting');
+    await restart.click();
+    await page.locator('#sheet.on').filter({ hasText: 'the new version if you just updated' }).waitFor();
+    const reloaded = page.waitForEvent('load', { timeout: 20000 });
+    await sheetButton(page, 'Restart').click();
+    await page.locator('#offline').filter({ hasText: 'Loom is restarting on the PC' }).waitFor();
+    await fits(page, 375, 'restarting');
+    state.updated = false; // the new Loom has no update waiting
+    await reloaded;
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'relaunch').map(c => c.argv), [['--yes']]);
+    await page.getByRole('button', { name: 'Restart', exact: true }).waitFor();
+    assert.equal(await page.locator('#offline').isVisible(), false, 'back: no banner');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS restarting Loom from the phone: the update hint, a confirm, a banner while it restarts, a reload when it is back');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));

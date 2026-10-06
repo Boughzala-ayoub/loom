@@ -1,6 +1,6 @@
 /** Settings: the PC's Preferences, the agents its + menu offers, the window,
  * and this phone's own choices. Each PC setting is a loomctl command. */
-import { act, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, pref, run, setPref, sheet, store, toast, topBar } from "./core";
+import { $, act, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar } from "./core";
 import { b64u, unb64u } from "../push";
 
 type Theme = { name: string; scheme: string; current: boolean; vars: Record<string, string> };
@@ -9,6 +9,8 @@ type Settings = { sound: string; taskbar: string; overlay: string; awake: string
 type Startup = { label: string; cmd: string };
 type Remote = { phones: number; address: string | null; port: number };
 type Trashed = { folder?: string; at: string; branch?: string; commit?: string; when?: string };
+/** When this Loom started, and whether an update waits for a restart. */
+type Status = { booted?: number; updated?: boolean };
 
 export const settingsView = el("section", "screen primary alone");
 settingsView.id = "settings";
@@ -21,9 +23,10 @@ let settings: Settings | null = null;
 let startups: Startup[] = [];
 let remote: Remote | null = null;
 let trash: Trashed[] = [];
+let loom: Status = {};
 
 export async function read() {
-  const [t, n, s, st, r, tr] = await Promise.all([
+  const [t, n, s, st, r, tr, , ls] = await Promise.all([
     run<Theme[]>("theme").catch(() => themes),
     run<Notify>("notify").catch(() => notify),
     run<Settings>("set").catch(() => settings),
@@ -31,7 +34,9 @@ export async function read() {
     run<Remote>("remote").catch(() => remote),
     run<Trashed[]>("trash").catch(() => trash),
     pushState().catch(() => {}),
+    run<Status>("status").catch(() => loom),
   ]);
+  loom = ls;
   // An older Loom answers a command it lacks with an error: each reading keeps its shape.
   const list = <T>(v: unknown, was: T[]) => (Array.isArray(v) ? (v as T[]) : was);
   [themes, startups, trash] = [list(t, themes), list(st, startups), list(tr, trash)];
@@ -96,6 +101,29 @@ export async function closeStale() {
     const p = findPane(n.data?.pane ?? null);
     if (p && (p.state === "idle" || p.state === "working") && Date.now() - (n.data?.at ?? 0) > 15_000) n.close();
   }
+}
+
+/** Restarts Loom on the PC (loomctl relaunch), then reloads this page from the
+ * Loom that comes back: after an update, its new page too. */
+async function restartLoom() {
+  const busy = panes().filter((p) => p.state === "working").map((p) => p.ref);
+  const detail = busy.length ? `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: restarting stops ${busy.length === 1 ? "it" : "them"}. Every agent comes back in its session.`
+    : "Loom closes safely on the PC and starts again, the new version if you just updated. Every agent comes back in its session.";
+  if (!(await confirmSheet("Restart Loom?", detail, "Restart", busy.length > 0))) return;
+  const was = loom.booted;
+  if (!(await act(() => run("relaunch", ["--yes"], { change: true })))) return;
+  app.restarting = true;
+  const banner = $("#offline");
+  banner.classList.add("calm");
+  for (const end = Date.now() + 180_000; Date.now() < end; await sleep(2000)) {
+    banner.textContent = "Loom is restarting on the PC. This page reloads when it's back.";
+    banner.hidden = false;
+    const s = await run<Status>("status").catch(() => null);
+    if (s?.booted && s.booted !== was) return location.reload();
+  }
+  app.restarting = false;
+  banner.classList.remove("calm");
+  banner.textContent = "Loom didn't come back. Start it on the PC.";
 }
 
 /** The phone wears the PC's theme: the same colour names, set on the page. */
@@ -201,6 +229,8 @@ const current = themes.find((t) => t.current);
     const win = el("div", "seg");
     for (const [how, label] of [["show", "Show"], ["minimize", "Minimize"], ["maximize", "Maximize"], ["restore", "Restore"]]) win.append(button(label, () => void act(() => run("window", [how], { change: true }), `Window: ${label.toLowerCase()}`)));
     nodes.push(...group("On the PC",
+      setting("Restart Loom", loom.updated ? "An update is installed: restart to use it" : "Closes safely and starts again. Every agent comes back",
+        button(loom.updated ? "Restart to update" : "Restart", () => void restartLoom(), loom.updated ? "primary" : "")),
       setting("Keep the PC awake", "While Loom runs, the PC doesn't sleep", toggle(settings.awake === "on", "Keep the PC awake", (on) => run("set", ["awake", on ? "on" : "off"], { change: true }))),
       setting("Agent overlay", "The small list of agents over other windows", choice(settings.overlay, [["off", "Off"], ["background", "In background"], ["always", "Always"]], (v) => run("set", ["overlay", v], { change: true })), true),
       setting("Plan usage", "Ask Claude and Codex for your limits", toggle(settings["plan-usage"] === "on", "Plan usage", (on) => run("set", ["plan-usage", on ? "on" : "off"], { change: true }))),

@@ -16,7 +16,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff", "hashedFiles"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff", "hashedFiles"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -631,4 +631,25 @@ if (check(308)) {
   assert.deepEqual([sent[3].tag, sent[3].url], ["loom-test", "/#/pane/p1/work%3A1"]);
   await assert.rejects(async () => c.remote.run({ _: ["push"] }), /remote push takes test/);
   console.log("ok   task notices become phone notifications that open the agent, as the policy allows; remote push test");
+}
+
+if (check(309)) {
+  // loomctl relaunch: a pane working on something wants --yes, and the restart comes after the answer.
+  const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
+  const p = { id: "p1", th, agent: "codex", busy: true } as any;
+  th.panes.push(p);
+  let relaunched = 0;
+  const c = fixture({ threads: [th], current: th, dashboardOpen: false, paneRows: () => "", paneName: () => "work:1", relaunch: () => { relaunched++; } });
+  await assert.rejects(async () => c.relaunch.run({ _: [] }), /work:1 is working: a restart stops it\. Add --yes\./);
+  assert.equal(relaunched, 0);
+  assert.deepEqual(Array.from((await c.relaunch.run({ _: [], yes: true })).data.stopping), ["work:1"]);
+  assert.equal(relaunched, 0, "not before its answer");
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(relaunched, 1);
+  p.busy = false;
+  await c.relaunch.run({ _: [] });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(relaunched, 2, "nothing working: no --yes needed");
+  assert.equal(typeof (await c.status.run()).data.booted, "number", "status says when this Loom started");
+  console.log("ok   relaunch wants --yes while a pane works and restarts after its answer; status says when Loom started");
 }

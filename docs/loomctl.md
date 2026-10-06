@@ -121,7 +121,7 @@ shows one.
 
 | Command | What it does |
 | --- | --- |
-| `status` | Counts by state, the pane in front, and every pane waiting for you. |
+| `status` | Counts by state, the pane in front, and every pane waiting for you. JSON has `booted`, when this Loom started, and `updated`, true once its exe has been replaced (an update waits for `relaunch`). |
 | `threads` | Every thread: name, id, state, pane count, branch and folder. `--json` adds `changed`: lines added and removed against HEAD and the files changed, as its sidebar row shows them. |
 | `panes [--thread T] [--state S]` | Every pane, or a thread's, or the ones in a state (`--state idle,waiting` for several). |
 | `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included, and with `--styles` too, their styled rows. JSON has `alt`, true while a full-screen app such as OpenCode holds the screen. See [What the input holds](#what-the-input-holds). |
@@ -169,6 +169,7 @@ shows one.
 | `layout <cols\|rows\|grid> [--thread T]` | How a thread arranges its panes. |
 | `zoom [pane]` | Let a pane fill its thread, or put it back. |
 | `window <show\|minimize\|maximize\|restore\|phone>` | Bring the window up, resize it, or toggle the phone size. |
+| `relaunch [--yes]` | Restart Loom: it closes as closing its window does, then starts again, after an update the new version. Every pane comes back, agents in their sessions. A pane working on something stops, so with one working it wants `--yes`. Loom answers first, then closes. Preferences on the PC and the phone's Settings have a Restart button that says so when an update is installed. |
 | `vscode [thread]` | Open a thread's folder in VS Code. |
 
 The three steps of `window show` (unminimize, show, focus) each time out after 2 seconds. A stuck step does not block later commands. Windows may still finish that step after loomctl reports a timeout.

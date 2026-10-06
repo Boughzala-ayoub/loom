@@ -342,6 +342,8 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 10px); min-widt
 #toast.error { border-color: var(--err); }
 @media (min-width: 900px) { #toast { left: auto; width: 420px; } }
 #offline { position: sticky; top: 0; z-index: 7; padding: 10px 16px; background: color-mix(in srgb, var(--err) 30%, var(--panel)); }
+/* A restart you asked for: news, not an error. */
+#offline.calm { background: color-mix(in srgb, var(--accent) 25%, var(--panel)); }
 
 /* Pairing --------------------------------------------------------------------- */
 #pairing { display: grid; place-content: center; min-height: 100dvh; padding: 24px; }

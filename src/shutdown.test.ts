@@ -20,7 +20,7 @@ let closeHandler: () => Promise<void>;
 const pendingWrites = ["final report"];
 let diskFull = true;
 class TestError extends Error {}
-const sandbox = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false,
+const sandbox = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false,
   document: { body: { inert: false } }, threads: [{ panes: [p] }], MAX_PANES: 8,
   pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(),
   drainJournal: async () => { if (++drains > 1 && diskFull) throw new Error("disk full"); if (!diskFull) pendingWrites.length = 0; },
@@ -68,7 +68,7 @@ async function page(sentBefore: number, emitted: number) {
   let clock = 0, onBatch = (_: { payload: unknown }) => {}, request = async () => {};
   const routed: string[] = [], toasts: string[] = [];
   const sandbox = createContext({ console, Date: { now: () => clock }, setTimeout: (f: () => void, ms: number) => { clock += ms; setTimeout(f, 0); },
-    agentBatch: 0, agentBatches: new Map(), shuttingDown: false, document: { body: { inert: false } }, threads: [{ panes: [{ id: "p", paint() {} }] }],
+    agentBatch: 0, agentBatches: new Map(), shuttingDown: false, relaunching: false, document: { body: { inert: false } }, threads: [{ panes: [{ id: "p", paint() {} }] }],
     pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
     invoke: async (cmd: string) => cmd === "agent_batch_base" ? sentBefore : { events: [["p", "final"]], emitted },
     listen: async (_: string, f: typeof onBatch) => { onBatch = f; return () => {}; },
@@ -96,3 +96,24 @@ const behind = await page(0, 0);
 for (let seq = 2; seq <= 66; seq++) behind.deliver(seq);
 assert.equal(behind.routed.length, 65, "batches behind one that never lands must not pile up without bound");
 console.log("ok   R16-5 a batch that never lands is given up on by the second close, or after 64 later ones");
+
+// Restarting (main.ts relaunch): the same safe close, and the new Loom is started
+// only once everything is on record, just before the window goes. A start that
+// fails keeps the window, panes stopped, as a failed close does.
+for (const fails of [false, true]) {
+  const order: string[] = [];
+  let request = async () => {};
+  const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: true, document: { body: { inert: false } },
+    threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(),
+    drainJournal: async () => { order.push("journal"); },
+    invoke: async (cmd: string) => { order.push(cmd); if (cmd === "relaunch" && fails) throw new Error("no exe"); return { events: [], emitted: 0 }; },
+    agentEvents: () => {}, sweepTasks: () => {}, toast: () => { order.push("toast"); },
+    getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => { order.push("destroyed"); } }),
+  });
+  await runInContext(ts.transpileModule(`(async () => {\n${close}\n})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  await new Promise(r => setTimeout(r, 0));
+  await request();
+  assert.deepEqual(order, ["journal", "pty_shutdown", "journal", "relaunch", fails ? "toast" : "destroyed"]);
+  assert.equal(s.relaunching, !fails, "a failed start leaves no restart armed for the next close");
+}
+console.log("ok   a restart closes safely and starts the new Loom only before the window goes; a failed start keeps the window");

@@ -118,7 +118,7 @@ async function refresh() {
 /** The threads every 2 s, the open screen every second, git every 6 s: while the page is in view. */
 async function loop(every: number, work: () => Promise<unknown>) {
   for (;;) {
-    if (app.token && !document.hidden) {
+    if (app.token && !document.hidden && !app.restarting) {
       try {
         await work();
       } catch (e) {
