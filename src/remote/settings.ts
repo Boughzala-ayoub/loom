@@ -83,6 +83,8 @@ async function setPush(on: boolean) {
 /** Each start: a phone signed up hands Loom its subscription again, in case its browser renewed it. */
 export async function syncPush() {
   if (!pushable() || Notification.permission !== "granted") return;
+  // A newer worker from an updated Loom takes over now, not a day later.
+  void (await navigator.serviceWorker.getRegistration())?.update().catch(() => {});
   const sub = await subscribed();
   if (sub) pushOn = (await pushApi({ subscription: sub.toJSON() })).on;
 }

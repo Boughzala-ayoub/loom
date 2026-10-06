@@ -21,7 +21,7 @@ const server = createServer((req, res) => {
   try {
     const path = new URL(req.url, 'http://x').pathname;
     // remote.rs serves these two from outside dist/.
-    const file = path === '/sw.js' ? resolve('src-tauri/src/remote-sw.js') : path === '/icon.png' ? resolve('src-tauri/icons/icon.png')
+    const file = path === '/sw.js' ? resolve('src-tauri/src/remote-sw.js') : path === '/icon.png' || path === '/badge.png' ? resolve(`src-tauri/icons${path}`)
       : resolve('dist', path === '/' ? 'remote.html' : path.slice(1));
     res.setHeader('Content-Type', { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' }[extname(file)] || 'application/octet-stream');
     res.end(readFileSync(file));
@@ -436,6 +436,9 @@ try {
     await deliver({ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', url: '/#/pane/gone-id/Beta%3A1', tag: 'b1', at: Date.now() });
     await until('the notification shows', async () => (await shown()).length === 1);
     assert.deepEqual(await shown(), [{ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', tag: 'b1', url: '/#/pane/gone-id/Beta%3A1' }]);
+    // Loom's mark in the status bar, Loom's logo beside the text.
+    assert.deepEqual(await page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map(n => [new URL(n.badge).pathname, new URL(n.icon).pathname])), [['/badge.png', '/icon.png']]);
+    assert.equal((await fetch(`${base}/badge.png`)).status, 200);
 
     // A tap: the worker sends the open page to the agent.
     await page.evaluate(() => (location.hash = '#/settings'));

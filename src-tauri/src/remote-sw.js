@@ -17,6 +17,8 @@ self.addEventListener("push", (e) => {
     tag: m.tag || "loom",
     renotify: true,
     icon: "/icon.png",
+    // The status bar's icon: Chrome's own without it.
+    badge: "/badge.png",
     timestamp: m.at || Date.now(),
     data: { url: m.url || "/", pane: m.tag || "", at: m.at || Date.now() },
   }));

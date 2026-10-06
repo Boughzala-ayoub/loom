@@ -145,6 +145,7 @@ try {
   assert.match(res.headers.get('content-type'), /javascript/);
   assert.match(await res.text(), /notificationclick/);
   assert.equal((await fetch(base + '/icon.png')).headers.get('content-type'), 'image/png');
+  assert.equal((await fetch(base + '/badge.png')).headers.get('content-type'), 'image/png');
   assert.equal((await api('/api/push', {})).status, 401, 'No token, no notifications');
   const b64u = buf => Buffer.from(buf).toString('base64url');
   const ua = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);

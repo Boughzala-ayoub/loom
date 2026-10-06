@@ -34,8 +34,10 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 const MANIFEST: &str = r##"{"name":"Loom","short_name":"Loom","start_url":"/","display":"standalone","background_color":"#111111","theme_color":"#111111","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"},{"src":"/icon.png","sizes":"512x512","type":"image/png"}]}"##;
 const ICON: &[u8] = include_bytes!("../../src/logo.svg");
-/// Android draws notification icons from PNGs only.
+/// Android draws notification icons from PNGs only, and the status bar's
+/// badge from its alpha alone: the logo's chevron and cursor, white.
 const ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
+const BADGE_PNG: &[u8] = include_bytes!("../icons/badge.png");
 /// The service worker that shows Loom's pushes and opens the agent on a tap.
 const WORKER: &str = include_str!("remote-sw.js");
 
@@ -286,6 +288,7 @@ async fn route(app: &AppHandle, request: &Request) -> Reply {
         ("GET", "/manifest.webmanifest") => Reply::new(200, "application/manifest+json", MANIFEST.into()),
         ("GET", "/icon.svg") => Reply::new(200, "image/svg+xml", ICON.into()),
         ("GET", "/icon.png") => Reply::new(200, "image/png", ICON_PNG.into()),
+        ("GET", "/badge.png") => Reply::new(200, "image/png", BADGE_PNG.into()),
         ("GET", "/sw.js") => Reply::new(200, "text/javascript", WORKER.into()),
         ("GET", p) if p.starts_with("/assets/") => asset(app, &p[1..]).cached(),
         ("POST", "/api/pair") => pair(app, request),
