@@ -28,7 +28,7 @@ let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
     gone: () => false, invoke: async () => ({}), startupTurns: null, contextOf: () => undefined, closedTaskContexts: new WeakMap(), taskSeq: 3, taskWatch: new Map(), heldEnter: new Map(), keepTasks() {}, keepReceipts() {},
-    threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }],
+    threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }], desktopWindow: undefined,
     ...extra });
   runInContext(code, s);
   Object.assign(s, extra);
@@ -50,6 +50,8 @@ if (check(204)) {
   model = "second";
   assert.equal((await c.threads.run()).data[0].panes[0].model, "second");
   assert.equal((await c.status.run()).data.front.context.usedTokens, 12);
+  // The phone remote reads the window size and the startups the new-thread form offers.
+  assert.deepEqual([(await c.status.run()).data.phone, (await c.status.run()).data.agents], [false, ["Codex", "Claude"]]);
   const before = calls;
   await Promise.all(Array.from({ length: 20 }, () => c.panes.run({ _: [] })));
   assert.equal(calls, before + 1, "concurrent clients coalesce native reads");

@@ -17,6 +17,7 @@ mod opencode;
 mod usage;
 mod pipe;
 mod control;
+mod remote;
 mod deletion;
 mod workspace;
 
@@ -1824,6 +1825,7 @@ pub fn run() {
         .manage(Reports::default())
         .manage(output::Bus::default())
         .manage(control::Pending::default())
+        .manage(remote::Remote::default())
         .manage(WindowStateReady::default())
         .manage(dictate::Dictation::default())
         .manage(usage::Scanned::default())
@@ -1895,6 +1897,7 @@ pub fn run() {
             std::thread::spawn(move || handle.state::<output::Bus>().run());
             control::serve(app.handle().clone(), pipe::pipe_name(profile_arg().as_deref()));
             control::serve(app.handle().clone(), pipe::instance_pipe());
+            remote::start(app.handle());
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(std::time::Duration::from_millis(250));
@@ -1932,7 +1935,7 @@ pub fn run() {
             commands::canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
             commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
-            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake,
+            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake, remote::remote,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,
             commands::dictate_stop,

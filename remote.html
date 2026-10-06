@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#0c1120" />
+    <title>Loom</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" />
+    <!-- The phone remote (remote.ts), served by loom.exe (remote.rs). Colours are Loom's default theme. -->
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0c1120; --panel: #121a2d; --raise: #19233b; --line: #243150; --line-strong: #34436a;
+        --text: #e8eaf1; --muted: #9ba4bc; --faint: #848da7; --accent: #7ea6ef;
+        --ok: #7cc08d; --err: #e5605a; --warn: #f2bb44; --blue: #93b4e8; --magenta: #c3a3dc; --cyan: #7fc6cf;
+        --mono: "Cascadia Mono", Consolas, "Roboto Mono", "Droid Sans Mono", monospace;
+        --tap: 48px;
+        font: 15px/1.4 "Segoe UI", system-ui, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; background: var(--bg); color: var(--text); }
+      body { min-height: 100dvh; }
+      [hidden] { display: none !important; }
+      button, input, select, textarea { font: inherit; color: inherit; }
+      button { min-height: var(--tap); padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--raise); cursor: pointer; }
+      button:active { background: var(--line); }
+      button.primary { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, var(--raise)); font-weight: 600; }
+      button.danger { color: var(--err); }
+      button:disabled { opacity: 0.5; }
+      input, select, textarea { width: 100%; min-height: var(--tap); padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); }
+      :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+      .bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 8px; min-height: 56px; padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+      .bar b { font-size: 17px; }
+      .bar .grow { flex: 1; min-width: 0; }
+      .bar img { width: 22px; height: 22px; }
+      .icon-btn { min-width: var(--tap); padding: 0; font-size: 20px; }
+      .chip { padding: 2px 8px; border-radius: 99px; font-size: 13px; white-space: nowrap; background: var(--raise); color: var(--muted); }
+      .chip.waiting { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+      .chip.working { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+      .chip.exited { color: var(--err); }
+
+      /* Phone: one view at a time. Wider: the list beside the open view. */
+      #app { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 100dvh; }
+      body:not([data-view="list"]) #list, #empty { display: none; }
+      @media (min-width: 900px) {
+        #app { grid-template-columns: 340px minmax(0, 1fr); }
+        body:not([data-view="list"]) #list, body[data-view="list"] #empty { display: block; }
+        #list { position: sticky; top: 0; height: 100dvh; overflow-y: auto; border-right: 1px solid var(--line); }
+        #back { display: none; }
+      }
+
+      h2 { margin: 16px 12px 6px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+      h2.waiting { color: var(--warn); }
+      .row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 10px; align-items: center; width: 100%; min-height: 64px; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: none; text-align: left; }
+      .row[aria-current="true"] { background: var(--raise); }
+      .row svg { grid-row: span 2; width: 22px; height: 22px; }
+      .row .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .title { grid-column: 2; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .age { grid-row: span 2; color: var(--faint); font-size: 13px; font-variant-numeric: tabular-nums; }
+      .row.waiting .age { color: var(--warn); }
+      #rows .none { padding: 24px 12px; color: var(--muted); }
+      #list-actions { padding: 16px 12px 32px; }
+      #list-actions button { width: 100%; }
+
+      /* The open agent: its screen scrolls between the bar and the dock. */
+      #pane { display: flex; flex-direction: column; height: 100dvh; min-width: 0; }
+      #pane .who { display: flex; flex-direction: column; }
+      #pane-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+      #pane-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+      #notice { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+      #notice span { flex: 1; min-width: 0; }
+      #screen { flex: 1; min-height: 0; margin: 0; padding: 8px; overflow: auto; background: var(--bg); font-family: var(--mono); line-height: 1.25; white-space: pre; }
+      #screen .line { min-height: 1.25em; }
+      .b { font-weight: 700; } .d { opacity: 0.6; } .i { font-style: italic; } .u { text-decoration: underline; }
+      #dock { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 8px; border-top: 1px solid var(--line); background: var(--panel); }
+      #question { display: flex; flex-direction: column; gap: 6px; }
+      #question p { margin: 0; color: var(--warn); white-space: pre-wrap; }
+      #question button { text-align: left; }
+      #keys { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+      #keys button { padding: 0 4px; }
+      #prompt { display: flex; gap: 8px; align-items: flex-end; }
+      #prompt textarea { min-height: var(--tap); max-height: 40dvh; resize: none; }
+      #prompt button { flex: none; }
+
+      /* The pane's actions: a sheet over the screen. */
+      #actions { position: fixed; inset: auto 0 0 0; z-index: 5; display: grid; gap: 8px; max-height: 80dvh; overflow-y: auto; padding: 12px 12px 20px; border-top: 1px solid var(--line-strong); border-radius: 16px 16px 0 0; background: var(--panel); box-shadow: 0 -12px 40px rgb(0 0 0 / 0.5); }
+      #actions .pair { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+      #scrim { position: fixed; inset: 0; z-index: 4; background: rgb(0 0 0 / 0.45); }
+      @media (min-width: 900px) { #actions { inset: auto auto 16px 50%; width: 420px; transform: translateX(-50%); border-radius: 16px; border: 1px solid var(--line-strong); } }
+
+      #new form, #pairing form { display: grid; gap: 14px; max-width: 560px; padding: 16px 12px 32px; }
+      label { display: grid; gap: 6px; color: var(--muted); font-size: 14px; }
+      .choice { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .choice button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+      .hint { margin: 0; color: var(--muted); font-size: 14px; }
+      code { font-family: var(--mono); color: var(--text); }
+      #empty { padding: 32px 16px; color: var(--muted); }
+
+      #pairing { min-height: 100dvh; }
+      #pairing input { font-size: 28px; letter-spacing: 0.3em; text-align: center; }
+      #offline { position: sticky; top: 0; z-index: 3; padding: 10px 12px; background: color-mix(in srgb, var(--err) 25%, var(--panel)); color: var(--text); }
+      /* At the top: the prompt, the keys and the sheet's buttons are at the bottom. */
+      #toast { position: fixed; left: 12px; right: 12px; top: 64px; z-index: 6; padding: 12px 14px; border-radius: 10px; background: var(--raise); border: 1px solid var(--line-strong); box-shadow: 0 8px 24px rgb(0 0 0 / 0.4); }
+      #toast.error { border-color: var(--err); }
+      @media (min-width: 900px) {
+        #toast { left: auto; width: 420px; }
+        #keys { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+      }
+    </style>
+  </head>
+  <body data-view="list">
+    <div id="offline" hidden></div>
+    <section id="pairing" hidden>
+      <div class="bar"><img src="/icon.svg" alt="" /><b class="grow">Pair this phone</b></div>
+      <form>
+        <p class="hint">On the PC, in any Loom terminal, run <code>loomctl remote pair</code> and enter the code it shows.</p>
+        <label>Pairing code <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required /></label>
+        <button class="primary">Pair</button>
+      </form>
+    </section>
+    <div id="app" hidden>
+      <aside id="list">
+        <div class="bar"><img src="/icon.svg" alt="" /><b class="grow">Loom</b><span id="counts" class="chip"></span><button id="new-btn">+ New</button></div>
+        <div id="rows"></div>
+      </aside>
+      <main id="pane" hidden>
+        <div class="bar">
+          <button id="back" class="icon-btn" aria-label="Back">&#8249;</button>
+          <div class="who grow"><span id="pane-name"></span><span id="pane-title"></span></div>
+          <span id="pane-state" class="chip"></span>
+          <button id="more" class="icon-btn" aria-label="Actions">&#8943;</button>
+        </div>
+        <div id="notice" hidden><span></span><button></button></div>
+        <pre id="screen"></pre>
+        <div id="dock">
+          <div id="question" hidden></div>
+          <div id="keys">
+            <button data-key="esc">Esc</button><button data-key="ctrl-c">Ctrl+C</button><button data-key="up" aria-label="Up">&#8593;</button><button data-key="down" aria-label="Down">&#8595;</button><button data-key="enter">Enter</button>
+            <button data-key="tab">Tab</button><button data-key="shift-tab">&#8679;Tab</button><button data-key="left" aria-label="Left">&#8592;</button><button data-key="right" aria-label="Right">&#8594;</button><button data-key="backspace" aria-label="Backspace">&#9003;</button>
+          </div>
+          <form id="prompt"><textarea name="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="primary">Send</button></form>
+        </div>
+      </main>
+      <main id="new" hidden>
+        <div class="bar"><button class="icon-btn back" aria-label="Back">&#8249;</button><b class="grow">New thread</b></div>
+        <form>
+          <label>Project <select name="project"></select></label>
+          <label id="folder-field" hidden>Folder on the PC <input name="folder" placeholder="C:\Users\you\code\project" /></label>
+          <div class="choice"><button type="button" data-kind="worktree" aria-pressed="true">New worktree</button><button type="button" data-kind="checkout" aria-pressed="false">This folder</button></div>
+          <label id="name-field">Thread name <input name="name" placeholder="fix-login" autocapitalize="off" autocorrect="off" /></label>
+          <label id="base-field">Base branch (optional) <input name="base" placeholder="HEAD" autocapitalize="off" autocorrect="off" /></label>
+          <label>Agent <select name="agent"></select></label>
+          <button class="primary">Create</button>
+        </form>
+      </main>
+      <main id="empty">Pick an agent.</main>
+    </div>
+    <div id="scrim" hidden></div>
+    <div id="actions" hidden></div>
+    <div id="toast" hidden></div>
+    <script type="module" src="/src/remote.ts"></script>
+  </body>
+</html>

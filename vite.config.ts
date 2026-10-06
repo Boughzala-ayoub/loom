@@ -10,8 +10,8 @@ export default defineConfig(async () => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
-  // The agent overlay is its own small page, so it never loads the workspace.
-  build: { rollupOptions: { input: { main: "index.html", overlay: "overlay.html" } } },
+  // The agent overlay and the phone remote are pages of their own, so they never load the workspace.
+  build: { rollupOptions: { input: { main: "index.html", overlay: "overlay.html", remote: "remote.html" } } },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

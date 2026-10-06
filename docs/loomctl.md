@@ -481,6 +481,32 @@ when time runs out.
 | `set overlay off\|background\|always` | When the agent overlay shows. |
 | `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
 | `notify --check SEQ,...` | Whether those events may go out as notices now. |
+| `remote [on [--port N] \| off \| pair \| revoke]` | The phone remote: its state, start or stop it, show a pairing code for a phone, or unpair every phone. See [Phone remote](#phone-remote). |
+
+### Phone remote
+
+`loomctl remote on` serves a page for your phone at `127.0.0.1:7420` (`7421`
+for a debug build; `--port` picks another, and Loom remembers it). The page
+lists every agent, shows one's screen, sends prompts and keys, answers
+numbered questions, and starts, restarts, stops and closes panes and threads.
+Each of those is a loomctl command, so the phone can do what loomctl does.
+The remote stays on across restarts until `loomctl remote off`.
+
+Loom only listens on this PC. `tailscale serve --bg 7420` puts the page on
+your tailnet at `https://<pc>.<tailnet>.ts.net`, which only your own devices
+can open. `loomctl remote` shows that address once Tailscale is signed in.
+
+A phone pairs once. `loomctl remote pair` shows a six-digit code that works
+for 10 minutes, for one phone, and stops working after five wrong guesses.
+Enter it on the page. The phone keeps a token; Loom keeps only its SHA-256, in
+`<workspace>.remote.json` beside the workspace file. `loomctl remote revoke`
+unpairs every phone.
+
+The prompt box sends an agent a `submit` task and a shell a `send` line. Each
+change carries a `--key`, so a retry after a dropped connection doesn't run
+it twice. **Fit Loom to phone** in a pane's actions shows that pane on the PC,
+turns on the phone window size and zooms the pane, so the agent redraws at
+about the phone's width. Turn it off again from the same menu.
 
 ## Answering questions
 

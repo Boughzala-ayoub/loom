@@ -32,7 +32,7 @@ const MAX_ACTIVE: usize = 64;
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// `step`, or TimedOut once `limit` passes.
-async fn within<T>(limit: Duration, step: impl std::future::Future<Output = std::io::Result<T>>) -> std::io::Result<T> {
+pub(crate) async fn within<T>(limit: Duration, step: impl std::future::Future<Output = std::io::Result<T>>) -> std::io::Result<T> {
     tokio::time::timeout(limit, step).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
 }
 
@@ -170,7 +170,7 @@ async fn answer(app: AppHandle, pipe: NamedPipeServer) -> std::io::Result<()> {
 /// after its request, so its end of the pipe reads EOF (or an error) only when
 /// it's gone. Dropping `work` then frees the slot a long wait would hold, and
 /// tells the page to stop that wait (ask's Waiter).
-async fn unless_gone<T>(read: &mut (impl tokio::io::AsyncRead + Unpin), work: impl std::future::Future<Output = T>) -> Option<T> {
+pub(crate) async fn unless_gone<T>(read: &mut (impl tokio::io::AsyncRead + Unpin), work: impl std::future::Future<Output = T>) -> Option<T> {
     use std::{future::Future, task::Poll};
     let mut byte = [0u8; 1];
     let (mut work, mut gone) = (std::pin::pin!(work), std::pin::pin!(read.read(&mut byte)));
@@ -255,7 +255,7 @@ mod tests {
 
 /// Hands a request to the page and waits for its answer: the request's own
 /// timeout (`wait` asks for long ones), plus a margin for the page's reply.
-async fn ask(app: &AppHandle, request: Value) -> Value {
+pub(crate) async fn ask(app: &AppHandle, request: Value) -> Value {
     let pending = app.state::<Pending>();
     for _ in 0..200 {
         if pending.ready.load(Ordering::Acquire) {

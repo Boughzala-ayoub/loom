@@ -52,6 +52,10 @@ sha2 = "0.10"
 # Already in the tree through tauri: loomctl's named pipe (control.rs) and its timeouts.
 tokio = { version = "1", features = ["net", "io-util", "sync", "time"] }
 portable-pty = "0.9"
+# Already in the tree through tauri and png: the phone remote's tokens and pairing
+# codes (remote.rs), and its gzipped answers.
+getrandom = "0.3"
+flate2 = "1"
 whisper-rs = "0.16.0"
 # cpal accepts windows-core ">=0.61, <=0.62" but pairs it with the `windows`
 # crate, which tao/wry hold at 0.61 — left alone the resolver maxes windows-core

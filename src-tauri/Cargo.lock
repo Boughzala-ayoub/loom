@@ -2138,6 +2138,8 @@ name = "loom"
 version = "3.0.0"
 dependencies = [
  "cpal",
+ "flate2",
+ "getrandom 0.3.4",
  "portable-pty",
  "regex",
  "serde",

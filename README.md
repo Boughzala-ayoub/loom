@@ -250,6 +250,24 @@ and maximized or fullscreen state. The sidebar closes in phone mode and returns
 to its previous state afterward. Running panes stay open. On short monitors,
 the window keeps enough width for the controls instead of preserving the exact ratio.
 
+The phone remote is a web page for the phone instead of remote desktop. The
+agents keep running on the PC. Set it up once:
+
+1. Install [Tailscale](https://tailscale.com/download) on the PC and the phone,
+   and sign in to both with the same account. The personal plan is free.
+2. In a Loom terminal: `loomctl remote on`, then `tailscale serve --bg 7420`.
+3. `loomctl remote` shows the address, `https://<pc>.<tailnet>.ts.net`. Open
+   it in Chrome on the phone.
+4. `loomctl remote pair` shows a code. Enter it on the phone.
+5. In Chrome's menu, **Add to Home screen** opens it like an app.
+
+The page lists the agents, waiting ones first. Open one to read its screen,
+send a prompt, answer its question with a tap, or press Esc, Ctrl+C, arrows
+and Enter. **+ New** starts a thread, with a worktree or in a folder. A pane's
+`⋯` menu fits Loom to the phone so the agent redraws at the phone's width, and
+restarts, stops or closes panes and threads. See
+[docs/loomctl.md](docs/loomctl.md#phone-remote).
+
 ### Changes
 
 `⎇` in the thread bar (or `Ctrl+Shift+G`) opens the changes panel on the

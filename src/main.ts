@@ -8033,7 +8033,7 @@ const CLI: Record<string, CliCommand> = {
       const waiting = panes.filter((p) => cliState(p) === "waiting");
       const front = current?.active ?? current?.panes[0];
       return {
-        data: { threads: threads.length, panes: panes.length, ...count, front: front ? paneData(front) : null, overview: dashboardOpen, waitingPanes: waiting.map(paneData) },
+        data: { threads: threads.length, panes: panes.length, ...count, front: front ? paneData(front) : null, overview: dashboardOpen, phone: desktopWindow !== undefined, agents: startups.map((s) => s.label), waitingPanes: waiting.map(paneData) },
         text: [
           `${threads.length} thread${threads.length === 1 ? "" : "s"}, ${panes.length} pane${panes.length === 1 ? "" : "s"}: ` +
             CLI_STATES.filter((s) => count[s]).map((s) => `${count[s]} ${s}`).join(", "),
@@ -8106,7 +8106,7 @@ const CLI: Record<string, CliCommand> = {
       const text = raw.split("\n").map((l) => l.trimEnd()).join("\n").replace(/\n+$/, "");
       const buf = p.term.buffer.active;
       const cursor = { x: buf.cursorX, y: buf.cursorY, hidden: p.cursorHidden };
-      return { data: { pane: p.id, ref: paneName(p), text, cursor, input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p) } : {}) }, text };
+      return { data: { pane: p.id, ref: paneName(p), text, cursor, cols: p.term.cols, input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p) } : {}) }, text };
     },
   },
   menu: {
@@ -8693,7 +8693,23 @@ const CLI: Record<string, CliCommand> = {
       else if (how === "restore") await w.unminimize().then(() => w.unmaximize());
       else if (how === "phone") await phoneWindow();
       else throw new Error(`window takes show, minimize, maximize, restore or phone, not ${how}.`);
-      return { data: { window: how }, text: "" };
+      return { data: { window: how, phone: desktopWindow !== undefined }, text: "" };
+    },
+  },
+  remote: {
+    usage: "remote [on [--port N] | off | pair | revoke]",
+    help: "The phone remote: a page for your phone that does what loomctl does. on starts it on 127.0.0.1 (port 7420 unless --port), and `tailscale serve --bg <port>` then puts it on your own devices. pair shows a code a phone enters once, for 10 minutes. revoke unpairs every phone. docs/loomctl.md has the setup.",
+    options: { port: "int" },
+    run: async (a) => {
+      const action = a._[0] ?? "status";
+      const port = a.port === undefined ? null : num(a, "port", 0, 1, 65535);
+      const s = await invoke<{ on: boolean; listening: boolean; port: number; phones: number; pairing: string | null; error: string | null; address: string | null }>("remote", { action, port });
+      const text = [
+        s.listening ? `On, at 127.0.0.1:${s.port}. ${s.phones} phone${s.phones === 1 ? "" : "s"} paired.` : s.on ? `On, but not listening: ${s.error}` : "Off. loomctl remote on starts it.",
+        s.listening && (s.address ? `Phone address: ${s.address} (once: tailscale serve --bg ${s.port})` : `Tailscale isn't installed or signed in. Install it, then run: tailscale serve --bg ${s.port}`),
+        s.pairing && `Pairing code: ${s.pairing}. Open the address on the phone and enter it within 10 minutes.`,
+      ].filter(Boolean).join("\n");
+      return { data: s, text };
     },
   },
 };
