@@ -1,6 +1,8 @@
 // The phone remote against the real app: loomctl remote on/pair/revoke, the
-// HTTP server's refusals, and the phone page in headless Chrome at 320 to
-// 1280 px, driving a cmd.exe pane, creating and closing threads. Needs a
+// HTTP server's refusals, and the phone app in headless Chrome at 320 to
+// 1280 px: a cmd.exe pane, the Changes tab on the temporary repo (a hunk, a
+// commit, a branch, a stash), Usage, Settings, creating and closing threads.
+// REMOTE_WIDTHS=375 runs one width. Needs a
 // release build with --features tauri/custom-protocol (loom.exe and
 // loomctl.exe beside it, or LOOM_TEST_EXE). A temporary profile and Git
 // folder; restores the shared files a test Loom rewrites. The test Loom's
@@ -161,7 +163,11 @@ try {
     await page.screenshot({ path: join(out, `${what.replace(/\W+/g, '-')}.png`) });
   };
 
-  const alpha = page => page.locator('#rows .thread', { has: page.locator('.thread-name', { hasText: 'alpha' }) });
+  const alpha = page => page.locator('#list .thread', { has: page.locator('.thread-head .name', { hasText: /^alpha/ }) });
+  const sheetButton = (page, text) => page.locator('#sheet.on button', { hasText: text });
+  const sheetDone = page => page.locator('#sheet').waitFor({ state: 'hidden' });
+  const paneName = page => page.locator('#pane .who b').textContent();
+  const git = (...args) => spawnSync('git', ['-C', repo, '-c', 'user.email=check@loom', '-c', 'user.name=check', ...args], { encoding: 'utf8' });
 
   // Pairing through the page itself.
   let page = await context(375);
@@ -171,17 +177,23 @@ try {
   code = ok('--json', 'remote', 'pair').json.pairing;
   await page.fill('#pairing input', code);
   await page.click('#pairing button');
-  await page.locator('#rows .row').first().waitFor();
+  await page.locator('#list .agent').first().waitFor();
   const phoneToken = await page.evaluate(() => localStorage.getItem('loom-token'));
   assert.match(phoneToken, /^[0-9a-f]{64}$/);
   await page.context().close();
   console.log('PASS pairing from the page');
 
+  // A file the Changes tab can stage, diff, commit and discard.
+  writeFileSync(join(repo, 'notes.txt'), 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n');
+  git('add', 'notes.txt');
+  const trunk = git('rev-parse', '--abbrev-ref', 'HEAD').stdout.trim();
+  git('commit', '-q', '-m', 'notes');
+
   for (const width of (process.env.REMOTE_WIDTHS || '320,375,768,1024,1280').split(',').map(Number)) {
     page = await context(width, phoneToken);
     await page.goto(base);
     const thread = alpha(page);
-    const row = thread.locator('.row');
+    const row = thread.locator('.agent');
     await row.waitFor();
     await fits(page, `${width} list`);
     // Threads as on the PC; a folded one stays folded on this phone.
@@ -192,16 +204,21 @@ try {
     assert.equal(await row.count(), 0, 'A folded thread stays folded after a reload');
     await thread.locator('.thread-head').click();
     await thread.locator('.thread-top .icon-btn').click();
-    await page.locator('#actions button', { hasText: 'Rename' }).waitFor();
+    await sheetButton(page, 'Rename').waitFor();
     await fits(page, `${width} thread actions`);
-    await page.locator('#actions button', { hasText: 'Cancel' }).click();
-    await page.click('#views [data-list=state]');
-    await page.locator('#rows .row', { hasText: 'alpha:1' }).waitFor();
-    await fits(page, `${width} by state`);
-    await page.click('#views [data-list=threads]');
+    await sheetButton(page, 'Cancel').click();
+    await sheetDone(page);
+    // Finding: the box narrows the list.
+    await page.fill('#list input[type=search]', 'zzz-nothing');
+    await page.locator('#list .empty', { hasText: 'Nothing matches' }).waitFor();
+    await page.fill('#list input[type=search]', '');
+    await page.click('#list .seg button:has-text("Activity")');
+    await page.locator('#list .card').first().waitFor();
+    await fits(page, `${width} activity`);
+    await page.click('#list .seg button:has-text("Threads")');
     await row.click();
     await page.locator('#screen .line').first().waitFor();
-    assert.equal(await page.locator('#pane-name').textContent(), 'alpha:1 · shell');
+    assert.equal(await paneName(page), 'alpha:1 · shell');
     // A line as wide as the terminal wraps on the phone instead of scrolling sideways.
     const said = `phone-says-hi-${width}-${'x'.repeat(200)}`;
     await page.fill('#prompt textarea', `echo ${said}`);
@@ -210,6 +227,7 @@ try {
     const sideways = () => page.evaluate(() => { const s = document.querySelector('#screen'); return s.scrollWidth - s.clientWidth; });
     assert.ok(await sideways() <= 0, `${width}: wrapped lines don't scroll sideways`);
     assert.ok(await page.locator('#keys').isHidden(), 'The keys start folded');
+    if (width < 900) assert.ok(await page.locator('#tabs').isHidden(), 'Phone: an agent has the whole screen, no tab bar');
     await fits(page, `${width} pane`);
     await page.click('#keys-btn');
     await page.locator('#keys').waitFor();
@@ -230,16 +248,16 @@ try {
     await page.click('#keys-btn');
     await page.locator('#keys').waitFor({ state: 'hidden' });
     await page.click('#more');
-    await page.locator('#actions button', { hasText: "Don't wrap long lines" }).click();
+    await sheetButton(page, "Don't wrap long lines").click();
     await page.waitForFunction(() => !document.querySelector('#screen').classList.contains('wrap'));
     if (width < 600) assert.ok(await sideways() > 0, `${width}: unwrapped, the wide line scrolls sideways`);
     await page.click('#more');
-    await page.locator('#actions button', { hasText: 'Wrap long lines' }).click();
+    await sheetButton(page, 'Wrap long lines').click();
     await page.waitForFunction(() => document.querySelector('#screen').classList.contains('wrap'));
     await page.click('#more');
-    await page.locator('#actions').waitFor();
+    await sheetButton(page, 'Older lines').waitFor();
     await fits(page, `${width} actions`);
-    await page.locator('#actions button', { hasText: 'Older lines' }).click();
+    await sheetButton(page, 'Older lines').click();
     await page.locator('#notice', { hasText: 'Older lines' }).waitFor();
     await page.locator('#notice button', { hasText: 'Back to live' }).click();
     await page.locator('#notice', { hasText: 'Older lines' }).waitFor({ state: 'hidden' });
@@ -249,51 +267,162 @@ try {
     for (let i = 0; i < 30 && !(await olderShown()); i++) { await page.mouse.wheel(0, -400); await pause(150); }
     assert.ok(await olderShown(), `${width}: scrolling up reads the history`);
     for (let i = 0; i < 60 && (await olderShown()); i++) { await page.mouse.wheel(0, 800); await pause(150); }
-    const box = await page.evaluate(() => { const b = document.querySelector('#screen'); return [b.scrollTop, b.clientHeight, b.scrollHeight]; });
-    assert.ok(!(await olderShown()), `${width}: back at the bottom, the screen is live again (scrollTop, height, scrollHeight: ${box})`);
+    assert.ok(!(await olderShown()), `${width}: back at the bottom, the screen is live again`);
     if (width >= 900) assert.ok(await page.locator('#list').isVisible(), 'Wide: the list stays beside the pane');
     else {
       assert.ok(!(await page.locator('#list').isVisible()), 'Phone: one view at a time');
-      await page.click('#back');
+      await page.click('#pane .back');
       await row.waitFor();
     }
-    await page.click('#new-btn');
+    await page.click('[aria-label="New thread"]');
     await page.locator('#new form').waitFor();
     await fits(page, `${width} new thread`);
-    await page.goto(base + '#/full');
-    await page.waitForFunction(() => document.querySelector('#mirror').dataset.seq, null, { timeout: 20000 });
-    await fits(page, `${width} full loom`);
-    await page.click('#full-kbd');
-    await page.locator('#full-keys').waitFor();
-    await fits(page, `${width} full loom keys`);
-    await page.click('#full-back');
-    await page.locator('#full').waitFor({ state: 'hidden' });
+    if (width < 900) await page.click('#new .back');
+
+    // Changes: the thread's git, as the PC's panel shows it.
+    writeFileSync(join(repo, 'notes.txt'), `one\ntwo ${width}\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten ${width}\n`);
+    writeFileSync(join(repo, `new-${width}.txt`), 'fresh\n');
+    await page.click('#tabs a[data-tab=changes]');
+    await page.locator('#changes .file', { hasText: 'notes.txt' }).waitFor({ timeout: 20000 });
+    await fits(page, `${width} changes`);
+    await page.locator('#changes .file', { hasText: 'notes.txt' }).locator('.open').click();
+    await page.locator('#diff .hunk').first().waitFor({ timeout: 20000 });
+    await fits(page, `${width} diff`);
+    // A hunk staged alone: the index holds that change, the tree still has the rest.
+    const hunks = await page.locator('#diff .hunk').count();
+    await page.locator('#diff .hunk').first().locator('button', { hasText: 'Stage' }).click();
+    for (let i = 0; i < 40 && !git('diff', '--cached', '--name-only').stdout.includes('notes.txt'); i++) await pause(250);
+    assert.match(git('diff', '--cached', '--name-only').stdout, /notes\.txt/, 'Stage on a hunk stages it');
+    if (hunks > 1) assert.match(git('diff', '--name-only').stdout, /notes\.txt/, 'The other hunk stays unstaged');
+    if (width < 900) await page.click('#diff .back');
+    await page.locator('#changes .file', { hasText: `new-${width}.txt` }).waitFor();
+    await page.locator('#changes .file', { hasText: `new-${width}.txt` }).locator('.icon-btn').click();
+    await sheetButton(page, 'Stage').click();
+    for (let i = 0; i < 40 && !git('diff', '--cached', '--name-only').stdout.includes(`new-${width}.txt`); i++) await pause(250);
+    assert.match(git('diff', '--cached', '--name-only').stdout, new RegExp(`new-${width}`), 'A file stages from its menu');
+    await page.fill('#changes .composer textarea', `phone commit ${width}`);
+    await page.click('#changes .composer button:has-text("Commit") >> nth=0');
+    for (let i = 0; i < 40 && !git('log', '--oneline', '-1').stdout.includes(`phone commit ${width}`); i++) await pause(250);
+    assert.match(git('log', '--oneline', '-1').stdout, new RegExp(`phone commit ${width}`), 'Commit commits');
+    assert.equal(git('status', '--porcelain').stdout.trim(), '', 'All changes went in');
+    await page.locator('#changes .commit-row', { hasText: `phone commit ${width}` }).waitFor();
+    await page.locator('#changes .commit-row', { hasText: `phone commit ${width}` }).locator('.open').click();
+    await page.locator('#diff .commit-head').waitFor({ timeout: 20000 });
+    await fits(page, `${width} commit`);
+    if (width < 900) await page.click('#diff .back');
+    await page.click('#changes [aria-label="Git actions"]');
+    await sheetButton(page, 'Switch branch').waitFor();
+    await fits(page, `${width} git actions`);
+    await sheetButton(page, 'Cancel').click();
+    await sheetDone(page);
+
+    await page.click('#tabs a[data-tab=usage]');
+    await page.locator('#usage .provider').first().waitFor();
+    await fits(page, `${width} usage`);
+    await page.click('#tabs a[data-tab=settings]');
+    await page.locator('#settings .group').first().waitFor({ timeout: 20000 });
+    await fits(page, `${width} settings`);
+    await page.locator('#settings .setting', { hasText: 'Theme' }).locator('button').click();
+    await page.locator('#sheet.on .swatch').first().waitFor();
+    await fits(page, `${width} themes`);
+    await sheetButton(page, 'Cancel').click();
+    await sheetDone(page);
     await page.context().close();
-    console.log(`PASS ${width} px: threads and folding, thread menu, by state, pane, wrapping, keyboard, send, actions, older lines and scrolling back, new-thread form, Full Loom`);
+    console.log(`PASS ${width} px: threads, finding, folding, thread menu, activity, pane, wrapping, keyboard, send, actions, older lines and scrolling back, new thread, changes (hunk, stage, commit, log), usage, settings`);
   }
+
+  // Git from the phone and loomctl: refusals without --yes, branches, stashes, discard, PR without GitHub.
+  page = await context(375, phoneToken);
+  const tid = ok('--json', 'threads').json[0].id;
+  assert.match(loomctl('git', tid, 'discard', 'notes.txt').err, /--yes/, 'Discarding asks for --yes');
+  assert.match(loomctl('git', tid, 'reset', 'HEAD', '--hard').err, /--yes/, 'A hard reset asks for --yes');
+  let status = ok('--json', 'git', tid).json;
+  assert.ok(Array.isArray(status.unstaged) && Array.isArray(status.commits) && status.commits.length >= 2, 'git status gives sections and commits');
+  writeFileSync(join(repo, 'notes.txt'), 'thrown away\n');
+  await page.goto(`${base}#/changes/${encodeURIComponent(tid)}`);
+  await page.locator('#changes .file', { hasText: 'notes.txt' }).locator('.icon-btn').click();
+  await sheetButton(page, 'Discard changes').click();
+  await sheetButton(page, 'Discard').click();
+  for (let i = 0; i < 40 && git('status', '--porcelain').stdout.trim(); i++) await pause(250);
+  assert.equal(git('status', '--porcelain').stdout.trim(), '', 'Discard, after its confirmation, restores the file');
+  await page.click('#changes [aria-label="Git actions"]');
+  await sheetButton(page, 'Switch branch').click();
+  await sheetButton(page, 'New branch').click();
+  await page.locator('#sheet.on input').fill('phone-branch');
+  await sheetButton(page, 'Create and switch').click();
+  for (let i = 0; i < 40 && git('rev-parse', '--abbrev-ref', 'HEAD').stdout.trim() !== 'phone-branch'; i++) await pause(250);
+  assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD').stdout.trim(), 'phone-branch', 'A new branch from the phone');
+  writeFileSync(join(repo, 'stash-me.txt'), 'later\n');
+  await page.click('#changes [aria-label="Git actions"]');
+  await sheetButton(page, 'Stash all changes').click();
+  for (let i = 0; i < 40 && !git('stash', 'list').stdout.trim(); i++) await pause(250);
+  assert.match(git('stash', 'list').stdout, /loom alpha/, 'Stash all changes stashes');
+  await page.click('#changes [aria-label="Git actions"]');
+  await sheetButton(page, 'Restore a stash').click();
+  await sheetButton(page, 'stash@{0}').click();
+  for (let i = 0; i < 40 && !existsSync(join(repo, 'stash-me.txt')); i++) await pause(250);
+  assert.ok(existsSync(join(repo, 'stash-me.txt')), 'Restoring a stash brings its files back');
+  await page.click('#changes [aria-label="Git actions"]');
+  await sheetButton(page, 'Create PR').click();
+  await page.locator('#toast.error', { hasText: 'not on GitHub' }).waitFor();
+  rmSync(join(repo, 'stash-me.txt'));
+  git('stash', 'drop');
+  console.log('PASS git from the phone: discard after asking, a new branch, stash and restore, PR needs GitHub, loomctl refuses loss without --yes');
+
+  // Settings change the PC: sound, the theme (which the phone wears), text size, the agents list.
+  await page.goto(`${base}#/settings`);
+  await page.locator('#settings .group').first().waitFor({ timeout: 20000 });
+  const sound = ok('--json', 'set').json.sound;
+  await page.locator('#settings .setting', { hasText: 'Sound' }).locator('.switch').click();
+  for (let i = 0; i < 40 && ok('--json', 'set').json.sound === sound; i++) await pause(250);
+  assert.notEqual(ok('--json', 'set').json.sound, sound, 'The sound switch sets it on the PC');
+  await page.locator('#settings .setting', { hasText: 'Theme' }).locator('button').click();
+  await page.locator('#sheet.on .swatch', { hasText: 'nord' }).click();
+  for (let i = 0; i < 40 && !ok('--json', 'theme').json.find(t => t.current)?.name.startsWith('nord'); i++) await pause(250);
+  assert.equal(ok('--json', 'theme').json.find(t => t.current).name, 'nord', 'The theme changes on the PC');
+  await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--bg').trim() !== '');
+  const font = Number(ok('--json', 'set').json.font);
+  await page.click('#settings [aria-label="Larger"]');
+  for (let i = 0; i < 40 && Number(ok('--json', 'set').json.font) === font; i++) await pause(250);
+  assert.equal(Number(ok('--json', 'set').json.font), font + 1, 'Text size goes up on the PC');
+  await page.fill('#settings input[aria-label=Name]', 'phone-tool');
+  await page.fill('#settings input[aria-label=Command]', 'cmd /k echo phone');
+  await page.click('#settings form button.primary');
+  for (let i = 0; i < 40 && !ok('--json', 'startups').json.some(s => s.label === 'phone-tool'); i++) await pause(250);
+  assert.ok(ok('--json', 'startups').json.some(s => s.label === 'phone-tool' && s.cmd === 'cmd /k echo phone'), 'A new agent to start');
+  await page.click('#settings [aria-label="Remove phone-tool"]');
+  for (let i = 0; i < 40 && ok('--json', 'startups').json.some(s => s.label === 'phone-tool'); i++) await pause(250);
+  assert.ok(!ok('--json', 'startups').json.some(s => s.label === 'phone-tool'), 'And removed');
+  ok('theme', 'loom');
+  ok('set', 'font', String(font));
+  ok('set', 'sound', sound);
+  await page.context().close();
+  console.log('PASS settings from the phone: sound, theme on the PC and the phone, text size, agents to start');
 
   // Creating and closing threads from the phone.
   page = await context(375, phoneToken);
+  git('switch', '-q', trunk);
   await page.goto(base + '#/new');
   await page.locator('#new form').waitFor();
   await page.selectOption('#new select[name=project]', repo);
   await page.fill('#new input[name=name]', 'phone-wt');
   await page.selectOption('#new select[name=agent]', 'cmd');
   await page.click('#new button.primary');
-  await page.waitForFunction(() => document.querySelector('#pane-name')?.textContent.endsWith('· shell') && location.hash.startsWith('#/pane/'), null, { timeout: 60000 });
+  await page.waitForFunction(() => document.querySelector('#pane .who b')?.textContent.endsWith('· shell') && location.hash.startsWith('#/pane/'), null, { timeout: 60000 });
   let threads = ok('--json', 'threads').json;
   const wt = threads.find(t => t.branch === 'loom/phone-wt');
   assert.ok(wt, `A worktree thread on loom/phone-wt: ${JSON.stringify(threads.map(t => t.branch))}`);
-  await page.click('#more');
-  await page.locator('#actions button', { hasText: 'Close the thread' }).click();
-  await alpha(page).locator('.row').waitFor();
+  await page.goto(base);
+  await page.locator('#list .thread', { has: page.locator('.thread-head .name', { hasText: 'phone-wt' }) }).locator('.thread-top .icon-btn').click();
+  await sheetButton(page, 'Close the thread').click();
+  await sheetButton(page, 'Close thread').click();
   for (let i = 0; i < 20 && ok('--json', 'threads').json.length !== 1; i++) await pause(250);
   assert.equal(ok('--json', 'threads').json.length, 1, 'Closing the thread from the phone closes it');
   await page.goto(base + '#/new');
   await page.selectOption('#new select[name=project]', '');
   await page.fill('#new input[name=folder]', plain);
   await page.click('#new [data-kind=checkout]');
-  assert.ok(!(await page.locator('#name-field').isVisible()), 'This folder needs no name');
+  assert.ok(!(await page.locator('#new input[name=name]').isVisible()), 'This folder needs no name');
   await page.selectOption('#new select[name=agent]', 'cmd');
   await page.click('#new button.primary');
   await page.waitForFunction(() => location.hash.startsWith('#/pane/'), null, { timeout: 60000 });
@@ -304,12 +433,12 @@ try {
 
   // Fitting Loom to the phone narrows the pane, and back.
   await page.goto(base);
-  await alpha(page).locator('.row').click();
+  await alpha(page).locator('.agent').click();
   await page.locator('#screen .line').first().waitFor();
   const cols = () => ok('--json', 'read', 'alpha:1').json.cols;
   const wide = cols();
   await page.click('#more');
-  await page.locator('#actions button', { hasText: 'Fit Loom to phone' }).click();
+  await sheetButton(page, 'Fit Loom to phone').click();
   await page.locator('#toast', { hasText: 'fits the phone' }).waitFor();
   for (let i = 0; i < 20 && cols() >= wide; i++) await pause(250);
   const narrow = cols();
@@ -319,55 +448,20 @@ try {
   await page.locator('#notice').waitFor({ state: 'hidden' });
   await fits(page, '375 pane fitted');
   await page.click('#more');
-  await page.locator('#actions button', { hasText: 'Desktop size on the PC' }).click();
+  await sheetButton(page, 'Desktop size on the PC').click();
   await page.locator('#toast', { hasText: 'desktop size' }).waitFor();
   assert.equal(ok('--json', 'status').json.phone, false);
   console.log(`PASS fitting Loom to the phone: ${wide} to ${narrow} columns, and back`);
 
-  // Full Loom: the PC's window at the phone's size, with keys typed into it.
-  assert.equal((await fetch(base + '/api/mirror?after=0')).status, 401, 'No token, no frames');
-  assert.equal((await api('/api/mirror', { action: 'start', width: 375, height: 700, scale: 1 })).status, 401, 'No token, no Full Loom');
-  res = await api('/api/mirror', { action: 'start', width: 375, height: 700, scale: 1 }, auth);
-  assert.equal(res.status, 200, await res.clone().text());
-  res = await api('/api/mirror', { action: 'input', events: [{ method: 'Runtime.evaluate', params: { expression: '1' } }] }, auth);
-  assert.equal(res.status, 409);
-  assert.match((await res.json()).error, /Input takes/, 'The phone may send input, nothing else of DevTools');
-  await api('/api/mirror', { action: 'stop' }, auth);
-  assert.equal((await fetch(base + '/api/mirror?after=0', { headers: auth })).status, 409, 'Stopped, no frames');
-  await page.goto(base + '#/full');
-  await page.waitForFunction(() => document.querySelector('#mirror').dataset.seq, null, { timeout: 20000 });
-  for (let i = 0; i < 20 && cols() >= wide; i++) await pause(250);
-  const phoneCols = cols();
-  assert.ok(phoneCols < wide, `Full Loom lays Loom out at the phone's width: ${wide} to ${phoneCols} columns`);
-  // A tap on the terminal beside the PC's thread drawer focuses it, as on the phone (the drawer closes too).
-  const shown = await page.locator('#mirror').boundingBox();
-  await page.mouse.click(shown.x + shown.width * 0.9, shown.y + shown.height * 0.5);
-  await pause(500);
-  await page.screenshot({ path: join(out, '375-full-loom-tapped.png') });
-  await page.click('#full-kbd');
-  await page.locator('#full-keys .type').pressSequentially('echo mirror-says-hi');
-  await page.locator('#full-keys [data-key=enter]').click();
-  // The echo's output on a line of its own: the command line itself wraps at the phone's width.
-  const mirrored = () => /^mirror-says-hi$/m.test(ok('--json', 'read', 'alpha:1', '--lines', '200').json.text);
-  for (let i = 0; i < 40 && !mirrored(); i++) await pause(250);
-  assert.ok(mirrored(), 'Keys typed in Full Loom reach the terminal in focus');
-  await page.screenshot({ path: join(out, '375-full-loom-typed.png') });
-  await page.click('#full-back');
-  for (let i = 0; i < 20 && cols() !== wide; i++) await pause(250);
-  assert.equal(cols(), wide, 'Leaving Full Loom gives Loom its own size back');
-  assert.equal((await fetch(base + '/api/mirror?after=0', { headers: auth })).status, 409, 'Left, the stream stops');
-  console.log(`PASS Full Loom: frames, ${wide} to ${phoneCols} columns and back, typing into the terminal, input only`);
-
   // Renaming from the thread's menu.
   await page.goto(base);
   await alpha(page).locator('.thread-top .icon-btn').click();
-  page.removeAllListeners('dialog');
-  page.once('dialog', d => d.accept('alpha-renamed'));
-  await page.locator('#actions button', { hasText: 'Rename' }).click();
+  await sheetButton(page, 'Rename').click();
+  await page.locator('#sheet.on input').fill('alpha-renamed');
+  await sheetButton(page, 'Rename').click();
   for (let i = 0; i < 20 && ok('--json', 'threads').json[0].name !== 'alpha-renamed'; i++) await pause(250);
   assert.equal(ok('--json', 'threads').json[0].name, 'alpha-renamed');
-  await page.locator('#rows .thread-name', { hasText: 'alpha-renamed' }).waitFor();
-  page.on('dialog', d => d.accept());
+  await page.locator('#list .thread-head .name', { hasText: 'alpha-renamed' }).waitFor();
   console.log('PASS renaming a thread from its menu');
 
   // Revoked, the page asks to pair again.

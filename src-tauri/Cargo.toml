@@ -56,10 +56,6 @@ portable-pty = "0.9"
 # codes (remote.rs), and its gzipped answers.
 getrandom = "0.3"
 flate2 = "1"
-# Already in the tree through wry and tauri: Full Loom (mirror.rs) drives the
-# window's WebView2 through DevTools and decodes the frames it streams.
-webview2-com = "0.38"
-base64 = "0.22"
 whisper-rs = "0.16.0"
 # cpal accepts windows-core ">=0.61, <=0.62" but pairs it with the `windows`
 # crate, which tao/wry hold at 0.61 — left alone the resolver maxes windows-core

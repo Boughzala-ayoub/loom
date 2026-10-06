@@ -122,10 +122,12 @@ shows one.
 | Command | What it does |
 | --- | --- |
 | `status` | Counts by state, the pane in front, and every pane waiting for you. |
-| `threads` | Every thread: name, id, state, pane count, branch and folder. |
+| `threads` | Every thread: name, id, state, pane count, branch and folder. `--json` adds `changed`: lines added and removed against HEAD and the files changed, as its sidebar row shows them. |
 | `panes [--thread T] [--state S]` | Every pane, or a thread's, or the ones in a state (`--state idle,waiting` for several). |
 | `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included, and with `--styles` too, their styled rows. See [What the input holds](#what-the-input-holds). |
 | `menu [pane]` | The numbered question on the pane's screen, if any, with an id for it. See [Answering questions](#answering-questions). |
+| `messages [pane...]` | What each agent last heard and said, from its session's transcript, as the Overview shows it. Each is cut at 500 characters. |
+| `context [pane]` | A Claude pane's context, as its gauge's panel shows it: tokens by kind, the size after each turn, and where it was compacted. |
 | `receipt <token>` | What `send --receipt` sent and what came back, without waiting. See [Receipts as a record](#receipts-as-a-record). |
 | `task <id> [--end cancelled\|unknown]` | A task from `submit` as it stands. See [Tasks](#tasks). |
 | `tasks [--pane P] [--state S]` | Every open task and the last 500 to finish. |
@@ -166,6 +168,7 @@ shows one.
 | `layout <cols\|rows\|grid> [--thread T]` | How a thread arranges its panes. |
 | `zoom [pane]` | Let a pane fill its thread, or put it back. |
 | `window <show\|minimize\|maximize\|restore\|phone>` | Bring the window up, resize it, or toggle the phone size. |
+| `vscode [thread]` | Open a thread's folder in VS Code. |
 
 The three steps of `window show` (unminimize, show, focus) each time out after 2 seconds. A stuck step does not block later commands. Windows may still finish that step after loomctl reports a timeout.
 
@@ -481,23 +484,48 @@ when time runs out.
 
 | Command | What it does |
 | --- | --- |
-| `theme [name]` | List the themes, or switch to one. |
+| `theme [name]` | List the themes with their colours, or switch to one. |
 | `set` | Show the settings. |
 | `set sound\|taskbar\|awake\|plan-usage on\|off` | Change one. |
 | `set overlay off\|background\|always` | When the agent overlay shows. |
+| `set font N` | The terminals' text size, 8 to 24 points, as Ctrl+= and Ctrl+- set it. |
+| `startups [add <label> <command...> \| remove <label>]` | The agents and terminals the `+` menu offers, which `new` and `add --agent` pick from. |
 | `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
 | `notify --check SEQ,...` | Whether those events may go out as notices now. |
 | `remote [on [--port N] \| off \| pair \| revoke]` | The phone remote: its state, start or stop it, show a pairing code for a phone, or unpair every phone. See [Phone remote](#phone-remote). |
 
+### Git
+
+`git <thread>` is the Changes panel from the command line. It runs git the way
+the panel's buttons do, and a change answers with the status after it.
+
+| Command | What it does |
+| --- | --- |
+| `git <thread>` | The branch, its upstream and how far apart, a half-done merge, revert or rebase, the staged, unstaged and untracked files with their +/- counts, and the last 10 commits. |
+| `git <thread> diff [path...] [--staged\|--untracked] [--full]` | A section's diff, or some files'. `--full` shows whole files. |
+| `git <thread> show <sha> [--full]` | A commit: its message, stat and patch. |
+| `git <thread> files` / `file <path>` | The thread's files, or one file's text. |
+| `git <thread> stage\|unstage\|discard [path...] [--unstaged\|--staged\|--untracked]` | Move files between sections, or throw their changes away. Discard wants `--yes`. |
+| `git <thread> apply - [--cached] [--reverse]` | Apply one hunk's patch from standard input: stage it (`--cached`), unstage it (both), or throw it away (`--reverse`, which wants `--yes`). |
+| `git <thread> commit <message...> [--staged] [--push]` | Commit everything, or only the index, and push after. |
+| `git <thread> amend [message...]` / `undo` | Rewrite the last commit, or bring its changes back as staged work. Both want `--yes`. |
+| `git <thread> push\|pull\|fetch\|force-push` | As the panel's menu does them: `push -u origin HEAD`, `pull --rebase --autostash`, `fetch --all --prune`, `push --force-with-lease` (which wants `--yes`). |
+| `git <thread> pr` | Push and print GitHub's compare page for the branch. |
+| `git <thread> branches` / `switch <name> [--create]` | The 40 latest branches, or move to one. |
+| `git <thread> stashes` / `stash` / `stash-apply <ref>` / `stash-drop <ref>` | List, stash every change, apply one, or drop one (`--yes`). |
+| `git <thread> revert <sha>` / `reset <sha> --soft\|--hard` | Undo a commit with a new one, or move the branch back to it. A reset wants `--yes`. |
+| `git <thread> continue\|skip\|abort` | Finish, skip a commit of, or give up a half-done merge, revert or rebase. |
+| `git <thread> resolve ours\|theirs <path...>` | Take one side of a conflict and mark it resolved. |
+
 ### Phone remote
 
-`loomctl remote on` serves a page for your phone at `127.0.0.1:7420` (`7421`
-for a debug build; `--port` picks another, and Loom remembers it). The page
-lists the threads and their agents as the PC's sidebar does, or every agent
-by state, shows one's screen, sends prompts and keys, answers
-numbered questions, and starts, restarts, stops and closes panes and threads.
-Each of those is a loomctl command, so the phone can do what loomctl does.
-The remote stays on across restarts until `loomctl remote off`.
+`loomctl remote on` serves an app for your phone at `127.0.0.1:7420` (`7421`
+for a debug build; `--port` picks another, and Loom remembers it). Its four
+tabs are Agents (the threads, the Overview's activity and each agent's
+screen), Changes (`git`), Usage (`usage`, each agent's context, `context`)
+and Settings (`theme`, `set`, `notify`, `startups`, `window`, `remote`,
+`trash`). Each action is a loomctl command, so the phone does what loomctl
+does. The remote stays on across restarts until `loomctl remote off`.
 
 Loom only listens on this PC. `tailscale serve --bg 7420` puts the page on
 your tailnet at `https://<pc>.<tailnet>.ts.net`, which only your own devices
@@ -509,20 +537,7 @@ Enter it on the page. The phone keeps a token; Loom keeps only its SHA-256, in
 `<workspace>.remote.json` beside the workspace file. `loomctl remote revoke`
 unpairs every phone.
 
-**Full Loom**, at the top of the list, streams Loom's own window to the phone,
-so every menu and panel works there: usage, preferences, changes, the
-overview. While a phone watches, the page on the PC lays out at the phone's
-size (the window keeps its own), and the agents redraw at its width. Tap to
-click, tap twice to double-click, hold to right-click, swipe to scroll. The
-keyboard button opens a PC keyboard: its box types into whatever has focus
-on the PC, so tap a terminal first. Frames come only when the page changes,
-at about 10 KB each, one CSS pixel per pixel, so text is a little soft on a
-sharp phone. Leaving Full Loom, or 20 seconds without the page asking for a
-frame, gives Loom its size back. The phone can send mouse, key and text input
-to the page through it, and nothing else of DevTools.
-
-In a pane, the keyboard button beside the message box opens the same PC
-keyboard. Its box sends each key straight to the pane with `keys`. Ctrl, Alt
+In an agent, the keyboard button beside the message box opens a PC keyboard. Its box sends each key straight to the pane with `keys`. Ctrl, Alt
 and Shift hold for the next key, from its row or the phone's keyboard, and Fn
 shows F1 to F12. Scrolling up past the top of a pane's screen reads its
 history with `read --styles --lines 2000`; the screen stays still until you
@@ -535,7 +550,9 @@ turns on the phone window size and zooms the pane, so the agent redraws at
 about the phone's width. Turn it off again from the same menu. Without it, a
 screen too wide for the phone wraps its lines at 12 px, unless that menu turns
 wrapping off. The phone's browser keeps its folded threads, the list view, the
-keys row and wrapping; Loom keeps none of them.
+keys row, wrapping, commit message drafts and the PC's last theme; Loom keeps
+none of them. What can lose work asks first on the phone, and loomctl wants
+`--yes` for it.
 
 ## Answering questions
 

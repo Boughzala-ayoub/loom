@@ -261,23 +261,38 @@ agents keep running on the PC. Set it up once:
 4. `loomctl remote pair` shows a code. Enter it on the phone.
 5. In Chrome's menu, **Add to Home screen** opens it like an app.
 
-The page lists your threads the way the PC's sidebar does: each project, its
-threads, and their agents. Tap a project or a thread to fold it. A folded
-thread still shows its agents' icons, with a dot on the working and waiting
-ones. **By state** lists the agents instead, waiting ones first, and the
-"N waiting" chip at the top opens the first one. Open an agent to read its
-screen, send a prompt, or answer its question with a tap. Long lines wrap to
-the phone's width, and scrolling up past the top reads the agent's history.
-The keyboard button beside the message box opens a PC keyboard: Esc, Tab,
-Ctrl, Alt and Shift that hold for the next key, arrows, Home, End, PgUp, PgDn,
-F1 to F12, and a box that types straight into the agent. **Full Loom**, at the
-top of the list, streams Loom's own window to the phone at the phone's size,
-so every menu and panel works there too: tap to click, hold to right-click,
-swipe to scroll. **+ New** starts a thread, with a worktree
-or in a folder. A thread's `⋯` adds an agent, renames the thread or closes it.
-A pane's `⋯` fits Loom to the phone so the agent redraws at the phone's width,
-turns wrapping off, and restarts, stops or closes the pane. See
-[docs/loomctl.md](docs/loomctl.md#phone-remote).
+The page is an app with four tabs, and it wears the PC's theme.
+
+- **Agents** draws your threads the way the PC's sidebar does: each project a
+  rail, each thread a knot on it in its state's colour, its agents below. Tap
+  a project or a thread to fold it; the box at the top finds an agent.
+  **Activity** is the PC's Overview: every agent, waiting ones first, with
+  what it last heard and said, its question's options as buttons and a reply
+  box. Open an agent to read its screen, send a prompt or answer a question.
+  Long lines wrap to the phone, and scrolling up past the top reads the
+  agent's history. The keyboard button opens a PC keyboard: Esc, Tab, Ctrl,
+  Alt and Shift held for the next key, arrows, Home, End, PgUp, PgDn, F1 to
+  F12, and a box that types straight into the agent. An agent's `⋯` sets
+  Claude's model and effort, its task notices, fits Loom to the phone, zooms
+  it on the PC, and restarts, stops or closes it. A thread's `⋯` adds an
+  agent, renames the thread, sets its layout on the PC, opens it in VS Code on
+  the PC, and closes it, deleting the worktree and branch if you ask, after
+  saying what that loses. `+` starts a thread.
+- **Changes** is the PC's Changes panel: the branch and how far it is from its
+  upstream, a half-done merge or rebase with its buttons, the staged, changed
+  and new files, and the last commits. A file opens its diff, with Stage,
+  Unstage or Discard on each hunk. Commit, or Commit & push, takes everything
+  or only what's staged. Its `⋯` fetches, pulls, pushes, creates a PR,
+  switches or creates branches, stashes and restores, amends or undoes the
+  last commit, force-pushes and browses the files.
+- **Usage** shows your Claude and Codex limits as the plan chips do, with when
+  each resets, every agent's context, and for a Claude agent what fills it.
+- **Settings** has the PC's Preferences (theme, terminal text size, task
+  notices, sound, taskbar flash, keeping the PC awake, the agent overlay, plan
+  usage), its window, the agents the `+` menu starts, this phone's own
+  choices, unpairing, and the deleted worktrees in Loom's trash.
+
+See [docs/loomctl.md](docs/loomctl.md#phone-remote).
 
 ### Changes
 

@@ -4940,14 +4940,6 @@ void listen<string>("overlay-pick", e => void comeBack(threads.flatMap(t => t.pa
 void listen("overlay-open", () => void comeBack());
 void listen("overlay-dismiss", () => ((overlayClosedAt = loomFocused), syncOverlay()));
 void listen<number>("overlay-cap", e => ((overlayCap = e.payload), save()));
-// Full Loom (mirror.rs) lays this page out at a phone's size, where a tap
-// closes the sidebar drawer: back at the window's size it is as it was, as
-// after the phone window size.
-let mirrorSide: boolean | undefined;
-void listen<boolean>("mirror", e => {
-  if (e.payload) mirrorSide ??= sideOpen;
-  else if (mirrorSide !== undefined) (toggleSide(mirrorSide), (mirrorSide = undefined));
-});
 
 function paintOverlayPref() {
   const b = $("#overlay-pref");
@@ -5662,8 +5654,8 @@ async function showTab() {
  * Untracked files have no base at all, so they go against nothing.
  * That base is also what makes a hunk button meaningful — a diff of `HEAD`
  * mixes both sides and cannot be applied to either. */
-const diffOf = (th: Thread, sec: Sec, paths: string[]) => async () => {
-  if (sec !== "untracked") return gitPreview(th.dir, [], "diff", ...ctx(), ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
+const diffOf = (th: Thread, sec: Sec, paths: string[], full = diffFull) => async () => {
+  if (sec !== "untracked") return gitPreview(th.dir, [], "diff", ...(full ? ["-U999999"] : []), ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
   const parts: string[] = [];
   let bytes = 0;
   for (const u of paths) {
@@ -6353,20 +6345,54 @@ const commitMenu: Menu = {
 async function createPR() {
   const th = current;
   if (!th) return;
-  const body = $("#changes-body");
   try {
-    const url = (await git(th.dir, "remote", "get-url", "origin")).trim();
-    const m = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
-    if (!m) throw new Error(`origin is not on GitHub: ${url || "(no origin)"}`);
-    const head = (await git(th.dir, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").catch(() => "")).trim();
-    const base = head.replace(/^origin\//, "") || "main";
-    await git(th.dir, "push", "-u", "origin", "HEAD");
-    await openUrl(`https://github.com/${m[1]}/${m[2]}/compare/${base}...${encodeURIComponent(th.branch)}?expand=1`);
+    await openUrl(await prUrl(th));
   } catch (e) {
-    note(body, String(e));
+    note($("#changes-body"), String(e));
   }
   void refreshChanges();
 }
+
+/** Pushes the thread's branch and gives GitHub's compare page for it. */
+async function prUrl(th: Thread) {
+  const url = (await git(th.dir, "remote", "get-url", "origin").catch(() => "")).trim(); // no origin at all reads as one off GitHub
+  const m = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
+  if (!m) throw new Error(`origin is not on GitHub: ${url || "(no origin)"}`);
+  const head = (await git(th.dir, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").catch(() => "")).trim();
+  const base = head.replace(/^origin\//, "") || "main";
+  await git(th.dir, "push", "-u", "origin", "HEAD");
+  return `https://github.com/${m[1]}/${m[2]}/compare/${base}...${encodeURIComponent(th.branch)}?expand=1`;
+}
+
+/** The Changes panel as data, for loomctl git: the branch and its upstream, git's
+ * half-done merge, revert or rebase, the three sections with their +/- counts,
+ * and the last 10 commits. Reading it refreshes the thread's sidebar numbers. */
+async function gitStatus(th: Thread) {
+  const [z, unstaged, staged, log, midway, head] = await Promise.all([
+    git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch"),
+    git(th.dir, "diff", "--numstat").then(parseNumstat),
+    git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
+    git(th.dir, "log", "--oneline", "-10").catch(() => ""),
+    invoke<string>("git_midway", { dir: th.dir }).catch(() => ""),
+    git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => new Map<string, Stat>()),
+  ]);
+  const status = parseStatus(z);
+  let { upstream, span, ask } = parseBranch(z);
+  if (ask) upstream = await git(th.dir, "rev-parse", "--abbrev-ref", "@{upstream}").then((s) => s.trim(), () => "");
+  const [behind = 0, ahead = 0] = span ? span.split("\t").map(Number) : [];
+  th.setStat({ ...sumStat(head.values()), files: status.length });
+  const row = (c: Change, stats: Map<string, Stat>) => ({ path: c.path, x: c.x, y: c.y, ...(stats.get(c.path) ?? { add: 0, del: 0 }) });
+  const tracked = status.filter((c) => c.x !== "?");
+  return {
+    thread: th.id, name: th.name, dir: th.dir, branch: th.branch, upstream, ahead, behind, midway,
+    unstaged: tracked.filter((c) => c.y !== " ").map((c) => row(c, unstaged)),
+    staged: tracked.filter((c) => c.x !== " ").map((c) => row(c, staged)),
+    untracked: status.filter((c) => c.x === "?").map((c) => row(c, new Map())),
+    commits: log.split("\n").filter(Boolean).map((l) => ({ sha: l.slice(0, l.indexOf(" ")), subject: l.slice(l.indexOf(" ") + 1) })),
+    changed: th.changed,
+  };
+}
+type GitStatus = Awaited<ReturnType<typeof gitStatus>>;
 
 /** Sidebar and header stats: lines changed against HEAD plus the untracked
  * count. Two git calls per thread; a folder that is not a repo answers nothing
@@ -7635,7 +7661,7 @@ function threadState(th: Thread) {
 }
 const threadData = (th: Thread) => ({
   id: th.id, name: th.name, repo: th.repo, dir: th.dir, branch: th.branch, front: th === current, state: threadState(th),
-  layout: th.layout, zoomed: th.zoomed?.id ?? null, panes: th.panes.map(paneData),
+  layout: th.layout, zoomed: th.zoomed?.id ?? null, changed: th.changed, panes: th.panes.map(paneData),
 });
 const paneRows = (panes: Pane[]) => table(panes.map((p) => [paneName(p), p.id, p.agent, cliState(p), p.label]));
 
@@ -8175,6 +8201,231 @@ const CLI: Record<string, CliCommand> = {
       return { data: { open: changesOpen }, text: `Changes ${changesOpen ? "open" : "closed"}` };
     },
   },
+  git: {
+    usage: "git <thread> [status | diff [path...] [--staged|--untracked] [--full] | show <sha> [--full] | files | file <path> | stage|unstage|discard [path...] [--unstaged|--staged|--untracked] | apply - [--cached] [--reverse] | commit <message...> [--staged] [--push] | amend [message...] | undo | push | pull | fetch | force-push | pr | branches | switch <name> [--create] | stashes | stash | stash-apply <ref> | stash-drop <ref> | revert <sha> | reset <sha> --soft|--hard | continue | skip | abort | resolve ours|theirs <path...>] [--yes]",
+    help: "The Changes panel from the command line, with git's own commands as the panel runs them. Bare or status: the branch, its upstream and how far apart, a half-done merge, revert or rebase, the unstaged, staged and untracked files with their +/- counts, and the last 10 commits. diff and show print a diff (--full: whole files); files lists the thread's files and file prints one. stage, unstage and discard take paths, or a whole section. apply - takes a hunk's patch on standard input. commit commits everything, or with --staged only the index, and --push pushes after. pr pushes and gives GitHub's compare page. What can lose work wants --yes: discard, apply --reverse without --cached, amend, undo, force-push, stash-drop and reset. A change answers with the status after it.",
+    options: { staged: "bool", unstaged: "bool", untracked: "bool", full: "bool", cached: "bool", reverse: "bool", push: "bool", create: "bool", soft: "bool", hard: "bool", yes: "bool" },
+    run: async (a) => {
+      const th = cliThread(cliWord(a, 0, "a thread"));
+      const [what = "status", ...rest] = a._.slice(1);
+      const run = (...args: string[]) => git(th.dir, ...args);
+      const sure = (why: string) => {
+        if (!flag(a, "yes")) throw new Error(`${why} Add --yes to go ahead.`);
+      };
+      const word = (i: number, name: string) => {
+        if (!rest[i]) throw new Error(`git ${what} needs ${name}.`);
+        return rest[i];
+      };
+      const summary = (g: GitStatus) => [
+        `${g.branch || "(no branch)"} ${upstreamLabel(g.upstream, `${g.behind}\t${g.ahead}`)}${g.midway ? `  (${g.midway} in progress)` : ""}`,
+        ...(["staged", "unstaged", "untracked"] as const).flatMap((sec) => g[sec].map((c) => `${sec === "staged" ? c.x : sec === "untracked" ? "?" : c.y} ${c.path}  +${c.add} -${c.del}${sec === "staged" ? "  (staged)" : ""}`)),
+      ].join("\n");
+      // After a change: the branch may have moved, and the panel and sidebar show it.
+      const changed = async (text: string) => {
+        th.branch = (await run("rev-parse", "--abbrev-ref", "HEAD").catch(() => th.branch)).trim() || th.branch;
+        save();
+        if (th === current && changesOpen) void refreshChanges();
+        return { data: await gitStatus(th), text };
+      };
+      switch (what) {
+        case "status": {
+          const g = await gitStatus(th);
+          return { data: g, text: summary(g) };
+        }
+        case "diff": {
+          const sec: Sec = flag(a, "staged") ? "staged" : flag(a, "untracked") ? "untracked" : "unstaged";
+          const paths = rest.length ? rest : (await gitStatus(th))[sec].map((c) => c.path);
+          const diff = paths.length ? await diffOf(th, sec, paths, flag(a, "full"))() : "";
+          return { data: { diff }, text: diff };
+        }
+        case "show": {
+          const diff = await gitPreview(th.dir, [], "show", "--stat", "--patch", ...(flag(a, "full") ? ["-U999999"] : []), word(0, "a commit"));
+          return { data: { diff }, text: diff };
+        }
+        case "files": {
+          const out = await run("ls-files", "-z", "--cached", "--others", "--exclude-standard").catch(() => null);
+          const files = out === null ? await invoke<string[]>("list_files", { dir: th.dir }) : out.split("\0").filter(Boolean);
+          return { data: { files }, text: files.join("\n") };
+        }
+        case "file": {
+          const text = await invoke<string>("read_file", { dir: th.dir, path: rest.join(" ") || word(0, "a path") });
+          return { data: { text }, text };
+        }
+        case "stage":
+        case "unstage":
+        case "discard": {
+          const act = what as Act;
+          if (act === "discard") sure("Discarding throws the changes away.");
+          const g = await gitStatus(th);
+          const picked: Sec[] = (["unstaged", "staged", "untracked"] as const).filter((sec) => flag(a, sec));
+          const secs: Sec[] = picked.length ? picked : act === "unstage" ? ["staged"] : ["unstaged", "untracked"];
+          let n = 0;
+          for (const sec of secs) {
+            const files = g[sec].filter((c) => !rest.length || rest.includes(c.path));
+            n += files.length;
+            for (const args of gitAct(sec, act, files)) await run(...args);
+          }
+          if (!n) throw new Error(`Nothing to ${act}${rest.length ? ` in ${rest.join(", ")}` : ""}.`);
+          return changed(`${act === "stage" ? "Staged" : act === "unstage" ? "Unstaged" : "Discarded"} ${n} file${n === 1 ? "" : "s"}`);
+        }
+        case "apply": {
+          const patch = rest.join(" ");
+          if (!patch.trim()) throw new Error("git apply reads the hunk's patch: loomctl git <thread> apply - < hunk.patch");
+          if (flag(a, "reverse") && !flag(a, "cached")) sure("Applying in reverse throws that hunk away.");
+          const args = ["apply", ...(flag(a, "cached") ? ["--cached"] : []), ...(flag(a, "reverse") ? ["--reverse"] : [])];
+          await invoke("git_stdin", { dir: th.dir, args, patch: patch.endsWith("\n") ? patch : patch + "\n" });
+          return changed("Applied");
+        }
+        case "commit": {
+          const message = rest.join(" ").trim();
+          if (!message) throw new Error("Give the commit message.");
+          if (!flag(a, "staged")) await run("add", "-A");
+          await run("commit", "-m", message);
+          th.commitDraft = "";
+          if (current === th) $<HTMLTextAreaElement>("#commit-msg").value = "";
+          if (flag(a, "push")) await run("push", "-u", "origin", "HEAD");
+          return changed(flag(a, "push") ? "Committed and pushed" : "Committed");
+        }
+        case "amend": {
+          sure("Amending rewrites the last commit.");
+          const message = rest.join(" ").trim();
+          await run("commit", "--amend", ...(message ? ["-m", message] : ["--no-edit"]));
+          return changed("Amended");
+        }
+        case "undo":
+          sure("Undoing the last commit brings its changes back as staged work.");
+          await run("reset", "--soft", "HEAD~1");
+          return changed("Undid the last commit");
+        case "push":
+          await run("push", "-u", "origin", "HEAD");
+          return changed("Pushed");
+        case "pull":
+          await run("pull", "--rebase", "--autostash");
+          return changed("Pulled");
+        case "fetch":
+          await run("fetch", "--all", "--prune");
+          return changed("Fetched");
+        case "force-push":
+          sure(`Force-pushing overwrites the remote ${th.branch} unless someone pushed since you last fetched.`);
+          await run("push", "--force-with-lease");
+          return changed("Force-pushed");
+        case "pr": {
+          const url = await prUrl(th);
+          return { data: { url, ...(await gitStatus(th)) }, text: url };
+        }
+        case "branches": {
+          const out = await run("branch", "--format=%(refname:short)", "--sort=-committerdate").catch(() => "");
+          const branches = out.split("\n").map((b) => b.trim()).filter(Boolean).slice(0, 40);
+          return { data: { current: th.branch, branches }, text: branches.map((b) => (b === th.branch ? `* ${b}` : `  ${b}`)).join("\n") };
+        }
+        case "switch":
+          await run("switch", ...(flag(a, "create") ? ["-c"] : []), word(0, "a branch"));
+          return changed(`On ${rest[0]}`);
+        case "stashes": {
+          const out = await run("stash", "list", "--format=%gd%x09%gs").catch(() => "");
+          const stashes = out.split("\n").filter(Boolean).map((l) => ({ ref: l.split("\t")[0], message: l.split("\t").slice(1).join("\t") }));
+          return { data: { stashes }, text: stashes.map((x) => `${x.ref}  ${x.message}`).join("\n") };
+        }
+        case "stash":
+          await run("stash", "push", "-u", "-m", `loom ${th.name}`);
+          return changed("Stashed");
+        case "stash-apply":
+          await run("stash", "apply", word(0, "a stash"));
+          return changed("Stash applied");
+        case "stash-drop":
+          sure(`Dropping ${rest[0] ?? "a stash"} deletes it.`);
+          await run("stash", "drop", word(0, "a stash"));
+          return changed("Stash dropped");
+        case "revert":
+          await run("-c", "core.editor=true", "revert", "--no-edit", word(0, "a commit"));
+          return changed("Reverted");
+        case "reset": {
+          const how = flag(a, "hard") ? "--hard" : flag(a, "soft") ? "--soft" : "";
+          if (!how) throw new Error("git reset takes --soft (keep the changes, staged) or --hard (lose them).");
+          sure(how === "--hard" ? "A hard reset loses every change after that commit." : "A soft reset moves the branch back.");
+          await run("reset", how, word(0, "a commit"));
+          return changed("Reset");
+        }
+        case "continue":
+        case "skip":
+        case "abort": {
+          const midway = await invoke<string>("git_midway", { dir: th.dir }).catch(() => "");
+          if (!midway) throw new Error("git isn't in the middle of a merge, revert or rebase.");
+          if (what === "abort") await run(midway, "--abort");
+          else if (what === "skip") {
+            if (midway !== "rebase") throw new Error("Only a rebase can skip a commit.");
+            await run("rebase", "--skip");
+          } else await run("-c", "core.editor=true", ...(midway === "merge" ? ["commit", "--no-edit"] : [midway, "--continue"]));
+          return changed(`${midway} ${what === "abort" ? "aborted" : what === "skip" ? "skipped a commit" : "continued"}`);
+        }
+        case "resolve": {
+          const side = word(0, "ours or theirs");
+          if (side !== "ours" && side !== "theirs") throw new Error(`Resolve with ours or theirs, not ${side}.`);
+          const paths = rest.slice(1);
+          if (!paths.length) throw new Error("Name the files to resolve.");
+          await run("checkout", `--${side}`, "--", ...paths);
+          await run("add", "--", ...paths);
+          return changed(`Resolved ${paths.length} with ${side}`);
+        }
+        default:
+          throw new Error(`git doesn't know "${what}". loomctl help git lists what it does.`);
+      }
+    },
+  },
+  messages: {
+    usage: "messages [pane...]",
+    help: "What each agent last heard and said, as the Overview shows it: the last prompt and the last answer from its session's transcript, each cut at 500 characters. Shells have none.",
+    run: async (a) => {
+      const panes = (a._.length ? a._.map(cliPane) : threads.flatMap((t) => t.panes)).filter((p) => p.agent !== "shell" && dashboardSession(p));
+      const got: Record<string, DashboardMessages> = {};
+      // An opencode export takes seconds: each runs alone, the rest together.
+      const batches = [panes.filter((p) => p.agent !== "opencode"), ...panes.filter((p) => p.agent === "opencode").map((p) => [p])];
+      await Promise.all(batches.filter((b) => b.length).map(async (batch) => Object.assign(got, await invoke<Record<string, DashboardMessages>>("last_messages", {
+        panes: batch.map((p) => [claudeMarker(p), opencodeCommand(p.startup) || p.agent, p.th.dir, dashboardSession(p)]),
+      }).catch(() => ({})))));
+      const data = panes.map((p) => ({ pane: p.id, ref: paneName(p), user: got[claudeMarker(p)]?.user ?? "", agent: got[claudeMarker(p)]?.agent ?? "" }));
+      return { data, text: data.map((m) => `${m.ref}\n  you: ${m.user}\n  agent: ${m.agent}`).join("\n") };
+    },
+  },
+  context: {
+    usage: "context [pane]",
+    help: "A Claude pane's context, as its gauge's panel shows it: tokens by kind, the size after each turn, and where it was compacted.",
+    run: async (a) => {
+      const p = cliPane(a._[0]);
+      if (p.agent !== "claude") throw new Error(`${paneName(p)} isn't a Claude pane: only Claude's transcript says this.`);
+      const profile = await invoke<Profile | null>("context_profile", { pane: claudeMarker(p), dir: p.th.dir, sid: p.sid });
+      if (!profile) throw new Error(`${paneName(p)} has no transcript to read yet.`);
+      return { data: { pane: p.id, ref: paneName(p), ...profile }, text: profile.buckets.map((b) => `${b.label}  ${b.tokens}`).join("\n") };
+    },
+  },
+  startups: {
+    usage: "startups [add <label> <command...> | remove <label>]",
+    help: "The agents and terminals the + menu offers, which new and add --agent pick from: list them, add one, or remove one.",
+    run: (a) => {
+      const [how, label, ...cmd] = a._;
+      if (how === "add") {
+        if (!label) throw new Error("Name the new entry.");
+        if (startups.some((x) => x.label === label)) throw new Error(`There is already a "${label}".`);
+        startups.push({ label, cmd: cmd.join(" ") || label });
+        save();
+      } else if (how === "remove") {
+        const i = startups.findIndex((x) => x.label === label);
+        if (i < 0) throw new Error(`No "${label ?? ""}" in the list.`);
+        startups.splice(i, 1);
+        save();
+      } else if (how !== undefined) throw new Error(`startups takes add or remove, not ${how}.`);
+      return { data: startups.map((x) => ({ label: x.label, cmd: x.cmd })), text: table(startups.map((x) => [x.label, x.cmd])) };
+    },
+  },
+  vscode: {
+    usage: "vscode [thread]",
+    help: "Open a thread's folder in VS Code on this PC.",
+    run: async (a) => {
+      const th = cliThread(a._[0]);
+      await invoke("open_vscode", { dir: th.dir });
+      return { data: { thread: th.id }, text: `VS Code: ${th.dir}` };
+    },
+  },
   layout: {
     usage: "layout <cols|rows|grid> [--thread T]",
     help: "How a thread arranges its panes.",
@@ -8646,7 +8897,7 @@ const CLI: Record<string, CliCommand> = {
       const name = a._.join(" ").trim();
       if (!name) {
         return {
-          data: THEMES.map((t) => ({ name: t.label, scheme: t.scheme ?? "dark", current: t === theme })),
+          data: THEMES.map((t) => ({ name: t.label, scheme: t.scheme ?? "dark", current: t === theme, vars: t.vars })),
           text: table(THEMES.map((t) => [t === theme ? "*" : " ", t.label, t.scheme ?? "dark"])),
         };
       }
@@ -8659,12 +8910,12 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   set: {
-    usage: "set [sound|taskbar|overlay|awake|plan-usage] [value]",
-    help: "Show the settings, or change one: on/off, and overlay off/background/always.",
+    usage: "set [sound|taskbar|overlay|awake|plan-usage|font] [value]",
+    help: "Show the settings, or change one: on/off, overlay off/background/always, and font the terminals' size in points (8 to 24).",
     run: async (a) => {
       const settings = () => ({
         sound: soundEnabled ? "on" : "off", taskbar: taskbarEnabled ? "on" : "off", overlay: overlayMode,
-        awake: keepAwake ? "on" : "off", "plan-usage": planUsage ? "on" : "off",
+        awake: keepAwake ? "on" : "off", "plan-usage": planUsage ? "on" : "off", font: String(fontSize),
       });
       const key = a._[0];
       const value = a._[1];
@@ -8680,6 +8931,10 @@ const CLI: Record<string, CliCommand> = {
       } else if (key === "overlay") {
         if (!OVERLAY_MODES.some((m) => m === value)) throw new Error(`overlay takes ${OVERLAY_MODES.join(", ")}, not ${value ?? "nothing"}.`);
         for (let i = 0; i < OVERLAY_MODES.length && overlayMode !== value; i++) $("#overlay-pref").click();
+      } else if (key === "font") {
+        const n = Number(value);
+        if (!Number.isInteger(n) || n < 8 || n > 24) throw new Error(`font takes a size from 8 to 24, not ${value ?? "nothing"}.`);
+        setFont(n);
       } else if (key !== undefined) {
         throw new Error(`No setting "${key}". loomctl set lists them.`);
       }

@@ -3,8 +3,7 @@
 //! through control::ask, so a phone can do whatever loomctl can. It listens
 //! on 127.0.0.1 only: `tailscale serve` carries it to your own devices over
 //! HTTPS. A phone needs a token, which it gets once for the six-digit code
-//! `loomctl remote pair` shows. Full Loom (mirror.rs) streams the window
-//! itself through it too.
+//! `loomctl remote pair` shows.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -268,8 +267,6 @@ async fn route(app: &AppHandle, request: &Request) -> Reply {
         ("GET", p) if p.starts_with("/assets/") => asset(app, &p[1..]).cached(),
         ("POST", "/api/pair") => pair(app, request),
         ("POST", "/api/cli") => cli(app, request).await,
-        ("GET", "/api/mirror") => mirror_frame(app, request).await,
-        ("POST", "/api/mirror") => mirror(app, request).await,
         _ => Reply::error(404, "Not found."),
     }
 }
@@ -335,58 +332,11 @@ fn guess(pairing: &mut Option<Pairing>, code: &str, now: Instant) -> Result<(), 
     Err("Wrong code.")
 }
 
-/// The refusal for a request without a paired phone's token.
-fn unpaired(app: &AppHandle, request: &Request) -> Option<Reply> {
+async fn cli(app: &AppHandle, request: &Request) -> Reply {
     let token = request.header("authorization").and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("").trim();
     let paired = !token.is_empty() && app.state::<Remote>().config.lock().unwrap().phones.contains(&hash(token));
-    (!paired).then(|| Reply::json(401, json!({ "ok": false, "unpaired": true, "error": "This phone isn't paired, or its pairing was revoked." })))
-}
-
-/// Full Loom's next frame, newer than ?after=N: a JPEG with its number in
-/// X-Seq, or 204 when the page didn't change for a while.
-async fn mirror_frame(app: &AppHandle, request: &Request) -> Reply {
-    if let Some(refused) = unpaired(app, request) {
-        return refused;
-    }
-    let after = request.path.split_once("?after=").and_then(|(_, n)| n.parse().ok()).unwrap_or(0);
-    match crate::mirror::frame(app, after).await {
-        Ok(Some(f)) => Reply::new(200, "image/jpeg", f.jpeg.clone()).header("X-Seq", f.seq.to_string()),
-        Ok(None) => Reply::new(204, "text/plain", Vec::new()),
-        Err(error) => Reply::error(409, &error),
-    }
-}
-
-/// Full Loom: start at the phone's size (again when it changes), stop, or play input.
-async fn mirror(app: &AppHandle, request: &Request) -> Reply {
-    if let Some(refused) = unpaired(app, request) {
-        return refused;
-    }
-    let Ok(body) = serde_json::from_slice::<Value>(&request.body) else { return Reply::error(400, "The body isn't JSON.") };
-    let size = |k: &str| body[k].as_u64().map(|n| n as u32);
-    let done = match body["action"].as_str() {
-        Some("start") => match (size("width"), size("height"), body["scale"].as_f64()) {
-            (Some(w), Some(h), Some(scale)) => crate::mirror::start(app, w, h, scale).await,
-            _ => Err("start takes the width, height and scale of the phone's screen.".into()),
-        },
-        Some("stop") => {
-            crate::mirror::stop(app).await;
-            Ok(())
-        }
-        Some("input") => match body["events"].as_array() {
-            Some(events) => crate::mirror::input(app, events).await,
-            None => Err("input takes a list of events.".into()),
-        },
-        _ => Err("Send start, stop or input.".into()),
-    };
-    match done {
-        Ok(()) => Reply::json(200, json!({ "ok": true })),
-        Err(error) => Reply::error(409, &error),
-    }
-}
-
-async fn cli(app: &AppHandle, request: &Request) -> Reply {
-    if let Some(refused) = unpaired(app, request) {
-        return refused;
+    if !paired {
+        return Reply::json(401, json!({ "ok": false, "unpaired": true, "error": "This phone isn't paired, or its pairing was revoked." }));
     }
     let Ok(mut command) = serde_json::from_slice::<Value>(&request.body) else { return Reply::error(400, "The body isn't JSON.") };
     let words = command["argv"].as_array().is_some_and(|a| a.iter().all(Value::is_string));
@@ -414,17 +364,11 @@ struct Reply {
     kind: String,
     body: Vec<u8>,
     cached: bool,
-    headers: Vec<(&'static str, String)>,
 }
 
 impl Reply {
     fn new(status: u16, kind: &str, body: Vec<u8>) -> Self {
-        Reply { status, kind: kind.into(), body, cached: false, headers: Vec::new() }
-    }
-
-    fn header(mut self, name: &'static str, value: String) -> Self {
-        self.headers.push((name, value));
-        self
+        Reply { status, kind: kind.into(), body, cached: false }
     }
 
     fn json(status: u16, body: Value) -> Self {
@@ -452,7 +396,7 @@ impl Reply {
             self.body
         };
         let reason = match self.status {
-            200 => "OK", 204 => "No Content", 400 => "Bad Request", 409 => "Conflict", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found",
+            200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found",
             411 => "Length Required", 413 => "Payload Too Large", 431 => "Request Header Fields Too Large", _ => "Internal Server Error",
         };
         let cache = if self.cached { "public, max-age=31536000, immutable" } else { "no-store" };
@@ -462,9 +406,6 @@ impl Reply {
         );
         if squeeze {
             head.push_str("Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n");
-        }
-        for (name, value) in &self.headers {
-            head.push_str(&format!("{name}: {value}\r\n"));
         }
         head.push_str("\r\n");
         [head.into_bytes(), body].concat()

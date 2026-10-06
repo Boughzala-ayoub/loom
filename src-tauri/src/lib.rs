@@ -18,7 +18,6 @@ mod usage;
 mod pipe;
 mod control;
 mod remote;
-mod mirror;
 mod deletion;
 mod workspace;
 
@@ -1827,7 +1826,6 @@ pub fn run() {
         .manage(output::Bus::default())
         .manage(control::Pending::default())
         .manage(remote::Remote::default())
-        .manage(mirror::Mirror::default())
         .manage(WindowStateReady::default())
         .manage(dictate::Dictation::default())
         .manage(usage::Scanned::default())
