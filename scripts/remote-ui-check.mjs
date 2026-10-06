@@ -47,6 +47,7 @@ const own = id => (id === 'a' ? 'alpha' : 'beta');
 const status = id => ({ thread: id, name: id === 'a' ? 'Alpha' : 'Beta', branch: `loom/${id}`, upstream: `origin/loom/${id}`, ahead: 1, behind: 1, midway: 'rebase',
   staged: [file('staged.txt', 'M', ' ')], unstaged: [file(`${own(id)}.txt`), file('conflict.txt', 'U', 'U')], untracked: [file('new.txt', '?', '?')],
   commits: [{ sha: 'abc1234', subject: 'A recent commit message with a useful description' }] });
+const question = pane => ({ question: ['May I change this file?'], options: ['Yes, go ahead', 'No, keep it'], keys: ['1', '2'], rev: `menu-${pane}` });
 const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 100644\n--- a/${name}\n+++ b/${name}\n@@ -1 +1 @@\n-old ${name}\n+new ${name}\n`;
 
 /** A page whose /api answers like Loom. `hold` keeps a `git <thread> <action>` reply until state.held[it]() runs. */
@@ -91,11 +92,15 @@ async function context(width, token = true, push = false) {
       if (state.corruptSend) { state.corruptSend = false; return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true,"data":' }); }
       if (state.refuseSend) { state.refuseSend = false; return route.fulfill({ json: { ok: false, error: 'That pane is busy.' } }); }
     }
+    // failThreads: the next that many reads of the threads never reach Loom; offline: nothing does.
+    if (state.offline || (c.cmd === 'threads' && state.failThreads > 0)) { state.failThreads--; return route.abort('failed'); }
     if (c.cmd === 'threads' && state.hold.delete('threads')) await new Promise(r => (state.held.threads = r));
     // Every threads read waits while blocked: unblock() lets them all go.
     if (c.cmd === 'threads' && state.blocked) await new Promise(r => state.blocked.push(r));
-    // A command's next reply waits for state.held[cmd]() (menu, status).
-    if (state.hold.delete(c.cmd)) await new Promise(r => (state.held[c.cmd] = r));
+    // A command's next reply waits for state.held[cmd]() (menu, status). An agent's question comes with
+    // its screen (read --menu), so holding menu holds that read.
+    const holdAs = c.cmd === 'read' && c.argv.includes('--menu') ? 'menu' : c.cmd;
+    if (state.hold.delete(holdAs)) await new Promise(r => (state.held[holdAs] = r));
     let data;
     const threads = [thread('a', 'Alpha'), thread('b', 'Beta', 'codex')];
     // siblings: Alpha:2 runs Codex (sameKind: a second Claude) beside Alpha:1's Claude. closeFirst: Alpha:1 closed
@@ -130,8 +135,8 @@ async function context(width, token = true, push = false) {
       }
       case 'threads': data = threads; break;
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
-      case 'menu': data = { question: ['May I change this file?'], options: ['Yes, go ahead', 'No, keep it'], keys: ['1', '2'], rev: `menu-${c.argv[0]}` }; break;
-      case 'read': data = { text: 'sample screen', cols: 120, rows: [{ runs: [{ x: 0, text: 'sample screen' }] }] }; break;
+      case 'menu': data = question(c.argv[0]); break;
+      case 'read': data = { text: 'sample screen', cols: 120, rows: [{ runs: [{ x: 0, text: 'sample screen' }] }], ...(c.argv.includes('--menu') ? { menu: question(c.argv[0]) } : {}) }; break;
       case 'theme': data = ['loom', 'nord', 'light'].map((name, i) => ({ name, scheme: i === 2 ? 'light' : 'dark', current: i === 0, vars: {} })); break;
       case 'set': data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': 'on', font: '13' }; break;
       case 'notify': data = { all: 'on', kinds: { finish: true, fail: true, blocked: true }, newPanes: 'inherit' }; break;
@@ -151,10 +156,12 @@ async function context(width, token = true, push = false) {
         if (action === 'diff') data = { diff: patch(`${own(id)}.txt`) };
         else if (action === 'show') data = { diff: `commit abc1234\nAuthor: Tester <test@example.com>\nDate: Tue Oct 6 10:00:00 2026 +0100\n\n    A sample commit\n\n ${own(id)}.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n\n${patch(`${own(id)}.txt`)}` };
         else if (action === 'files') data = { files: [`${own(id)}.txt`, 'src/deep/path.txt'] };
-        else if (action === 'file') data = { text: `${own(id)} one\ntwo\nthree\n` };
+        else if (action === 'file') data = { text: c.argv[2] === 'big.txt' ? Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join('\n') : `${own(id)} one\ntwo\nthree\n` };
         else if (action === 'branches') data = { current: `loom/${id}`, branches: [`loom/${id}`, 'feature/next'] };
         else if (action === 'stashes') data = { stashes: [{ ref: 'stash@{0}', message: `WIP on loom/${id}: abc1234 A saved change` }] };
         else data = status(id);
+        // gitChurn: an agent in the thread writes a new file before each read.
+        if (action === 'status' && state.gitChurn) data.untracked.push(file(`made-${state.gitChurn++}.txt`, '?', '?'));
         break;
       }
       default: data = {};
@@ -448,6 +455,118 @@ try {
     await ctx.close();
   }
   console.log('PASS a hunk or file action that completes after you left redraws and navigates nothing');
+
+  // --- The phone review's fixes (docs/reviews/LOOM_PHONE_REMOTE_REVIEW_CLAUDE_OPUS55_2026-10-06_192346.md) ---
+  {
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1', '#question button');
+    // One trip a turn: the question comes with the screen, never asked apart (it was read, then menu).
+    const since = state.calls.length;
+    await page.waitForTimeout(2200);
+    const turn = state.calls.slice(since);
+    assert.ok(turn.filter(c => c.cmd === 'read').length >= 2 && turn.every(c => c.cmd !== 'read' || c.argv.includes('--menu')), 'the screen is read with its question');
+    assert.equal(turn.filter(c => c.cmd === 'menu').length, 0, 'no menu read of its own');
+    // ⋯ opens at once (it waited for status), and status still comes.
+    state.hold.add('status');
+    await page.click('#more');
+    await page.locator('#sheet.on').waitFor({ timeout: 1000 });
+    await until('status for the window size', () => state.held.status);
+    state.held.status();
+    await close(page);
+    // A toast lets a tap through to Back and ⋯ under it (it took them).
+    await page.fill('#prompt textarea', 'go on');
+    await page.click('#prompt button.primary');
+    await page.locator('#toast').filter({ hasText: 'Sent' }).waitFor();
+    assert.deepEqual(await page.evaluate(() => ['#pane .back', '#more'].map(s => {
+      const r = document.querySelector(s).getBoundingClientRect();
+      return !!document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest(s);
+    })), [true, true], 'Back and ⋯ take a tap under a toast');
+    // Each agent keeps its own message (one box held it for all).
+    await page.fill('#prompt textarea', 'for Alpha only');
+    await page.evaluate(() => (location.hash = '#/pane/b1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
+    assert.equal(await page.inputValue('#prompt textarea'), '', "Alpha's message isn't Beta's");
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:1' }).waitFor();
+    assert.equal(await page.inputValue('#prompt textarea'), 'for Alpha only', 'it comes back with Alpha');
+    // A reply lost on the way holds the screen up until its deadline, not for good.
+    state.hold.add('menu'); // the next read of the screen never answers
+    await until('the read is lost', () => state.held.menu);
+    const lost = state.calls.length;
+    await until('the screen is read again', () => state.calls.slice(lost).some(c => c.cmd === 'read'), 20000);
+    // One lost read of the threads says nothing; Loom out of reach shows the banner over the page, the message box on screen.
+    await page.evaluate(() => {
+      const banner = document.querySelector('#offline');
+      window.bannerShown = false;
+      new MutationObserver(() => { if (!banner.hidden) window.bannerShown = true; }).observe(banner, { attributes: true });
+    });
+    state.failThreads = 1;
+    await until('the lost threads read', () => state.failThreads === 0);
+    await page.waitForTimeout(2500);
+    assert.equal(await page.evaluate(() => window.bannerShown), false, 'one lost read shows no banner, not even for a moment');
+    state.offline = true;
+    await page.locator('#offline').waitFor({ timeout: 8000 });
+    const dock = await page.locator('#dock').boundingBox();
+    assert.ok(dock.y + dock.height <= 800.5, `the banner pushes nothing: the dock ends at ${dock.y + dock.height} of 800`);
+    state.offline = false;
+    await page.locator('#offline').waitFor({ state: 'hidden', timeout: 8000 });
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    const { ctx, page, state } = await context(375);
+    // A word the phone's keyboard is still composing lands once when the cards are rebuilt meanwhile (it doubled).
+    await goto(page, '', '#list .agent');
+    await page.locator('#list .seg button').filter({ hasText: 'Activity' }).click();
+    const reply = page.locator('#list .reply input[aria-label="Reply to Alpha:1"]');
+    await reply.click();
+    await page.keyboard.type('yes ');
+    const cdp = await ctx.newCDPSession(page);
+    await cdp.send('Input.imeSetComposition', { text: 'do', selectionStart: 2, selectionEnd: 2 });
+    state.changedTitle = true;
+    await page.locator('#list .card').filter({ hasText: 'Another agent has changed its title' }).waitFor({ timeout: 5000 });
+    await cdp.send('Input.imeSetComposition', { text: 'done', selectionStart: 4, selectionEnd: 4 });
+    await cdp.send('Input.insertText', { text: 'done' });
+    assert.equal(await reply.inputValue(), 'yes done', 'the composed word lands once');
+    // Its card, kept while typed in, is drawn anew once the box is left.
+    const card = await page.locator('#list .card[data-pane=a1]').elementHandle();
+    await reply.blur();
+    await page.waitForFunction(c => !c.isConnected, card, { timeout: 5000 });
+    // The commit box: a message keeps its caret while an agent writes files in the thread (it jumped to the end).
+    await goto(page, '#/changes/a', '#changes .composer textarea');
+    const box = page.locator('#changes .composer textarea');
+    await box.fill('fix the login bug');
+    await box.evaluate(t => { t.focus(); t.setSelectionRange(4, 4); });
+    const typed = await box.elementHandle();
+    state.gitChurn = 1;
+    await page.locator('#changes .file').filter({ hasText: 'made-' }).first().waitFor({ timeout: 14000 });
+    assert.deepEqual(await typed.evaluate(t => [t.isConnected, document.activeElement === t, t.selectionStart]), [true, true, 4], 'the same box, focused, its caret where it was');
+    // Usage isn't redrawn while nothing on it changed (it was, every 2 s).
+    await goto(page, '#/usage', '#usage .provider');
+    const provider = await page.locator('#usage .provider').first().elementHandle();
+    await page.waitForTimeout(4500);
+    assert.ok(await provider.evaluate(e => e.isConnected), 'the same cards after 4.5 s');
+    // A big file draws a thousand lines at a time (it drew 20,000 at once).
+    await goto(page, '#/file/a/big.txt', '#diff .r');
+    assert.equal(await page.locator('#diff .r').count(), 1000);
+    const more = page.locator('#diff .more-rows');
+    assert.equal(await more.innerText(), 'Show more: 1500 lines left');
+    await more.click();
+    await more.click();
+    assert.equal(await page.locator('#diff .r').count(), 2500);
+    assert.equal(await page.locator('#diff .r').last().innerText().then(t => t.includes('line 2500')), true);
+    assert.equal(await more.isVisible(), false, 'no button once all are drawn');
+    await more.evaluate(b => (b.hidden = false)); // its button, at every width
+    for (const width of [320, 375, 768, 901, 1024, 1280]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.waitForTimeout(80);
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), `the paged file fits at ${width}`);
+      if (width === 375 || width === 901) await page.screenshot({ path: resolve(out, `${width}-file-paged.png`) });
+    }
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log("PASS the phone review's fixes: one read for screen and question, ⋯ at once, toasts let taps through, a message per agent, a lost reply gives up, the banner only after two misses and over the page, a composed word lands once, the commit caret stays, Usage stays put, big files in pages");
   // --- Notifications on this phone ----------------------------------------------------------
   {
     const { ctx, page, state } = await context(375, true, true);
@@ -793,8 +912,9 @@ try {
   for (const [where, hash, target] of [['a link being looked up', '#/pane/a3/Alpha%3A2/k-a3', 'a3'], ['another agent', '#/pane/a1/Alpha%3A1', 'a1'], ['Settings', '#/settings', 'b1']]) {
     for (const late of ['menu', 'status']) {
       const { ctx, page, state } = await context(375);
-      if (late === 'menu') state.hold.add('menu');
       await goto(page, '#/pane/b1/Beta%3A1', '#screen .line');
+      // Beta's next read of its screen and question, or the status its actions ask for.
+      if (late === 'menu') state.hold.add('menu');
       if (late === 'status') { state.hold.add('status'); await page.click('#more'); }
       await until(`Beta's ${late} is asked`, () => state.held[late]);
       Object.assign(state, { added: true }, target === 'a3' ? { blocked: [] } : {}); // Alpha:2 added on the PC since

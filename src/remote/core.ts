@@ -47,16 +47,21 @@ export class Offline extends Error {}
 export const hooks = { unpaired: () => {}, changed: () => {} };
 
 /** One loomctl command. A change carries a key, so the retry after a dropped
- * connection gets the first run's answer instead of running it again. */
+ * connection gets the first run's answer instead of running it again. Each
+ * waits as long as Loom would, then gives up: a reply lost on the way (the phone
+ * changed networks) must not hold up the screen and every key after it. */
 export async function run<T>(cmd: string, argv: string[] = [], opts: { stdin?: string; change?: boolean; timeout?: number } = {}): Promise<T> {
   const key = opts.change ? `phone-${[...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")}` : null;
+  const timeout = opts.timeout ?? 30;
   for (let attempt = 0; ; attempt++) {
     let res: Response | undefined, reply: { ok?: boolean; error?: string; data?: unknown } | null = null;
     try {
       res = await fetch("/api/cli", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${app.token}` },
-        body: JSON.stringify({ cmd, argv, stdin: opts.stdin ?? null, key, timeout: opts.timeout ?? 30 }),
+        body: JSON.stringify({ cmd, argv, stdin: opts.stdin ?? null, key, timeout }),
+        // Loom answers within its timeout plus 5 s (control.rs ask); then a little more for the trip.
+        signal: AbortSignal.timeout((timeout + 10) * 1000),
       });
       reply = await res.json();
     } catch { /* below */ }
@@ -232,6 +237,16 @@ export function sequence<T>(send: (items: T[]) => Promise<unknown>) {
       busy = false;
     })();
   };
+}
+
+/** Gives `parent` the children `next`, one of which is its child `keep`, never taken out: a text box in
+ * it keeps the focus and the word a phone keyboard is still composing, which a rebuilt box would
+ * get a second time. */
+export function replaceAround(parent: Element, next: Node[], keep: Element) {
+  for (const n of [...parent.childNodes]) if (n !== keep) n.remove();
+  const at = next.indexOf(keep);
+  keep.before(...next.slice(0, at));
+  keep.after(...next.slice(at + 1));
 }
 
 /** +12 −3, or nothing for no change. */

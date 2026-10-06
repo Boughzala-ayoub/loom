@@ -76,14 +76,17 @@ export async function read(now = false, force = false) {
   draw();
 }
 
+let drawn = ""; // what the tab shows: drawn again only when that changes, never under a finger for nothing
 export function draw() {
-  const nodes: Node[] = [];
+  const nodes: Element[] = [];
   for (const [kind, name] of [["claude", "Claude"], ["codex", "Codex"]] as const) {
     const plan = plans?.[kind];
     const box = el("section", "provider");
     const head = el("div", "provider-head");
     const who = el("div", "who");
-    who.append(el("b", "", plan?.tier ? `${name} ${TIERS[plan.tier] ?? plan.tier}` : name), el("span", "", refresh.disabled ? "Refreshing…" : plan?.fetchedAt ? (age(plan.fetchedAt) === "now" ? "Updated just now" : `Updated ${age(plan.fetchedAt)} ago`) : plans ? "No reading" : "Reading…"));
+    // By the minute: seconds would redraw the tab on each 2 s read of the threads.
+    const fresh = plan?.fetchedAt && Date.now() - Date.parse(plan.fetchedAt) < 60000;
+    who.append(el("b", "", plan?.tier ? `${name} ${TIERS[plan.tier] ?? plan.tier}` : name), el("span", "", refresh.disabled ? "Refreshing…" : plan?.fetchedAt ? (fresh ? "Updated just now" : `Updated ${age(plan.fetchedAt)} ago`) : plans ? "No reading" : "Reading…"));
     const page = el("a", "", "Details");
     Object.assign(page, { href: PAGES[kind], target: "_blank", rel: "noreferrer" });
     head.append(agentIcon(kind), who, page);
@@ -111,6 +114,9 @@ export function draw() {
     list.append(...withContext.sort((a, b) => (a.context!.remainingPercent - b.context!.remainingPercent)).map(contextRow));
     nodes.push(list);
   }
+  const html = nodes.map((n) => n.outerHTML).join("");
+  if (html === drawn && body.childElementCount) return;
+  drawn = html;
   body.replaceChildren(...nodes);
 }
 
@@ -118,6 +124,7 @@ function contextRow(p: Pane) {
   const used = 100 - p.context!.remainingPercent;
   const row = el("button", "ctx-row");
   row.type = "button";
+  row.dataset.pane = p.id; // where its tap goes, so a new pane id draws it anew
   row.onclick = () => (p.agent === "claude" ? go(`#/context/${encodeURIComponent(p.id)}`) : go(`#/pane/${encodeURIComponent(p.id)}`));
   const t = threadOf(p);
   row.append(agentIcon(p.agent), el("b", "", `${t?.name ?? ""} / ${p.agent}${p.model ? ` · ${p.model}` : ""}`), el("span", "pct", `${used}%`), meter(used, used >= 90 ? "critical" : used >= 70 ? "warning" : ""));

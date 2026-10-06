@@ -16,7 +16,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff", "hashedFiles"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -671,4 +671,18 @@ if (check(309)) {
   assert.equal(replaced, 0, "the replacement keeps running");
   assert.match(retry.text, /already restarted/);
   console.log("ok   relaunch wants --yes while a pane works and restarts after its answer; status says when Loom started; --booted restarts only that Loom");
+}
+if (check(310)) {
+  // The phone reads an agent's screen and its question in one request: read --menu answers what menu does.
+  const survey = "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss";
+  let screen = claudeComposer + "\n" + survey;
+  const p = { id: "p", th: { name: "work", panes: [] }, agent: "claude", term: { cols: 80, buffer: { active: { cursorX: 0, cursorY: 0, type: "normal" } } } };
+  const c = fixture({ cliPane: () => p, liveScreen: () => screen, inputState: () => ({ kind: "empty" }), styledRows: () => [] });
+  const menu = c.menu.run({ _: ["p"] }).data;
+  assert.ok(menu?.rev, "the fixture shows a question");
+  assert.deepEqual(c.read.run({ _: ["p"], styles: true, menu: true }).data.menu, menu);
+  assert.ok(!("menu" in c.read.run({ _: ["p"], styles: true }).data), "plain read is as before");
+  screen = claudeComposer;
+  assert.equal(c.read.run({ _: ["p"], menu: true }).data.menu, null);
+  console.log("ok   read --menu carries the pane's question, as menu reads it, or null");
 }

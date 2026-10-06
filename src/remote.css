@@ -260,6 +260,7 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 10px); min-widt
 .diff .hunk { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; padding: 6px 10px; border-block: 1px solid var(--edge); background: var(--panel); color: var(--blue); }
 .diff .hunk code { flex: 1 1 100%; overflow-wrap: anywhere; font-size: 12px; }
 .diff .hunk button { min-height: 44px; padding: 0 14px; font: 600 14px var(--ui); }
+.diff .more-rows { display: block; width: calc(100% - 32px); margin: 14px 16px 0; font: 600 15px var(--ui); }
 .diff .file-head { margin-top: 14px; padding: 8px 12px; background: var(--raise); color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
 .commit-head { display: grid; gap: 6px; padding: 14px 16px; border-bottom: 1px solid var(--edge); font: 15px/1.45 var(--ui); }
 .commit-head b { font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -338,10 +339,12 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 10px); min-widt
 #sheet .item svg { width: 20px; height: 20px; color: var(--muted); }
 #sheet .item.danger svg { color: var(--err); }
 @media (min-width: 900px) { #sheet { left: 50%; right: auto; bottom: 24px; width: 440px; border: 1px solid var(--edge-hi); border-radius: 22px; transform: translate(-50%, 24px); opacity: 0; transition: transform 0.2s, opacity 0.2s; } #sheet.on { transform: translate(-50%, 0); opacity: 1; } }
-#toast { position: fixed; left: 12px; right: 12px; top: 12px; z-index: 10; padding: 13px 16px; border: 1px solid var(--edge-hi); border-radius: 14px; background: var(--raise); box-shadow: var(--shadow); }
+/* Over the top bar, a tap goes through to Back and ⋯ under it. */
+#toast { position: fixed; left: 12px; right: 12px; top: 12px; z-index: 10; padding: 13px 16px; border: 1px solid var(--edge-hi); border-radius: 14px; background: var(--raise); box-shadow: var(--shadow); pointer-events: none; }
 #toast.error { border-color: var(--err); }
 @media (min-width: 900px) { #toast { left: auto; width: 420px; } }
-#offline { position: sticky; top: 0; z-index: 7; padding: 10px 16px; background: color-mix(in srgb, var(--err) 30%, var(--panel)); }
+/* Over the page, not in it: shown, it moves nothing, so an agent's message box stays on screen. */
+#offline { position: fixed; left: 0; right: 0; top: 0; z-index: 7; padding: 10px 16px; background: color-mix(in srgb, var(--err) 30%, var(--panel)); pointer-events: none; }
 /* A restart you asked for: news, not an error. */
 #offline.calm { background: color-mix(in srgb, var(--accent) 25%, var(--panel)); }
 

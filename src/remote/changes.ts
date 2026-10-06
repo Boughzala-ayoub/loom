@@ -2,7 +2,7 @@
  * which runs git the way the panel's own buttons do. */
 import { diffRows, hunkPatch, type DiffRow } from "../gitparse";
 import {
-  act, app, base, button, closeSheet, confirmSheet, el, findThread, go, iconButton, item, pref, promptSheet, run, setPref,
+  act, app, base, button, closeSheet, confirmSheet, el, findThread, go, iconButton, item, pref, promptSheet, replaceAround, run, setPref,
   sheet, stat, tick, toast, topBar, ui,
 } from "./core";
 
@@ -83,13 +83,14 @@ function empty(title: string, text: string) {
   return box;
 }
 
+let held = false; // the commit box kept as it was while a message is typed: redrawn once you leave it
 function draw(tid: string, s: Status) {
   status = s;
   const key = JSON.stringify(s);
-  if (key === statusKey) return; // leave the rows under the finger
+  const kept = body.querySelector<HTMLElement>(".composer");
+  const typing = !!kept && kept.dataset.thread === tid && document.activeElement === kept.querySelector("textarea");
+  if (key === statusKey && !(held && !typing)) return; // leave the rows under the finger
   statusKey = key;
-  const kept = body.querySelector<HTMLTextAreaElement>(".composer textarea");
-  const focused = document.activeElement === kept;
   const t = findThread(tid);
   const tracked = [...s.staged, ...s.unstaged];
   const paths = new Set([...tracked, ...s.untracked].map((f) => f.path));
@@ -120,8 +121,11 @@ function draw(tid: string, s: Status) {
     }));
     nodes.push(el("div", "section-title", "Recent commits"), box);
   }
-  body.replaceChildren(...nodes);
-  if (focused) body.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+  // A message being typed keeps its box, never rebuilt: the caret stays, and so does a word the phone's keyboard is composing.
+  const at = typing ? nodes.findIndex((n) => n instanceof HTMLElement && n.matches(".composer")) : -1;
+  held = at >= 0;
+  if (held) (nodes[at] = kept!), replaceAround(body, nodes, kept!);
+  else body.replaceChildren(...nodes);
 }
 
 function branchCard(tid: string, s: Status) {
@@ -188,6 +192,7 @@ async function ask(tid: string, title: string, detail: string, action: string, a
 let onlyStaged = false;
 function composer(tid: string, s: Status) {
   const box = el("div", "composer");
+  box.dataset.thread = tid;
   const draftKey = `loom-commit-${tid}`;
   const msg = el("textarea");
   Object.assign(msg, { rows: 2, placeholder: "Commit message", value: pref(draftKey, "") });
@@ -364,7 +369,25 @@ export function showCommit(tid: string, sha: string) {
   void lastDiff();
 }
 
-const CAP = 20000; // rows drawn: a phone isn't for reading more than this
+/** The first PAGE of `count` rows, and a button that adds the next PAGE each tap. A phone lays out a
+ * thousand rows in a few hundred ms; all of a 10,000-line file froze it for over a second. */
+const PAGE = 1000;
+function paged(count: number, row: (i: number) => Node | null): Node[] {
+  let next = 0;
+  const more = button("", () => more.before(...page()), "more-rows");
+  const page = () => {
+    const out: Node[] = [];
+    for (const end = Math.min(count, next + PAGE); next < end; next++) {
+      const node = row(next);
+      if (node) out.push(node);
+    }
+    more.hidden = next >= count;
+    more.textContent = `Show more: ${count - next} line${count - next === 1 ? "" : "s"} left`;
+    return out;
+  };
+  return [...page(), more];
+}
+
 function drawDiff(tid: string, text: string, sec: Sec | null, path: string) {
   const rows = diffRows(text);
   if (!rows.length) return void diffBox.replaceChildren(...(sec === null ? [] : [empty("No differences", "Nothing changed here, or it's a binary file.")]));
@@ -375,24 +398,20 @@ function drawDiff(tid: string, text: string, sec: Sec | null, path: string) {
     const route = location.hash;
     void change(tid, ["stage", "--untracked", path], "Staged").then((ok) => ok && location.hash === route && history.back());
   }, "primary")));
-  rows.slice(0, CAP).forEach((r: DiffRow, i) => {
-    if (r.text.startsWith("diff --git")) {
-      if (files > 1 || sec === null) out.push(el("div", "file-head", r.text.replace(/^diff --git a\/(.*) b\/.*$/, "$1")));
-      return;
-    }
+  out.push(...paged(rows.length, (i) => {
+    const r: DiffRow = rows[i];
+    if (r.text.startsWith("diff --git")) return files > 1 || sec === null ? el("div", "file-head", r.text.replace(/^diff --git a\/(.*) b\/.*$/, "$1")) : null;
     if (r.kind === "hunk") {
       const h = el("div", "hunk");
       h.append(el("code", "", r.text));
       for (const [label, args, risky] of moves) h.append(button(label, () => void moveHunk(tid, rows, i, args, risky, label), risky ? "danger" : ""));
-      out.push(h);
-      return;
+      return h;
     }
-    if (r.kind === "meta" && /^(index |--- |\+\+\+ )/.test(r.text)) return;
+    if (r.kind === "meta" && /^(index |--- |\+\+\+ )/.test(r.text)) return null;
     const line = el("div", `r ${r.kind}`);
     line.append(el("span", "n", r.kind === "add" ? "" : r.old ? String(r.old) : ""), el("span", "n", r.kind === "del" ? "" : r.neu ? String(r.neu) : ""), el("span", "t", r.text || " "));
-    out.push(line);
-  });
-  if (rows.length > CAP) out.push(el("p", "hint", `${rows.length - CAP} more lines not shown.`));
+    return line;
+  }));
   diffBox.replaceChildren(...out);
 }
 function commitHead(head: string) {
@@ -478,11 +497,11 @@ export async function showFile(tid: string, path: string) {
   const n = ++diffSeq;
   diffBox.replaceChildren(el("p", "hint", "Reading the file…"));
   try {
-    const text = (await run<{ text: string }>("git", [tid, "file", path], { timeout: 60 })).text;
+    const lines = (await run<{ text: string }>("git", [tid, "file", path], { timeout: 60 })).text.split("\n");
     if (n !== diffSeq) return;
-    diffBox.replaceChildren(...text.split("\n").slice(0, CAP).map((t, i) => {
+    diffBox.replaceChildren(...paged(lines.length, (i) => {
       const line = el("div", "r");
-      line.append(el("span", "n", ""), el("span", "n", String(i + 1)), el("span", "t", t || " "));
+      line.append(el("span", "n", ""), el("span", "n", String(i + 1)), el("span", "t", lines[i] || " "));
       return line;
     }));
   } catch (e) {

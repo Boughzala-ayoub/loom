@@ -3259,6 +3259,12 @@ function liveScreen(p: Pane, joined = true, surveyOnly = false) {
   return lines.join("\n");
 }
 
+/** loomctl menu: the numbered question on a pane's screen, or Claude's survey, with the id choose --menu takes. */
+function paneMenu(p: Pane) {
+  const m = readMenu(liveScreen(p, false)) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
+  return m && { ...m, rev: menuRev(m) };
+}
+
 /** The live screen's rows as readInput's cells. */
 function screenCells(p: Pane): Cell[][] {
   const buf = p.term.buffer.active, cell = buf.getNullCell(), rows: Cell[][] = [];
@@ -8219,9 +8225,9 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   read: {
-    usage: "read [pane] [--lines N] [--styles]",
-    help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the rows with their styles: the screen's, or with --lines those N lines'. JSON alt is true while a full-screen app such as OpenCode holds the screen.",
-    options: { lines: "int", styles: "bool" },
+    usage: "read [pane] [--lines N] [--styles] [--menu]",
+    help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the rows with their styles: the screen's, or with --lines those N lines'. --menu adds menu, what menu answers for the pane, in the same read. JSON alt is true while a full-screen app such as OpenCode holds the screen.",
+    options: { lines: "int", styles: "bool", menu: "bool" },
     run: (a) => {
       const p = cliPane(a._[0]);
       let raw: string, from: number | undefined, to: number | undefined;
@@ -8240,7 +8246,8 @@ const CLI: Record<string, CliCommand> = {
       const text = raw.split("\n").map((l) => l.trimEnd()).join("\n").replace(/\n+$/, "");
       const buf = p.term.buffer.active;
       const cursor = { x: buf.cursorX, y: buf.cursorY, hidden: p.cursorHidden };
-      return { data: { pane: p.id, ref: paneName(p), text, cursor, cols: p.term.cols, alt: buf.type === "alternate", input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p, from, to) } : {}) }, text };
+      return { data: { pane: p.id, ref: paneName(p), text, cursor, cols: p.term.cols, alt: buf.type === "alternate", input: inputState(p),
+        ...(flag(a, "styles") ? { rows: styledRows(p, from, to) } : {}), ...(flag(a, "menu") ? { menu: paneMenu(p) } : {}) }, text };
     },
   },
   menu: {
@@ -8248,13 +8255,11 @@ const CLI: Record<string, CliCommand> = {
     help: "The numbered question on a pane's screen, including Claude's active session survey below the composer. Wrapped questions are supported. Quoted or dismissed surveys are not actionable. Survey keys are 1, 2, 3 and 0; selected is -1 because none is highlighted.",
     run: (a) => {
       const p = cliPane(a._[0]);
-      const screen = liveScreen(p, false);
-      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
+      const m = paneMenu(p);
       if (!m) return { data: null, text: `${paneName(p)} isn't showing a numbered question.` };
-      const rev = menuRev(m);
       // The whole prompt, which the id covers, not just the summary above the options.
-      const note = `(${m.selected < 0 ? "Press a listed digit" : `${m.selected + 1} is highlighted`}. Menu ${rev}: choose --menu ${rev} answers only this question.)`;
-      return { data: { ...m, rev }, text: [...m.prompt, note].join("\n") };
+      const note = `(${m.selected < 0 ? "Press a listed digit" : `${m.selected + 1} is highlighted`}. Menu ${m.rev}: choose --menu ${m.rev} answers only this question.)`;
+      return { data: m, text: [...m.prompt, note].join("\n") };
     },
   },
   show: {

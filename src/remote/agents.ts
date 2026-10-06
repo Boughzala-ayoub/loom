@@ -3,7 +3,7 @@
  * agent's screen, and starting threads. */
 import {
   act, age, agentIcon, app, back, base, button, closeSheet, confirmSheet, el, findPane, findThread, go, iconButton,
-  item, panes, pref, promptSheet, replace, run, sequence, setPref, sheet, stat, threadOf, tick, toast, topBar, ui,
+  item, panes, pref, promptSheet, replace, replaceAround, run, sequence, setPref, sheet, stat, threadOf, tick, toast, topBar, ui,
   type Pane, type Thread,
 } from "./core";
 import { keyboard, type Typed } from "./keyboard";
@@ -25,6 +25,7 @@ const said = new Map<string, Said>();
 const asks = new Map<string, Menu | null>();
 let saidAt = 0;
 let listKey = "";
+let held = false; // a card kept as it was while its reply is typed: redrawn once you leave its box
 let open: string | null = null; // the agent on show, for the list's highlight
 const shuttled = new Map<string, string>(); // each thread's last state, to run the shuttle as work starts
 
@@ -67,23 +68,24 @@ export function drawList() {
   const waiting = all.filter((p) => p.state === "waiting");
   // Rebuilt only when something besides the ages changed, so a tap never lands on a row being replaced.
   const key = JSON.stringify([open, view, query, [...folded], app.threads.map((t) => [t.id, t.name, t.branch, t.state, t.changed, t.panes.map((p) => [p.id, p.state, p.title, p.agent])]), view === "activity" ? [...said, ...asks] : 0]);
-  if (key !== listKey) {
+  const typing = document.activeElement instanceof HTMLInputElement && rows.contains(document.activeElement) ? document.activeElement : null;
+  if (key !== listKey || (held && !typing)) {
     listKey = key;
     for (const b of views.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-pressed", String(b.dataset.view === view));
-    const typing = document.activeElement instanceof HTMLInputElement && rows.contains(document.activeElement) ? document.activeElement : null;
     const banner = waiting.length ? [waitingBanner(waiting)] : [];
-    if (!app.threads.length) rows.replaceChildren(empty("No threads yet", "Start one with + at the top."));
-    else if (view === "activity") rows.replaceChildren(...banner, ...activity());
-    else rows.replaceChildren(...banner, ...byThread());
-    // The reply being typed keeps the focus and the selection in its rebuilt box.
-    const again = typing && replyInput(typing.dataset.pane);
-    if (again) {
-      again.focus({ preventScroll: true });
-      again.setSelectionRange(typing.selectionStart, typing.selectionEnd, typing.selectionDirection ?? undefined);
-    }
+    const next = !app.threads.length ? [empty("No threads yet", "Start one with + at the top.")] : [...banner, ...(view === "activity" ? activity() : byThread())];
+    // The card whose reply is being typed stays as it was, its box never rebuilt, until you leave the box.
+    const card = typing?.closest<HTMLElement>(".card");
+    const at = card ? next.findIndex((n) => n instanceof HTMLElement && n.matches(".card") && n.dataset.pane === card.dataset.pane) : -1;
+    held = at >= 0;
+    if (held) (next[at] = card!), replaceAround(rows, next, card!);
+    else rows.replaceChildren(...next);
   }
   const latest = (id: string) => findThread(id)?.panes.map((p) => p.lastOutput ?? "").sort().pop() || null;
-  for (const a of rows.querySelectorAll<HTMLElement>(".when")) a.textContent = age(a.dataset.thread ? latest(a.dataset.thread) : findPane(a.dataset.pane!)?.lastOutput ?? null);
+  for (const a of rows.querySelectorAll<HTMLElement>(".when")) {
+    const when = age(a.dataset.thread ? latest(a.dataset.thread) : findPane(a.dataset.pane!)?.lastOutput ?? null);
+    if (a.textContent !== when) a.textContent = when;
+  }
   // The shuttle runs down a thread's rail as its agents start work.
   for (const t of app.threads) {
     const was = shuttled.get(t.id);
@@ -216,6 +218,7 @@ function activity() {
   return shown.map((p) => {
     const t = threadOf(p)!;
     const card = el("article", `card ${p.state}`);
+    card.dataset.pane = p.id;
     const head = button("", () => go(`#/pane/${encodeURIComponent(p.id)}`), "card-head");
     const who = el("span", "who");
     who.append(el("b", "", `${t.name} / ${p.agent}`), el("span", "", p.title || t.branch));
@@ -376,12 +379,11 @@ promptForm.append(keysBtn, promptText, sendBtn);
   const dock = el("div");
   dock.id = "dock";
   dock.append(questionBox, keysBox, promptForm);
-  const more = iconButton("more", "Actions", () => void paneActions());
+  const more = iconButton("more", "Actions", () => paneActions());
   more.id = "more";
   paneView.append(topBar(who, [stateChip, more], "#/"), noticeBar, screenBox, dock);
 }
 
-let openState = "";
 let shown: string | null = null; // the last screen drawn, to skip redrawing an unchanged one
 let question = "";
 let older = false; // older lines on screen: the live view waits
@@ -391,9 +393,9 @@ let wrap = pref("loom-wrap", "1") === "1";
 /** null: a link names a pane the list doesn't have yet (remote.ts), so none is open until it is read:
  * nothing typed, chosen or asked goes to the one open before, and what was typed stays. */
 export function showPane(id: string | null, stableId = "") {
+  const was = draftKey();
   if (id !== open) {
     open = id;
-    openState = "";
     shown = null;
     question = "";
     older = false;
@@ -414,6 +416,14 @@ export function showPane(id: string | null, stableId = "") {
     openStable = findPane(id)?.stableId || stableId || (stableFor === id ? openStable : "");
     stableFor = id;
   }
+  // Each agent keeps its own unsent message. One typed while a link's agent is looked up is for that agent.
+  const now = draftKey();
+  if (now !== was) {
+    if (was !== null) typed.set(was, promptText.value);
+    if (was !== null || !promptText.value) promptText.value = (now !== null && typed.get(now)) || "";
+    promptText.style.height = "";
+    if (promptText.value) promptText.style.height = `${promptText.scrollHeight + 2}px`;
+  }
   drawHead();
   drawKeys();
   reread();
@@ -422,6 +432,9 @@ export const openPane = () => open;
 // The open agent's stableId, and the pane id it was known for: it finds the agent again once Loom
 // restarts and its pane id is gone.
 let openStable = "", stableFor: string | null = null;
+/** Unsent messages by agent: its stableId, which a restart keeps, else its pane id. None while a link's agent is looked up. */
+const typed = new Map<string, string>();
+const draftKey = () => (open === null ? null : (stableFor === open && openStable) || open);
 
 /** After each read of the list. Once the open agent's pane is missing from it, the one pane with its
  * stableId (saved with each pane, never shared) is the one Loom restored it as: the address follows,
@@ -460,9 +473,6 @@ export function drawHead() {
   whoTitle.textContent = p.title;
   stateChip.textContent = p.state;
   stateChip.className = `chip ${p.state}`;
-  // A question shows without the screen changing, as the agent stops: read again.
-  if (p.state !== openState) shown = null;
-  openState = p.state;
 }
 
 /** Terminal colours: the 16 of Loom's default theme, then xterm's cube and greys. */
@@ -561,19 +571,18 @@ function drawQuestion(id: string, m: Menu | null) {
 
 export const reread = () => void screen().catch(() => {});
 
-/** Reads the open agent's screen, and its question when the screen changed. */
+/** Reads the open agent's screen and its question, in one trip to the PC. */
 export async function screen() {
   const id = open;
   if (!id || older || !app.token || paneView.hidden) return;
-  const s = await run<Screen>("read", [id, "--styles"]);
-  if (id !== open || older || s.text === shown) return;
-  shown = s.text;
-  draw(s);
-  const m = await run<Menu | null>("menu", [id]).catch(() => null);
+  const s = await run<Screen & { menu?: Menu | null }>("read", [id, "--styles", "--menu"], { timeout: 5 });
   // Its buttons answer this pane: not once another is open or being looked up (null), nor off screen.
-  // Not drawn, it is read again.
-  if (id !== open || paneView.hidden) return void (shown = null);
-  drawQuestion(id, m);
+  if (id !== open || older || paneView.hidden) return;
+  if (s.text !== shown) {
+    shown = s.text;
+    draw(s);
+  }
+  drawQuestion(id, s.menu ?? null);
 }
 
 /** Toggles Loom's phone size on the PC, with the open pane filling the window. */
@@ -683,14 +692,15 @@ promptForm.onsubmit = async (e) => {
   const text = promptText.value.trim();
   if (!text || !open) return;
   sendBtn.disabled = true;
-  const id = open;
+  const id = open, key = draftKey()!;
   // An agent gets a task Loom follows to its end. A shell gets the line typed:
   // submit needs Loom's PowerShell prompt and would add a PowerShell comment.
   const cmd = findPane(id)?.agent === "shell" ? "send" : "submit";
   await act(async () => {
     await run(cmd, [id, "-"], { stdin: text, change: true, timeout: 60 });
     // Only the message that went: one typed while it was on its way, here or for another agent, stays.
-    if (promptText.value.trim() !== text) return;
+    if (typed.get(key)?.trim() === text) typed.delete(key); // left for another agent while it went
+    if (draftKey() !== key || promptText.value.trim() !== text) return;
     promptText.value = "";
     promptText.style.height = "";
   }, "Sent");
@@ -710,12 +720,9 @@ promptText.addEventListener("keydown", (e) => {
 const MODELS = ["opus[1m]", "sonnet[1m]", "fable[1m]", "haiku", "default"];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max", "auto"];
 
-async function paneActions() {
+function paneActions() {
   const p = findPane(open);
   if (!p) return;
-  // Someone at the PC may have changed the window since.
-  app.phoneSize = (await run<{ phone: boolean }>("status").catch(() => ({ phone: app.phoneSize }))).phone;
-  if (p.id !== open || paneView.hidden) return; // another opened or looked up meanwhile, or the view was left
   const t = threadOf(p)!;
   const items: (Node | string)[] = [];
   if (p.agent === "claude") {
@@ -741,8 +748,15 @@ async function paneActions() {
   }
   items.push(el("p", "", "Task notices for this agent"), bell);
   if (p.agent === "claude") items.push(item("Context", () => go(`#/context/${encodeURIComponent(p.id)}`), "", { icon: "layers" }));
+  const fitLabel = () => (app.phoneSize ? "Desktop size on the PC" : "Fit Loom to phone");
+  const fit = item(fitLabel(), fitPhone, "", { icon: "phone" });
+  // The sheet opens at once; someone at the PC may have changed the window since, which status says.
+  void run<{ phone: boolean }>("status").then((s) => {
+    app.phoneSize = s.phone;
+    fit.lastChild!.textContent = fitLabel();
+  }, () => {});
   items.push(
-    item(app.phoneSize ? "Desktop size on the PC" : "Fit Loom to phone", fitPhone, "", { icon: "phone" }),
+    fit,
     item(wrap ? "Don't wrap long lines" : "Wrap long lines", () => {
       wrap = !wrap;
       setPref("loom-wrap", wrap ? "1" : "0");

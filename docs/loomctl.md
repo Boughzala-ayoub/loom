@@ -124,7 +124,7 @@ shows one.
 | `status` | Counts by state, the pane in front, and every pane waiting for you. JSON has `booted`, when this Loom started, and `updated`, true once its exe has been replaced (an update waits for `relaunch`). |
 | `threads` | Every thread: name, id, state, pane count, branch and folder. `--json` adds `changed`: lines added and removed against HEAD and the files changed, as its sidebar row shows them. |
 | `panes [--thread T] [--state S]` | Every pane, or a thread's, or the ones in a state (`--state idle,waiting` for several). |
-| `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included, and with `--styles` too, their styled rows. JSON has `alt`, true while a full-screen app such as OpenCode holds the screen. See [What the input holds](#what-the-input-holds). |
+| `read [pane] [--lines N] [--styles] [--menu]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included, and with `--styles` too, their styled rows. `--menu` adds `menu`, what `menu` answers, from the same read. JSON has `alt`, true while a full-screen app such as OpenCode holds the screen. See [What the input holds](#what-the-input-holds). |
 | `menu [pane]` | The numbered question on the pane's screen, if any, with an id for it. See [Answering questions](#answering-questions). |
 | `messages [pane...]` | What each agent last heard and said, from its session's transcript, as the Overview shows it. Each is cut at 500 characters. |
 | `context [pane]` | A Claude pane's context, as its gauge's panel shows it: tokens by kind, the size after each turn, and where it was compacted. |

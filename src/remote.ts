@@ -117,7 +117,7 @@ async function pair(e: SubmitEvent) {
 }
 
 async function refresh() {
-  app.threads = await run<Thread[]>("threads");
+  app.threads = await run<Thread[]>("threads", [], { timeout: 5 });
   const waiting = app.threads.flatMap((t) => t.panes).filter((p) => p.state === "waiting").length;
   badge.textContent = String(waiting);
   badge.hidden = !waiting;
@@ -128,20 +128,24 @@ async function refresh() {
   void closeStale().catch(() => {});
 }
 
-/** The threads every 2 s, the open screen every second, git every 6 s: while the page is in view. */
+/** The threads every 2 s, the open screen every second, git every 6 s: while the page is in view.
+ * Each starts that long after the last began, its trip to the PC included. Offline shows once the
+ * same reading failed twice running: one lost on a patchy connection says nothing. */
 async function loop(every: number, work: () => Promise<unknown>) {
-  for (;;) {
+  for (let missed = 0; ;) {
+    const began = performance.now();
     if (app.token && !document.hidden && !app.restarting) {
       try {
         await work();
+        missed = 0;
       } catch (e) {
-        if (e instanceof Offline) {
+        if (e instanceof Offline && ++missed >= 2) {
           $("#offline").textContent = e.message;
           $("#offline").hidden = false;
         }
       }
     }
-    await sleep(every);
+    await sleep(every - (performance.now() - began));
   }
 }
 
@@ -167,8 +171,8 @@ async function start() {
   if (started) return;
   started = true;
   void loop(2000, refresh);
-  // ponytail: rereads the open screen every second (about 1.7 KB gzipped); gate on
-  // the pane's lastOutput if mobile data use matters.
+  // ponytail: rereads the open screen, its question too, every second (about 1.5 KB gzipped);
+  // gate on the pane's lastOutput if mobile data use matters.
   void loop(1000, screen);
   void loop(6000, () => readChanges());
 }
