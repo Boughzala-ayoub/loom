@@ -2137,6 +2137,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 name = "loom"
 version = "3.0.0"
 dependencies = [
+ "base64 0.22.1",
  "cpal",
  "flate2",
  "getrandom 0.3.4",
@@ -2152,6 +2153,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
  "tokio",
+ "webview2-com",
  "whisper-rs",
  "windows",
 ]

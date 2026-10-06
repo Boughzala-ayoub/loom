@@ -6,7 +6,7 @@ import { icon } from "./icons";
 import type { Agent } from "./agent";
 
 type Pane = { id: string; ref: string; threadId: string; agent: Agent; title: string; state: string; lastOutput: string | null };
-type Thread = { id: string; name: string; repo: string; zoomed: string | null; panes: Pane[] };
+type Thread = { id: string; name: string; repo: string; dir: string; branch: string; state: string; zoomed: string | null; panes: Pane[] };
 type Run = { x: number; text: string; bold?: boolean; dim?: boolean; italic?: boolean; underline?: boolean; inverse?: boolean; fg?: number | string; bg?: number | string };
 type Screen = { text: string; cols: number; rows: { runs: Run[] }[] };
 type Menu = { question: string[]; options: string[]; keys?: string[]; rev: string };
@@ -15,8 +15,13 @@ const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySe
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const GROUPS: [string, string[]][] = [["Waiting for you", ["waiting"]], ["Working", ["working", "starting"]], ["Idle", ["idle"]], ["Exited", ["exited"]]];
 
-let token = stored();
+let token = pref("loom-token", "");
 let threads: Thread[] = [];
+// This phone's own choices, kept in its browser.
+let listView = pref("loom-list", "threads"); // "threads", as on the PC, or "state"
+const folded = new Set(pref("loom-folded", "").split("\n").filter(Boolean)); // thread ids and "repo:<path>"
+let keysOpen = pref("loom-keys", "") === "1";
+let wrap = pref("loom-wrap", "1") === "1";
 let agents = ["claude", "codex", "opencode"];
 let phoneSize = false;
 let open: string | null = null;
@@ -26,13 +31,16 @@ let question = "";
 let older = false; // older lines on screen: the live view waits
 let pushed = false; // this page put the open pane in the history, so Back can pop it
 
-function stored() {
-  try { return localStorage.getItem("loom-token") ?? ""; } catch { return ""; }
+function pref(name: string, fallback: string) {
+  try { return localStorage.getItem(name) ?? fallback; } catch { return fallback; }
+}
+// A private window may refuse: the phone then forgets when the tab closes.
+function setPref(name: string, value: string) {
+  try { if (value) localStorage.setItem(name, value); else localStorage.removeItem(name); } catch { /* see above */ }
 }
 function store(t: string) {
   token = t;
-  // A private window may refuse: the phone then stays paired until the tab closes.
-  try { if (t) localStorage.setItem("loom-token", t); else localStorage.removeItem("loom-token"); } catch { /* see above */ }
+  setPref("loom-token", t);
 }
 
 class Offline extends Error {}
@@ -116,29 +124,103 @@ function age(iso: string | null) {
 let listKey = "";
 function drawList() {
   const all = panes();
-  const waiting = all.filter((p) => p.state === "waiting").length;
-  $("#counts").textContent = waiting ? `${waiting} waiting` : "";
-  $("#counts").hidden = !waiting;
-  $("#counts").className = waiting ? "chip waiting" : "chip";
+  const waiting = all.filter((p) => p.state === "waiting");
+  $("#counts").hidden = !waiting.length;
+  $("#counts span").textContent = `${waiting.length} waiting`;
+  $("#counts").onclick = () => waiting[0] && go(waiting[0].id);
   // Rebuilt only when something besides the ages changed, so a tap never lands on a row being replaced.
-  const key = JSON.stringify([open, all.map((p) => [p.id, p.ref, p.state, p.title, p.agent])]);
+  const key = JSON.stringify([open, listView, [...folded], threads.map((t) => [t.id, t.name, t.branch, t.state, t.panes.map((p) => [p.id, p.ref, p.state, p.title, p.agent])])]);
   if (key !== listKey) {
     listKey = key;
+    for (const b of document.querySelectorAll<HTMLElement>("#views button")) b.setAttribute("aria-pressed", String(b.dataset.list === listView));
     const rows = $("#rows");
-    if (!all.length) rows.replaceChildren(el("p", "none", "No agents. Start a thread with + New."));
+    if (listView === "threads") rows.replaceChildren(...(threads.length ? byThread() : [el("p", "none", "No threads. Start one with + New.")]));
+    else if (!all.length) rows.replaceChildren(el("p", "none", "No agents. Start a thread with + New."));
     else rows.replaceChildren(...GROUPS.flatMap(([title, states]) => {
       const group = all.filter((p) => states.includes(p.state));
       if (!group.length) return [];
-      return [el("h2", states[0], `${title} · ${group.length}`), ...group.map((p) => {
-        const row = button("", () => go(p.id), `row ${p.state}`);
-        row.dataset.id = p.id;
-        row.setAttribute("aria-current", String(p.id === open));
-        row.append(icon(p.agent), el("span", "name", `${p.ref} · ${p.agent}`), el("span", "age"), el("span", "title", p.title || " "));
-        return row;
-      })];
+      return [el("h2", states[0], `${title} · ${group.length}`), ...group.map((p) => paneRow(p, `${p.ref} · ${p.agent}`))];
     }));
   }
-  for (const row of document.querySelectorAll<HTMLElement>("#rows .row")) row.querySelector(".age")!.textContent = age(find(row.dataset.id!)?.lastOutput ?? null);
+  const latest = (id: string) => threads.find((t) => t.id === id)?.panes.map((p) => p.lastOutput ?? "").sort().pop() || null;
+  for (const a of document.querySelectorAll<HTMLElement>("#rows .age")) a.textContent = age(a.dataset.thread ? latest(a.dataset.thread) : find(a.dataset.pane!)?.lastOutput ?? null);
+}
+
+function paneRow(p: Pane, name: string, chip = false) {
+  const row = button("", () => go(p.id), `row ${p.state}`);
+  row.dataset.id = p.id;
+  row.setAttribute("aria-current", String(p.id === open));
+  const head = el("span", "name");
+  head.append(el("span", "", name));
+  if (chip && p.state !== "idle") head.append(el("span", `chip ${p.state}`, p.state));
+  const when = el("span", "age");
+  when.dataset.pane = p.id;
+  row.append(icon(p.agent), head, when, el("span", "title", p.title || " "));
+  return row;
+}
+
+/** As on the PC: each project, its threads, and their agents. A tap on a
+ * project or a thread folds it; a folded thread still shows its agents' states. */
+function byThread() {
+  return [...new Set(threads.map((t) => t.repo))].flatMap((repo) => {
+    const group = threads.filter((t) => t.repo === repo);
+    const key = `repo:${repo}`;
+    const head = button("", () => fold(key), "project");
+    head.setAttribute("aria-expanded", String(!folded.has(key)));
+    head.append(el("span", "chev"), el("span", "grow", base(repo)), el("span", "n", String(group.length)));
+    return folded.has(key) ? [head] : [head, ...group.map(threadBlock)];
+  });
+}
+
+function threadBlock(t: Thread) {
+  const shut = folded.has(t.id);
+  const head = button("", () => fold(t.id), "thread-head");
+  head.setAttribute("aria-expanded", String(!shut));
+  const who = el("span", "who");
+  who.append(el("span", "thread-name", t.name), el("span", "branch", t.branch || base(t.dir)));
+  const pips = el("span", "pips");
+  if (shut) {
+    // Waiting and working agents first, so the "+n" never hides them.
+    const rank = (p: Pane) => ["waiting", "working", "starting", "exited"].indexOf(p.state) >>> 0;
+    pips.append(...[...t.panes].sort((a, b) => rank(a) - rank(b)).slice(0, 4).map((p) => {
+      const pip = el("span", `pip ${p.state}`);
+      pip.append(icon(p.agent));
+      return pip;
+    }));
+    if (t.panes.length > 4) pips.append(el("span", "", `+${t.panes.length - 4}`));
+  }
+  const when = el("span", "age");
+  when.dataset.thread = t.id;
+  head.append(el("span", "chev"), who, pips, when);
+  const more = button("⋯", () => threadActions(t), "icon-btn");
+  more.setAttribute("aria-label", `${t.name}: actions`);
+  const top = el("div", "thread-top");
+  top.append(head, more);
+  const box = el("div", `thread ${t.state}`);
+  box.dataset.id = t.id;
+  box.append(top);
+  if (!shut) box.append(...(t.panes.length ? t.panes.map((p) => paneRow(p, p.agent, true)) : [el("p", "none", "No agents. Add one from ⋯.")]));
+  return box;
+}
+
+function fold(key: string) {
+  if (!folded.delete(key)) folded.add(key);
+  setPref("loom-folded", [...folded].join("\n"));
+  drawList();
+}
+
+function threadActions(t: Thread) {
+  sheet([
+    el("label", "", `Add an agent to ${t.name}`), addAgent(t.id),
+    item("Show it on the PC", () => run("show", [t.id], { change: true }), "Shown on the PC"),
+    button("Rename", () => {
+      closeSheet();
+      const name = prompt(`Rename ${t.name}. Its branch and folder keep their names.`, t.name)?.trim();
+      if (name && name !== t.name) void act(() => run("rename", [t.id, name], { change: true }), "Renamed");
+    }),
+    item(`Close the thread ${t.name}`, () => run("close-thread", [t.id, "--yes"], { change: true, timeout: 60 }), "Thread closed",
+      `Close ${t.name} and all its panes? Its folder and branch stay.`, "danger"),
+  ]);
 }
 
 // --- One agent ------------------------------------------------------------
@@ -187,7 +269,8 @@ function color(c: number | string | undefined) {
 
 let charWidth = 0; // a character's width at a 1 px font
 /** The font that fits the terminal's width, between 7 and 14 px. Wider than
- * that, the screen scrolls sideways and offers to fit Loom to the phone. */
+ * that, the screen scrolls sideways and offers to fit Loom to the phone.
+ * Wrapping, a screen that only fits under 10 px shows at 12 px, its lines wrapped. */
 function fit(cols: number) {
   if (!charWidth) {
     const probe = el("span", "", "M".repeat(20));
@@ -198,12 +281,14 @@ function fit(cols: number) {
   }
   const box = $("#screen");
   const width = box.clientWidth - 16;
-  const size = Math.min(14, Math.max(7, Math.floor((width / (cols * charWidth)) * 10) / 10));
+  const fitted = Math.floor((width / (cols * charWidth)) * 10) / 10;
+  const size = Math.min(14, wrap && fitted < 10 ? 12 : Math.max(7, fitted));
   box.style.fontSize = `${size}px`;
-  if (!older) notice(cols * charWidth * 7 > width ? `${cols} columns, wider than this screen.` : "");
+  box.classList.toggle("wrap", wrap);
+  if (!older) notice(!wrap && cols * charWidth * 7 > width ? `${cols} columns, wider than this screen.` : "");
 }
 
-function notice(text: string, label = phoneSize ? "Desktop size" : "Fit Loom to phone", action = () => void act(fitPhone)) {
+function notice(text: string, label = phoneSize ? "Desktop size" : "Fit Loom to phone", action: () => void = () => void act(fitPhone)) {
   const bar = $("#notice");
   bar.hidden = !text;
   bar.querySelector("span")!.textContent = text;
@@ -212,12 +297,19 @@ function notice(text: string, label = phoneSize ? "Desktop size" : "Fit Loom to 
   b.onclick = action;
 }
 
-function draw(s: Screen) {
+let drawnAt = 0; // when the page last moved the screen itself, not your finger
+function draw(s: Screen, toEnd = false) {
   const box = $("#screen");
-  const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  drawnAt = performance.now();
+  const atEnd = toEnd || box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
   fit(s.cols);
-  box.replaceChildren(...s.rows.map((row) => {
-    const line = el("div", "line");
+  // The blank rows under an agent's last line would keep it off the bottom.
+  let end = s.rows.length;
+  while (end && !s.rows[end - 1].runs.some((r) => r.text.trim() || r.bg !== undefined)) end--;
+  box.replaceChildren(...s.rows.slice(0, end).map((row) => {
+    const text = row.runs.map((r) => r.text).join("");
+    // A rule of box-drawing lines is cut at the edge, not wrapped onto more lines.
+    const line = el("div", /^\s*[─-╿][\s─-╿]*$/.test(text) ? "line rule" : "line");
     let col = 0;
     for (const r of row.runs) {
       if (r.x > col) line.append(" ".repeat(r.x - col));
@@ -276,20 +368,69 @@ async function fitPhone() {
   toast(phoneSize ? "Loom fits the phone now" : "Loom is back at its desktop size");
 }
 
+/** The pane's history above its screen, styled, when you scroll up past the
+ * screen's top. The live view waits until you scroll back to the bottom. */
+let loadingOlder = false;
 async function olderLines() {
   const id = open;
-  if (!id) return;
-  const s = await run<{ text: string }>("read", [id, "--lines", "500"]);
-  older = true;
+  if (!id || older || loadingOlder) return;
+  loadingOlder = true;
+  try {
+    const s = await run<Screen>("read", [id, "--styles", "--lines", "2000"]);
+    if (id !== open) return;
+    older = true;
+    const box = $("#screen");
+    const fromBottom = box.scrollHeight - box.scrollTop;
+    draw(s);
+    box.scrollTop = box.scrollHeight - fromBottom;
+    notice("Older lines. Scroll to the bottom for live.", "Back to live", live);
+  } finally {
+    loadingOlder = false;
+  }
+}
+
+function live() {
+  if (!older) return;
+  older = false;
+  notice("");
+  const id = open;
+  void run<Screen>("read", [id!, "--styles"]).then((s) => {
+    if (id !== open || older) return;
+    shown = s.text;
+    draw(s, true);
+  }).catch(() => {});
+}
+
+{
+  // Scrolling up past the top of the screen reads the history; back at the bottom, it's live again.
   const box = $("#screen");
-  box.textContent = s.text;
-  box.scrollTop = box.scrollHeight;
-  notice("Older lines.", "Back to live", () => {
-    older = false;
-    shown = null;
-    notice("");
-    reread();
-  });
+  // Only a finger or a wheel counts: the box also scrolls when the keys fold or the page redraws.
+  let last = 0, touchY = 0, touching = false, userAt = 0;
+  const byUser = () => touching || performance.now() - userAt < 1000; // a flick glides on after the finger lifts
+  box.addEventListener("scroll", () => {
+    const up = box.scrollTop < last;
+    last = box.scrollTop;
+    if (performance.now() - drawnAt < 300 || !byUser()) return;
+    if (up && box.scrollTop < 40) void olderLines();
+    else if (!up && older && box.scrollTop + box.clientHeight >= box.scrollHeight - 4) live();
+  }, { passive: true });
+  // A screen shorter than the box doesn't scroll: a pull down asks for the history all
+  // the same, and a push up at the bottom goes back to live.
+  const atBottom = () => box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
+  const pulled = (dy: number) => {
+    if (dy < 0 && box.scrollTop <= 0) void olderLines();
+    else if (dy > 0 && older && atBottom()) live();
+  };
+  box.addEventListener("touchstart", (e) => { touching = true; touchY = e.touches[0].clientY; }, { passive: true });
+  box.addEventListener("touchmove", (e) => {
+    const dy = touchY - e.touches[0].clientY;
+    if (Math.abs(dy) > 30) pulled(dy);
+  }, { passive: true });
+  for (const end of ["touchend", "touchcancel"]) box.addEventListener(end, () => { touching = false; userAt = performance.now(); }, { passive: true });
+  box.addEventListener("wheel", (e) => {
+    userAt = performance.now();
+    pulled(e.deltaY);
+  }, { passive: true });
 }
 
 function sheet(items: HTMLElement[]) {
@@ -309,30 +450,46 @@ function item(text: string, work: () => Promise<unknown>, done: string, ask = ""
   }, className);
 }
 
-async function actions() {
-  const p = find(open);
-  if (!p) return;
-  // Someone at the PC may have changed the window since.
-  phoneSize = (await run<{ phone: boolean }>("status").catch(() => ({ phone: phoneSize }))).phone;
-  const th = threadOf(p);
+/** A picker and Add: the new agent opens. */
+function addAgent(threadId: string) {
   const pick = el("select");
   pick.append(...agents.map((a) => new Option(a, a)));
+  pick.setAttribute("aria-label", "Agent");
   const add = button("Add", () => {
     closeSheet();
     void act(async () => {
-      const added = await run<Pane>("add", [p.threadId, "--agent", pick.value], { change: true, timeout: 60 });
+      const added = await run<Pane>("add", [threadId, "--agent", pick.value], { change: true, timeout: 60 });
       await refresh();
       go(added.id);
     }, "Started");
   });
   const pair = el("div", "pair");
   pair.append(pick, add);
+  return pair;
+}
+
+async function actions() {
+  const p = find(open);
+  if (!p) return;
+  // Someone at the PC may have changed the window since.
+  phoneSize = (await run<{ phone: boolean }>("status").catch(() => ({ phone: phoneSize }))).phone;
+  const th = threadOf(p);
   sheet([
     item(phoneSize ? "Desktop size on the PC" : "Fit Loom to phone", fitPhone, ""),
+    item(wrap ? "Don't wrap long lines" : "Wrap long lines", async () => {
+      wrap = !wrap;
+      setPref("loom-wrap", wrap ? "1" : "0");
+      $("#screen").classList.toggle("wrap", wrap);
+    }, ""),
     item("Show it on the PC", () => run("show", [p.id], { change: true }), "Shown on the PC"),
+    item("Open it in Full Loom", async () => {
+      await run("show", [p.id], { change: true });
+      pushed = true;
+      location.hash = "#/full";
+    }, ""),
     item("Older lines", olderLines, ""),
     item("Clear the input (Ctrl+U)", () => run("keys", [p.id, "ctrl-u"], { change: true }), ""),
-    el("label", "", `Add an agent to ${th?.name ?? "this thread"}`), pair,
+    el("label", "", `Add an agent to ${th?.name ?? "this thread"}`), addAgent(p.threadId),
     item("Restart", () => run("restart", [p.id, "--yes"], { change: true, timeout: 60 }), "Restarted", `Restart ${p.ref}? Its session resumes.`),
     item("Stop", () => run("stop", [p.id, "--yes"], { change: true }), "Stopped", `Stop ${p.ref}? The pane stays.`, "danger"),
     item("Close this pane", async () => { await run("close", [p.id, "--yes"], { change: true }); back(); }, "Closed", `Close ${p.ref}?`, "danger"),
@@ -388,11 +545,322 @@ async function create(e: SubmitEvent) {
   submit.disabled = false;
 }
 
+// --- A PC keyboard --------------------------------------------------------
+
+type Mods = { ctrl: boolean; alt: boolean; shift: boolean };
+type Typed = { key: string; mods: Mods } | { text: string };
+const LABELS: Record<string, string> = {
+  esc: "Esc", ctrl: "Ctrl", alt: "Alt", shift: "Shift", home: "Home", up: "↑", end: "End", tab: "Tab", "shift-tab": "⇧Tab",
+  "ctrl-c": "^C", backspace: "⌫", left: "←", down: "↓", right: "→", fn: "Fn", insert: "Ins", delete: "Del",
+  pageup: "PgUp", pagedown: "PgDn", space: "Space", enter: "Enter",
+};
+const PAGES = [
+  [["esc", "ctrl", "alt", "shift", "home", "up", "end"], ["tab", "shift-tab", "ctrl-c", "backspace", "left", "down", "right"], ["fn", "insert", "delete", "pageup", "pagedown", "space", "enter"]],
+  [["f1", "f2", "f3", "f4", "f5", "f6", "esc"], ["f7", "f8", "f9", "f10", "f11", "f12", "tab"], ["fn", "ctrl", "alt", "shift", "left", "right", "enter"]],
+];
+/** A physical keyboard's keys, by the names loomctl keys takes. */
+const DOM_KEYS: Record<string, string> = {
+  Escape: "esc", Tab: "tab", Enter: "enter", Backspace: "backspace", Delete: "delete", Insert: "insert", Home: "home", End: "end",
+  PageUp: "pageup", PageDown: "pagedown", ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+};
+const SENTINEL = " "; // the type box keeps one character, so Backspace always has something to delete and reaches us
+
+/** The keys a PC has and a phone keyboard lacks; Ctrl, Alt and Shift held for
+ * the next key, as on a PC; and a box whose typing goes straight through. */
+function keyboard(box: HTMLElement, hint: string, out: (t: Typed) => void) {
+  const mods: Mods = { ctrl: false, alt: false, shift: false };
+  let page = 0;
+  const keys = el("div", "keys");
+  const draw = () => keys.replaceChildren(...PAGES[page].flat().map((k) => {
+    const b = button(LABELS[k] ?? k.toUpperCase(), () => press(k));
+    b.dataset.key = k;
+    if (k === "fn") b.setAttribute("aria-pressed", String(page === 1));
+    if (k in mods) b.setAttribute("aria-pressed", String(mods[k as keyof Mods]));
+    // A key leaves the focus in the type box, so the phone's keyboard stays up.
+    b.onpointerdown = (e) => e.preventDefault();
+    return b;
+  }));
+  const press = (key: string, held: Partial<Mods> = {}) => {
+    if (key === "fn") return (page = 1 - page), draw();
+    if (key in mods) return (mods[key as keyof Mods] = !mods[key as keyof Mods]), draw();
+    out({ key, mods: { ctrl: mods.ctrl || !!held.ctrl, alt: mods.alt || !!held.alt, shift: mods.shift || !!held.shift } });
+    if (mods.ctrl || mods.alt || mods.shift) (mods.ctrl = mods.alt = mods.shift = false), draw();
+  };
+  // Text the phone's keyboard typed: with Ctrl, Alt or Shift held, each character is a key.
+  const typed = (text: string) => {
+    if (mods.ctrl || mods.alt || mods.shift) for (const ch of text) press(ch === " " ? "space" : ch);
+    else out({ text });
+  };
+  const type = el("input", "type");
+  Object.assign(type, { placeholder: hint, autocapitalize: "off", spellcheck: false });
+  type.setAttribute("autocomplete", "off");
+  type.setAttribute("autocorrect", "off");
+  type.setAttribute("aria-label", hint);
+  const reset = () => { type.value = SENTINEL; type.setSelectionRange(1, 1); };
+  type.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return; // the phone's keyboard: beforeinput says what it typed
+    const named = DOM_KEYS[e.key] ?? (/^F\d\d?$/.test(e.key) ? e.key.toLowerCase() : null);
+    const combo = (e.ctrlKey || e.altKey || e.metaKey) && e.key.length === 1;
+    if (!named && !combo) return;
+    e.preventDefault();
+    press(named ?? (e.key === " " ? "space" : e.key.toLowerCase()), { ctrl: e.ctrlKey, alt: e.altKey || e.metaKey, shift: e.shiftKey && !!named });
+  });
+  type.addEventListener("beforeinput", (e) => {
+    if (e.isComposing || e.inputType === "insertCompositionText") return;
+    if (e.inputType === "insertText" && e.data) typed(e.data);
+    else if (e.inputType === "deleteContentBackward") press("backspace");
+    else if (e.inputType === "insertLineBreak" || e.inputType === "insertParagraph") press("enter");
+    else return;
+    e.preventDefault();
+  });
+  // Words the keyboard composed (suggestions, swipe typing) arrive whole when it commits them.
+  type.addEventListener("compositionend", (e) => { if (e.data) typed(e.data); reset(); });
+  type.addEventListener("input", (e) => {
+    if ((e as InputEvent).isComposing) return;
+    const extra = type.value.startsWith(SENTINEL) ? type.value.slice(SENTINEL.length) : type.value;
+    if (extra) typed(extra);
+    reset();
+  });
+  type.addEventListener("focus", () => setTimeout(reset));
+  type.addEventListener("blur", () => (type.value = ""));
+  box.replaceChildren(type, keys);
+  draw();
+  return type;
+}
+
+/** Sends in order, one request at a time; what piles up meanwhile goes in the next. */
+function sequence<T>(send: (items: T[]) => Promise<unknown>) {
+  let queue: T[] = [], busy = false;
+  return (...items: T[]) => {
+    queue.push(...items);
+    if (busy) return;
+    busy = true;
+    void (async () => {
+      while (queue.length) {
+        const batch = queue;
+        queue = [];
+        try { await send(batch); } catch (e) { toast(e instanceof Error ? e.message : String(e), true); }
+      }
+      busy = false;
+    })();
+  };
+}
+
+/** The pane's keyboard: keys and typed text go to the open pane as they come. */
+const toPane = sequence<{ id: string; t: Typed }>(async (items) => {
+  // Runs of keys go in one keys command, runs of text in one --text, in order.
+  for (let i = 0; i < items.length;) {
+    const { id, t } = items[i];
+    if ("text" in t) {
+      let text = "";
+      for (; i < items.length && items[i].id === id && "text" in items[i].t; i++) text += (items[i].t as { text: string }).text;
+      await run("keys", [id, "--text", "-"], { stdin: text, change: true });
+    } else {
+      const names: string[] = [];
+      for (; i < items.length && items[i].id === id && "key" in items[i].t; i++) {
+        const { key, mods } = items[i].t as { key: string; mods: Mods };
+        names.push(`${mods.ctrl ? "ctrl-" : ""}${mods.alt ? "alt-" : ""}${mods.shift ? "shift-" : ""}${key}`);
+      }
+      await run("keys", [id, ...names], { change: true });
+    }
+  }
+  shown = null;
+  reread();
+});
+keyboard($("#keys"), "Type here: each key goes straight to the pane", (t) => { if (open) toPane({ id: open, t }); });
+
+// --- Full Loom ------------------------------------------------------------
+// The PC's own Loom window, streamed from mirror.rs: every menu and panel.
+
+type CdpEvent = { method: string; params: Record<string, unknown> };
+const canvas = $<HTMLCanvasElement>("#mirror");
+let full = 0; // which visit to Full Loom is running; 0 when it's closed
+let emu = { width: 0, height: 0 }; // the page's size on the PC, in CSS pixels
+let shownEmu = emu; // the size the frame on show was taken at
+let frameSeq = 0;
+
+async function mirror(body: object) {
+  const res = await fetch("/api/mirror", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  const reply = await res.json().catch(() => null);
+  if (res.status === 401) { store(""); pairing(); }
+  if (!reply?.ok) throw new Error(reply?.error ?? `Loom isn't answering (${res.status}). Is it running, with the remote on?`);
+}
+
+/** Lays Loom out at the size the stream has on this screen, and starts it. */
+async function startFull() {
+  const r = canvas.getBoundingClientRect();
+  emu = { width: Math.round(r.width), height: Math.round(r.height) };
+  // ponytail: the screencast sends frames at one pixel per CSS pixel whatever the ratio, so
+  // text is soft on a sharp phone; Page.captureScreenshot with clip.scale 2 could do better.
+  if (emu.width && emu.height) await mirror({ action: "start", ...emu, scale: 1 });
+}
+
+/** Draws each frame as it comes: a request waits on the PC until the page changes. */
+async function watchFull(visit: number) {
+  const draw = canvas.getContext("2d")!;
+  while (full === visit) {
+    if (document.hidden) { await sleep(500); continue; }
+    let res: Response;
+    try {
+      res = await fetch(`/api/mirror?after=${frameSeq}`, { headers: { Authorization: `Bearer ${token}` } });
+    } catch {
+      $("#offline").textContent = "Can't reach Loom. Is the PC on, and Tailscale connected on both?";
+      $("#offline").hidden = false;
+      await sleep(2000);
+      continue;
+    }
+    $("#offline").hidden = true;
+    if (full !== visit) break;
+    if (res.status === 401) { store(""); pairing(); break; }
+    // The PC stopped the stream (this page was away a while): start it again.
+    if (res.status === 409) { await startFull().catch(() => sleep(2000)); continue; }
+    if (res.status !== 200) { if (res.status !== 204) await sleep(2000); continue; }
+    frameSeq = Number(res.headers.get("X-Seq")) || frameSeq;
+    const frame = await createImageBitmap(await res.blob());
+    if (canvas.width !== frame.width || canvas.height !== frame.height) {
+      [canvas.width, canvas.height] = [frame.width, frame.height];
+      shownEmu = emu;
+    }
+    draw.drawImage(frame, 0, 0);
+    frame.close();
+    canvas.dataset.seq = String(frameSeq); // the frame on show, for checks
+  }
+}
+
+const toFull = sequence<CdpEvent>((events) => mirror({ action: "input", events }));
+
+/** Screen pixels per page pixel, and where the frame is drawn: it keeps its
+ * shape in the box (object-fit: contain), so a frame from before a resize sits
+ * between bands until the next one comes. */
+function drawn() {
+  const r = canvas.getBoundingClientRect();
+  const fit = Math.min(r.width / canvas.width, r.height / canvas.height);
+  const [w, h] = [canvas.width * fit, canvas.height * fit];
+  return { k: w / (shownEmu.width || w), left: r.left + (r.width - w) / 2, top: r.top + (r.height - h) / 2 };
+}
+/** A point on the stream, in the page's CSS pixels. */
+function at(e: { clientX: number; clientY: number }) {
+  const { k, left, top } = drawn();
+  return { x: Math.round((e.clientX - left) / k), y: Math.round((e.clientY - top) / k) };
+}
+const mouse = (type: string, p: { x: number; y: number }, more: Record<string, unknown> = {}): CdpEvent => ({ method: "Input.dispatchMouseEvent", params: { type, ...p, ...more } });
+function click(p: { x: number; y: number }, button: "left" | "right", clickCount = 1) {
+  toFull(mouse("mouseMoved", p), mouse("mousePressed", p, { button, buttons: button === "left" ? 1 : 2, clickCount }), mouse("mouseReleased", p, { button, buttons: 0, clickCount }));
+}
+let wheelAt: { x: number; y: number; dx: number; dy: number } | null = null;
+function wheel(p: { x: number; y: number }, dx: number, dy: number) {
+  // Gathered for 30 ms: a swipe is dozens of moves.
+  if (wheelAt) return void ((wheelAt.dx += dx), (wheelAt.dy += dy));
+  wheelAt = { ...p, dx, dy };
+  setTimeout(() => {
+    const w = wheelAt!;
+    wheelAt = null;
+    toFull(mouse("mouseWheel", { x: w.x, y: w.y }, { deltaX: Math.round(w.dx), deltaY: Math.round(w.dy) }));
+  }, 30);
+}
+
+{
+  // Tap to click, tap twice to double-click, hold to right-click, swipe to scroll.
+  let g: { id: number; x: number; y: number; lastX: number; lastY: number; moved: boolean; held: boolean; timer: number } | null = null;
+  let lastTap = { t: 0, x: 0, y: 0 };
+  canvas.addEventListener("pointerdown", (e) => {
+    if (e.button === 2) return click(at(e), "right");
+    canvas.setPointerCapture(e.pointerId);
+    const p = at(e);
+    g = { id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY, moved: false, held: false, timer: 0 };
+    const mine = g;
+    g.timer = window.setTimeout(() => {
+      if (mine.moved) return;
+      mine.held = true;
+      click(p, "right");
+      navigator.vibrate?.(15);
+    }, 550);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!g || e.pointerId !== g.id) return;
+    if (!g.moved && Math.hypot(e.clientX - g.x, e.clientY - g.y) < 10) return;
+    g.moved = true;
+    clearTimeout(g.timer);
+    const { k } = drawn();
+    wheel(at(e), (g.lastX - e.clientX) / k, (g.lastY - e.clientY) / k);
+    [g.lastX, g.lastY] = [e.clientX, e.clientY];
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    if (!g || e.pointerId !== g.id) return;
+    clearTimeout(g.timer);
+    if (!g.moved && !g.held) {
+      const p = at(e), now = Date.now();
+      const twice = now - lastTap.t < 400 && Math.hypot(p.x - lastTap.x, p.y - lastTap.y) < 24;
+      click(p, "left", twice ? 2 : 1);
+      lastTap = twice ? { t: 0, x: 0, y: 0 } : { t: now, ...p };
+    }
+    g = null;
+  });
+  canvas.addEventListener("pointercancel", () => { if (g) clearTimeout(g.timer); g = null; });
+  canvas.addEventListener("wheel", (e) => { e.preventDefault(); wheel(at(e), e.deltaX, e.deltaY); }, { passive: false });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  // The phone's keyboard or a resized window changes the room the stream has: Loom lays out again.
+  let resized = 0;
+  new ResizeObserver(() => {
+    clearTimeout(resized);
+    resized = window.setTimeout(() => {
+      const r = canvas.getBoundingClientRect();
+      if (full && Math.round(r.width) && (Math.abs(r.width - emu.width) > 2 || Math.abs(r.height - emu.height) > 2)) void startFull().catch((e) => toast(e.message, true));
+    }, 300);
+  }).observe(canvas);
+}
+
+/** A key as a PC keyboard sends it to the page. */
+const CODES: Record<string, [string, string, number]> = {
+  esc: ["Escape", "Escape", 27], tab: ["Tab", "Tab", 9], enter: ["Enter", "Enter", 13], backspace: ["Backspace", "Backspace", 8],
+  delete: ["Delete", "Delete", 46], insert: ["Insert", "Insert", 45], home: ["Home", "Home", 36], end: ["End", "End", 35],
+  pageup: ["PageUp", "PageUp", 33], pagedown: ["PageDown", "PageDown", 34], left: ["ArrowLeft", "ArrowLeft", 37],
+  up: ["ArrowUp", "ArrowUp", 38], right: ["ArrowRight", "ArrowRight", 39], down: ["ArrowDown", "ArrowDown", 40], space: [" ", "Space", 32],
+};
+function keyEvents(t: Typed): CdpEvent[] {
+  if ("text" in t) return [{ method: "Input.insertText", params: { text: t.text } }];
+  let { key: name, mods } = t;
+  if (name === "shift-tab") [name, mods] = ["tab", { ...mods, shift: true }];
+  if (name === "ctrl-c") [name, mods] = ["c", { ...mods, ctrl: true }];
+  const f = /^f(\d\d?)$/.exec(name);
+  const ch = name.length === 1 ? (mods.shift ? name.toUpperCase() : name) : "";
+  const [key, code, vk] = CODES[name] ?? (f ? [`F${f[1]}`, `F${f[1]}`, 111 + Number(f[1])]
+    : /^[a-z]$/i.test(name) ? [ch, `Key${name.toUpperCase()}`, name.toUpperCase().charCodeAt(0)]
+    : /^\d$/.test(name) ? [ch, `Digit${name}`, 48 + Number(name)] : [ch, "", 0]);
+  const modifiers = (mods.alt ? 1 : 0) | (mods.ctrl ? 2 : 0) | (mods.shift ? 8 : 0);
+  // A character key types itself, unless Ctrl or Alt makes it a shortcut.
+  const text = mods.ctrl || mods.alt ? "" : name === "enter" ? "\r" : key.length === 1 ? key : "";
+  const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  return [
+    { method: "Input.dispatchKeyEvent", params: { ...base, type: text ? "keyDown" : "rawKeyDown", ...(text ? { text, unmodifiedText: text } : {}) } },
+    { method: "Input.dispatchKeyEvent", params: { ...base, type: "keyUp" } },
+  ];
+}
+const fullType = keyboard($("#full-keys"), "Type here: keys go to Loom", (t) => toFull(...keyEvents(t)));
+$("#full-kbd").onclick = () => {
+  const box = $("#full-keys");
+  box.hidden = !box.hidden;
+  $("#full-kbd").setAttribute("aria-expanded", String(!box.hidden));
+  if (!box.hidden) fullType.focus();
+};
+$("#full-back").onclick = back;
+$("#full-btn").onclick = () => { pushed = true; location.hash = "#/full"; };
+
 // --- Views, pairing and the loops -----------------------------------------
 
 function route() {
   const m = /^#\/pane\/(.+)$/.exec(location.hash);
-  const view = m ? "pane" : location.hash === "#/new" ? "new" : "list";
+  const view = m ? "pane" : location.hash === "#/new" ? "new" : location.hash === "#/full" ? "full" : "list";
+  if (view === "full" && !full) {
+    full = Date.now();
+    const visit = full;
+    delete canvas.dataset.seq;
+    // After the layout, so the stream asks for the room it really has.
+    requestAnimationFrame(() => void startFull().then(() => watchFull(visit), (e) => toast(e.message, true)));
+  } else if (view !== "full" && full) {
+    full = 0;
+    void mirror({ action: "stop" }).catch(() => {});
+  }
   const id = m ? decodeURIComponent(m[1]) : null;
   if (id !== open) {
     open = id;
@@ -413,6 +881,7 @@ function route() {
   document.body.dataset.view = view;
   $("#pane").hidden = view !== "pane";
   $("#new").hidden = view !== "new";
+  $("#full").hidden = view !== "full";
   closeSheet();
   if (view === "new") drawNew();
   drawList();
@@ -495,14 +964,24 @@ $<HTMLFormElement>("#pairing form").onsubmit = pair;
 $<HTMLFormElement>("#new form").onsubmit = create;
 ($<HTMLFormElement>("#new form").elements.namedItem("project") as HTMLSelectElement).onchange = kind;
 for (const b of document.querySelectorAll<HTMLButtonElement>("#new [data-kind]")) b.onclick = () => { worktree = b.dataset.kind === "worktree"; kind(); };
-for (const b of document.querySelectorAll<HTMLButtonElement>("#keys button")) {
-  b.onclick = () => { if (open) void act(() => run("keys", [open!, b.dataset.key!], { change: true })); };
+for (const b of document.querySelectorAll<HTMLButtonElement>("#views button")) {
+  b.onclick = () => { listView = b.dataset.list!; setPref("loom-list", listView); drawList(); };
 }
+/** The keys fold away under the button beside the message box, and stay as left. */
+function drawKeys() {
+  const box = $("#screen");
+  const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
+  $("#keys").hidden = !keysOpen;
+  $("#keys-btn").setAttribute("aria-expanded", String(keysOpen));
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+$("#keys-btn").onclick = () => { keysOpen = !keysOpen; setPref("loom-keys", keysOpen ? "1" : ""); drawKeys(); };
+drawKeys();
 $<HTMLFormElement>("#prompt").onsubmit = async (e) => {
   e.preventDefault();
   const box = $<HTMLTextAreaElement>("#prompt textarea");
   const text = box.value.trim();
-  const send = $<HTMLButtonElement>("#prompt button");
+  const send = $<HTMLButtonElement>("#prompt .primary");
   if (!text || !open) return;
   send.disabled = true;
   const id = open;

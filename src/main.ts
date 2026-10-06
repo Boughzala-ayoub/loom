@@ -3265,12 +3265,13 @@ function inputState(p: Pane) {
 
 /** read --styles: the live screen's rows as runs of text that share a style.
  * Colors are a palette index or #rrggbb; default styles are left out. */
-function styledRows(p: Pane) {
+/** Rows from..to of the buffer with their styles; the screen's by default. */
+function styledRows(p: Pane, from = p.term.buffer.active.baseY, to = from + p.term.rows) {
   const buf = p.term.buffer.active, cell = buf.getNullCell();
   const hex = (n: number) => `#${n.toString(16).padStart(6, "0")}`;
   const rows: { y: number; runs: Record<string, unknown>[] }[] = [];
-  for (let y = 0; y < p.term.rows; y++) {
-    const line = buf.getLine(buf.baseY + y), runs: Record<string, unknown>[] = [];
+  for (let y = 0; y < to - from; y++) {
+    const line = buf.getLine(from + y), runs: Record<string, unknown>[] = [];
     let key = "";
     for (let x = 0; line && x < line.length; x++) {
       line.getCell(x, cell);
@@ -4939,6 +4940,14 @@ void listen<string>("overlay-pick", e => void comeBack(threads.flatMap(t => t.pa
 void listen("overlay-open", () => void comeBack());
 void listen("overlay-dismiss", () => ((overlayClosedAt = loomFocused), syncOverlay()));
 void listen<number>("overlay-cap", e => ((overlayCap = e.payload), save()));
+// Full Loom (mirror.rs) lays this page out at a phone's size, where a tap
+// closes the sidebar drawer: back at the window's size it is as it was, as
+// after the phone window size.
+let mirrorSide: boolean | undefined;
+void listen<boolean>("mirror", e => {
+  if (e.payload) mirrorSide ??= sideOpen;
+  else if (mirrorSide !== undefined) (toggleSide(mirrorSide), (mirrorSide = undefined));
+});
 
 function paintOverlayPref() {
   const b = $("#overlay-pref");
@@ -8086,12 +8095,11 @@ const CLI: Record<string, CliCommand> = {
   },
   read: {
     usage: "read [pane] [--lines N] [--styles]",
-    help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the screen's rows with their styles.",
+    help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the rows with their styles: the screen's, or with --lines those N lines'.",
     options: { lines: "int", styles: "bool" },
     run: (a) => {
       const p = cliPane(a._[0]);
-      if (flag(a, "styles") && a.lines !== undefined) throw new Error("--styles reads the screen, not history: leave out --lines.");
-      let raw: string;
+      let raw: string, from: number | undefined, to: number | undefined;
       if (a.lines === undefined) raw = liveScreen(p);
       else {
         const buf = p.term.buffer.active;
@@ -8102,11 +8110,12 @@ const CLI: Record<string, CliCommand> = {
         const lines: string[] = [];
         for (let y = Math.max(0, end - n); y < end; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
         raw = lines.join("\n");
+        [from, to] = [Math.max(0, end - n), end];
       }
       const text = raw.split("\n").map((l) => l.trimEnd()).join("\n").replace(/\n+$/, "");
       const buf = p.term.buffer.active;
       const cursor = { x: buf.cursorX, y: buf.cursorY, hidden: p.cursorHidden };
-      return { data: { pane: p.id, ref: paneName(p), text, cursor, cols: p.term.cols, input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p) } : {}) }, text };
+      return { data: { pane: p.id, ref: paneName(p), text, cursor, cols: p.term.cols, input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p, from, to) } : {}) }, text };
     },
   },
   menu: {
@@ -8265,16 +8274,17 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   keys: {
-    usage: "keys <pane> <key...> [--gen N] [--task ID]",
-    help: "Press keys in a pane: enter, esc, tab, shift-tab, up, down, left, right, backspace, ctrl-c, ctrl-u, or a single character. ctrl-u clears input before the cursor in agents that support it; use read to check the draft afterward. It sends no Enter. --gen N refuses a pane that restarted since. A lone enter on a pane where submit typed a task's text but held back its Enter, with nothing written there since, is that task's Enter: the task goes on from there. --task ID insists on it, and presses nothing if it can't be.",
-    options: { gen: "int", task: "string" },
+    usage: "keys <pane> <key...> [--text] [--gen N] [--task ID]",
+    help: "Press keys in a pane: enter, esc, tab, shift-tab, up, down, left, right, home, end, pageup, pagedown, insert, delete, backspace, space, f1 to f12, or a single character, each with any of ctrl-, alt- and shift- before it (ctrl-c, alt-enter, ctrl-shift-left). ctrl-u clears input before the cursor in agents that support it; use read to check the draft afterward. --text types the words as they are, joined by spaces, in one write: loomctl keys <pane> --text - reads them from standard input. It sends no Enter. --gen N refuses a pane that restarted since. A lone enter on a pane where submit typed a task's text but held back its Enter, with nothing written there since, is that task's Enter: the task goes on from there. --task ID insists on it, and presses nothing if it can't be.",
+    options: { gen: "int", task: "string", text: "bool" },
     run: async (a) => {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
-      const names = a._.slice(1);
-      if (!names.length) throw new Error("Name the keys to press.");
-      const enter = names.length === 1 && names[0] === "enter", id = str(a, "task");
+      const text = flag(a, "text");
+      const names = text ? [a._.slice(1).join(" ")] : a._.slice(1);
+      if (!names.join("")) throw new Error(text ? "Give the text to type." : "Name the keys to press.");
+      const enter = !text && names.length === 1 && names[0] === "enter", id = str(a, "task");
       if (id !== undefined && !enter) throw new Error("--task goes with a lone enter: loomctl keys <pane> enter --task ID.");
-      const bytes = names.map((n) => {
+      const bytes = text ? names : names.map((n) => {
         const b = keyBytes(n, p.term.modes.applicationCursorKeysMode);
         if (b === null) throw new Error(`Unknown key "${n}". To type text, use loomctl send --no-enter.`);
         return b;

@@ -161,6 +161,8 @@ try {
     await page.screenshot({ path: join(out, `${what.replace(/\W+/g, '-')}.png`) });
   };
 
+  const alpha = page => page.locator('#rows .thread', { has: page.locator('.thread-name', { hasText: 'alpha' }) });
+
   // Pairing through the page itself.
   let page = await context(375);
   await page.goto(base);
@@ -175,20 +177,65 @@ try {
   await page.context().close();
   console.log('PASS pairing from the page');
 
-  for (const width of [320, 375, 768, 1024, 1280]) {
+  for (const width of (process.env.REMOTE_WIDTHS || '320,375,768,1024,1280').split(',').map(Number)) {
     page = await context(width, phoneToken);
     await page.goto(base);
-    const row = page.locator('#rows .row', { hasText: 'alpha:1' });
+    const thread = alpha(page);
+    const row = thread.locator('.row');
     await row.waitFor();
     await fits(page, `${width} list`);
+    // Threads as on the PC; a folded one stays folded on this phone.
+    await thread.locator('.thread-head').click();
+    await row.waitFor({ state: 'detached' });
+    await page.reload();
+    await thread.locator('.thread-head[aria-expanded=false]').waitFor();
+    assert.equal(await row.count(), 0, 'A folded thread stays folded after a reload');
+    await thread.locator('.thread-head').click();
+    await thread.locator('.thread-top .icon-btn').click();
+    await page.locator('#actions button', { hasText: 'Rename' }).waitFor();
+    await fits(page, `${width} thread actions`);
+    await page.locator('#actions button', { hasText: 'Cancel' }).click();
+    await page.click('#views [data-list=state]');
+    await page.locator('#rows .row', { hasText: 'alpha:1' }).waitFor();
+    await fits(page, `${width} by state`);
+    await page.click('#views [data-list=threads]');
     await row.click();
     await page.locator('#screen .line').first().waitFor();
     assert.equal(await page.locator('#pane-name').textContent(), 'alpha:1 · shell');
-    const said = `phone-says-hi-${width}`;
+    // A line as wide as the terminal wraps on the phone instead of scrolling sideways.
+    const said = `phone-says-hi-${width}-${'x'.repeat(200)}`;
     await page.fill('#prompt textarea', `echo ${said}`);
-    await page.click('#prompt button');
-    await page.waitForFunction(s => document.querySelector('#screen').textContent.split(s).length > 2, said, { timeout: 15000 });
+    await page.click('#prompt button.primary');
+    await page.waitForFunction(s => document.querySelector('#screen').textContent.replace(/\s/g, '').split(s).length > 2, said, { timeout: 15000 });
+    const sideways = () => page.evaluate(() => { const s = document.querySelector('#screen'); return s.scrollWidth - s.clientWidth; });
+    assert.ok(await sideways() <= 0, `${width}: wrapped lines don't scroll sideways`);
+    assert.ok(await page.locator('#keys').isHidden(), 'The keys start folded');
     await fits(page, `${width} pane`);
+    await page.click('#keys-btn');
+    await page.locator('#keys').waitFor();
+    await fits(page, `${width} pane keys`);
+    // The keyboard types straight into the pane, and Ctrl holds for one key.
+    const typed = `typed-${width}`;
+    await page.locator('#keys .type').pressSequentially(`echo ${typed}`);
+    await page.locator('#keys [data-key=enter]').click();
+    await page.waitForFunction(w => document.querySelector('#screen').textContent.split(w).length > 2, typed, { timeout: 15000 });
+    await page.locator('#keys [data-key=ctrl]').click();
+    assert.equal(await page.locator('#keys [data-key=ctrl]').getAttribute('aria-pressed'), 'true');
+    await page.locator('#keys [data-key=end]').click();
+    assert.equal(await page.locator('#keys [data-key=ctrl]').getAttribute('aria-pressed'), 'false', 'Ctrl lets go after one key');
+    await page.locator('#keys [data-key=fn]').click();
+    await page.locator('#keys [data-key=f12]').waitFor();
+    await fits(page, `${width} pane keys fn`);
+    await page.locator('#keys [data-key=fn]').click();
+    await page.click('#keys-btn');
+    await page.locator('#keys').waitFor({ state: 'hidden' });
+    await page.click('#more');
+    await page.locator('#actions button', { hasText: "Don't wrap long lines" }).click();
+    await page.waitForFunction(() => !document.querySelector('#screen').classList.contains('wrap'));
+    if (width < 600) assert.ok(await sideways() > 0, `${width}: unwrapped, the wide line scrolls sideways`);
+    await page.click('#more');
+    await page.locator('#actions button', { hasText: 'Wrap long lines' }).click();
+    await page.waitForFunction(() => document.querySelector('#screen').classList.contains('wrap'));
     await page.click('#more');
     await page.locator('#actions').waitFor();
     await fits(page, `${width} actions`);
@@ -196,6 +243,14 @@ try {
     await page.locator('#notice', { hasText: 'Older lines' }).waitFor();
     await page.locator('#notice button', { hasText: 'Back to live' }).click();
     await page.locator('#notice', { hasText: 'Older lines' }).waitFor({ state: 'hidden' });
+    // Scrolling up past the screen's top reads the history; back at the bottom, it's live.
+    const olderShown = () => page.locator('#notice', { hasText: 'Older lines' }).isVisible();
+    await page.locator('#screen').hover();
+    for (let i = 0; i < 30 && !(await olderShown()); i++) { await page.mouse.wheel(0, -400); await pause(150); }
+    assert.ok(await olderShown(), `${width}: scrolling up reads the history`);
+    for (let i = 0; i < 60 && (await olderShown()); i++) { await page.mouse.wheel(0, 800); await pause(150); }
+    const box = await page.evaluate(() => { const b = document.querySelector('#screen'); return [b.scrollTop, b.clientHeight, b.scrollHeight]; });
+    assert.ok(!(await olderShown()), `${width}: back at the bottom, the screen is live again (scrollTop, height, scrollHeight: ${box})`);
     if (width >= 900) assert.ok(await page.locator('#list').isVisible(), 'Wide: the list stays beside the pane');
     else {
       assert.ok(!(await page.locator('#list').isVisible()), 'Phone: one view at a time');
@@ -205,8 +260,16 @@ try {
     await page.click('#new-btn');
     await page.locator('#new form').waitFor();
     await fits(page, `${width} new thread`);
+    await page.goto(base + '#/full');
+    await page.waitForFunction(() => document.querySelector('#mirror').dataset.seq, null, { timeout: 20000 });
+    await fits(page, `${width} full loom`);
+    await page.click('#full-kbd');
+    await page.locator('#full-keys').waitFor();
+    await fits(page, `${width} full loom keys`);
+    await page.click('#full-back');
+    await page.locator('#full').waitFor({ state: 'hidden' });
     await page.context().close();
-    console.log(`PASS ${width} px: list, pane, send, actions, older lines, new-thread form`);
+    console.log(`PASS ${width} px: threads and folding, thread menu, by state, pane, wrapping, keyboard, send, actions, older lines and scrolling back, new-thread form, Full Loom`);
   }
 
   // Creating and closing threads from the phone.
@@ -223,7 +286,7 @@ try {
   assert.ok(wt, `A worktree thread on loom/phone-wt: ${JSON.stringify(threads.map(t => t.branch))}`);
   await page.click('#more');
   await page.locator('#actions button', { hasText: 'Close the thread' }).click();
-  await page.locator('#rows .row', { hasText: 'alpha:1' }).waitFor();
+  await alpha(page).locator('.row').waitFor();
   for (let i = 0; i < 20 && ok('--json', 'threads').json.length !== 1; i++) await pause(250);
   assert.equal(ok('--json', 'threads').json.length, 1, 'Closing the thread from the phone closes it');
   await page.goto(base + '#/new');
@@ -241,7 +304,7 @@ try {
 
   // Fitting Loom to the phone narrows the pane, and back.
   await page.goto(base);
-  await page.locator('#rows .row', { hasText: 'alpha:1' }).click();
+  await alpha(page).locator('.row').click();
   await page.locator('#screen .line').first().waitFor();
   const cols = () => ok('--json', 'read', 'alpha:1').json.cols;
   const wide = cols();
@@ -260,6 +323,52 @@ try {
   await page.locator('#toast', { hasText: 'desktop size' }).waitFor();
   assert.equal(ok('--json', 'status').json.phone, false);
   console.log(`PASS fitting Loom to the phone: ${wide} to ${narrow} columns, and back`);
+
+  // Full Loom: the PC's window at the phone's size, with keys typed into it.
+  assert.equal((await fetch(base + '/api/mirror?after=0')).status, 401, 'No token, no frames');
+  assert.equal((await api('/api/mirror', { action: 'start', width: 375, height: 700, scale: 1 })).status, 401, 'No token, no Full Loom');
+  res = await api('/api/mirror', { action: 'start', width: 375, height: 700, scale: 1 }, auth);
+  assert.equal(res.status, 200, await res.clone().text());
+  res = await api('/api/mirror', { action: 'input', events: [{ method: 'Runtime.evaluate', params: { expression: '1' } }] }, auth);
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).error, /Input takes/, 'The phone may send input, nothing else of DevTools');
+  await api('/api/mirror', { action: 'stop' }, auth);
+  assert.equal((await fetch(base + '/api/mirror?after=0', { headers: auth })).status, 409, 'Stopped, no frames');
+  await page.goto(base + '#/full');
+  await page.waitForFunction(() => document.querySelector('#mirror').dataset.seq, null, { timeout: 20000 });
+  for (let i = 0; i < 20 && cols() >= wide; i++) await pause(250);
+  const phoneCols = cols();
+  assert.ok(phoneCols < wide, `Full Loom lays Loom out at the phone's width: ${wide} to ${phoneCols} columns`);
+  // A tap on the terminal beside the PC's thread drawer focuses it, as on the phone (the drawer closes too).
+  const shown = await page.locator('#mirror').boundingBox();
+  await page.mouse.click(shown.x + shown.width * 0.9, shown.y + shown.height * 0.5);
+  await pause(500);
+  await page.screenshot({ path: join(out, '375-full-loom-tapped.png') });
+  await page.click('#full-kbd');
+  await page.locator('#full-keys .type').pressSequentially('echo mirror-says-hi');
+  await page.locator('#full-keys [data-key=enter]').click();
+  // The echo's output on a line of its own: the command line itself wraps at the phone's width.
+  const mirrored = () => /^mirror-says-hi$/m.test(ok('--json', 'read', 'alpha:1', '--lines', '200').json.text);
+  for (let i = 0; i < 40 && !mirrored(); i++) await pause(250);
+  assert.ok(mirrored(), 'Keys typed in Full Loom reach the terminal in focus');
+  await page.screenshot({ path: join(out, '375-full-loom-typed.png') });
+  await page.click('#full-back');
+  for (let i = 0; i < 20 && cols() !== wide; i++) await pause(250);
+  assert.equal(cols(), wide, 'Leaving Full Loom gives Loom its own size back');
+  assert.equal((await fetch(base + '/api/mirror?after=0', { headers: auth })).status, 409, 'Left, the stream stops');
+  console.log(`PASS Full Loom: frames, ${wide} to ${phoneCols} columns and back, typing into the terminal, input only`);
+
+  // Renaming from the thread's menu.
+  await page.goto(base);
+  await alpha(page).locator('.thread-top .icon-btn').click();
+  page.removeAllListeners('dialog');
+  page.once('dialog', d => d.accept('alpha-renamed'));
+  await page.locator('#actions button', { hasText: 'Rename' }).click();
+  for (let i = 0; i < 20 && ok('--json', 'threads').json[0].name !== 'alpha-renamed'; i++) await pause(250);
+  assert.equal(ok('--json', 'threads').json[0].name, 'alpha-renamed');
+  await page.locator('#rows .thread-name', { hasText: 'alpha-renamed' }).waitFor();
+  page.on('dialog', d => d.accept());
+  console.log('PASS renaming a thread from its menu');
 
   // Revoked, the page asks to pair again.
   ok('remote', 'revoke');

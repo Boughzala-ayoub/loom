@@ -37,7 +37,7 @@
       .icon-btn { min-width: var(--tap); padding: 0; font-size: 20px; }
       .chip { padding: 2px 8px; border-radius: 99px; font-size: 13px; white-space: nowrap; background: var(--raise); color: var(--muted); }
       .chip.waiting { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
-      .chip.working { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+      .chip.working, .chip.starting { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
       .chip.exited { color: var(--err); }
 
       /* Phone: one view at a time. Wider: the list beside the open view. */
@@ -55,11 +55,55 @@
       .row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 10px; align-items: center; width: 100%; min-height: 64px; padding: 8px 12px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: none; text-align: left; }
       .row[aria-current="true"] { background: var(--raise); }
       .row svg { grid-row: span 2; width: 22px; height: 22px; }
-      .row .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 600; }
+      .row .name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .name .chip { font-weight: 400; }
       .row .title { grid-column: 2; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .row .age { grid-row: span 2; color: var(--faint); font-size: 13px; font-variant-numeric: tabular-nums; }
       .row.waiting .age { color: var(--warn); }
       #rows .none { padding: 24px 12px; color: var(--muted); }
+      .full-row { display: flex; align-items: center; gap: 12px; width: calc(100% - 24px); margin: 10px 12px 0; padding: 8px 14px; text-align: left; }
+      .full-row svg { flex: none; width: 26px; height: 26px; color: var(--accent); }
+      .full-row span { display: grid; min-width: 0; }
+      .full-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
+
+      /* Full Loom: the PC's window, streamed, above its keyboard and bar. */
+      #full { display: flex; flex-direction: column; height: 100dvh; min-width: 0; }
+      #mirror { flex: 1; min-height: 0; width: 100%; display: block; object-fit: contain; touch-action: none; background: var(--bg); }
+      #full-dock { flex: none; display: grid; gap: 8px; padding: 8px; border-top: 1px solid var(--line); background: var(--panel); }
+      .full-bar { display: flex; align-items: center; gap: 8px; }
+      .full-bar .grow { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; }
+      body[data-view="full"] #list, body[data-view="full"] #empty { display: none !important; }
+      @media (min-width: 900px) { body[data-view="full"] #app { grid-template-columns: minmax(0, 1fr); } }
+
+      /* By thread, as on the PC: project, then thread, then its agents. Both fold. */
+      #views { padding: 10px 12px 4px; }
+      .bare { padding: 0 2px; border: 0; background: none; }
+      .chev::before { content: "\25BE"; display: inline-block; transition: transform 0.15s; }
+      [aria-expanded="false"] > .chev::before { transform: rotate(-90deg); }
+      .project { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; margin-top: 6px; padding: 0 12px; border: 0; border-radius: 0; background: none; color: var(--muted); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; text-align: left; }
+      .project .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .project .n { color: var(--faint); }
+      .thread { border-top: 1px solid var(--line); }
+      .thread.waiting { box-shadow: inset 3px 0 var(--warn); }
+      .thread.working { box-shadow: inset 3px 0 var(--accent); }
+      .thread-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; padding-right: 4px; }
+      .thread-top .icon-btn { border-color: transparent; background: none; color: var(--muted); }
+      .thread-head { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto auto; align-items: center; column-gap: 10px; min-height: 60px; padding: 6px 6px 6px 12px; border: 0; border-radius: 0; background: none; text-align: left; }
+      .thread-head .chev { color: var(--muted); }
+      .thread-head .who { display: flex; flex-direction: column; min-width: 0; }
+      .thread-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 600; }
+      .thread.waiting .thread-name { color: var(--warn); }
+      .branch { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font: 12px var(--mono); }
+      .thread-head .age { color: var(--faint); font-size: 13px; font-variant-numeric: tabular-nums; }
+      .pips { display: flex; align-items: center; gap: 7px; color: var(--faint); font-size: 12px; }
+      .pip { position: relative; display: flex; }
+      .pip svg { width: 18px; height: 18px; }
+      .pip:not(.idle)::after { content: ""; position: absolute; right: -3px; bottom: -3px; width: 8px; height: 8px; border: 2px solid var(--bg); border-radius: 50%; background: var(--accent); }
+      .pip.waiting::after { background: var(--warn); }
+      .pip.exited::after { background: var(--err); }
+      .thread .row { padding-left: 36px; border-top: 1px solid color-mix(in srgb, var(--line) 50%, transparent); border-bottom: 0; }
+      #rows .thread > .none { margin: 0; padding: 4px 12px 16px 36px; }
       #list-actions { padding: 16px 12px 32px; }
       #list-actions button { width: 100%; }
 
@@ -72,16 +116,24 @@
       #notice span { flex: 1; min-width: 0; }
       #screen { flex: 1; min-height: 0; margin: 0; padding: 8px; overflow: auto; background: var(--bg); font-family: var(--mono); line-height: 1.25; white-space: pre; }
       #screen .line { min-height: 1.25em; }
+      #screen.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+      #screen.wrap .rule { white-space: pre; overflow: hidden; }
       .b { font-weight: 700; } .d { opacity: 0.6; } .i { font-style: italic; } .u { text-decoration: underline; }
       #dock { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 8px; border-top: 1px solid var(--line); background: var(--panel); }
       #question { display: flex; flex-direction: column; gap: 6px; }
       #question p { margin: 0; color: var(--warn); white-space: pre-wrap; }
       #question button { text-align: left; }
-      #keys { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
-      #keys button { padding: 0 4px; }
+      /* A PC keyboard: the box types straight through, the keys are what a phone keyboard lacks. */
+      .kbd { display: grid; gap: 6px; }
+      .kbd .keys { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 5px; }
+      .kbd .keys button { min-height: 44px; padding: 0 2px; font-size: 13px; }
+      .kbd .keys button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--raise)); }
+      .kbd .type { min-height: 44px; font-family: var(--mono); }
       #prompt { display: flex; gap: 8px; align-items: flex-end; }
       #prompt textarea { min-height: var(--tap); max-height: 40dvh; resize: none; }
       #prompt button { flex: none; }
+      #keys-btn { display: grid; place-items: center; }
+      #keys-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
 
       /* The pane's actions: a sheet over the screen. */
       #actions { position: fixed; inset: auto 0 0 0; z-index: 5; display: grid; gap: 8px; max-height: 80dvh; overflow-y: auto; padding: 12px 12px 20px; border-top: 1px solid var(--line-strong); border-radius: 16px 16px 0 0; background: var(--panel); box-shadow: 0 -12px 40px rgb(0 0 0 / 0.5); }
@@ -105,7 +157,6 @@
       #toast.error { border-color: var(--err); }
       @media (min-width: 900px) {
         #toast { left: auto; width: 420px; }
-        #keys { grid-template-columns: repeat(10, minmax(0, 1fr)); }
       }
     </style>
   </head>
@@ -121,7 +172,9 @@
     </section>
     <div id="app" hidden>
       <aside id="list">
-        <div class="bar"><img src="/icon.svg" alt="" /><b class="grow">Loom</b><span id="counts" class="chip"></span><button id="new-btn">+ New</button></div>
+        <div class="bar"><img src="/icon.svg" alt="" /><b class="grow">Loom</b><button id="counts" class="bare" hidden><span class="chip waiting"></span></button><button id="new-btn">+ New</button></div>
+        <button id="full-btn" class="full-row" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></svg><span><b>Full Loom</b><small>Every menu and panel, as on the PC</small></span></button>
+        <div id="views" class="choice"><button type="button" data-list="threads" aria-pressed="true">Threads</button><button type="button" data-list="state" aria-pressed="false">By state</button></div>
         <div id="rows"></div>
       </aside>
       <main id="pane" hidden>
@@ -135,11 +188,11 @@
         <pre id="screen"></pre>
         <div id="dock">
           <div id="question" hidden></div>
-          <div id="keys">
-            <button data-key="esc">Esc</button><button data-key="ctrl-c">Ctrl+C</button><button data-key="up" aria-label="Up">&#8593;</button><button data-key="down" aria-label="Down">&#8595;</button><button data-key="enter">Enter</button>
-            <button data-key="tab">Tab</button><button data-key="shift-tab">&#8679;Tab</button><button data-key="left" aria-label="Left">&#8592;</button><button data-key="right" aria-label="Right">&#8594;</button><button data-key="backspace" aria-label="Backspace">&#9003;</button>
-          </div>
-          <form id="prompt"><textarea name="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="primary">Send</button></form>
+          <div id="keys" class="kbd" hidden></div>
+          <form id="prompt">
+            <button type="button" id="keys-btn" class="icon-btn" aria-label="Keys" aria-controls="keys" aria-expanded="false"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2" /><path d="M6 10h.01M9.3 10h.01M12.6 10h.01M15.9 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6" /></svg></button>
+            <textarea name="text" rows="1" placeholder="Message" aria-label="Message"></textarea><button class="primary">Send</button>
+          </form>
         </div>
       </main>
       <main id="new" hidden>
@@ -153,6 +206,17 @@
           <label>Agent <select name="agent"></select></label>
           <button class="primary">Create</button>
         </form>
+      </main>
+      <main id="full" hidden>
+        <canvas id="mirror" aria-label="Loom on the PC"></canvas>
+        <div id="full-dock">
+          <div id="full-keys" class="kbd" hidden></div>
+          <div class="full-bar">
+            <button id="full-back" class="icon-btn" aria-label="Back">&#8249;</button>
+            <span class="grow">Tap to click, tap twice to double-click, hold to right-click, swipe to scroll.</span>
+            <button id="full-kbd" class="icon-btn" aria-label="Keyboard" aria-controls="full-keys" aria-expanded="false"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><rect x="2.5" y="6" width="19" height="12" rx="2" /><path d="M6 10h.01M9.3 10h.01M12.6 10h.01M15.9 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6" /></svg></button>
+          </div>
+        </div>
       </main>
       <main id="empty">Pick an agent.</main>
     </div>

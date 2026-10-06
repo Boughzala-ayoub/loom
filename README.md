@@ -261,11 +261,22 @@ agents keep running on the PC. Set it up once:
 4. `loomctl remote pair` shows a code. Enter it on the phone.
 5. In Chrome's menu, **Add to Home screen** opens it like an app.
 
-The page lists the agents, waiting ones first. Open one to read its screen,
-send a prompt, answer its question with a tap, or press Esc, Ctrl+C, arrows
-and Enter. **+ New** starts a thread, with a worktree or in a folder. A pane's
-`⋯` menu fits Loom to the phone so the agent redraws at the phone's width, and
-restarts, stops or closes panes and threads. See
+The page lists your threads the way the PC's sidebar does: each project, its
+threads, and their agents. Tap a project or a thread to fold it. A folded
+thread still shows its agents' icons, with a dot on the working and waiting
+ones. **By state** lists the agents instead, waiting ones first, and the
+"N waiting" chip at the top opens the first one. Open an agent to read its
+screen, send a prompt, or answer its question with a tap. Long lines wrap to
+the phone's width, and scrolling up past the top reads the agent's history.
+The keyboard button beside the message box opens a PC keyboard: Esc, Tab,
+Ctrl, Alt and Shift that hold for the next key, arrows, Home, End, PgUp, PgDn,
+F1 to F12, and a box that types straight into the agent. **Full Loom**, at the
+top of the list, streams Loom's own window to the phone at the phone's size,
+so every menu and panel works there too: tap to click, hold to right-click,
+swipe to scroll. **+ New** starts a thread, with a worktree
+or in a folder. A thread's `⋯` adds an agent, renames the thread or closes it.
+A pane's `⋯` fits Loom to the phone so the agent redraws at the phone's width,
+turns wrapping off, and restarts, stops or closes the pane. See
 [docs/loomctl.md](docs/loomctl.md#phone-remote).
 
 ### Changes

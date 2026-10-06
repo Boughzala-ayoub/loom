@@ -124,7 +124,7 @@ shows one.
 | `status` | Counts by state, the pane in front, and every pane waiting for you. |
 | `threads` | Every thread: name, id, state, pane count, branch and folder. |
 | `panes [--thread T] [--state S]` | Every pane, or a thread's, or the ones in a state (`--state idle,waiting` for several). |
-| `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included. See [What the input holds](#what-the-input-holds). |
+| `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included, and with `--styles` too, their styled rows. See [What the input holds](#what-the-input-holds). |
 | `menu [pane]` | The numbered question on the pane's screen, if any, with an id for it. See [Answering questions](#answering-questions). |
 | `receipt <token>` | What `send --receipt` sent and what came back, without waiting. See [Receipts as a record](#receipts-as-a-record). |
 | `task <id> [--end cancelled\|unknown]` | A task from `submit` as it stands. See [Tasks](#tasks). |
@@ -325,7 +325,7 @@ collect a staged version that no commit has.
 | --- | --- |
 | `send <pane> <text...> [--no-enter] [--gen N] [--receipt] [--input REV] [--replace]` | Type text and press Enter once it shows on screen. |
 | `submit <pane> <text...> [--gen N] [--input REV]` | Hand over a task: `send`'s checks and more, and a task id back. See [Tasks](#tasks). |
-| `keys <pane> <key...> [--gen N] [--task ID]` | Press keys. A lone `enter` can be a task's held-back Enter: see [Retrying a submit](#retrying-a-submit). |
+| `keys <pane> <key...> [--text] [--gen N] [--task ID]` | Press keys, or with `--text` type the words as they are. A lone `enter` can be a task's held-back Enter: see [Retrying a submit](#retrying-a-submit). |
 | `choose <pane> <n> [--menu ID] [--gen N]` | Pick option n of a numbered question, as the Overview's buttons do. |
 
 How `send` works:
@@ -417,7 +417,8 @@ question, and reads as `unknown` too.
 `hidden` when the program hid it; Claude hides it and draws its own caret).
 `read --styles` adds the screen's `rows` as runs of text with their style:
 `bold`, `dim`, `italic`, `underline`, `inverse`, and `fg`/`bg` as a palette
-index or `#rrggbb`.
+index or `#rrggbb`. With `--lines N` the rows are those N lines, history
+included, which is how the phone scrolls back.
 
 `--input REV` makes a send conditional on the input you read. Loom checks it in
 the pane's turn, right before typing, and types nothing if anything wrote to
@@ -447,10 +448,15 @@ $r = loomctl --json read api-fix:1 | ConvertFrom-Json    # the suggestion is gon
 loomctl send api-fix:1 --input $r.input.rev 'rite the tests'
 ```
 
-`keys` takes `enter` (or `return`), `esc` (or `escape`), `tab`, `shift-tab`
-(or `backtab`), `backspace`, `space`, `delete` (or `del`), `pageup`,
-`pagedown`, `up`, `down`, `left`, `right`, `home`, `end`, `ctrl-<letter>`
-(also written `ctrl+c` or `c-c`), and any single character. If a restart cuts a
+`keys` takes `enter` (or `return`), `esc` (or `escape`), `tab`, `backtab`,
+`backspace`, `space`, `insert` (or `ins`), `delete` (or `del`), `pageup`,
+`pagedown`, `up`, `down`, `left`, `right`, `home`, `end`, `f1` to `f12`, and
+any single character. Any of `ctrl-` (or `c-`), `alt-` (or `meta-`, `m-`) and
+`shift-` goes before a key, as on a PC keyboard: `shift-tab`, `ctrl-c`,
+`alt-enter`, `ctrl-shift-left`, `shift-f5`. A `+` works in place of each `-`
+(`ctrl+c`). Loom sends what xterm sends for each. `--text` types the words
+instead, joined by spaces, in one write and without Enter; `keys <pane> --text -`
+reads them from standard input. If a restart cuts a
 `keys` short, the failure says how many went in (`"pressed": 1`): an `enter`
 among them may already have run something.
 
@@ -487,7 +493,8 @@ when time runs out.
 
 `loomctl remote on` serves a page for your phone at `127.0.0.1:7420` (`7421`
 for a debug build; `--port` picks another, and Loom remembers it). The page
-lists every agent, shows one's screen, sends prompts and keys, answers
+lists the threads and their agents as the PC's sidebar does, or every agent
+by state, shows one's screen, sends prompts and keys, answers
 numbered questions, and starts, restarts, stops and closes panes and threads.
 Each of those is a loomctl command, so the phone can do what loomctl does.
 The remote stays on across restarts until `loomctl remote off`.
@@ -502,11 +509,33 @@ Enter it on the page. The phone keeps a token; Loom keeps only its SHA-256, in
 `<workspace>.remote.json` beside the workspace file. `loomctl remote revoke`
 unpairs every phone.
 
+**Full Loom**, at the top of the list, streams Loom's own window to the phone,
+so every menu and panel works there: usage, preferences, changes, the
+overview. While a phone watches, the page on the PC lays out at the phone's
+size (the window keeps its own), and the agents redraw at its width. Tap to
+click, tap twice to double-click, hold to right-click, swipe to scroll. The
+keyboard button opens a PC keyboard: its box types into whatever has focus
+on the PC, so tap a terminal first. Frames come only when the page changes,
+at about 10 KB each, one CSS pixel per pixel, so text is a little soft on a
+sharp phone. Leaving Full Loom, or 20 seconds without the page asking for a
+frame, gives Loom its size back. The phone can send mouse, key and text input
+to the page through it, and nothing else of DevTools.
+
+In a pane, the keyboard button beside the message box opens the same PC
+keyboard. Its box sends each key straight to the pane with `keys`. Ctrl, Alt
+and Shift hold for the next key, from its row or the phone's keyboard, and Fn
+shows F1 to F12. Scrolling up past the top of a pane's screen reads its
+history with `read --styles --lines 2000`; the screen stays still until you
+scroll back to the bottom.
+
 The prompt box sends an agent a `submit` task and a shell a `send` line. Each
 change carries a `--key`, so a retry after a dropped connection doesn't run
 it twice. **Fit Loom to phone** in a pane's actions shows that pane on the PC,
 turns on the phone window size and zooms the pane, so the agent redraws at
-about the phone's width. Turn it off again from the same menu.
+about the phone's width. Turn it off again from the same menu. Without it, a
+screen too wide for the phone wraps its lines at 12 px, unless that menu turns
+wrapping off. The phone's browser keeps its folded threads, the list view, the
+keys row and wrapping; Loom keeps none of them.
 
 ## Answering questions
 

@@ -144,22 +144,40 @@ export function onOff(value: string | undefined, what: string): boolean {
 }
 
 const NAMED: Record<string, string> = {
-  enter: "\r", return: "\r", esc: "\x1b", escape: "\x1b", tab: "\t", "shift-tab": "\x1b[Z", backtab: "\x1b[Z",
-  backspace: "\x7f", space: " ", delete: "\x1b[3~", del: "\x1b[3~", pageup: "\x1b[5~", pagedown: "\x1b[6~",
+  enter: "\r", return: "\r", esc: "\x1b", escape: "\x1b", tab: "\t", backtab: "\x1b[Z", backspace: "\x7f", space: " ",
 };
 const ARROWS: Record<string, string> = { up: "A", down: "B", right: "C", left: "D", home: "H", end: "F" };
+const TILDE: Record<string, number> = {
+  insert: 2, ins: 2, delete: 3, del: 3, pageup: 5, pagedown: 6, f5: 15, f6: 17, f7: 18, f8: 19, f9: 20, f10: 21, f11: 23, f12: 24,
+};
+const SS3: Record<string, string> = { f1: "P", f2: "Q", f3: "R", f4: "S" };
+/** Ctrl with a character that isn't a letter, as xterm sends it. */
+const CTRL: Record<string, string> = { "@": "\0", " ": "\0", "2": "\0", "[": "\x1b", "\\": "\x1c", "]": "\x1d", "^": "\x1e", "6": "\x1e", "_": "\x1f", "/": "\x1f", "-": "\x1f", "?": "\x7f" };
 
 /** The bytes a key sends, or null for a name loomctl doesn't know. Arrows
  * follow the terminal's cursor-key mode, the way xterm would send them. A
- * single character is itself: menu digits, y and n. */
+ * single character is itself: menu digits, y and n. ctrl-, alt- and shift-
+ * (or c-, meta-, m-) go before any key, in any order, as on a PC keyboard. */
 export function keyBytes(name: string, appCursor: boolean): string | null {
-  const k = name.toLowerCase().replace(/\+/g, "-");
-  if (k in NAMED) return NAMED[k];
-  if (k in ARROWS) return (appCursor ? "\x1bO" : "\x1b[") + ARROWS[k];
-  const ctrl = /^(?:ctrl|c)-([a-z])$/.exec(k);
-  if (ctrl) return String.fromCharCode(ctrl[1].charCodeAt(0) - 96);
-  if ([...name].length === 1) return name;
-  return null;
+  let rest = name.replace(/\+(?=.)/g, "-"), ctrl = false, alt = false, shift = false;
+  for (let m; (m = /^(ctrl|c|alt|meta|m|shift)-(?=.)/i.exec(rest)); rest = rest.slice(m[0].length)) {
+    const mod = m[1].toLowerCase();
+    if (mod === "ctrl" || mod === "c") ctrl = true;
+    else if (mod === "shift") shift = true;
+    else alt = true;
+  }
+  const k = rest.toLowerCase();
+  // xterm's modifier code: arrows, Home, End, Insert, Delete, PageUp, PageDown and F-keys carry it.
+  const code = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
+  if (k in ARROWS) return code > 1 ? `\x1b[1;${code}${ARROWS[k]}` : (appCursor ? "\x1bO" : "\x1b[") + ARROWS[k];
+  if (k in TILDE) return code > 1 ? `\x1b[${TILDE[k]};${code}~` : `\x1b[${TILDE[k]}~`;
+  if (k in SS3) return code > 1 ? `\x1b[1;${code}${SS3[k]}` : `\x1bO${SS3[k]}`;
+  // The rest: shift and ctrl change the character itself, alt puts Esc before it.
+  let out = k in NAMED ? NAMED[k] : [...rest].length === 1 ? rest : null;
+  if (out === null) return null;
+  if (shift) out = k === "tab" ? "\x1b[Z" : out.toUpperCase();
+  if (ctrl) out = /^[a-z]$/i.test(out) ? String.fromCharCode(out.toLowerCase().charCodeAt(0) - 96) : (CTRL[out] ?? out);
+  return alt ? `\x1b${out}` : out;
 }
 
 /** Rows as plain aligned columns; the last column runs free. */
