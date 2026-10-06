@@ -3,7 +3,9 @@
 //! through control::ask, so a phone can do whatever loomctl can. It listens
 //! on 127.0.0.1 only: `tailscale serve` carries it to your own devices over
 //! HTTPS. A phone needs a token, which it gets once for the six-digit code
-//! `loomctl remote pair` shows.
+//! `loomctl remote pair` shows. A phone can also sign up for Loom's task
+//! notices as Web Push notifications (docs/phone-notifications-study.md):
+//! this keeps the subscriptions and posts what push.ts encrypts and signs.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,8 +32,12 @@ const GUESSES: u8 = 5;
 const MAX_ACTIVE: usize = 32;
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
-const MANIFEST: &str = r##"{"name":"Loom","short_name":"Loom","start_url":"/","display":"standalone","background_color":"#111111","theme_color":"#111111","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"}]}"##;
+const MANIFEST: &str = r##"{"name":"Loom","short_name":"Loom","start_url":"/","display":"standalone","background_color":"#111111","theme_color":"#111111","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"},{"src":"/icon.png","sizes":"512x512","type":"image/png"}]}"##;
 const ICON: &[u8] = include_bytes!("../../src/logo.svg");
+/// Android draws notification icons from PNGs only.
+const ICON_PNG: &[u8] = include_bytes!("../icons/icon.png");
+/// The service worker that shows Loom's pushes and opens the agent on a tap.
+const WORKER: &str = include_str!("remote-sw.js");
 
 /// `<workspace>.remote.json`, beside the workspace file, so each profile has its own.
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -40,6 +46,21 @@ struct Config {
     port: Option<u16>,
     /// SHA-256 of each paired phone's token: the file alone lets nobody in.
     phones: Vec<String>,
+    /// Loom's Web Push key, made once by its window (push.ts): `public`, the
+    /// key phones subscribe with, and `private`, a JWK that only signs pushes.
+    #[serde(default)]
+    vapid: Option<Value>,
+    /// Each phone's push subscription, by its token's hash: unpairing drops it.
+    #[serde(default)]
+    pushes: Vec<Push>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct Push {
+    phone: String,
+    endpoint: String,
+    p256dh: String,
+    auth: String,
 }
 
 struct Pairing {
@@ -97,7 +118,7 @@ pub async fn remote(app: AppHandle, action: String, port: Option<u16>) -> Result
         }
         "revoke" => {
             *remote.pairing.lock().unwrap() = None;
-            update(&app, |c| c.phones.clear())?;
+            update(&app, |c| { c.phones.clear(); c.pushes.clear(); })?;
         }
         _ => return Err(format!("remote takes on, off, pair or revoke, not {action}.")),
     }
@@ -106,15 +127,15 @@ pub async fn remote(app: AppHandle, action: String, port: Option<u16>) -> Result
 
 async fn status(app: &AppHandle) -> Value {
     let remote = app.state::<Remote>();
-    let (on, port, phones) = {
+    let (on, port, phones, pushes) = {
         let c = remote.config.lock().unwrap();
-        (c.on, c.port.unwrap_or(PORT), c.phones.len())
+        (c.on, c.port.unwrap_or(PORT), c.phones.len(), c.pushes.len())
     };
     let listening = remote.server.lock().unwrap().is_some();
     let pairing = remote.pairing.lock().unwrap().as_ref().filter(|p| p.until > Instant::now()).map(|p| p.code.clone());
     let error = remote.error.lock().unwrap().clone();
     let name = tauri::async_runtime::spawn_blocking(tailnet_name).await.ok().flatten();
-    json!({ "on": on, "listening": listening, "port": port, "phones": phones, "pairing": pairing, "error": error, "address": name.map(|n| format!("https://{n}")) })
+    json!({ "on": on, "listening": listening, "port": port, "phones": phones, "pushes": pushes, "pairing": pairing, "error": error, "address": name.map(|n| format!("https://{n}")) })
 }
 
 /// This PC's name on your tailnet, if Tailscale is installed and signed in.
@@ -264,9 +285,12 @@ async fn route(app: &AppHandle, request: &Request) -> Reply {
         ("GET", "/") => asset(app, "remote.html"),
         ("GET", "/manifest.webmanifest") => Reply::new(200, "application/manifest+json", MANIFEST.into()),
         ("GET", "/icon.svg") => Reply::new(200, "image/svg+xml", ICON.into()),
+        ("GET", "/icon.png") => Reply::new(200, "image/png", ICON_PNG.into()),
+        ("GET", "/sw.js") => Reply::new(200, "text/javascript", WORKER.into()),
         ("GET", p) if p.starts_with("/assets/") => asset(app, &p[1..]).cached(),
         ("POST", "/api/pair") => pair(app, request),
         ("POST", "/api/cli") => cli(app, request).await,
+        ("POST", "/api/push") => push(app, request),
         _ => Reply::error(404, "Not found."),
     }
 }
@@ -332,11 +356,125 @@ fn guess(pairing: &mut Option<Pairing>, code: &str, now: Instant) -> Result<(), 
     Err("Wrong code.")
 }
 
-async fn cli(app: &AppHandle, request: &Request) -> Reply {
+/// The paired phone a request comes from: its token's hash.
+fn phone(app: &AppHandle, request: &Request) -> Option<String> {
     let token = request.header("authorization").and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("").trim();
-    let paired = !token.is_empty() && app.state::<Remote>().config.lock().unwrap().phones.contains(&hash(token));
-    if !paired {
-        return Reply::json(401, json!({ "ok": false, "unpaired": true, "error": "This phone isn't paired, or its pairing was revoked." }));
+    let id = hash(token);
+    (!token.is_empty() && app.state::<Remote>().config.lock().unwrap().phones.contains(&id)).then_some(id)
+}
+
+fn unpaired() -> Reply {
+    Reply::json(401, json!({ "ok": false, "unpaired": true, "error": "This phone isn't paired, or its pairing was revoked." }))
+}
+
+/// A phone's notifications: `{}` asks for Loom's key and whether this phone
+/// gets them, `{"subscription": …}` (the browser's PushSubscription.toJSON())
+/// signs it up, replacing its last one, and `{"off": true}` stops them.
+fn push(app: &AppHandle, request: &Request) -> Reply {
+    let Some(phone) = phone(app, request) else { return unpaired() };
+    let Ok(body) = serde_json::from_slice::<Value>(&request.body) else { return Reply::error(400, "The body isn't JSON.") };
+    let next = if body["off"] == true {
+        Some(None)
+    } else if body["subscription"].is_object() {
+        let Some(sub) = subscription(&phone, &body["subscription"]) else { return Reply::error(400, "That isn't a push subscription.") };
+        Some(Some(sub))
+    } else {
+        None
+    };
+    if let Some(next) = next {
+        let saved = update(app, |c| {
+            c.pushes.retain(|p| p.phone != phone && next.as_ref().map_or(true, |n| n.endpoint != p.endpoint));
+            c.pushes.extend(next);
+        });
+        if let Err(error) = saved {
+            return Reply::error(500, &error);
+        }
+    }
+    let remote = app.state::<Remote>();
+    let c = remote.config.lock().unwrap();
+    Reply::json(200, json!({ "ok": true, "key": c.vapid.as_ref().and_then(|k| k["public"].as_str()), "on": c.pushes.iter().any(|p| p.phone == phone) }))
+}
+
+/// A browser's subscription, checked: where to post, and its two keys in base64url.
+fn subscription(phone: &str, v: &Value) -> Option<Push> {
+    let endpoint = v["endpoint"].as_str().filter(|e| (e.starts_with("https://") || e.starts_with("http://")) && e.len() <= 2048 && !e.chars().any(char::is_control))?;
+    let key = |name: &str, len: std::ops::RangeInclusive<usize>| {
+        v["keys"][name].as_str().filter(|k| len.contains(&k.len()) && k.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_=".contains(&b))).map(String::from)
+    };
+    Some(Push { phone: phone.into(), endpoint: endpoint.into(), p256dh: key("p256dh", 86..=88)?, auth: key("auth", 22..=24)? })
+}
+
+/// For push.ts: Loom's key, or null before its window made one, and every subscription.
+#[tauri::command]
+pub fn push_targets(app: AppHandle) -> Value {
+    let remote = app.state::<Remote>();
+    let c = remote.config.lock().unwrap();
+    let subs: Vec<Value> = c.pushes.iter().map(|p| json!({ "endpoint": p.endpoint, "p256dh": p.p256dh, "auth": p.auth })).collect();
+    json!({ "key": c.vapid, "subs": subs })
+}
+
+/// Keeps the key Loom's window made, unless one is kept already: the kept one answers.
+#[tauri::command]
+pub fn push_key(app: AppHandle, key: Value) -> Result<Value, String> {
+    if !key["public"].is_string() || !key["private"].is_object() {
+        return Err("That isn't a push key.".into());
+    }
+    if app.state::<Remote>().config.lock().unwrap().vapid.is_none() {
+        update(&app, |c| { c.vapid.get_or_insert(key); })?;
+    }
+    Ok(app.state::<Remote>().config.lock().unwrap().vapid.clone().unwrap_or_default())
+}
+
+/// A subscription its push service no longer knows (404 or 410).
+#[tauri::command]
+pub fn push_forget(app: AppHandle, endpoint: String) -> Result<(), String> {
+    update(&app, |c| c.pushes.retain(|p| p.endpoint != endpoint))
+}
+
+/// Posts one push that push.ts built; answers the push service's status.
+#[tauri::command]
+pub async fn push_post(endpoint: String, headers: Vec<(String, String)>, body: Vec<u8>) -> Result<u16, String> {
+    tauri::async_runtime::spawn_blocking(move || post(&endpoint, &headers, &body)).await.map_err(|e| e.to_string())?
+}
+
+/// Through Windows' curl.exe, as usage.rs does: Loom's Rust has no TLS. The
+/// headers and the address go in a config on stdin and the body in a temp
+/// file, so none of them shows on a command line.
+fn post(endpoint: &str, headers: &[(String, String)], body: &[u8]) -> Result<u16, String> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    if !(endpoint.starts_with("https://") || endpoint.starts_with("http://")) || headers.iter().any(|(k, v)| k.chars().chain(v.chars()).any(char::is_control)) {
+        return Err("That isn't a push request.".into());
+    }
+    let file = std::env::temp_dir().join(format!("loom-push-{}.bin", random::<8>().iter().map(|b| format!("{b:02x}")).collect::<String>()));
+    std::fs::write(&file, body).map_err(|e| format!("Loom couldn't stage the push: {e}"))?;
+    let quote = |s: &str| serde_json::to_string(s).unwrap();
+    let mut config: String = headers.iter().map(|(k, v)| format!("header = {}\n", quote(&format!("{k}: {v}")))).collect();
+    config += &format!("url = {}\ndata-binary = {}\n", quote(endpoint), quote(&format!("@{}", file.display())));
+    let curl = std::env::var("SystemRoot").map(|r| format!("{r}\\System32\\curl.exe")).unwrap_or_else(|_| "curl.exe".into());
+    let out = Command::new(curl)
+        .args(["-q", "-sS", "-m", "20", "-o", "NUL", "-w", "%{http_code}", "-K", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no console flash
+        .spawn()
+        .and_then(|mut child| {
+            child.stdin.take().expect("piped").write_all(config.as_bytes())?;
+            child.wait_with_output()
+        });
+    let _ = std::fs::remove_file(&file);
+    let out = out.map_err(|e| format!("curl: {e}"))?;
+    match String::from_utf8_lossy(&out.stdout).trim().parse::<u16>() {
+        Ok(status) if status > 0 => Ok(status),
+        _ => Err(format!("The push didn't reach its push service (curl exit {}).", out.status.code().unwrap_or(-1))),
+    }
+}
+
+async fn cli(app: &AppHandle, request: &Request) -> Reply {
+    if phone(app, request).is_none() {
+        return unpaired();
     }
     let Ok(mut command) = serde_json::from_slice::<Value>(&request.body) else { return Reply::error(400, "The body isn't JSON.") };
     let words = command["argv"].as_array().is_some_and(|a| a.iter().all(Value::is_string));
@@ -448,6 +586,59 @@ mod tests {
         let mut p = open("123456");
         assert!(guess(&mut p, "123456", now + PAIRING).is_err(), "an expired code");
         assert!(guess(&mut None, "", now).is_err());
+    }
+
+    #[test]
+    fn a_subscription_needs_an_address_and_both_keys() {
+        let good = json!({ "endpoint": "https://fcm.googleapis.com/fcm/send/abc", "keys": { "p256dh": "B".repeat(87), "auth": "a".repeat(22) } });
+        let sub = subscription("phone", &good).unwrap();
+        assert_eq!((sub.phone.as_str(), sub.endpoint.as_str(), sub.p256dh.len(), sub.auth.len()), ("phone", "https://fcm.googleapis.com/fcm/send/abc", 87, 22));
+        for bad in [
+            json!({ "endpoint": "file:///C:/x", "keys": good["keys"] }),
+            json!({ "endpoint": "https://a/\r\nx", "keys": good["keys"] }),
+            json!({ "endpoint": good["endpoint"], "keys": { "p256dh": "B".repeat(87) } }),
+            json!({ "endpoint": good["endpoint"], "keys": { "p256dh": "B+/".repeat(29), "auth": "a".repeat(22) } }),
+        ] {
+            assert!(subscription("phone", &bad).is_none(), "{bad}");
+        }
+        // A remote.json from before pushes loads, with none.
+        let old: Config = serde_json::from_str(r#"{"on":true,"port":7420,"phones":["x"]}"#).unwrap();
+        assert!(old.vapid.is_none() && old.pushes.is_empty());
+    }
+
+    #[test]
+    fn a_push_reaches_its_push_service_with_its_headers_and_body() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let got = std::thread::spawn(move || {
+            let (mut s, _) = server.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            // Read until the body is all in.
+            loop {
+                let n = s.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).to_string();
+                if let Some(at) = text.find("\r\n\r\n") {
+                    let len = text.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                    if raw.len() >= at + 4 + len { break; }
+                }
+            }
+            s.write_all(b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n").unwrap();
+            raw
+        });
+        let body: Vec<u8> = (0..=255).collect();
+        let headers = vec![("Content-Encoding".to_string(), "aes128gcm".to_string()), ("TTL".to_string(), "43200".to_string())];
+        assert_eq!(post(&format!("http://127.0.0.1:{port}/push/abc"), &headers, &body).unwrap(), 201);
+        let raw = got.join().unwrap();
+        let at = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&raw[..at]).to_string();
+        assert!(head.starts_with("POST /push/abc HTTP/1.1"), "{head}");
+        assert!(head.contains("Content-Encoding: aes128gcm") && head.contains("TTL: 43200"), "{head}");
+        assert_eq!(&raw[at + 4..], body.as_slice(), "the body arrives byte for byte");
+        assert!(post("ftp://x", &headers, &body).is_err());
+        assert!(post("http://127.0.0.1:1/", &[("A".into(), "b\r\nc".into())], &body).is_err(), "no header may carry a line break");
     }
 
     #[test]

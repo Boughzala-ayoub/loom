@@ -1,7 +1,8 @@
 // The phone remote against the real app: loomctl remote on/pair/revoke, the
 // HTTP server's refusals, and the phone app in headless Chrome at 320 to
 // 1280 px: a cmd.exe pane, the Changes tab on the temporary repo (a hunk, a
-// commit, a branch, a stash), Usage, Settings, creating and closing threads.
+// commit, a branch, a stash), Usage, Settings, creating and closing threads,
+// and a phone's notifications through a stand-in push service on 127.0.0.1.
 // REMOTE_WIDTHS=375 runs one width. Needs a
 // release build with --features tauri/custom-protocol (loom.exe and
 // loomctl.exe beside it, or LOOM_TEST_EXE). A temporary profile and Git
@@ -17,6 +18,7 @@ import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
+import { createServer as httpServer } from 'node:http';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const exe = resolve(process.env.LOOM_TEST_EXE || 'src-tauri/target/release/loom.exe');
@@ -135,6 +137,87 @@ try {
   for (let i = 0; i < 5; i++) await api('/api/pair', { code: code === '000000' ? '111111' : '000000' });
   assert.equal((await api('/api/pair', { code })).status, 403, 'Five wrong guesses use the code up');
   console.log('PASS the page, its bundle, gzip, refusals without a token, and pairing');
+
+  // Notifications: the worker and icon are served, a phone signs up, and
+  // `remote push test` reaches its push service encrypted for it and signed.
+  res = await fetch(base + '/sw.js');
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /javascript/);
+  assert.match(await res.text(), /notificationclick/);
+  assert.equal((await fetch(base + '/icon.png')).headers.get('content-type'), 'image/png');
+  assert.equal((await api('/api/push', {})).status, 401, 'No token, no notifications');
+  const b64u = buf => Buffer.from(buf).toString('base64url');
+  const ua = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const keys = { p256dh: b64u(await crypto.subtle.exportKey('raw', ua.publicKey)), auth: b64u(crypto.getRandomValues(new Uint8Array(16))) };
+  const pushes = [];
+  let answer = 201;
+  const service = httpServer((req, res) => {
+    const parts = [];
+    req.on('data', c => parts.push(c));
+    req.on('end', () => { pushes.push({ path: req.url, headers: req.headers, body: Buffer.concat(parts) }); res.statusCode = answer; res.end(); });
+  });
+  await new Promise(r => service.listen(0, '127.0.0.1', r));
+  const endpoint = `http://127.0.0.1:${service.address().port}/push/phone-1`;
+  // loomctl without blocking: the stand-in push service answers from this same process.
+  const pushTest = () => new Promise(resolve => {
+    const env = { ...process.env };
+    delete env.LOOM_PIPE;
+    const child = spawn(ctl, ['--profile', profile, '--json', 'remote', 'push', 'test'], { env });
+    let out = '';
+    child.stdout.on('data', d => (out += d));
+    child.on('close', code => resolve({ code, json: (() => { try { return JSON.parse(out); } catch { return undefined; } })() }));
+  });
+  try {
+    let got = await (await api('/api/push', {}, auth)).json();
+    assert.equal(got.on, false);
+    assert.match(got.key, /^[A-Za-z0-9_-]{87}$/, 'Loom made its key at start');
+    assert.equal((await api('/api/push', { subscription: { endpoint, keys: { p256dh: keys.p256dh } } }, auth)).status, 400, 'a subscription needs both keys');
+    got = await (await api('/api/push', { subscription: { endpoint, keys } }, auth)).json();
+    assert.equal(got.on, true);
+    assert.equal(ok('--json', 'remote').json.pushes, 1);
+    const first = await pushTest();
+    assert.equal(first.code, 0);
+    assert.equal(first.json.sent, 1);
+    assert.equal(pushes.length, 1);
+    const [{ path, headers, body }] = pushes;
+    assert.equal(path, '/push/phone-1');
+    assert.equal(headers['content-encoding'], 'aes128gcm');
+    assert.equal(headers.urgency, 'high');
+    assert.equal(headers.topic, 'loom-test');
+    assert.equal(headers.ttl, '43200');
+    // VAPID: signed with Loom's key, for this push service.
+    const [, jwt, k] = /^vapid t=([^,]+), k=(.+)$/.exec(headers.authorization);
+    assert.equal(k, got.key);
+    const [head, claims, sig] = jwt.split('.');
+    const verifier = await crypto.subtle.importKey('raw', Buffer.from(k, 'base64url'), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    assert.ok(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, verifier, Buffer.from(sig, 'base64url'), Buffer.from(`${head}.${claims}`)));
+    assert.equal(JSON.parse(Buffer.from(claims, 'base64url')).aud, new URL(endpoint).origin);
+    // RFC 8291, as the phone decrypts it.
+    const asPublic = body.subarray(21, 21 + body[20]);
+    const as = await crypto.subtle.importKey('raw', asPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+    const shared = await crypto.subtle.deriveBits({ name: 'ECDH', public: as }, ua.privateKey, 256);
+    const hkdf = async (salt, ikm, info, n) => crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']), n * 8);
+    const ikm = await hkdf(Buffer.from(keys.auth, 'base64url'), shared, Buffer.concat([Buffer.from('WebPush: info\0'), Buffer.from(keys.p256dh, 'base64url'), asPublic]), 32);
+    const salt = body.subarray(0, 16);
+    const cek = await crypto.subtle.importKey('raw', await hkdf(salt, ikm, Buffer.from('Content-Encoding: aes128gcm\0'), 16), 'AES-GCM', false, ['decrypt']);
+    const plain = Buffer.from(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: await hkdf(salt, ikm, Buffer.from('Content-Encoding: nonce\0'), 12) }, cek, body.subarray(21 + body[20])));
+    const message = JSON.parse(plain.subarray(0, -1));
+    assert.equal(message.title, 'Loom');
+    assert.equal(message.tag, 'loom-test');
+    assert.match(message.url, /^\/#\/pane\/[^/]+\/alpha%3A1$/, 'the test opens the first agent');
+    // Gone from its push service: Loom forgets it.
+    answer = 410;
+    assert.notEqual((await pushTest()).code, 0, 'a push no phone got fails');
+    assert.equal(ok('--json', 'remote').json.pushes, 0);
+    assert.equal((await (await api('/api/push', {}, auth)).json()).on, false);
+    // Signed up again, then off from the phone.
+    await api('/api/push', { subscription: { endpoint, keys } }, auth);
+    assert.equal((await (await api('/api/push', { off: true }, auth)).json()).on, false);
+    assert.equal(ok('--json', 'remote').json.pushes, 0);
+  } finally {
+    service.close();
+  }
+  console.log('PASS notifications: the worker, a phone signs up, a push reaches its push service encrypted and signed, a gone one is forgotten');
 
   // The phone page, at every width.
   browser = await chromium.launch({ channel: 'chrome', headless: true });

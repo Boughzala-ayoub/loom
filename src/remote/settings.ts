@@ -1,6 +1,7 @@
 /** Settings: the PC's Preferences, the agents its + menu offers, the window,
  * and this phone's own choices. Each PC setting is a loomctl command. */
-import { act, app, button, closeSheet, confirmSheet, el, hooks, iconButton, pref, run, setPref, sheet, store, toast, topBar } from "./core";
+import { act, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, pref, run, setPref, sheet, store, toast, topBar } from "./core";
+import { b64u, unb64u } from "../push";
 
 type Theme = { name: string; scheme: string; current: boolean; vars: Record<string, string> };
 type Notify = { all: string; kinds: { finish: boolean; fail: boolean; blocked: boolean }; newPanes: string };
@@ -29,6 +30,7 @@ export async function read() {
     run<Startup[]>("startups").catch(() => startups),
     run<Remote>("remote").catch(() => remote),
     run<Trashed[]>("trash").catch(() => trash),
+    pushState().catch(() => {}),
   ]);
   // An older Loom answers a command it lacks with an error: each reading keeps its shape.
   const list = <T>(v: unknown, was: T[]) => (Array.isArray(v) ? (v as T[]) : was);
@@ -39,6 +41,59 @@ export async function read() {
   const cur = themes.find((x) => x.current);
   if (cur) wear(cur);
   draw();
+}
+
+// --- Notifications on this phone (docs/phone-notifications-study.md) ---------------
+
+/** A service worker and the Push API: Chrome has them at Loom's https address. */
+const pushable = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+let pushOn = false;
+/** /api/push: Loom's key and whether this phone gets notifications, after the change asked for. */
+async function pushApi(change: object) {
+  const res = await fetch("/api/push", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${app.token}` }, body: JSON.stringify(change) });
+  const reply = await res.json().catch(() => null);
+  if (!reply?.ok) throw new Error(reply?.error ?? `Loom isn't answering (${res.status}).`);
+  return reply as { key: string | null; on: boolean };
+}
+const subscribed = async () => (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription() ?? null;
+/** On when Loom has this phone's subscription and the browser still holds it. */
+async function pushState() {
+  if (!pushable()) return;
+  pushOn = (await pushApi({})).on && Notification.permission === "granted" && !!(await subscribed());
+}
+/** Signs this phone up for Loom's notifications (Android asks first), or stops them. */
+async function setPush(on: boolean) {
+  const reg = await navigator.serviceWorker.register("/sw.js");
+  if (!on) {
+    await (await reg.pushManager.getSubscription())?.unsubscribe();
+    pushOn = (await pushApi({ off: true })).on;
+    return;
+  }
+  if ((await Notification.requestPermission()) !== "granted") throw new Error("Notifications are blocked for this page: allow them in the browser's site settings.");
+  const { key } = await pushApi({});
+  if (!key) throw new Error("Loom is still making its key. Try again in a moment.");
+  await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  // Made with another key (Loom's remote settings were reset): sign up again.
+  const made = sub?.options.applicationServerKey;
+  if (sub && (!made || b64u(new Uint8Array(made)) !== key)) (await sub.unsubscribe(), (sub = null));
+  sub ??= await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(key) });
+  pushOn = (await pushApi({ subscription: sub.toJSON() })).on;
+}
+/** Each start: a phone signed up hands Loom its subscription again, in case its browser renewed it. */
+export async function syncPush() {
+  if (!pushable() || Notification.permission !== "granted") return;
+  const sub = await subscribed();
+  if (sub) pushOn = (await pushApi({ subscription: sub.toJSON() })).on;
+}
+/** A notification goes once its agent was seen or answered (idle or working again), 15 s after it came.
+ * One for an agent that exited stays. */
+export async function closeStale() {
+  if (!pushable() || Notification.permission !== "granted") return;
+  for (const n of (await (await navigator.serviceWorker.getRegistration())?.getNotifications()) ?? []) {
+    const p = findPane(n.data?.pane ?? null);
+    if (p && (p.state === "idle" || p.state === "working") && Date.now() - (n.data?.at ?? 0) > 15_000) n.close();
+  }
 }
 
 /** The phone wears the PC's theme: the same colour names, set on the page. */
@@ -128,6 +183,9 @@ const current = themes.find((t) => t.current);
   ));
 
   if (notify && settings) nodes.push(...group("Notifications",
+    setting("Notifications on this phone", pushable() ? "Task notices, here too. A tap opens the agent." : "This browser can't get them. Open Loom's https address in Chrome.",
+      pushable() ? toggle(pushOn, "Notifications on this phone", setPush) : el("span")),
+    ...(pushOn ? [setting("Test them", "Every phone with notifications on gets one", button("Send a test", () => void act(() => run("remote", ["push", "test"], { change: true }), "Sent")))] : []),
     setting("Task notices", "Tell you when an agent's task ends", toggle(notify.all === "on", "Task notices", (on) => run("notify", ["--all", on ? "on" : "off"], { change: true }))),
     setting("When a task finishes", "", toggle(notify.kinds.finish, "When a task finishes", (on) => run("notify", ["--finish", on ? "on" : "off"], { change: true }))),
     setting("When a task fails", "", toggle(notify.kinds.fail, "When a task fails", (on) => run("notify", ["--fail", on ? "on" : "off"], { change: true }))),

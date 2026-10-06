@@ -16,14 +16,14 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff", "hashedFiles"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff", "hashedFiles"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`${node.declarationList.flags & ts.NodeFlags.Const ? "const" : "let"} ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
@@ -601,4 +601,34 @@ if (check(306)) {
   assert.equal(r.data.state, "idle");
   await assert.rejects(async () => c.seen.run({ _: [] }), /pane/);
   console.log("ok   seen clears a pane's wait without showing it");
+}
+
+if (check(308)) {
+  // A task notice the policy sends goes to the phones: what ended, and where a tap goes.
+  const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
+  const p = { id: "p1", th, agent: "codex" } as any;
+  th.panes.push(p);
+  const sent: any[] = [], notifyHistory: any[] = [];
+  const c = fixture({ threads: [th], notifyHistory, paneById: (id: string) => th.panes.find((x) => x.id === id), paneName: () => "work:1", liveScreen: () => "",
+    push: async (m: any) => { sent.push(m); return { sent: 1, failed: [] }; } });
+  const at = Date.now(), t = { id: "t1", pane: "p1", startedAt: at - 4 * 60_000 } as any;
+  const notice = (seq: number, state: string, more = {}) => lastFixture.pushNotice(t, { seq, task: "t1", at, state, signal: "end", ...more });
+  await notice(5, "completed", { response: "All tests pass." });
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{ title: "work:1 · Codex finished · 4 min", body: "All tests pass.", tag: "p1", url: "/#/pane/p1/work%3A1" }]);
+  await notice(6, "working");
+  assert.equal(sent.length, 1, "working is no notice");
+  await notice(7, "approval");
+  assert.deepEqual([sent[1].title, sent[1].body], ["work:1 · Codex asks", "It's waiting on you."]);
+  notifyHistory.push({ at: 7, on: true, kinds: { finish: false, fail: true, blocked: true }, panes: {} });
+  await notice(8, "completed");
+  assert.equal(sent.length, 2, "a kind turned off sends nothing");
+  await notice(9, "failed", { detail: "codex exited 1" });
+  assert.deepEqual([sent[2].title, sent[2].body], ["work:1 · Codex failed", "codex exited 1"]);
+  await lastFixture.pushNotice({ ...t, pane: "gone" }, { seq: 10, task: "t1", at, state: "failed", signal: "end" });
+  assert.equal(sent.length, 3, "a pane that's gone sends nothing");
+  // loomctl remote push test: a notification that opens the first agent.
+  assert.match((await c.remote.run({ _: ["push", "test"] })).text, /Sent to 1 phone/);
+  assert.deepEqual([sent[3].tag, sent[3].url], ["loom-test", "/#/pane/p1/work%3A1"]);
+  await assert.rejects(async () => c.remote.run({ _: ["push"] }), /remote push takes test/);
+  console.log("ok   task notices become phone notifications that open the agent, as the policy allows; remote push test");
 }

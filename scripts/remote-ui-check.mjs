@@ -3,6 +3,9 @@
 // fit its width, and the regressions from the phone remote review stay fixed:
 // late git replies, a cut-off answer to a change, Activity drafts, the startup
 // list, Cancel, and sends or hunk actions that complete after you moved on.
+// Notifications on this phone: the real service worker gets a push through
+// the DevTools protocol (headless Chrome can't reach a push service, so only
+// the subscription is made up) and a tap opens the agent.
 // Run `npm run build` first. Screenshots go to
 // node_modules/.cache/remote-ui-check. Set PLAYWRIGHT_MODULE to an installed
 // playwright module path if it isn't local.
@@ -17,7 +20,9 @@ mkdirSync(out, { recursive: true });
 const server = createServer((req, res) => {
   try {
     const path = new URL(req.url, 'http://x').pathname;
-    const file = resolve('dist', path === '/' ? 'remote.html' : path.slice(1));
+    // remote.rs serves these two from outside dist/.
+    const file = path === '/sw.js' ? resolve('src-tauri/src/remote-sw.js') : path === '/icon.png' ? resolve('src-tauri/icons/icon.png')
+      : resolve('dist', path === '/' ? 'remote.html' : path.slice(1));
     res.setHeader('Content-Type', { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' }[extname(file)] || 'application/octet-stream');
     res.end(readFileSync(file));
   } catch { res.statusCode = 404; res.end('missing'); }
@@ -45,14 +50,34 @@ const status = id => ({ thread: id, name: id === 'a' ? 'Alpha' : 'Beta', branch:
 const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 100644\n--- a/${name}\n+++ b/${name}\n@@ -1 +1 @@\n-old ${name}\n+new ${name}\n`;
 
 /** A page whose /api answers like Loom. `hold` keeps a `git <thread> <action>` reply until state.held[it]() runs. */
-async function context(width, token = true) {
-  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [] };
+// RFC 8291's example public key: any P-256 point does for a subscription that is made up.
+const PUSH_KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8';
+async function context(width, token = true, push = false) {
+  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null } };
   const ctx = await browser.newContext({ viewport: { width, height: 800 } });
   if (token) await ctx.addInitScript(() => localStorage.setItem('loom-token', 'fixture-token'));
+  if (push) {
+    await ctx.grantPermissions(['notifications'], { origin: base });
+    // Headless Chrome can't reach a push service: the subscription is made up, the worker is real.
+    await ctx.addInitScript(() => {
+      let sub = null;
+      PushManager.prototype.subscribe = async function (o) {
+        sub = { endpoint: 'https://push.example/sub/1', options: { applicationServerKey: new Uint8Array(o.applicationServerKey).buffer },
+          toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } }; }, async unsubscribe() { sub = null; return true; } };
+        return sub;
+      };
+      PushManager.prototype.getSubscription = async function () { return sub; };
+    });
+  }
   await ctx.route('**/api/**', async route => {
     const req = route.request(), c = req.postDataJSON();
     state.calls.push(c);
     if (req.url().endsWith('/pair')) return route.fulfill({ json: { ok: true, token: 'fixture-token' } });
+    if (req.url().endsWith('/api/push')) {
+      if (c.off) state.push = { on: false, sub: null };
+      if (c.subscription) state.push = { on: true, sub: c.subscription };
+      return route.fulfill({ json: { ok: true, key: PUSH_KEY, on: state.push.on } });
+    }
     if (typeof c.cmd !== 'string' || !Array.isArray(c.argv) || !c.argv.every(v => typeof v === 'string')) return route.fulfill({ status: 400, json: { ok: false, error: 'Send a command, its words, and optionally stdin and a key.' } });
     if (c.cmd === 'send' || c.cmd === 'submit') {
       if (state.hold.delete('submit')) await new Promise(r => (state.held.submit = r));
@@ -379,6 +404,67 @@ try {
     await ctx.close();
   }
   console.log('PASS a hunk or file action that completes after you left redraws and navigates nothing');
+  // --- Notifications on this phone ----------------------------------------------------------
+  {
+    const { ctx, page, state } = await context(375, true, true);
+    await goto(page, '#/settings', '#settings .group');
+    const toggle = page.getByRole('switch', { name: 'Notifications on this phone' });
+    assert.equal(await toggle.isChecked(), false);
+    await toggle.click();
+    await until('the subscription reaches Loom', () => state.push.sub);
+    assert.deepEqual(state.push.sub, { endpoint: 'https://push.example/sub/1', keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } });
+    await page.getByRole('button', { name: 'Send a test', exact: true }).click();
+    await until('the test', () => state.calls.some(c => c.cmd === 'remote' && c.argv.join(' ') === 'push test'));
+    assert.equal(await toggle.isChecked(), true);
+    for (const width of [320, 375, 768, 901, 1024, 1280]) {
+      await page.setViewportSize({ width, height: 800 });
+      await fits(page, width, 'settings-notifications-on');
+    }
+    await page.setViewportSize({ width: 375, height: 800 });
+    assert.match(await page.evaluate(() => navigator.serviceWorker.ready.then(r => r.active.scriptURL)), /\/sw\.js$/);
+
+    // A push, delivered to the worker as Chrome's push service would.
+    const cdp = await ctx.newCDPSession(page);
+    const regs = [];
+    cdp.on('ServiceWorker.workerRegistrationUpdated', e => regs.push(...e.registrations));
+    await cdp.send('ServiceWorker.enable');
+    await until('the worker registration', () => regs.some(r => r.scopeURL === `${base}/`));
+    const registrationId = regs.find(r => r.scopeURL === `${base}/`).registrationId;
+    const deliver = m => cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId, data: JSON.stringify(m) });
+    const shown = () => page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map(n => ({ title: n.title, body: n.body, tag: n.tag, url: n.data.url })));
+    // From before Loom restarted: the pane id is gone, its ref still finds Beta.
+    await deliver({ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', url: '/#/pane/gone-id/Beta%3A1', tag: 'b1', at: Date.now() });
+    await until('the notification shows', async () => (await shown()).length === 1);
+    assert.deepEqual(await shown(), [{ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', tag: 'b1', url: '/#/pane/gone-id/Beta%3A1' }]);
+
+    // A tap: the worker sends the open page to the agent.
+    await page.evaluate(() => (location.hash = '#/settings'));
+    const [sw] = ctx.serviceWorkers().length ? ctx.serviceWorkers() : [await ctx.waitForEvent('serviceworker')];
+    await sw.evaluate(async () => {
+      const [n] = await self.registration.getNotifications();
+      // ponytail: a made-up click can't waitUntil (it throws), but the handler's own work still runs.
+      try { self.dispatchEvent(new NotificationEvent('notificationclick', { notification: n })); } catch { /* see above */ }
+    });
+    await page.waitForFunction(() => location.hash === '#/pane/gone-id/Beta%3A1');
+    await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
+    assert.deepEqual(await shown(), [], 'the tapped one closes');
+
+    // Seen since it came: Alpha isn't waiting, so its old notification goes; a new one stays.
+    await deliver({ title: 'Alpha:1 · Claude finished', body: 'Done.', url: '/#/pane/a1/Alpha%3A1', tag: 'a1', at: Date.now() - 20000 });
+    await deliver({ title: 'Beta:1 · Codex asks', body: 'May I?', url: '/#/pane/b1/Beta%3A1', tag: 'b1', at: Date.now() });
+    await until('the seen one closes', async () => (await shown()).map(n => n.tag).join() === 'b1', 6000);
+    await page.waitForTimeout(2500);
+    assert.deepEqual((await shown()).map(n => n.tag), ['b1'], 'a new one stays');
+
+    // Off: Loom and the browser both let go.
+    await goto(page, '#/settings', '#settings .group');
+    await toggle.click();
+    await until('Loom stops them', () => !state.push.on);
+    await page.getByRole('button', { name: 'Send a test', exact: true }).waitFor({ state: 'detached' });
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS notifications on this phone: subscribe, a push shows, a tap opens the agent, seen ones close, off');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));

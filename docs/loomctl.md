@@ -493,7 +493,7 @@ when time runs out.
 | `startups [add <label> <command...> \| remove <label>]` | The agents and terminals the `+` menu offers, which `new` and `add --agent` pick from. |
 | `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
 | `notify --check SEQ,...` | Whether those events may go out as notices now. |
-| `remote [on [--port N] \| off \| pair \| revoke]` | The phone remote: its state, start or stop it, show a pairing code for a phone, or unpair every phone. See [Phone remote](#phone-remote). |
+| `remote [on [--port N] \| off \| pair \| revoke \| push test]` | The phone remote: its state, start or stop it, show a pairing code for a phone, unpair every phone, or send the phones with notifications on a test one. See [Phone remote](#phone-remote). |
 
 ### Git
 
@@ -554,6 +554,18 @@ wrapping off. The phone's browser keeps its folded threads, the list view, the
 keys row, wrapping, commit message drafts and the PC's last theme; Loom keeps
 none of them. What can lose work asks first on the phone, and loomctl wants
 `--yes` for it.
+
+**Notifications on this phone**, in the phone's Settings, sends it the task
+notices as phone notifications: an agent finished, asks something, or failed.
+The `notify` policy decides which, as it does for `watch`, and they come even
+while you look at that agent. A tap opens the agent in the phone app. Chrome
+gets them through its push service with the page closed, so they need the PC
+on and Loom running, not Tailscale on the phone. Each is encrypted for that
+phone (RFC 8291) and signed with Loom's key (VAPID, RFC 8292), which Loom
+makes once and keeps in `<workspace>.remote.json` with each phone's
+subscription; `remote revoke` drops them. `loomctl remote push test` sends
+every such phone one that opens an agent, and `loomctl remote` counts the
+phones with notifications on and says how the last push went.
 
 ## Answering questions
 

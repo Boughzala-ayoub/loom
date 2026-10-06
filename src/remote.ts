@@ -2,11 +2,11 @@
  * changes, usage and settings as phone screens, each action a loomctl command
  * posted to /api/cli. See docs/phone-remote-study.md. */
 import "./remote.css";
-import { $, app, closeSheet, el, hooks, Offline, pref, run, sleep, store, toast, ui, type IconName, type Thread } from "./remote/core";
+import { $, app, closeSheet, el, findPane, go, hooks, Offline, panes, pref, run, sleep, store, toast, ui, type IconName, type Thread } from "./remote/core";
 import { drawHead, drawList, list, newView, openPane, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
 import { diffView, filesView, read as readChanges, showCommit, showDiff, showFile, showFiles, showSummary, summary } from "./remote/changes";
 import { contextView, read as readUsage, showContext, usageView } from "./remote/usage";
-import { read as readSettings, settingsView, wear } from "./remote/settings";
+import { closeStale, read as readSettings, settingsView, syncPush, wear } from "./remote/settings";
 
 // The theme the PC wore last time, before anything is read: no flash of another one.
 try { wear(JSON.parse(pref("loom-theme", "null")) ?? { scheme: "dark", vars: {} }); } catch { /* the default palette */ }
@@ -40,7 +40,11 @@ type View = { tab: Tab; primary: HTMLElement; detail?: HTMLElement; hint?: [stri
 function view(): View {
   const [head = "", a = "", b = "", c = ""] = location.hash.replace(/^#\/?/, "").split("/").map((s) => decodeURIComponent(s));
   switch (head) {
-    case "pane": return { tab: "agents", primary: list, detail: paneView, enter: () => { showPane(a); showList(a); } };
+    case "pane": {
+      // A notification from before Loom restarted names a pane id that is gone: its ref finds the agent.
+      const id = findPane(a) || !b ? a : panes().find((p) => p.ref === b)?.id ?? a;
+      return { tab: "agents", primary: list, detail: paneView, enter: () => { showPane(id); showList(id); } };
+    }
     case "new": return { tab: "agents", primary: list, detail: newView, enter: () => { showNew(); showList(null); } };
     case "changes": return { tab: "changes", primary: summary, hint: ["Pick a file", "Its diff shows here, with a button for each hunk."], enter: () => showSummary(a || null) };
     case "diff": return { tab: "changes", primary: summary, detail: diffView, enter: () => { showSummary(a); showDiff(a, b as "staged", c); } };
@@ -108,6 +112,7 @@ async function refresh() {
   if (!list.hidden) drawList();
   if (!paneView.hidden) drawHead();
   if (!usageView.hidden) void readUsage(); // the PC's own reading, every minute
+  void closeStale().catch(() => {});
 }
 
 /** The threads every 2 s, the open screen every second, git every 6 s: while the page is in view. */
@@ -145,6 +150,7 @@ async function start() {
     toast(e instanceof Error ? e.message : String(e), true);
   }
   route();
+  void syncPush().catch(() => {});
   if (started) return;
   started = true;
   void loop(2000, refresh);
@@ -155,6 +161,10 @@ async function start() {
 }
 
 window.addEventListener("hashchange", route);
+// A tapped notification: the service worker (remote-sw.js) sends this page to the agent.
+navigator.serviceWorker?.addEventListener("message", (e) => {
+  if (typeof e.data?.open === "string" && e.data.open.startsWith("#/")) go(e.data.open);
+});
 $("#scrim").onclick = () => closeSheet();
 $<HTMLFormElement>("#pairing form").onsubmit = pair;
 document.addEventListener("visibilitychange", () => { if (!document.hidden && app.token) void refresh().catch(() => {}); });

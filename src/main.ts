@@ -22,6 +22,7 @@ import { claudeDivider, claudeComposer, readMenu, menuKeys, readSurvey, readInpu
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
+import { newPushKey, pushRequest, type PushKey, type PushMessage, type PushSub } from "./push";
 import type { OverlayRow, OverlayState } from "./overlay";
 import "@xterm/xterm/css/xterm.css";
 
@@ -3995,6 +3996,8 @@ function moveTask(t: Task, c: TaskChange, at = Date.now(), ctx = contextOf(t)): 
   const saved = write.then(() => true, () => false).finally(() => {
     if (taskWrites.get(t) === write) taskWrites.delete(t);
   });
+  // A notice goes to the phones too, once it is on record (as loomctl watch sees it).
+  if (notifyKind(state)) void saved.then((ok) => { if (ok) return pushNotice(t, event); }).catch(() => {});
   if (isFinal(state)) {
     t.settledAt = event.seq;
     taskWatch.delete(t.id);
@@ -4009,6 +4012,52 @@ function moveTask(t: Task, c: TaskChange, at = Date.now(), ctx = contextOf(t)): 
     keepTasks();
   }
   return saved;
+}
+
+/** Loom's Web Push key (push.ts): made once, kept by remote.rs. */
+async function pushKey(): Promise<PushKey> {
+  const kept = (await invoke<{ key: PushKey | null }>("push_targets")).key;
+  return kept ?? invoke<PushKey>("push_key", { key: await newPushKey() });
+}
+
+let lastPush = ""; // what the last push did, for loomctl remote
+/** A notification on every phone that turned them on (docs/phone-notifications-study.md). */
+async function push(message: Omit<PushMessage, "at">): Promise<{ sent: number; failed: string[] }> {
+  const { key, subs } = await invoke<{ key: PushKey | null; subs: PushSub[] }>("push_targets");
+  const out = { sent: 0, failed: [] as string[] };
+  if (!subs.length) return out;
+  const signing = key ?? (await pushKey());
+  for (const sub of subs) {
+    try {
+      const r = await pushRequest(sub, signing, { ...message, at: Date.now() });
+      const status = await invoke<number>("push_post", { endpoint: r.endpoint, headers: r.headers, body: Array.from(r.body) });
+      // Its push service no longer knows it: the phone turned them off, or its browser let the subscription go.
+      if (status === 404 || status === 410) await invoke("push_forget", { endpoint: sub.endpoint });
+      if (status >= 200 && status < 300) out.sent++;
+      else out.failed.push(`${new URL(sub.endpoint).host} answered ${status}`);
+    } catch (e) {
+      out.failed.push(String(e));
+    }
+  }
+  lastPush = `${new Date().toLocaleTimeString()}: ${out.sent} sent${out.failed.length ? `, ${out.failed.join("; ")}` : ""}`;
+  return out;
+}
+
+const AGENT_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", opencode: "OpenCode" };
+/** A task notice the policy sends, as a phone notification: what ended, and a tap opens the agent. */
+async function pushNotice(t: Task, e: TaskEvent) {
+  const kind = notifyKind(e.state);
+  const p = paneById(t.pane);
+  if (!kind || !p || !notifies(e, t.pane, notifyHistory)) return;
+  const ref = paneName(p), agent = AGENT_NAMES[p.agent] ?? p.agent;
+  const mins = t.startedAt ? Math.round((e.at - t.startedAt) / 60_000) : 0;
+  const took = mins < 1 ? "" : mins < 60 ? ` · ${mins} min` : ` · ${Math.floor(mins / 60)} h ${mins % 60} min`;
+  const menu = kind === "blocked" ? readMenu(liveScreen(p, false)) : null;
+  const title = kind === "finish" ? `${ref} · ${agent} finished${took}` : kind === "blocked" ? `${ref} · ${agent} asks` : `${ref} · ${agent} failed`;
+  const body = kind === "blocked"
+    ? (menu ? [menu.question.join(" ").trim(), ...menu.options.map((o, i) => `${menu.keys?.[i] ?? i + 1}. ${o}`)].join("\n") : "It's waiting on you.")
+    : e.response?.trim() || e.detail || (kind === "finish" ? "Its task is done." : "Its task failed.");
+  await push({ title, body: body.slice(0, 600), tag: p.id, url: `/#/pane/${encodeURIComponent(p.id)}/${encodeURIComponent(ref)}` });
 }
 
 /** The last 500 tasks to finish stay, however many are open. */
@@ -8979,15 +9028,23 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   remote: {
-    usage: "remote [on [--port N] | off | pair | revoke]",
-    help: "The phone remote: a page for your phone that does what loomctl does. on starts it on 127.0.0.1 (port 7420 unless --port), and `tailscale serve --bg <port>` then puts it on your own devices. pair shows a code a phone enters once, for 10 minutes. revoke unpairs every phone. docs/loomctl.md has the setup.",
+    usage: "remote [on [--port N] | off | pair | revoke | push test]",
+    help: "The phone remote: a page for your phone that does what loomctl does. on starts it on 127.0.0.1 (port 7420 unless --port), and `tailscale serve --bg <port>` then puts it on your own devices. pair shows a code a phone enters once, for 10 minutes. revoke unpairs every phone. A phone that turns on notifications in its Settings gets the task notices; push test sends each such phone one that opens an agent. docs/loomctl.md has the setup.",
     options: { port: "int" },
     run: async (a) => {
       const action = a._[0] ?? "status";
+      if (action === "push") {
+        if (a._[1] !== "test" || a._.length > 2) throw new Error("remote push takes test.");
+        const p = threads.flatMap((t) => t.panes).find((x) => x.agent !== "shell") ?? threads[0]?.panes[0];
+        const r = await push({ title: "Loom", body: p ? `Notifications work. Tap to open ${paneName(p)}.` : "Notifications work.", tag: "loom-test",
+          url: p ? `/#/pane/${encodeURIComponent(p.id)}/${encodeURIComponent(paneName(p))}` : "/" });
+        if (!r.sent && r.failed.length) throw new Error(`The test didn't reach a phone: ${r.failed.join("; ")}`);
+        return { data: r, text: r.sent ? `Sent to ${r.sent} phone${r.sent === 1 ? "" : "s"}.${r.failed.length ? ` Failed: ${r.failed.join("; ")}` : ""}` : "No phone has notifications on. Turn them on in the phone's Settings." };
+      }
       const port = a.port === undefined ? null : num(a, "port", 0, 1, 65535);
-      const s = await invoke<{ on: boolean; listening: boolean; port: number; phones: number; pairing: string | null; error: string | null; address: string | null }>("remote", { action, port });
+      const s = await invoke<{ on: boolean; listening: boolean; port: number; phones: number; pushes: number; pairing: string | null; error: string | null; address: string | null }>("remote", { action, port });
       const text = [
-        s.listening ? `On, at 127.0.0.1:${s.port}. ${s.phones} phone${s.phones === 1 ? "" : "s"} paired.` : s.on ? `On, but not listening: ${s.error}` : "Off. loomctl remote on starts it.",
+        s.listening ? `On, at 127.0.0.1:${s.port}. ${s.phones} phone${s.phones === 1 ? "" : "s"} paired, ${s.pushes ?? 0} with notifications on.${lastPush ? ` Last push ${lastPush}.` : ""}` : s.on ? `On, but not listening: ${s.error}` : "Off. loomctl remote on starts it.",
         s.listening && (s.address ? `Phone address: ${s.address} (once: tailscale serve --bg ${s.port})` : `Tailscale isn't installed or signed in. Install it, then run: tailscale serve --bg ${s.port}`),
         s.pairing && `Pairing code: ${s.pairing}. Open the address on the phone and enter it within 10 minutes.`,
       ].filter(Boolean).join("\n");
@@ -9540,6 +9597,8 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
     void pollPlan(provider);
     setInterval(() => void pollPlan(provider), 5 * 60_000);
   }
+  // A phone turning notifications on subscribes with this key: it is there before one asks.
+  void pushKey().catch(() => {});
   // Once a launch is plenty: the roster changes on Anthropic's schedule, not
   // yours, and the panel falls back to the CLI's aliases if this never answers.
   invoke<ModelOpt[]>("model_options")
