@@ -49,19 +49,19 @@ export const hooks = { unpaired: () => {}, changed: () => {} };
 export async function run<T>(cmd: string, argv: string[] = [], opts: { stdin?: string; change?: boolean; timeout?: number } = {}): Promise<T> {
   const key = opts.change ? `phone-${[...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")}` : null;
   for (let attempt = 0; ; attempt++) {
-    let res: Response;
+    let res: Response | undefined, reply: { ok?: boolean; error?: string; data?: unknown } | null = null;
     try {
       res = await fetch("/api/cli", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${app.token}` },
         body: JSON.stringify({ cmd, argv, stdin: opts.stdin ?? null, key, timeout: opts.timeout ?? 30 }),
       });
-    } catch {
-      if (key && attempt < 3) { await sleep(1500); continue; }
-      throw new Offline("Can't reach Loom. Is the PC on, and Tailscale connected on both?");
-    }
+      reply = await res.json();
+    } catch { /* below */ }
+    // No answer, or one cut off after the change ran: asked again with its key, it answers as the first run did.
+    if (!reply && key && attempt < 3) { await sleep(1500); continue; }
+    if (!res) throw new Offline("Can't reach Loom. Is the PC on, and Tailscale connected on both?");
     // Not JSON: tailscale serve answering for a Loom that isn't running, or has the remote off.
-    const reply = await res.json().catch(() => null);
     if (!reply) throw new Offline(`Loom isn't answering (${res.status}). Is it running, with the remote on?`);
     if (res.status === 401) {
       store("");
@@ -161,7 +161,7 @@ let sheetDone: ((v: unknown) => void) | null = null;
 export function sheet<T = unknown>(items: (Node | string)[], title = ""): Promise<T | null> {
   closeSheet();
   const box = $("#sheet");
-  box.replaceChildren(...(title ? [el("h2", "", title)] : []), ...items, button("Cancel", closeSheet, "ghost"));
+  box.replaceChildren(...(title ? [el("h2", "", title)] : []), ...items, button("Cancel", () => closeSheet(), "ghost"));
   box.hidden = $("#scrim").hidden = false;
   requestAnimationFrame(() => { box.classList.add("on"); $("#scrim").classList.add("on"); });
   return new Promise((resolve) => (sheetDone = resolve as (v: unknown) => void));

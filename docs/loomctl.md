@@ -124,7 +124,7 @@ shows one.
 | `status` | Counts by state, the pane in front, and every pane waiting for you. |
 | `threads` | Every thread: name, id, state, pane count, branch and folder. `--json` adds `changed`: lines added and removed against HEAD and the files changed, as its sidebar row shows them. |
 | `panes [--thread T] [--state S]` | Every pane, or a thread's, or the ones in a state (`--state idle,waiting` for several). |
-| `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included, and with `--styles` too, their styled rows. See [What the input holds](#what-the-input-holds). |
+| `read [pane] [--lines N] [--styles]` | The pane's screen as text. With `--lines N`, its last N lines, scrollback included, and with `--styles` too, their styled rows. JSON has `alt`, true while a full-screen app such as OpenCode holds the screen. See [What the input holds](#what-the-input-holds). |
 | `menu [pane]` | The numbered question on the pane's screen, if any, with an id for it. See [Answering questions](#answering-questions). |
 | `messages [pane...]` | What each agent last heard and said, from its session's transcript, as the Overview shows it. Each is cut at 500 characters. |
 | `context [pane]` | A Claude pane's context, as its gauge's panel shows it: tokens by kind, the size after each turn, and where it was compacted. |
@@ -135,7 +135,7 @@ shows one.
 | `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
 | `trash [list]` | Deleted worktrees waiting in Loom's trash, and where their folders and Git records went. See [Undoing a deletion](#undoing-a-deletion). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
-| `usage [claude\|codex]` | Fetch account limits and banked resets on demand. |
+| `usage [claude\|codex] [--refresh]` | Fetch account limits and banked resets on demand. |
 | `help [command]` | The commands, or one command. |
 
 `panes --json` gives more than the table, per pane:
@@ -151,7 +151,7 @@ shows one.
 | `atPrompt` | Shell panes: PowerShell's prompt is waiting for a command |
 | `lastOutput` | When the pane last drew anything |
 
-`usage [claude|codex] --json` reads account plan usage through a shared five-minute cache, even while `set plan-usage off` is in effect. Omit the provider for both. JSON includes `fetchedAt`, `nextRefreshAt` and `cached`. Rate limits can extend the cooldown. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.
+`usage [claude|codex] --json` reads account plan usage through a shared five-minute cache, even while `set plan-usage off` is in effect. `--refresh` skips those five minutes, as the refresh button in the PC's plan panel does, but still waits out a rate limit's cooldown. Omit the provider for both. JSON includes `fetchedAt`, `nextRefreshAt` and `cached`. Rate limits can extend the cooldown. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.
 
 `panes --json` includes `model`, `effort` and `context` from Claude and Codex session records, with structured startup selections as fallbacks. OpenCode currently has startup selections only. Context contains `usedTokens`, `windowTokens`, `remainingTokens` and `remainingPercent`. Missing or invalid settings are null. A newer Codex turn context with unset effort clears the previous effort and suppresses an older startup fallback. Model identifiers allow ASCII letters, digits, dots, underscores, colons, slashes and hyphens, up to 160 characters. Claude context suffixes such as `[1m]` and custom aliases such as `vendor/token:latest` are also accepted. Recognizable credentials and control characters are rejected before export, including restored startup values. Effort must be none, minimal, low, medium, high, xhigh, max or auto. Recent settings take precedence over statusline reports, then the last transcript turn; this does not depend on pane width. The same fields appear in nested pane records from `threads` and `status`.
 
@@ -163,6 +163,7 @@ shows one.
 | --- | --- |
 | `show <thread\|pane>` | Bring a thread or a pane to the front. |
 | `next` | Go to the next agent waiting for you, as F3 does. |
+| `seen <pane>` | Clear a pane's waiting state, as clicking it on the PC does, without bringing it to the front. |
 | `overview [open\|close]` | Open, close, or toggle the Overview. |
 | `changes [open\|close]` | Open, close, or toggle the Changes panel. |
 | `layout <cols\|rows\|grid> [--thread T]` | How a thread arranges its panes. |

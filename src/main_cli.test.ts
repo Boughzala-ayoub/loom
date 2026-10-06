@@ -16,7 +16,7 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff", "hashedFiles"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "inventory", "inventoryDiff", "hashedFiles"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -548,4 +548,57 @@ if (check(304)) {
   await assert.rejects(c.trash.run({ _: ["restore", "record"] }), /Use loomctl trash list/);
   assert.deepEqual(calls.map(([cmd]) => cmd), ["trash_list"]);
   console.log("ok   trash list says where each folder and its Git record went, to move both back by hand");
+}
+
+if (check(305)) {
+  let now = Date.now(), calls = 0, limited = false;
+  class Clock extends Date { static now() { return now; } }
+  const c = fixture({ Date: Clock, PLAN_PROVIDERS: { claude: { command: "plan_usage" } },
+    invoke: async () => { calls++; if (limited) throw new Error("usage rate limited; retry after 7200 seconds"); return { tier: "pro", stale: false, limits: [] }; } });
+  await c.usage.run({ _: ["claude"] });
+  assert.equal((await c.usage.run({ _: ["claude"] })).data.claude.cached, true, "a plain read keeps the five-minute cache");
+  assert.equal((await c.usage.run({ _: ["claude"], refresh: true })).data.claude.cached, false, "--refresh skips the five minutes");
+  assert.equal(calls, 2);
+  limited = true;
+  await c.usage.run({ _: ["claude"], refresh: true });
+  now += 600_000;
+  assert.equal((await c.usage.run({ _: ["claude"], refresh: true })).data.claude.cached, true, "--refresh waits out a rate limit");
+  assert.equal(calls, 3);
+  now += 6601_000;
+  await c.usage.run({ _: ["claude"], refresh: true });
+  assert.equal(calls, 4);
+  console.log("ok   usage --refresh skips the five-minute cache but not a rate limit's cooldown");
+}
+
+if (check(307)) {
+  // usage.rs clamps a 429's Retry-After to at least 300 s: a limit as long as the cache floor still holds a refresh.
+  for (const answer of ["thrown", "fallback"]) {
+    let now = Date.now(), calls = 0;
+    class Clock extends Date { static now() { return now; } }
+    const c = fixture({ Date: Clock, PLAN_PROVIDERS: { claude: { command: "plan_usage" } }, invoke: async () => {
+      calls++;
+      if (answer === "thrown") throw "usage rate limited; retry after 300 seconds";
+      return { tier: "pro", stale: true, limits: [], retryAfterSeconds: 300 };
+    } });
+    assert.equal((await c.usage.run({ _: ["claude"], refresh: true })).data.claude.cached, false);
+    assert.equal((await c.usage.run({ _: ["claude"], refresh: true })).data.claude.cached, true, `${answer}: a 300 s limit holds --refresh`);
+    assert.equal(calls, 1);
+    now += 301_000;
+    assert.equal((await c.usage.run({ _: ["claude"], refresh: true })).data.claude.cached, false, `${answer}: and lets go when it ends`);
+    assert.equal(calls, 2);
+  }
+  console.log("ok   usage --refresh waits out a 300-second rate limit, thrown or carried by a fallback reading");
+}
+
+if (check(306)) {
+  const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
+  let seen = 0;
+  const p = { id: "p", th, agent: "codex", waiting: true, seen() { seen++; this.waiting = false; } } as any;
+  th.panes.push(p);
+  const c = fixture({ threads: [th], current: th, cliPane: () => p, paneRows: () => "", show() { throw new Error("seen must not bring the pane to the front"); } });
+  const r = await c.seen.run({ _: ["p"] });
+  assert.equal(seen, 1);
+  assert.equal(r.data.state, "idle");
+  await assert.rejects(async () => c.seen.run({ _: [] }), /pane/);
+  console.log("ok   seen clears a pane's wait without showing it");
 }

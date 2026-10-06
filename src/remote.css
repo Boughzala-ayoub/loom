@@ -199,6 +199,9 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 10px); min-widt
 #screen .line { min-height: 1.25em; }
 #screen.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 #screen.wrap .rule { white-space: pre; overflow: hidden; }
+/* A full-screen app's rows meet as on the PC: each colour fills its row's height, block characters tile. */
+#screen.grid { line-height: normal; }
+#screen.grid .line { display: flex; min-height: 1lh; }
 .b { font-weight: 700; } .d { opacity: 0.6; } .i { font-style: italic; } .u { text-decoration: underline; }
 #dock { flex: none; display: grid; gap: 8px; padding: 8px 10px 10px; border-top: 1px solid var(--edge); background: var(--glass); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
 #question { display: grid; gap: 6px; }

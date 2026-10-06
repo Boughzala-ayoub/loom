@@ -3222,12 +3222,14 @@ function toggleDashboard(on = !dashboardOpen) {
  * to full width, the terminal flags the next row as their wrap, and a joined
  * rule no longer ends the question above the options. */
 function liveScreen(p: Pane, joined = true, surveyOnly = false) {
+  // Every read stops at the screen's width: the alternate screen never reflows, so a
+  // narrower terminal leaves the cells it had past it on its rows (xterm's Buffer.resize).
   const buf = p.term.buffer.active;
   const lines: string[] = [];
   let survey = false;
   for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
     const line = buf.getLine(y);
-    const text = line?.translateToString(false) ?? "";
+    const text = line?.translateToString(false, 0, p.term.cols) ?? "";
     const wasSurvey = survey;
     if (claudeComposer(text) || claudeDivider(text)) survey = false;
     const continueSurvey = wasSurvey && survey;
@@ -3243,7 +3245,7 @@ function screenCells(p: Pane): Cell[][] {
   const buf = p.term.buffer.active, cell = buf.getNullCell(), rows: Cell[][] = [];
   for (let y = buf.baseY; y < buf.baseY + p.term.rows; y++) {
     const line = buf.getLine(y), row: Cell[] = [];
-    for (let x = 0; line && x < line.length; x++) {
+    for (let x = 0; line && x < Math.min(line.length, p.term.cols); x++) {
       line.getCell(x, cell);
       // An unwritten cell has no chars; a wide character's second cell has no width.
       row.push({ ch: cell.getWidth() ? cell.getChars() || " " : "", dim: !!cell.isDim(), inverse: !!cell.isInverse() });
@@ -3273,7 +3275,7 @@ function styledRows(p: Pane, from = p.term.buffer.active.baseY, to = from + p.te
   for (let y = 0; y < to - from; y++) {
     const line = buf.getLine(from + y), runs: Record<string, unknown>[] = [];
     let key = "";
-    for (let x = 0; line && x < line.length; x++) {
+    for (let x = 0; line && x < Math.min(line.length, p.term.cols); x++) {
       line.getCell(x, cell);
       if (!cell.getWidth()) continue;
       const style = {
@@ -7182,7 +7184,7 @@ const makePlanMenu = (provider: PlanProvider): Menu => ({
     const busy = !!planPolls[provider];
     const refresh = mini(glyph("refresh"), busy ? `Refreshing ${info.name} usage…` : `Refresh ${info.name} usage now`, () => {
       const focused = document.activeElement === refresh; // a mouse click leaves focus where it was
-      void pollPlan(provider).then(() => {
+      void pollPlan(provider, true).then(() => {
         if (focused && openMenu === planMenus[provider]) $("#menu-list .plan-refresh")?.focus();
       });
       renderMenu();
@@ -7320,41 +7322,46 @@ function normalizePlan(plan: Plan): Plan {
 type AccountReading = (Plan | { error: string; stale: true }) & { fetchedAt: string | null; nextRefreshAt: string; cached: boolean };
 const accountPolls: Partial<Record<PlanProvider, Promise<AccountReading>>> = {};
 const accountCache: Partial<Record<PlanProvider, AccountReading>> = {};
-function accountPlan(provider: PlanProvider): Promise<AccountReading> {
+/** When a rate limit's cooldown ends: a refresh button waits it out, but not the five-minute floor. */
+const accountHolds: Partial<Record<PlanProvider, number>> = {};
+function accountPlan(provider: PlanProvider, force = false): Promise<AccountReading> {
   if (accountPolls[provider]) return accountPolls[provider]!;
   const previous = accountCache[provider];
-  if (previous && Date.parse(previous.nextRefreshAt) > Date.now()) return Promise.resolve({ ...previous, cached: true });
+  const until = force ? accountHolds[provider] ?? 0 : Date.parse(previous?.nextRefreshAt ?? "");
+  if (previous && until > Date.now()) return Promise.resolve({ ...previous, cached: true });
   return accountPolls[provider] = (async () => {
-    let retry = 300, result: Plan | { error: string; stale: true }, fetchedAt = previous?.fetchedAt ?? null;
+    // limit: the provider's own cooldown in seconds, 0 for none; the cache floor is 300 either way.
+    let limit = 0, result: Plan | { error: string; stale: true }, fetchedAt = previous?.fetchedAt ?? null;
     try {
       result = normalizePlan(await invoke<Plan>(PLAN_PROVIDERS[provider].command));
-      retry = Math.max(retry, result.retryAfterSeconds ?? 0);
+      limit = result.retryAfterSeconds ?? 0;
       fetchedAt = new Date().toISOString();
     } catch (e) {
       const error = String(e);
-      retry = Math.max(retry, Number(/retry after (\d+) seconds/.exec(error)?.[1] ?? 0));
+      limit = Number(/retry after (\d+) seconds/.exec(error)?.[1] ?? 0);
       result = { ...(previous && "limits" in previous ? previous : {}), error, stale: true };
     }
-    const reading = { ...result, fetchedAt, nextRefreshAt: new Date(Date.now() + Math.min(retry, 86400) * 1000).toISOString(), cached: false };
+    const reading = { ...result, fetchedAt, nextRefreshAt: new Date(Date.now() + Math.min(Math.max(300, limit), 86400) * 1000).toISOString(), cached: false };
     accountCache[provider] = reading;
+    accountHolds[provider] = limit > 0 ? Date.now() + Math.min(limit, 86400) * 1000 : 0;
     return reading;
   })().finally(() => { delete accountPolls[provider]; });
 }
 
 const planPolls: Partial<Record<PlanProvider, Promise<void>>> = {};
-function pollPlan(provider: PlanProvider): Promise<void> {
-  return planPolls[provider] ??= fetchPlan(provider).finally(() => {
+function pollPlan(provider: PlanProvider, force = false): Promise<void> {
+  return planPolls[provider] ??= fetchPlan(provider, force).finally(() => {
     delete planPolls[provider];
     paintPlan(provider);
     if (!menu.classList.contains("hidden") && openMenu === planMenus[provider]) renderMenu();
   });
 }
 
-async function fetchPlan(provider: PlanProvider) {
+async function fetchPlan(provider: PlanProvider, force = false) {
   if (!planUsage) return;
   const plan = plans[provider];
   try {
-    const got = await accountPlan(provider);
+    const got = await accountPlan(provider, force);
     if (!("limits" in got)) throw new Error(got.error);
     // A row whose reset time has passed describes a window that rolled over —
     // its usage is back at zero, whatever the stale payload last said. This is
@@ -8079,14 +8086,15 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   usage: {
-    usage: "usage [claude|codex]",
-    help: "Read account plan usage, even with plan-usage off. All callers share a fetch and a five-minute cache; rate limits can extend the cooldown, including Codex reset-credit detail failures after primary usage succeeds. A note identifies unavailable expiry details. JSON includes fetchedAt, nextRefreshAt and cached. Reset times and banked expiries are UTC ISO timestamps or null. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
+    usage: "usage [claude|codex] [--refresh]",
+    help: "Read account plan usage, even with plan-usage off. All callers share a fetch and a five-minute cache; --refresh skips the five minutes, as the PC's refresh button does, but not a rate limit's cooldown. Rate limits can extend the cooldown, including Codex reset-credit detail failures after primary usage succeeds. A note identifies unavailable expiry details. JSON includes fetchedAt, nextRefreshAt and cached. Reset times and banked expiries are UTC ISO timestamps or null. Omit the provider for both. --json includes limits, stale status, banked resets and expiry dates when available; errors are per provider and omit provider bodies and curl diagnostics. Does not enable background polling.",
+    options: { refresh: "bool" },
     run: async (a) => {
       const name = a._[0];
       if (a._.length > 1 || (name !== undefined && name !== "claude" && name !== "codex")) throw new Error("usage takes claude or codex, or neither for both.");
       const data: Partial<Record<PlanProvider, Plan | { error: string }>> = {};
       for (const provider of (name ? [name] : ["claude", "codex"]) as PlanProvider[]) {
-        try { data[provider] = await accountPlan(provider); }
+        try { data[provider] = await accountPlan(provider, flag(a, "refresh")); }
         catch (e) { data[provider] = { error: String(e) }; }
       }
       return { data, text: Object.entries(data).map(([provider, p]) => `${provider}: ${JSON.stringify(p)}`).join("\n") };
@@ -8121,7 +8129,7 @@ const CLI: Record<string, CliCommand> = {
   },
   read: {
     usage: "read [pane] [--lines N] [--styles]",
-    help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the rows with their styles: the screen's, or with --lines those N lines'.",
+    help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the rows with their styles: the screen's, or with --lines those N lines'. JSON alt is true while a full-screen app such as OpenCode holds the screen.",
     options: { lines: "int", styles: "bool" },
     run: (a) => {
       const p = cliPane(a._[0]);
@@ -8132,16 +8140,16 @@ const CLI: Record<string, CliCommand> = {
         const n = num(a, "lines", 50, 1, 100_000);
         // Up to the last line with anything on it: below a short prompt the screen is blank rows.
         let end = buf.length;
-        while (end > 0 && !buf.getLine(end - 1)?.translateToString(true).trim()) end--;
+        while (end > 0 && !buf.getLine(end - 1)?.translateToString(true, 0, p.term.cols).trim()) end--;
         const lines: string[] = [];
-        for (let y = Math.max(0, end - n); y < end; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? "");
+        for (let y = Math.max(0, end - n); y < end; y++) lines.push(buf.getLine(y)?.translateToString(true, 0, p.term.cols) ?? "");
         raw = lines.join("\n");
         [from, to] = [Math.max(0, end - n), end];
       }
       const text = raw.split("\n").map((l) => l.trimEnd()).join("\n").replace(/\n+$/, "");
       const buf = p.term.buffer.active;
       const cursor = { x: buf.cursorX, y: buf.cursorY, hidden: p.cursorHidden };
-      return { data: { pane: p.id, ref: paneName(p), text, cursor, cols: p.term.cols, input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p, from, to) } : {}) }, text };
+      return { data: { pane: p.id, ref: paneName(p), text, cursor, cols: p.term.cols, alt: buf.type === "alternate", input: inputState(p), ...(flag(a, "styles") ? { rows: styledRows(p, from, to) } : {}) }, text };
     },
   },
   menu: {
@@ -8173,6 +8181,15 @@ const CLI: Record<string, CliCommand> = {
       const th = cliThread(sel);
       show(th);
       return { data: threadData(th), text: `In front: ${th.name}` };
+    },
+  },
+  seen: {
+    usage: "seen <pane>",
+    help: "Clear a pane's waiting state, as clicking it on the PC does, without bringing it to the front.",
+    run: (a) => {
+      const p = cliPane(cliWord(a, 0, "a pane"));
+      p.seen();
+      return { data: paneData(p), text: `${paneName(p)} is ${cliState(p)}` };
     },
   },
   next: {

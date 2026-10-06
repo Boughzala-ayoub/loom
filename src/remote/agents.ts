@@ -9,7 +9,7 @@ import {
 import { keyboard, type Typed } from "./keyboard";
 
 type Run = { x: number; text: string; bold?: boolean; dim?: boolean; italic?: boolean; underline?: boolean; inverse?: boolean; fg?: number | string; bg?: number | string };
-type Screen = { text: string; cols: number; rows: { runs: Run[] }[] };
+type Screen = { text: string; cols: number; alt?: boolean; rows: { runs: Run[] }[] };
 type Menu = { question: string[]; options: string[]; keys?: string[]; rev: string };
 type Said = { user: string; agent: string };
 
@@ -70,10 +70,17 @@ export function drawList() {
   if (key !== listKey) {
     listKey = key;
     for (const b of views.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-pressed", String(b.dataset.view === view));
+    const typing = document.activeElement instanceof HTMLInputElement && rows.contains(document.activeElement) ? document.activeElement : null;
     const banner = waiting.length ? [waitingBanner(waiting)] : [];
     if (!app.threads.length) rows.replaceChildren(empty("No threads yet", "Start one with + at the top."));
     else if (view === "activity") rows.replaceChildren(...banner, ...activity());
     else rows.replaceChildren(...banner, ...byThread());
+    // The reply being typed keeps the focus and the selection in its rebuilt box.
+    const again = typing && replyInput(typing.dataset.pane);
+    if (again) {
+      again.focus({ preventScroll: true });
+      again.setSelectionRange(typing.selectionStart, typing.selectionEnd, typing.selectionDirection ?? undefined);
+    }
   }
   const latest = (id: string) => findThread(id)?.panes.map((p) => p.lastOutput ?? "").sort().pop() || null;
   for (const a of rows.querySelectorAll<HTMLElement>(".when")) a.textContent = age(a.dataset.thread ? latest(a.dataset.thread) : findPane(a.dataset.pane!)?.lastOutput ?? null);
@@ -241,11 +248,16 @@ function choices(p: Pane, m: Menu) {
   return box;
 }
 
+const drafts = new Map<string, string>(); // each Activity reply's unsent text: the cards are rebuilt as agents change
+const replyInput = (pane?: string) => [...rows.querySelectorAll<HTMLInputElement>(".reply input")].find((i) => i.dataset.pane === pane);
+
 function replyBox(p: Pane) {
   const form = el("form", "reply");
   const input = el("input");
-  Object.assign(input, { placeholder: `Reply to ${p.agent}`, enterKeyHint: "send" });
+  Object.assign(input, { placeholder: `Reply to ${p.agent}`, enterKeyHint: "send", value: drafts.get(p.id) ?? "" });
+  input.dataset.pane = p.id;
   input.setAttribute("aria-label", `Reply to ${p.ref}`);
+  input.oninput = () => drafts.set(p.id, input.value);
   form.append(input, el("button", "primary", "Send"));
   form.onsubmit = (e) => {
     e.preventDefault();
@@ -253,7 +265,11 @@ function replyBox(p: Pane) {
     if (!text) return;
     void act(async () => {
       await run(p.agent === "shell" ? "send" : "submit", [p.id, "-"], { stdin: text, change: true, timeout: 60 });
-      input.value = "";
+      // Only the reply that went: one typed while it was on its way stays a draft.
+      if ((drafts.get(p.id) ?? "").trim() !== text) return;
+      drafts.delete(p.id);
+      const shown = replyInput(p.id); // this box, or the one a rebuild put in its place meanwhile
+      if (shown) shown.value = "";
     }, "Sent");
   };
   return form;
@@ -384,6 +400,7 @@ export function showPane(id: string) {
     notice("");
     // With Loom fitted to the phone, the agent you open fills the PC's window too, at the phone's width.
     const p = findPane(id);
+    seen();
     if (p && app.phoneSize) void act(async () => {
       await run("show", [p.id], { change: true });
       if (threadOf(p)?.zoomed !== p.id) await run("zoom", [p.id], { change: true });
@@ -394,6 +411,13 @@ export function showPane(id: string) {
   reread();
 }
 export const openPane = () => open;
+
+/** Opening a waiting agent, or tapping its screen, clears the wait as a click on its pane does on the PC. */
+function seen() {
+  const p = findPane(open);
+  if (p?.state === "waiting") void act(() => run("seen", [p.id], { change: true }));
+}
+screenBox.addEventListener("click", seen);
 
 export function drawHead() {
   const p = findPane(open);
@@ -429,8 +453,10 @@ function color(c: number | string | undefined) {
 let charWidth = 0; // a character's width at a 1 px font
 /** The font that fits the terminal's width, between 7 and 14 px. Wider than
  * that, the screen scrolls sideways and offers to fit Loom to the phone.
- * Wrapping, a screen that only fits under 10 px shows at 12 px, its lines wrapped. */
-function fit(cols: number) {
+ * Wrapping, a screen that only fits under 10 px shows at 12 px, its lines wrapped.
+ * A full-screen app (OpenCode) draws a grid that wrapping breaks: it only fits,
+ * and under 10 px offers to fit Loom to the phone. */
+function fit(cols: number, grid = false) {
   if (!charWidth) {
     const probe = el("span", "", "M".repeat(20));
     probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font:100px var(--mono)";
@@ -440,10 +466,12 @@ function fit(cols: number) {
   }
   const width = screenBox.clientWidth - 24;
   const fitted = Math.floor((width / (cols * charWidth)) * 10) / 10;
-  const size = Math.min(14, wrap && fitted < 10 ? 12 : Math.max(7, fitted));
+  const wrapping = wrap && !grid;
+  const size = Math.min(14, wrapping && fitted < 10 ? 12 : Math.max(7, fitted));
   screenBox.style.fontSize = `${size}px`;
-  screenBox.classList.toggle("wrap", wrap);
-  if (!older) notice(!wrap && cols * charWidth * 7 > width ? `${cols} columns, wider than this screen.` : "");
+  screenBox.classList.toggle("wrap", wrapping);
+  screenBox.classList.toggle("grid", grid);
+  if (!older) notice(!wrapping && fitted < (grid && !app.phoneSize ? 10 : 7) ? `${cols} columns, ${fitted < 7 ? "wider than" : "small on"} this screen.` : "");
 }
 
 function notice(text: string, label = app.phoneSize ? "Desktop size" : "Fit Loom to phone", action: () => void = () => void act(fitPhone)) {
@@ -458,7 +486,10 @@ let drawnAt = 0; // when the page last moved the screen itself, not your finger
 function draw(s: Screen, toEnd = false) {
   const atEnd = toEnd || screenBox.scrollTop + screenBox.clientHeight >= screenBox.scrollHeight - 24;
   drawnAt = performance.now();
-  fit(s.cols);
+  fit(s.cols, !!s.alt);
+  // Around a full-screen app's grid, the background of its top-left cell.
+  const corner = s.rows[0]?.runs[0];
+  screenBox.style.background = s.alt && corner?.x === 0 ? color(corner.bg) : "";
   // The blank rows under an agent's last line would keep it off the bottom.
   let end = s.rows.length;
   while (end && !s.rows[end - 1].runs.some((r) => r.text.trim() || r.bg !== undefined)) end--;
@@ -468,7 +499,8 @@ function draw(s: Screen, toEnd = false) {
     const line = el("div", /^\s*[─-╿][\s─-╿]*$/.test(text) ? "line rule" : "line");
     let col = 0;
     for (const r of row.runs) {
-      if (r.x > col) line.append(" ".repeat(r.x - col));
+      // In a span: a grid's rows are flex boxes, which drop bare spaces.
+      if (r.x > col) line.append(el("span", "", " ".repeat(r.x - col)));
       const span = el("span", [r.bold && "b", r.dim && "d", r.italic && "i", r.underline && "u"].filter(Boolean).join(" "), r.text);
       const fg = color(r.fg), bg = color(r.bg);
       if (r.inverse) {
@@ -624,6 +656,8 @@ promptForm.onsubmit = async (e) => {
   const cmd = findPane(id)?.agent === "shell" ? "send" : "submit";
   await act(async () => {
     await run(cmd, [id, "-"], { stdin: text, change: true, timeout: 60 });
+    // Only the message that went: one typed while it was on its way, here or for another agent, stays.
+    if (promptText.value.trim() !== text) return;
     promptText.value = "";
     promptText.style.height = "";
   }, "Sent");

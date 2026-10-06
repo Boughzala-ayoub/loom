@@ -33,6 +33,8 @@ export async function read() {
   // An older Loom answers a command it lacks with an error: each reading keeps its shape.
   const list = <T>(v: unknown, was: T[]) => (Array.isArray(v) ? (v as T[]) : was);
   [themes, startups, trash] = [list(t, themes), list(st, startups), list(tr, trash)];
+  // New Thread and Add Agent offer these: one added here shows there, a removed one goes.
+  if (Array.isArray(st)) app.agents = startups.map((x) => x.label);
   [notify, settings, remote] = [n, s, r];
   const cur = themes.find((x) => x.current);
   if (cur) wear(cur);

@@ -20,7 +20,10 @@ const letter = (sec: Sec, c: File) => (conflicted(c) ? "!" : sec === "staged" ? 
 let thread: string | null = null; // the thread on show
 let status: Status | null = null;
 let statusKey = "";
-const git = (args: string[], opts: { stdin?: string; change?: boolean; timeout?: number } = {}) => run<Status>("git", [thread!, ...args], { timeout: 120, ...opts });
+// Each screen's newest read: a reply to an older one, or for another thread, is dropped,
+// so a late answer never puts one thread's files and buttons under another's name.
+let readSeq = 0, diffSeq = 0, filesSeq = 0;
+const git = (tid: string, args: string[], opts: { stdin?: string; change?: boolean; timeout?: number } = {}) => run<Status>("git", [tid, ...args], { timeout: 120, ...opts });
 
 // --- The summary ------------------------------------------------------------------
 
@@ -62,12 +65,15 @@ export const changesThread = () => thread;
 let readAt = 0;
 /** Reads git again: on show, after a change, and every 6 s while it's on screen. */
 export async function read(now = false) {
-  if (!thread || summary.hidden || (!now && Date.now() - readAt < 6000)) return;
+  const tid = thread;
+  if (!tid || summary.hidden || (!now && Date.now() - readAt < 6000)) return;
   readAt = Date.now();
+  const n = ++readSeq;
   try {
-    draw(await git(["status"]));
+    const s = await git(tid, ["status"]);
+    if (n === readSeq && tid === thread) draw(tid, s);
   } catch (e) {
-    body.replaceChildren(empty("git can't read this thread", e instanceof Error ? e.message : String(e)));
+    if (n === readSeq && tid === thread) body.replaceChildren(empty("git can't read this thread", e instanceof Error ? e.message : String(e)));
   }
 }
 
@@ -77,39 +83,39 @@ function empty(title: string, text: string) {
   return box;
 }
 
-function draw(s: Status) {
+function draw(tid: string, s: Status) {
   status = s;
   const key = JSON.stringify(s);
   if (key === statusKey) return; // leave the rows under the finger
   statusKey = key;
   const kept = body.querySelector<HTMLTextAreaElement>(".composer textarea");
   const focused = document.activeElement === kept;
-  const t = findThread(thread);
+  const t = findThread(tid);
   const tracked = [...s.staged, ...s.unstaged];
   const paths = new Set([...tracked, ...s.untracked].map((f) => f.path));
   if (t) paintPicker({ name: t.name, changed: { add: tracked.reduce((n, f) => n + f.add, 0), del: tracked.reduce((n, f) => n + f.del, 0), files: paths.size } });
-  const nodes: Node[] = [branchCard(s)];
+  const nodes: Node[] = [branchCard(tid, s)];
   const total = s.staged.length + s.unstaged.length + s.untracked.length;
   if (!total) nodes.push(empty("Nothing to commit", "The working tree matches the last commit."));
-  else nodes.push(composer(s));
+  else nodes.push(composer(tid, s));
   for (const [sec, title] of SECTIONS) {
     const files = s[sec];
     if (!files.length) continue;
     const head = el("div", "section-title");
     head.append(el("span", "grow", `${title} ${files.length}`));
-    if (sec === "staged") head.append(button("Unstage all", () => void change(["unstage", "--staged"], "Unstaged"), "ghost"));
-    else head.append(button("Stage all", () => void change(["stage", `--${sec}`], "Staged"), "ghost"));
+    if (sec === "staged") head.append(button("Unstage all", () => void change(tid, ["unstage", "--staged"], "Unstaged"), "ghost"));
+    else head.append(button("Stage all", () => void change(tid, ["stage", `--${sec}`], "Staged"), "ghost"));
     const box = el("div", "files");
-    box.append(...files.map((f) => fileRow(sec, f)));
+    box.append(...files.map((f) => fileRow(tid, sec, f)));
     nodes.push(head, box);
   }
   if (s.commits.length) {
     const box = el("div", "files");
     box.append(...s.commits.map((c) => {
       const row = el("div", "commit-row");
-      const open = button("", () => go(`#/commit/${encodeURIComponent(thread!)}/${c.sha}`), "open");
+      const open = button("", () => go(`#/commit/${encodeURIComponent(tid)}/${c.sha}`), "open");
       open.append(el("b", "", c.subject), el("span", "mono", c.sha));
-      row.append(open, iconButton("more", `Commit ${c.sha}`, () => commitActions(c)));
+      row.append(open, iconButton("more", `Commit ${c.sha}`, () => commitActions(tid, c)));
       return row;
     }));
     nodes.push(el("div", "section-title", "Recent commits"), box);
@@ -118,70 +124,71 @@ function draw(s: Status) {
   if (focused) body.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
 }
 
-function branchCard(s: Status) {
+function branchCard(tid: string, s: Status) {
   const card = el("div", "branch-card");
   const name = el("div", "branch");
   name.append(ui("branch"), s.branch || "(no branch)");
   const far = s.ahead || s.behind ? [s.ahead ? `${s.ahead} to push` : "", s.behind ? `${s.behind} to pull` : ""].filter(Boolean).join(", ") : "up to date";
   card.append(name, el("div", "upstream", s.upstream ? `${s.upstream}: ${far}` : "Not pushed yet"));
   const row = el("div", "row");
-  if (s.behind) row.append(button("Pull", () => void change(["pull"], "Pulled")));
-  row.append(button(s.upstream ? "Push" : "Publish branch", () => void change(["push"], "Pushed")), button("Create PR", () => void openPR()));
+  if (s.behind) row.append(button("Pull", () => void change(tid, ["pull"], "Pulled")));
+  row.append(button(s.upstream ? "Push" : "Publish branch", () => void change(tid, ["push"], "Pushed")), button("Create PR", () => void openPR(tid)));
   card.append(row);
   if (s.midway) {
     const bar = el("div", "midway");
     const acts = el("div", "row");
-    acts.append(button(s.midway === "merge" ? "Commit" : "Continue", () => void change(["continue"], "Continued"), "primary"));
-    if (s.midway === "rebase") acts.append(button("Skip", () => void change(["skip"], "Skipped")));
-    acts.append(button("Abort", () => void ask(`Abort the ${s.midway}?`, "The branch goes back to where it was before it started.", "Abort", ["abort"], "Aborted"), "danger"));
+    acts.append(button(s.midway === "merge" ? "Commit" : "Continue", () => void change(tid, ["continue"], "Continued"), "primary"));
+    if (s.midway === "rebase") acts.append(button("Skip", () => void change(tid, ["skip"], "Skipped")));
+    acts.append(button("Abort", () => void ask(tid, `Abort the ${s.midway}?`, "The branch goes back to where it was before it started.", "Abort", ["abort"], "Aborted"), "danger"));
     bar.append(el("b", "", `A ${s.midway} is in progress`), acts);
     card.append(bar);
   }
   return card;
 }
 
-function fileRow(sec: Sec, f: File) {
+function fileRow(tid: string, sec: Sec, f: File) {
   const row = el("div", "file");
   const l = letter(sec, f);
-  const open = button("", () => go(`#/diff/${encodeURIComponent(thread!)}/${sec}/${encodeURIComponent(f.path)}`), "open");
+  const open = button("", () => go(`#/diff/${encodeURIComponent(tid)}/${sec}/${encodeURIComponent(f.path)}`), "open");
   const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
   open.append(el("b", "", base(f.path)), el("span", "", dir || " "));
-  row.append(el("span", `letter ${l}`, l), open, stat(f), iconButton("more", `${f.path}: actions`, () => fileActions(sec, f)));
+  row.append(el("span", `letter ${l}`, l), open, stat(f), iconButton("more", `${f.path}: actions`, () => fileActions(tid, sec, f)));
   return row;
 }
 
-function fileActions(sec: Sec, f: File) {
-  const items: Node[] = [item("Show the diff", () => go(`#/diff/${encodeURIComponent(thread!)}/${sec}/${encodeURIComponent(f.path)}`), "", { icon: "file" })];
+function fileActions(tid: string, sec: Sec, f: File) {
+  const items: Node[] = [item("Show the diff", () => go(`#/diff/${encodeURIComponent(tid)}/${sec}/${encodeURIComponent(f.path)}`), "", { icon: "file" })];
   if (conflicted(f)) items.push(
-    item("Keep ours", () => change(["resolve", "ours", f.path], "Kept ours"), "", { icon: "changes" }),
-    item("Keep theirs", () => change(["resolve", "theirs", f.path], "Kept theirs"), "", { icon: "changes" }),
-    item("Mark resolved", () => change(["stage", f.path], "Marked resolved"), "", { icon: "changes" }),
+    item("Keep ours", () => change(tid, ["resolve", "ours", f.path], "Kept ours"), "", { icon: "changes" }),
+    item("Keep theirs", () => change(tid, ["resolve", "theirs", f.path], "Kept theirs"), "", { icon: "changes" }),
+    item("Mark resolved", () => change(tid, ["stage", f.path], "Marked resolved"), "", { icon: "changes" }),
   );
-  else if (sec === "staged") items.push(item("Unstage", () => change(["unstage", f.path], "Unstaged"), "", { icon: "undo" }));
-  else items.push(item("Stage", () => change(["stage", `--${sec}`, f.path], "Staged"), "", { icon: "plus" }));
-  items.push(item(sec === "untracked" ? "Delete" : "Discard changes", () => change(["discard", `--${sec}`, f.path, "--yes"], "Discarded"), "", {
+  else if (sec === "staged") items.push(item("Unstage", () => change(tid, ["unstage", f.path], "Unstaged"), "", { icon: "undo" }));
+  else items.push(item("Stage", () => change(tid, ["stage", `--${sec}`, f.path], "Staged"), "", { icon: "plus" }));
+  items.push(item(sec === "untracked" ? "Delete" : "Discard changes", () => change(tid, ["discard", `--${sec}`, f.path, "--yes"], "Discarded"), "", {
     icon: "trash", danger: true, ask: [sec === "untracked" ? `Delete ${base(f.path)}?` : `Discard changes to ${base(f.path)}?`, sec === "untracked" ? "git never had this file, so it can't come back." : "They can't be brought back.", sec === "untracked" ? "Delete" : "Discard"],
   }));
   void sheet(items, f.path);
 }
 
-/** A git change: the reply is the status after it. */
-async function change(args: string[], done: string, opts: { stdin?: string } = {}) {
+/** A git change in the thread it was asked for: the reply is the status after it,
+ * drawn while that thread is on show, and newer than any read already on its way. */
+async function change(tid: string, args: string[], done: string, opts: { stdin?: string } = {}) {
   let after: Status | null = null;
-  const ok = await act(async () => { after = await git(args, { change: true, ...opts }); }, done);
-  if (after) draw(after);
+  const ok = await act(async () => { after = await git(tid, args, { change: true, ...opts }); }, done);
+  if (after && tid === thread) (readSeq++, draw(tid, after));
   return ok;
 }
-async function ask(title: string, detail: string, action: string, args: string[], done: string) {
-  if (await confirmSheet(title, detail, action, true)) await change([...args, "--yes"], done);
+async function ask(tid: string, title: string, detail: string, action: string, args: string[], done: string) {
+  if (await confirmSheet(title, detail, action, true)) await change(tid, [...args, "--yes"], done);
 }
 
 // --- Committing -------------------------------------------------------------------
 
 let onlyStaged = false;
-function composer(s: Status) {
+function composer(tid: string, s: Status) {
   const box = el("div", "composer");
-  const draftKey = `loom-commit-${thread}`;
+  const draftKey = `loom-commit-${tid}`;
   const msg = el("textarea");
   Object.assign(msg, { rows: 2, placeholder: "Commit message", value: pref(draftKey, "") });
   msg.setAttribute("aria-label", "Commit message");
@@ -198,7 +205,7 @@ function composer(s: Status) {
     const text = msg.value.trim();
     if (!text) return msg.focus();
     for (const b of buttons) b.disabled = true;
-    const done = await change(["commit", "-", ...(onlyStaged ? ["--staged"] : []), ...(push ? ["--push"] : [])], push ? "Committed and pushed" : "Committed", { stdin: text });
+    const done = await change(tid, ["commit", "-", ...(onlyStaged ? ["--staged"] : []), ...(push ? ["--push"] : [])], push ? "Committed and pushed" : "Committed", { stdin: text });
     for (const b of buttons) b.disabled = false;
     if (done) setPref(draftKey, "");
   };
@@ -209,11 +216,11 @@ function composer(s: Status) {
   return box;
 }
 
-async function openPR() {
+async function openPR(tid: string) {
   // A window opened now, before awaiting, isn't a popup the browser blocks.
   const win = window.open("", "_blank");
   try {
-    const got = await run<{ url: string }>("git", [thread!, "pr"], { change: true, timeout: 120 });
+    const got = await run<{ url: string }>("git", [tid, "pr"], { change: true, timeout: 120 });
     tick();
     if (win) win.location.href = got.url;
     else location.href = got.url;
@@ -225,65 +232,66 @@ async function openPR() {
 }
 
 function repoActions() {
-  if (!thread) return;
-  const t = findThread(thread);
+  const tid = thread;
+  if (!tid) return;
+  const t = findThread(tid);
   void sheet([
-    item("Fetch", () => change(["fetch"], "Fetched"), "", { icon: "refresh" }),
-    item("Pull (rebase)", () => change(["pull"], "Pulled"), "", { icon: "pull" }),
-    item("Push", () => change(["push"], "Pushed"), "", { icon: "push" }),
-    item("Create PR", openPR, "", { icon: "pr" }),
-    item("Switch branch", branches, "", { icon: "branch" }),
-    item("Stash all changes", () => change(["stash"], "Stashed"), "", { icon: "stash" }),
-    item("Restore a stash", stashes, "", { icon: "stash" }),
-    item("Amend last commit", amend, "", { icon: "rename" }),
-    item("Undo last commit", () => change(["undo", "--yes"], "Undone"), "", { icon: "undo", ask: ["Undo the last commit?", "Its changes come back as staged work.", "Undo"] }),
-    item("Force push", () => change(["force-push", "--yes"], "Force-pushed"), "", {
+    item("Fetch", () => change(tid, ["fetch"], "Fetched"), "", { icon: "refresh" }),
+    item("Pull (rebase)", () => change(tid, ["pull"], "Pulled"), "", { icon: "pull" }),
+    item("Push", () => change(tid, ["push"], "Pushed"), "", { icon: "push" }),
+    item("Create PR", () => openPR(tid), "", { icon: "pr" }),
+    item("Switch branch", () => branches(tid), "", { icon: "branch" }),
+    item("Stash all changes", () => change(tid, ["stash"], "Stashed"), "", { icon: "stash" }),
+    item("Restore a stash", () => stashes(tid), "", { icon: "stash" }),
+    item("Amend last commit", () => amend(tid), "", { icon: "rename" }),
+    item("Undo last commit", () => change(tid, ["undo", "--yes"], "Undone"), "", { icon: "undo", ask: ["Undo the last commit?", "Its changes come back as staged work.", "Undo"] }),
+    item("Force push", () => change(tid, ["force-push", "--yes"], "Force-pushed"), "", {
       icon: "push", danger: true, ask: [`Force-push ${status?.branch ?? "this branch"}?`, "It overwrites the remote branch unless someone else has pushed since you last fetched.", "Force push"],
     }),
-    item("Browse files", () => go(`#/files/${encodeURIComponent(thread!)}`), "", { icon: "file" }),
-    item("Open in VS Code on the PC", () => run("vscode", [thread!], { change: true }), "VS Code opened on the PC", { icon: "code" }),
+    item("Browse files", () => go(`#/files/${encodeURIComponent(tid)}`), "", { icon: "file" }),
+    item("Open in VS Code on the PC", () => run("vscode", [tid], { change: true }), "VS Code opened on the PC", { icon: "code" }),
   ], t ? `${t.name}: git` : "git");
 }
 
-async function amend() {
-  const draftKey = `loom-commit-${thread}`;
+async function amend(tid: string) {
+  const draftKey = `loom-commit-${tid}`;
   const msg = pref(draftKey, "").trim();
   if (!(await confirmSheet("Amend the last commit?", msg ? `Its message becomes: ${msg}` : "Its message stays. Type one in the commit box first to change it.", "Amend", true))) return;
-  if (await change(["amend", "--yes", ...(msg ? ["-"] : [])], "Amended", msg ? { stdin: msg } : {})) setPref(draftKey, "");
+  if (await change(tid, ["amend", "--yes", ...(msg ? ["-"] : [])], "Amended", msg ? { stdin: msg } : {})) setPref(draftKey, "");
 }
 
-async function branches() {
-  const got = await run<{ current: string; branches: string[] }>("git", [thread!, "branches"]).catch((e) => (toast(e.message, true), null));
+async function branches(tid: string) {
+  const got = await run<{ current: string; branches: string[] }>("git", [tid, "branches"]).catch((e) => (toast(e.message, true), null));
   if (!got) return;
   void sheet([
     button("New branch…", async () => {
       closeSheet();
       const name = await promptSheet("New branch", "", "feature/name", "Create and switch");
-      if (name) await change(["switch", name, "--create"], `On ${name}`);
+      if (name) await change(tid, ["switch", name, "--create"], `On ${name}`);
     }, "item"),
-    ...got.branches.map((b) => item(b === got.current ? `${b} (current)` : b, () => (b === got.current ? undefined : change(["switch", b], `On ${b}`)), "", { icon: "branch" })),
+    ...got.branches.map((b) => item(b === got.current ? `${b} (current)` : b, () => (b === got.current ? undefined : change(tid, ["switch", b], `On ${b}`)), "", { icon: "branch" })),
   ], "Switch branch");
 }
 
-async function stashes() {
-  const got = await run<{ stashes: { ref: string; message: string }[] }>("git", [thread!, "stashes"]).catch((e) => (toast(e.message, true), null));
+async function stashes(tid: string) {
+  const got = await run<{ stashes: { ref: string; message: string }[] }>("git", [tid, "stashes"]).catch((e) => (toast(e.message, true), null));
   if (!got) return;
   if (!got.stashes.length) return void sheet([el("p", "", "Stash all changes from the git actions to keep them here.")], "No stashes");
   void sheet(got.stashes.flatMap((x) => {
     const pair = el("div", "pair");
-    const apply = item(`${x.ref}: ${x.message}`, () => change(["stash-apply", x.ref], "Stash applied"), "", { icon: "stash" });
-    const drop = iconButton("trash", `Drop ${x.ref}`, () => { closeSheet(); void ask(`Drop ${x.ref}?`, x.message, "Drop", ["stash-drop", x.ref], "Dropped"); });
+    const apply = item(`${x.ref}: ${x.message}`, () => change(tid, ["stash-apply", x.ref], "Stash applied"), "", { icon: "stash" });
+    const drop = iconButton("trash", `Drop ${x.ref}`, () => { closeSheet(); void ask(tid, `Drop ${x.ref}?`, x.message, "Drop", ["stash-drop", x.ref], "Dropped"); });
     pair.append(apply, drop);
     return [pair];
   }), "Restore a stash");
 }
 
-function commitActions(c: { sha: string; subject: string }) {
+function commitActions(tid: string, c: { sha: string; subject: string }) {
   void sheet([
-    item("Show the commit", () => go(`#/commit/${encodeURIComponent(thread!)}/${c.sha}`), "", { icon: "file" }),
-    item("Revert it", () => change(["revert", c.sha], "Reverted"), "", { icon: "undo", ask: [`Revert ${c.sha}?`, "A new commit undoes its changes.", "Revert"] }),
-    item("Move the branch back to it", () => change(["reset", c.sha, "--soft", "--yes"], "Reset"), "", { icon: "history", ask: [`Move the branch back to ${c.sha}?`, "Everything after it stays in the tree, staged.", "Reset"] }),
-    item("Reset hard to it", () => change(["reset", c.sha, "--hard", "--yes"], "Reset"), "", { icon: "trash", danger: true, ask: [`Reset hard to ${c.sha}?`, "Every change after it is lost.", "Reset hard"] }),
+    item("Show the commit", () => go(`#/commit/${encodeURIComponent(tid)}/${c.sha}`), "", { icon: "file" }),
+    item("Revert it", () => change(tid, ["revert", c.sha], "Reverted"), "", { icon: "undo", ask: [`Revert ${c.sha}?`, "A new commit undoes its changes.", "Revert"] }),
+    item("Move the branch back to it", () => change(tid, ["reset", c.sha, "--soft", "--yes"], "Reset"), "", { icon: "history", ask: [`Move the branch back to ${c.sha}?`, "Everything after it stays in the tree, staged.", "Reset"] }),
+    item("Reset hard to it", () => change(tid, ["reset", c.sha, "--hard", "--yes"], "Reset"), "", { icon: "trash", danger: true, ask: [`Reset hard to ${c.sha}?`, "Every change after it is lost.", "Reset hard"] }),
   ], c.subject);
 }
 
@@ -308,6 +316,8 @@ const diffBox = el("div", "diff");
 diffView.append(topBar(diffTop, [fullBtn], "#/changes"), diffBox);
 let full = pref("loom-diff-full", "") === "1";
 let lastDiff: () => Promise<void> = async () => {};
+// A hunk action completes on the screen it started from (its route), or it neither
+// reloads the diff screen, which may show another file now, nor goes back from where you are.
 const showDiffAgain = () => lastDiff();
 
 /** One file's diff in a section, with each hunk's buttons as on the PC. */
@@ -318,12 +328,13 @@ export function showDiff(tid: string, sec: Sec, path: string) {
   fullBtn.hidden = false;
   fullBtn.textContent = full ? "Changes only" : "Whole file";
   lastDiff = async () => {
+    const n = ++diffSeq;
     diffBox.replaceChildren(el("p", "hint", "Reading the diff…"));
     try {
       const got = await run<{ diff: string }>("git", [tid, "diff", path, `--${sec}`, ...(full ? ["--full"] : [])], { timeout: 60 });
-      drawDiff(got.diff, sec, path);
+      if (n === diffSeq) drawDiff(tid, got.diff, sec, path);
     } catch (e) {
-      diffBox.replaceChildren(empty("No diff", e instanceof Error ? e.message : String(e)));
+      if (n === diffSeq) diffBox.replaceChildren(empty("No diff", e instanceof Error ? e.message : String(e)));
     }
   };
   void lastDiff();
@@ -336,29 +347,34 @@ export function showCommit(tid: string, sha: string) {
   diffSub.textContent = findThread(tid)?.name ?? "";
   fullBtn.hidden = true;
   lastDiff = async () => {
+    const n = ++diffSeq;
     diffBox.replaceChildren(el("p", "hint", "Reading the commit…"));
     try {
       const text = (await run<{ diff: string }>("git", [tid, "show", sha], { timeout: 60 })).diff;
+      if (n !== diffSeq) return;
       // git show: the commit's header, its --stat, then the patch.
       const at = text.indexOf("\ndiff --git");
       const head = at < 0 ? text : text.slice(0, at);
-      drawDiff(at < 0 ? "" : text.slice(at + 1), null, "");
+      drawDiff(tid, at < 0 ? "" : text.slice(at + 1), null, "");
       diffBox.prepend(commitHead(head));
     } catch (e) {
-      diffBox.replaceChildren(empty("Can't show it", e instanceof Error ? e.message : String(e)));
+      if (n === diffSeq) diffBox.replaceChildren(empty("Can't show it", e instanceof Error ? e.message : String(e)));
     }
   };
   void lastDiff();
 }
 
 const CAP = 20000; // rows drawn: a phone isn't for reading more than this
-function drawDiff(text: string, sec: Sec | null, path: string) {
+function drawDiff(tid: string, text: string, sec: Sec | null, path: string) {
   const rows = diffRows(text);
   if (!rows.length) return void diffBox.replaceChildren(...(sec === null ? [] : [empty("No differences", "Nothing changed here, or it's a binary file.")]));
   const files = rows.filter((r) => r.text.startsWith("diff --git")).length;
   const moves: [string, string[], boolean][] = sec === "unstaged" ? [["Stage", ["--cached"], false], ["Discard", ["--reverse"], true]] : sec === "staged" ? [["Unstage", ["--cached", "--reverse"], false]] : [];
   const out: Node[] = [];
-  if (sec === "untracked") out.push(fileBar(button("Stage this file", () => void change(["stage", "--untracked", path], "Staged").then(() => history.back()), "primary")));
+  if (sec === "untracked") out.push(fileBar(button("Stage this file", () => {
+    const route = location.hash;
+    void change(tid, ["stage", "--untracked", path], "Staged").then((ok) => ok && location.hash === route && history.back());
+  }, "primary")));
   rows.slice(0, CAP).forEach((r: DiffRow, i) => {
     if (r.text.startsWith("diff --git")) {
       if (files > 1 || sec === null) out.push(el("div", "file-head", r.text.replace(/^diff --git a\/(.*) b\/.*$/, "$1")));
@@ -367,7 +383,7 @@ function drawDiff(text: string, sec: Sec | null, path: string) {
     if (r.kind === "hunk") {
       const h = el("div", "hunk");
       h.append(el("code", "", r.text));
-      for (const [label, args, risky] of moves) h.append(button(label, () => void moveHunk(rows, i, args, risky, label), risky ? "danger" : ""));
+      for (const [label, args, risky] of moves) h.append(button(label, () => void moveHunk(tid, rows, i, args, risky, label), risky ? "danger" : ""));
       out.push(h);
       return;
     }
@@ -407,9 +423,10 @@ function fileBar(...nodes: Node[]) {
   return bar;
 }
 
-async function moveHunk(rows: DiffRow[], at: number, args: string[], risky: boolean, label: string) {
+async function moveHunk(tid: string, rows: DiffRow[], at: number, args: string[], risky: boolean, label: string) {
+  const route = location.hash;
   if (risky && !(await confirmSheet("Discard this hunk?", "Its changes can't be brought back.", "Discard", true))) return;
-  if (await change(["apply", "-", ...args, ...(risky ? ["--yes"] : [])], `${label === "Stage" ? "Staged" : label === "Unstage" ? "Unstaged" : "Discarded"} the hunk`, { stdin: hunkPatch(rows, at) })) void showDiffAgain();
+  if (await change(tid, ["apply", "-", ...args, ...(risky ? ["--yes"] : [])], `${label === "Stage" ? "Staged" : label === "Unstage" ? "Unstaged" : "Discarded"} the hunk`, { stdin: hunkPatch(rows, at) }) && location.hash === route) void showDiffAgain();
 }
 
 // --- Files --------------------------------------------------------------------------
@@ -427,24 +444,27 @@ const filesBox = el("div", "files");
   b.append(find, filesBox);
   filesView.append(topBar("Files", [], "#/changes"), b);
 }
-let fileList: string[] = [];
+let fileList: string[] = [], filesTid = ""; // the list on show, and its thread
 filesFind.oninput = () => drawFiles();
 
 export async function showFiles(tid: string) {
   thread = tid;
+  const n = ++filesSeq;
   filesBox.replaceChildren(el("p", "hint", "Reading the file list…"));
   try {
-    fileList = (await run<{ files: string[] }>("git", [tid, "files"], { timeout: 60 })).files;
+    const files = (await run<{ files: string[] }>("git", [tid, "files"], { timeout: 60 })).files;
+    if (n !== filesSeq) return;
+    [fileList, filesTid] = [files, tid];
     drawFiles();
   } catch (e) {
-    filesBox.replaceChildren(empty("Can't list the files", e instanceof Error ? e.message : String(e)));
+    if (n === filesSeq) filesBox.replaceChildren(empty("Can't list the files", e instanceof Error ? e.message : String(e)));
   }
 }
 function drawFiles() {
   const q = filesFind.value.trim().toLowerCase();
   const hits = (q ? fileList.filter((f) => f.toLowerCase().includes(q)) : fileList).slice(0, 300);
   filesBox.replaceChildren(...hits.map((f) => {
-    const b = button("", () => go(`#/file/${encodeURIComponent(thread!)}/${encodeURIComponent(f)}`), "list-row");
+    const b = button("", () => go(`#/file/${encodeURIComponent(filesTid)}/${encodeURIComponent(f)}`), "list-row");
     b.append(ui("file"), el("span", "grow", f));
     return b;
   }), ...(hits.length === 300 ? [el("p", "hint", "Type to narrow the list.")] : []));
@@ -455,16 +475,18 @@ export async function showFile(tid: string, path: string) {
   diffName.textContent = base(path);
   diffSub.textContent = path;
   fullBtn.hidden = true;
+  const n = ++diffSeq;
   diffBox.replaceChildren(el("p", "hint", "Reading the file…"));
   try {
     const text = (await run<{ text: string }>("git", [tid, "file", path], { timeout: 60 })).text;
+    if (n !== diffSeq) return;
     diffBox.replaceChildren(...text.split("\n").slice(0, CAP).map((t, i) => {
       const line = el("div", "r");
       line.append(el("span", "n", ""), el("span", "n", String(i + 1)), el("span", "t", t || " "));
       return line;
     }));
   } catch (e) {
-    diffBox.replaceChildren(empty("Can't show it", e instanceof Error ? e.message : String(e)));
+    if (n === diffSeq) diffBox.replaceChildren(empty("Can't show it", e instanceof Error ? e.message : String(e)));
   }
 }
 

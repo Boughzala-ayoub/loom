@@ -5,7 +5,7 @@ import "./remote.css";
 import { $, app, closeSheet, el, hooks, Offline, pref, run, sleep, store, toast, ui, type IconName, type Thread } from "./remote/core";
 import { drawHead, drawList, list, newView, openPane, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
 import { diffView, filesView, read as readChanges, showCommit, showDiff, showFile, showFiles, showSummary, summary } from "./remote/changes";
-import { contextView, draw as drawUsage, read as readUsage, showContext, usageView } from "./remote/usage";
+import { contextView, read as readUsage, showContext, usageView } from "./remote/usage";
 import { read as readSettings, settingsView, wear } from "./remote/settings";
 
 // The theme the PC wore last time, before anything is read: no flash of another one.
@@ -107,7 +107,7 @@ async function refresh() {
   badge.hidden = !waiting;
   if (!list.hidden) drawList();
   if (!paneView.hidden) drawHead();
-  if (!usageView.hidden) drawUsage();
+  if (!usageView.hidden) void readUsage(); // the PC's own reading, every minute
 }
 
 /** The threads every 2 s, the open screen every second, git every 6 s: while the page is in view. */
@@ -134,7 +134,7 @@ async function start() {
   try {
     const s = await run<{ phone: boolean; agents: string[] }>("status");
     app.phoneSize = s.phone;
-    if (s.agents?.length) app.agents = s.agents;
+    if (Array.isArray(s.agents)) app.agents = s.agents; // empty too: an older Loom without the field keeps the defaults
     await refresh();
     void run<{ scheme: string; current: boolean; vars: Record<string, string> }[]>("theme").then((t) => {
       const cur = t.find((x) => x.current);

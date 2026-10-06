@@ -3,7 +3,7 @@
 import { age, agentIcon, el, findPane, go, iconButton, panes, run, threadOf, toast, topBar, type Pane } from "./core";
 
 type Limit = { label: string; group: string; percent: number; severity: string; resetsAt: string | null };
-type Plan = { tier?: string; limits: Limit[]; stale?: boolean; fetchedAt?: string; error?: string; note?: string; bankedResets?: number; bankedResetExpiries?: (string | null)[] };
+type Plan = { tier?: string; limits: Limit[]; stale?: boolean; fetchedAt?: string; nextRefreshAt?: string; cached?: boolean; error?: string; note?: string; bankedResets?: number; bankedResetExpiries?: (string | null)[] };
 type Profile = { buckets: { label: string; tokens: number }[]; series: number[]; drops: { turn: number; pre: number; post: number; trigger: string }[]; ctx: number; est: number };
 
 /** The PC's names: its TIERS and KIND_LABELS. */
@@ -54,18 +54,25 @@ function meter(percent: number, severity = "") {
 export const usageView = el("section", "screen primary alone");
 usageView.id = "usage";
 const body = el("div", "body");
-usageView.append(topBar("Usage", [iconButton("refresh", "Refresh", () => void read(true))]), body);
+const refresh = iconButton("refresh", "Refresh", () => void read(true, true));
+usageView.append(topBar("Usage", [refresh]), body);
 let plans: Record<string, Plan> | null = null;
 let readAt = 0;
 
-export async function read(now = false) {
+/** The PC's last reading, or with `force` a new one, as its refresh button asks. */
+export async function read(now = false, force = false) {
   if (usageView.hidden || (!now && Date.now() - readAt < 60000)) return draw();
   readAt = Date.now();
+  if (force) (refresh.disabled = true), draw();
   try {
-    plans = await run<Record<string, Plan>>("usage", [], { timeout: 60 });
+    plans = await run<Record<string, Plan>>("usage", force ? ["--refresh"] : [], { timeout: 60 });
+    // Forced and still cached: the account's rate limit holds it.
+    const held = force && Object.entries(plans).find(([, p]) => p.cached && p.nextRefreshAt);
+    if (held) toast(`${held[0] === "claude" ? "Claude" : "Codex"} is rate limited: try again after ${new Date(held[1].nextRefreshAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}.`);
   } catch (e) {
     if (now) toast(e instanceof Error ? e.message : String(e), true);
   }
+  if (force) refresh.disabled = false;
   draw();
 }
 
@@ -76,7 +83,7 @@ export function draw() {
     const box = el("section", "provider");
     const head = el("div", "provider-head");
     const who = el("div", "who");
-    who.append(el("b", "", plan?.tier ? `${name} ${TIERS[plan.tier] ?? plan.tier}` : name), el("span", "", plan?.fetchedAt ? `Updated ${age(plan.fetchedAt)} ago` : plans ? "No reading" : "Reading…"));
+    who.append(el("b", "", plan?.tier ? `${name} ${TIERS[plan.tier] ?? plan.tier}` : name), el("span", "", refresh.disabled ? "Refreshing…" : plan?.fetchedAt ? (age(plan.fetchedAt) === "now" ? "Updated just now" : `Updated ${age(plan.fetchedAt)} ago`) : plans ? "No reading" : "Reading…"));
     const page = el("a", "", "Details");
     Object.assign(page, { href: PAGES[kind], target: "_blank", rel: "noreferrer" });
     head.append(agentIcon(kind), who, page);
