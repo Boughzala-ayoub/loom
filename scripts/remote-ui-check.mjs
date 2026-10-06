@@ -40,7 +40,7 @@ async function until(what, f, ms = 8000) {
 }
 function thread(id, name, agent = 'claude') {
   return { id, name, repo: `C:/projects/${name}`, dir: `C:/projects/${name}`, branch: `loom/${name}`, state: 'idle', layout: 'cols', zoomed: null, front: id === 'a', changed: { add: 2, del: 1, files: 3 },
-    panes: [{ id: `${id}1`, ref: `${name}:1`, threadId: id, agent, state: 'idle', title: 'A long agent task title for the phone', lastOutput: '2026-10-06T10:00:00.000Z', model: 'sonnet[1m]', notify: 'inherit', context: { usedTokens: 20000, windowTokens: 200000, remainingPercent: 90 } }] };
+    panes: [{ id: `${id}1`, ref: `${name}:1`, sid: `s-${id}1`, stableId: `k-${id}1`, threadId: id, agent, state: 'idle', title: 'A long agent task title for the phone', lastOutput: '2026-10-06T10:00:00.000Z', model: 'sonnet[1m]', notify: 'inherit', context: { usedTokens: 20000, windowTokens: 200000, remainingPercent: 90 } }] };
 }
 const file = (path, x = ' ', y = 'M') => ({ path, x, y, add: 2, del: 1 });
 const own = id => (id === 'a' ? 'alpha' : 'beta');
@@ -54,7 +54,7 @@ const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 10
 const PUSH_KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8';
 /** push: true for a phone that may get notifications, 'old-key' for one subscribed before Loom's key changed. */
 async function context(width, token = true, push = false) {
-  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false };
+  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false, restarts: 0 };
   const ctx = await browser.newContext({ viewport: { width, height: 800 } });
   if (token) await ctx.addInitScript(() => localStorage.setItem('loom-token', 'fixture-token'));
   if (push) {
@@ -91,18 +91,46 @@ async function context(width, token = true, push = false) {
       if (state.corruptSend) { state.corruptSend = false; return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true,"data":' }); }
       if (state.refuseSend) { state.refuseSend = false; return route.fulfill({ json: { ok: false, error: 'That pane is busy.' } }); }
     }
+    if (c.cmd === 'threads' && state.hold.delete('threads')) await new Promise(r => (state.held.threads = r));
+    // Every threads read waits while blocked: unblock() lets them all go.
+    if (c.cmd === 'threads' && state.blocked) await new Promise(r => state.blocked.push(r));
+    // A command's next reply waits for state.held[cmd]() (menu, status).
+    if (state.hold.delete(c.cmd)) await new Promise(r => (state.held[c.cmd] = r));
     let data;
     const threads = [thread('a', 'Alpha'), thread('b', 'Beta', 'codex')];
+    // siblings: Alpha:2 runs Codex (sameKind: a second Claude) beside Alpha:1's Claude. closeFirst: Alpha:1 closed
+    // on the PC, so the sibling is Alpha:1 now.
+    if (state.siblings) {
+      threads[0].panes.push({ ...threads[0].panes[0], id: 'a2', ref: 'Alpha:2', sid: state.sharedSid ? 's-a1' : 's-a2', stableId: 'k-a2', agent: state.sameKind ? 'claude' : 'codex' });
+      if (state.closeFirst) { threads[0].panes.shift(); threads[0].panes[0].ref = 'Alpha:1'; }
+    }
+    if (state.added) threads[0].panes.push({ ...threads[0].panes[0], id: 'a3', ref: 'Alpha:2', sid: 's-a3', stableId: 'k-a3' }); // added on the PC
+    if (state.renamed) { threads[0].name = 'Renamed'; threads[0].panes[0].ref = 'Renamed:1'; }
+    // Another thread named Alpha: its Claude is Alpha:1 too.
+    if (state.twins) threads.push(thread('c', 'Alpha'));
     if (state.changedTitle) threads[1].panes[0].title = 'Another agent has changed its title';
-    // Loom restarted on the PC: the same agents, with new pane ids.
+    // Loom restarted on the PC (restartPc): the same agents, with new pane ids and the sids saved with them.
     if (state.newIds) for (const t of threads) t.panes[0].id = `new-${t.panes[0].id}`;
+    // again: restarted that many times more (new-a1, again-new-a1, again-again-new-a1).
+    if (state.again) for (const t of threads) t.panes[0].id = 'again-'.repeat(state.again) + t.panes[0].id;
+    // A pane closed on the PC, or from before a restart, isn't Loom's (main.ts cliPane).
+    if ((c.cmd === 'send' || c.cmd === 'submit') && !threads.some(t => t.panes.some(p => p.id === c.argv[0]))) return route.fulfill({ json: { ok: false, error: `No thread "${c.argv[0]}". loomctl threads lists them.` } });
     switch (c.cmd) {
       case 'status': data = { phone: false, agents: state.startups.map(s => s.label), booted: state.booted, updated: state.updated }; break;
-      // The restarted Loom answers a moment later, started anew.
-      case 'relaunch': if (!state.holdRestart) setTimeout(() => state.booted++, 1500); data = { stopping: [], booted: state.booted }; break;
+      case 'relaunch': {
+        // --booted names the Loom to restart (main.ts relaunch): the Loom that replaced it gets a retry
+        // with none of the old one's keys, and restarts nothing.
+        if (c.argv.includes('--booted') && c.argv[c.argv.indexOf('--booted') + 1] !== String(state.booted)) { data = { stopping: [], booted: state.booted }; break; }
+        state.restarts++;
+        // Loom takes it and goes: the answer is cut off, and the retry reaches the Loom that replaced it.
+        if (state.loseRestartReply) { state.loseRestartReply = false; state.booted++; return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true,"data":' }); }
+        // The restarted Loom answers a moment later, started anew.
+        if (!state.holdRestart) setTimeout(() => state.booted++, 1500);
+        data = { stopping: [], booted: state.booted }; break;
+      }
       case 'threads': data = threads; break;
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
-      case 'menu': data = { question: ['May I change this file?'], options: ['Yes, go ahead', 'No, keep it'], keys: ['1', '2'], rev: 'menu-1' }; break;
+      case 'menu': data = { question: ['May I change this file?'], options: ['Yes, go ahead', 'No, keep it'], keys: ['1', '2'], rev: `menu-${c.argv[0]}` }; break;
       case 'read': data = { text: 'sample screen', cols: 120, rows: [{ runs: [{ x: 0, text: 'sample screen' }] }] }; break;
       case 'theme': data = ['loom', 'nord', 'light'].map((name, i) => ({ name, scheme: i === 2 ? 'light' : 'dark', current: i === 0, vars: {} })); break;
       case 'set': data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': 'on', font: '13' }; break;
@@ -141,6 +169,11 @@ const sheetButton = (page, text) => page.locator('#sheet').getByRole('button', {
 async function close(page) { if (await page.locator('#sheet').isVisible()) await sheetButton(page, 'Cancel').click(); }
 async function goto(page, hash, ready) { await page.goto(base + '/' + hash); await page.locator(ready).first().waitFor(); }
 const git = (state, action) => state.calls.filter(c => c.cmd === 'git' && c.argv[1] === action);
+// Loom restarts on the PC: every pane a new id (a1 is new-a1), its sid kept. As in Loom, where a pane id
+// begins with when it was made (main.ts uid), the new Loom boots after a1 and b1 were made, before new-a1.
+const restartPc = state => Object.assign(state, { newIds: true, booted: parseInt('new', 36) });
+const header = page => page.locator('#pane .who b').innerText();
+const unblock = state => { const waiting = state.blocked; state.blocked = null; for (const go of waiting) go(); };
 
 // --- Every view fits its width -------------------------------------------------------
 let checks = 0;
@@ -163,6 +196,7 @@ try {
     await p.locator('#list .seg button').filter({ hasText: 'Activity' }).click(); await p.locator('#list .card').first().waitFor(); await fits(p, width, 'activity');
     await goto(p, '#/pane/a1', '#screen .line'); await fits(p, width, 'pane-question'); await p.click('#keys-btn'); await fits(p, width, 'keyboard');
     await p.locator('#keys [data-key=fn]').click(); await fits(p, width, 'function-keys'); await p.click('#more'); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'pane-menu'); await close(p);
+    await goto(p, '#/pane/zz1/Alpha%3A1', '#pane .who b:has-text("This agent is gone")'); await fits(p, width, 'pane-gone');
     await goto(p, '#/new', '#new form'); await fits(p, width, 'new-thread'); await p.locator('#new [data-kind=checkout]').click(); await fits(p, width, 'new-folder');
     await goto(p, '#/changes/a', '#changes .file'); await fits(p, width, 'changes'); await p.locator('#changes .picker').click(); await fits(p, width, 'thread-picker'); await close(p);
     await p.locator('#changes .file .icon-btn').first().click(); await fits(p, width, 'file-menu'); await sheetButton(p, 'Discard changes').click(); await fits(p, width, 'discard-confirm'); await close(p);
@@ -442,10 +476,10 @@ try {
     const registrationId = regs.find(r => r.scopeURL === `${base}/`).registrationId;
     const deliver = m => cdp.send('ServiceWorker.deliverPushMessage', { origin: base, registrationId, data: JSON.stringify(m) });
     const shown = () => page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map(n => ({ title: n.title, body: n.body, tag: n.tag, url: n.data.url })));
-    // From before Loom restarted: the pane id is gone, its ref still finds Beta.
-    await deliver({ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', url: '/#/pane/gone-id/Beta%3A1', tag: 'b1', at: Date.now() });
+    // A link names the pane and its ref (one from before a restart: "After Loom restarts on the PC").
+    await deliver({ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', url: '/#/pane/b1/Beta%3A1', tag: 'b1', at: Date.now() });
     await until('the notification shows', async () => (await shown()).length === 1);
-    assert.deepEqual(await shown(), [{ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', tag: 'b1', url: '/#/pane/gone-id/Beta%3A1' }]);
+    assert.deepEqual(await shown(), [{ title: 'Beta:1 · Codex finished · 4 min', body: 'All tests pass.', tag: 'b1', url: '/#/pane/b1/Beta%3A1' }]);
     // Loom's mark in the status bar, Loom's logo beside the text.
     assert.deepEqual(await page.evaluate(async () => (await (await navigator.serviceWorker.ready).getNotifications()).map(n => [new URL(n.badge).pathname, new URL(n.icon).pathname])), [['/badge.png', '/icon.png']]);
     assert.equal((await fetch(`${base}/badge.png`)).status, 200);
@@ -458,7 +492,7 @@ try {
       // ponytail: a made-up click can't waitUntil (it throws), but the handler's own work still runs.
       try { self.dispatchEvent(new NotificationEvent('notificationclick', { notification: n })); } catch { /* see above */ }
     });
-    await page.waitForFunction(() => location.hash === '#/pane/gone-id/Beta%3A1');
+    await page.waitForFunction(() => location.hash === '#/pane/b1/Beta%3A1');
     await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
     assert.deepEqual(await shown(), [], 'the tapped one closes');
 
@@ -494,7 +528,7 @@ try {
     await fits(page, 375, 'restarting');
     state.updated = false; // the new Loom has no update waiting
     await reloaded;
-    assert.deepEqual(state.calls.filter(c => c.cmd === 'relaunch').map(c => c.argv), [['--yes']]);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'relaunch').map(c => c.argv), [['--yes', '--booted', '1']]);
     await page.getByRole('button', { name: 'Restart', exact: true }).waitFor();
     assert.equal(await page.locator('#offline').isVisible(), false, 'back: no banner');
     assert.deepEqual(state.errors, []);
@@ -507,13 +541,18 @@ try {
     // the page read, so the page reads the list before resolving it.
     const { ctx, page, state } = await context(375);
     await goto(page, '#/settings', '#settings .group');
-    state.newIds = true;
+    restartPc(state);
     await page.evaluate(() => (location.hash = '#/pane/new-b1/Beta%3A1'));
     await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
     await page.waitForTimeout(2500);
     const reads = state.calls.filter(c => c.cmd === 'read').map(c => c.argv[0]);
     assert.ok(reads.includes('new-b1') && !reads.includes('b1'), `the new pane is read, never the old one: ${reads}`);
-    assert.doesNotMatch(await page.locator('#pane .who b').innerText(), /gone/);
+    assert.doesNotMatch(await header(page), /gone/);
+    // One the old Loom sent: its pane id is from before the restart, and its sid finds Beta.
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await page.evaluate(() => (location.hash = '#/pane/b1/Beta%3A1/k-b1'));
+    await page.waitForFunction(() => location.hash === '#/pane/new-b1/Beta%3A1/k-b1', null, { timeout: 8000 });
+    assert.match(await header(page), /^Beta:1/);
     assert.deepEqual(state.errors, []);
     await ctx.close();
   }
@@ -524,8 +563,8 @@ try {
     await goto(page, '#/pane/b1', '#screen .line');
     await page.fill('#prompt textarea', 'half a message');
     const entries = await page.evaluate(() => history.length);
-    state.newIds = true;
-    await page.waitForFunction(() => location.hash === '#/pane/new-b1/Beta%3A1', null, { timeout: 8000 });
+    restartPc(state);
+    await page.waitForFunction(() => location.hash === '#/pane/new-b1/Beta%3A1/k-b1', null, { timeout: 8000 });
     await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
     const since = state.calls.length;
     await page.waitForTimeout(1500);
@@ -536,7 +575,251 @@ try {
     assert.deepEqual(state.errors, []);
     await ctx.close();
   }
-  console.log('PASS after a PC restart: a notification opens the new pane, and an open agent follows its new id');
+  {
+    // Renamed on the PC while open, then Loom restarts: the agent is found by the name it has now.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1/Alpha%3A1', '#screen .line');
+    state.renamed = true;
+    await page.locator('#pane .who b').filter({ hasText: 'Renamed:1' }).waitFor();
+    await page.waitForTimeout(2500); // a list read since the header changed
+    restartPc(state);
+    await page.waitForFunction(() => location.hash === '#/pane/new-a1/Renamed%3A1/k-a1', null, { timeout: 8000 });
+    assert.match(await header(page), /^Renamed:1/);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS after a PC restart: a notification opens the new pane, old or new, and an open agent follows its new id, renamed too');
+
+  // --- A pane closed on the PC stays gone, and its draft goes to no other agent ----------------------
+  {
+    const { ctx, page, state } = await context(375);
+    state.siblings = true;
+    await goto(page, '#/pane/a1/Alpha%3A1', '#screen .line');
+    await page.fill('#prompt textarea', 'Draft for Claude');
+    state.closeFirst = true; // Alpha:1 closed on the PC: its Codex sibling is Alpha:1 now
+    await page.locator('#pane .who b').filter({ hasText: 'This agent is gone' }).waitFor();
+    await page.waitForTimeout(2500); // another list read: still gone
+    assert.equal(await page.evaluate(() => location.hash), '#/pane/a1/Alpha%3A1');
+    assert.equal(await header(page), 'This agent is gone');
+    await page.click('#prompt button.primary');
+    await page.locator('#toast.error').filter({ hasText: 'No thread "a1"' }).waitFor();
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit').map(c => c.argv[0]), ['a1'], 'the draft goes to no other agent');
+    assert.equal(await page.inputValue('#prompt textarea'), 'Draft for Claude', 'and stays');
+    // A link to it, as a notification from before it closed: gone too.
+    await goto(page, '#/pane/a1/Alpha%3A1', '#pane .who b:has-text("This agent is gone")');
+    await page.waitForTimeout(2500);
+    assert.equal(await page.evaluate(() => location.hash), '#/pane/a1/Alpha%3A1');
+    assert.ok(!state.calls.some(c => c.argv?.[0] === 'a2'), 'nothing is asked of the sibling');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  // Closed, then Loom restarted before the phone looked: the sibling comes back as Alpha:1, a Codex,
+  // a second Claude, or one on the same Claude session. No pane has the closed one's stableId, so
+  // nothing takes its place or its draft.
+  for (const [sibling, set] of [['a Codex', {}], ['a second Claude', { sameKind: true }], ['a Claude on the same session', { sameKind: true, sharedSid: true }]]) {
+    const { ctx, page, state } = await context(375);
+    Object.assign(state, { siblings: true }, set);
+    await goto(page, '#/pane/a1/Alpha%3A1', '#screen .line');
+    await page.fill('#prompt textarea', 'Draft intended for the first pane');
+    restartPc(Object.assign(state, { closeFirst: true }));
+    await page.locator('#pane .who b').filter({ hasText: 'This agent is gone' }).waitFor();
+    await page.waitForTimeout(2500);
+    assert.equal(await page.evaluate(() => location.hash), '#/pane/a1/Alpha%3A1', `${sibling} must not take its place`);
+    await page.click('#prompt button.primary');
+    await page.locator('#toast.error').filter({ hasText: 'No thread "a1"' }).waitFor();
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit').map(c => [c.argv[0], c.stdin]), [['a1', 'Draft intended for the first pane']], `${sibling}: the draft goes to no other agent`);
+    assert.equal(await page.inputValue('#prompt textarea'), 'Draft intended for the first pane', 'and stays');
+    assert.ok(!state.calls.some(c => c.argv?.[0] === 'new-a2'), 'nothing is asked of the sibling');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // Another thread named Alpha has a Claude at Alpha:1 too: the stableId tells them apart.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1/Alpha%3A1', '#screen .line');
+    restartPc(Object.assign(state, { twins: true }));
+    await page.waitForFunction(() => location.hash === '#/pane/new-a1/Alpha%3A1/k-a1', null, { timeout: 8000 });
+    await page.waitForTimeout(1500);
+    assert.ok(!state.calls.some(c => c.argv?.[0] === 'new-c1'), 'the twin is never read');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // Its address keeps the stableId: after a second restart, the page reloaded from it finds the pane again.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1/Alpha%3A1/k-a1', '#screen .line');
+    restartPc(state);
+    await page.waitForFunction(() => location.hash === '#/pane/new-a1/Alpha%3A1/k-a1', null, { timeout: 8000 });
+    // Hidden, the page reads nothing more until the reload.
+    await page.evaluate(() => Object.defineProperty(document, 'hidden', { value: true, configurable: true }));
+    state.again = 1;
+    await page.reload();
+    await page.waitForFunction(() => location.hash === '#/pane/again-new-a1/Alpha%3A1/k-a1', null, { timeout: 8000 });
+    assert.match(await header(page), /^Alpha:1/);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // A page showing a missing pane it knows no stableId for: a link for that same id with its stableId finds it.
+    const { ctx, page, state } = await context(375);
+    restartPc(state);
+    state.again = 1;
+    await goto(page, '#/pane/new-a1/Alpha%3A1', '#pane .who b:has-text("This agent is gone")');
+    await page.evaluate(() => (location.hash = '#/pane/new-a1/Alpha%3A1/k-a1'));
+    await page.waitForFunction(() => location.hash === '#/pane/again-new-a1/Alpha%3A1/k-a1', null, { timeout: 8000 });
+    assert.match(await header(page), /^Alpha:1/);
+    // And one it knows: a later link without the stableId doesn't forget it.
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await page.locator('#settings .group').first().waitFor();
+    state.again = 2; // a third start
+    await page.waitForTimeout(2500); // a list read while Settings is up
+    await page.evaluate(() => (location.hash = '#/pane/again-new-a1/Alpha%3A1'));
+    await page.waitForFunction(() => location.hash === '#/pane/again-again-new-a1/Alpha%3A1/k-a1', null, { timeout: 8000 });
+    assert.match(await header(page), /^Alpha:1/);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS a pane closed on the PC stays gone and keeps its draft, after an unseen restart too, whatever shares its name or session; the stableId follows the pane, in its address across restarts and reloads, and from a link for the id on show');
+
+  // --- A link read late shows nothing once you moved on -------------------------------------------
+  {
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1/Alpha%3A1', '#screen .line');
+    restartPc(state);
+    // A notification from the new Loom names a pane the list doesn't have: the list is read first, and held.
+    state.hold.add('threads');
+    await page.evaluate(() => (location.hash = '#/pane/new-b1/Beta%3A1'));
+    await until('the list read for the link', () => state.held.threads);
+    await page.evaluate(() => (location.hash = '#/pane/a1/Alpha%3A1'));
+    // Meanwhile the next read finds Alpha's new pane.
+    await page.waitForFunction(() => location.hash === '#/pane/new-a1/Alpha%3A1/k-a1', null, { timeout: 8000 });
+    state.held.threads();
+    await page.waitForTimeout(600);
+    assert.equal(await page.evaluate(() => location.hash), '#/pane/new-a1/Alpha%3A1/k-a1');
+    assert.match(await header(page), /^Alpha:1/, "Beta's late link must not take the screen");
+    await page.fill('#prompt textarea', 'For Alpha');
+    await page.click('#prompt button.primary');
+    await until('the message', () => state.calls.some(c => c.cmd === 'submit'));
+    assert.equal(state.calls.find(c => c.cmd === 'submit').argv[0], 'new-a1');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // Beta open, then Settings; Loom restarts on the PC; a notification asks for Alpha. Reading the list
+    // first must not follow Beta, the agent open before, in Alpha's place.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/b1/Beta%3A1', '#screen .line');
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await page.locator('#settings .group').first().waitFor();
+    restartPc(state);
+    const since = state.calls.length;
+    await page.evaluate(() => (location.hash = '#/pane/new-a1/Alpha%3A1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:1' }).waitFor();
+    await page.waitForTimeout(2500);
+    assert.equal(await page.evaluate(() => location.hash), '#/pane/new-a1/Alpha%3A1', 'the address asked for');
+    assert.match(await header(page), /^Alpha:1/);
+    await page.fill('#prompt textarea', 'For Alpha');
+    await page.click('#prompt button.primary');
+    await until('the message', () => state.calls.some(c => c.cmd === 'submit'));
+    assert.equal(state.calls.find(c => c.cmd === 'submit').argv[0], 'new-a1');
+    assert.ok(!state.calls.slice(since).some(c => c.argv?.[0] === 'new-b1'), 'Beta is never shown');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // Beta open; Alpha:2 is added on the PC and its notification tapped before the list has it. While the
+    // list is read, nothing typed, pressed, chosen or asked reaches Beta, and the message stays; then it
+    // goes to Alpha:2.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/b1/Beta%3A1', '#screen .line');
+    await page.click('#keys-btn');
+    Object.assign(state, { added: true, blocked: [] });
+    await page.evaluate(() => (location.hash = '#/pane/a3/Alpha%3A2/k-a3'));
+    await until('the list read for the link', () => state.blocked.length);
+    const since = state.calls.length;
+    await page.fill('#prompt textarea', 'Message intended for Alpha:2');
+    await page.click('#prompt button.primary');
+    await page.locator('#keys [data-key=tab]').click();
+    await page.locator('#keys input').pressSequentially('x');
+    await page.waitForTimeout(500);
+    assert.deepEqual(state.calls.slice(since).filter(c => c.argv?.includes('b1')), [], 'nothing reaches Beta');
+    assert.equal(await page.locator('#question').isVisible(), false, "Beta's question is gone");
+    await page.click('#more');
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('#sheet').isVisible(), false, 'no pane actions');
+    assert.equal(await page.inputValue('#prompt textarea'), 'Message intended for Alpha:2', 'what was typed stays');
+    assert.equal(await header(page), 'Opening the agent');
+    for (const width of [320, 375, 768, 901, 1024, 1280]) {
+      await page.setViewportSize({ width, height: 800 });
+      await fits(page, width, 'notification-pending');
+    }
+    await page.setViewportSize({ width: 375, height: 800 });
+    unblock(state);
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:2' }).waitFor();
+    await page.click('#prompt button.primary');
+    await until('the message', () => state.calls.some(c => c.cmd === 'submit'));
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit').map(c => [c.argv[0], c.stdin]), [['a3', 'Message intended for Alpha:2']]);
+    assert.ok(!state.calls.some(c => c.argv?.includes('b1') && c.key), 'Beta was never changed');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // The same, left before the list came: back to Beta, the late read opens nothing, and Beta takes the message.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/b1/Beta%3A1', '#screen .line');
+    Object.assign(state, { added: true, blocked: [] });
+    await page.evaluate(() => (location.hash = '#/pane/a3/Alpha%3A2/k-a3'));
+    await until('the list read for the link', () => state.blocked.length);
+    await page.evaluate(() => (location.hash = '#/pane/b1/Beta%3A1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
+    unblock(state);
+    await page.waitForTimeout(600);
+    assert.equal(await page.evaluate(() => location.hash), '#/pane/b1/Beta%3A1');
+    assert.match(await header(page), /^Beta:1/);
+    assert.ok(!state.calls.some(c => c.argv?.includes('a3')), 'Alpha:2 is never opened');
+    await page.fill('#prompt textarea', 'For Beta');
+    await page.click('#prompt button.primary');
+    await until('the message', () => state.calls.some(c => c.cmd === 'submit'));
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit').map(c => c.argv[0]), ['b1']);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log("PASS a link whose list read completes late leaves the screen you moved to; after a restart a link opens its own agent, never the one open before; while a link's pane is looked up nothing reaches the agent open before");
+
+  // --- Beta's question or actions, read late, stay Beta's ---------------------------------------------
+  // Beta's question (menu) or its actions sheet (status) answers after you moved on: to a link's pane being
+  // looked up, to another agent, or to Settings. Beta's buttons and sheet don't come back, and the ones
+  // you then use answer the agent on show.
+  for (const [where, hash, target] of [['a link being looked up', '#/pane/a3/Alpha%3A2/k-a3', 'a3'], ['another agent', '#/pane/a1/Alpha%3A1', 'a1'], ['Settings', '#/settings', 'b1']]) {
+    for (const late of ['menu', 'status']) {
+      const { ctx, page, state } = await context(375);
+      if (late === 'menu') state.hold.add('menu');
+      await goto(page, '#/pane/b1/Beta%3A1', '#screen .line');
+      if (late === 'status') { state.hold.add('status'); await page.click('#more'); }
+      await until(`Beta's ${late} is asked`, () => state.held[late]);
+      Object.assign(state, { added: true }, target === 'a3' ? { blocked: [] } : {}); // Alpha:2 added on the PC since
+      await page.evaluate(h => (location.hash = h), hash);
+      if (target === 'a3') await until('the list read for the link', () => state.blocked.length);
+      if (target === 'a1') await page.locator('#question button').first().waitFor(); // Alpha's own question
+      state.held[late]();
+      await page.waitForTimeout(500);
+      const what = `${late} late, at ${where}`;
+      assert.equal(await page.locator('#sheet').isVisible(), false, `${what}: Beta's actions don't open`);
+      if (target === 'a3') assert.equal(await page.locator('#question').isVisible(), false, `${what}: Beta's question isn't drawn`);
+      // Then the agent on show: Alpha:2 once read, Alpha:1, or Beta again after Settings.
+      if (target === 'a3') { unblock(state); await page.locator('#pane .who b').filter({ hasText: 'Alpha:2' }).waitFor(); }
+      if (target === 'b1') await page.evaluate(() => (location.hash = '#/pane/b1/Beta%3A1'));
+      await page.locator('#question button').first().click();
+      await page.click('#more');
+      await sheetButton(page, 'Clear the input (Ctrl+U)').click();
+      await until(`${what}: the answer and the key`, () => state.calls.some(c => c.cmd === 'choose') && state.calls.some(c => c.cmd === 'keys'));
+      assert.deepEqual(state.calls.filter(c => c.cmd === 'choose' || c.cmd === 'keys').map(c => [c.cmd, c.argv[0], c.argv.at(-1)]),
+        [['choose', target, `menu-${target}`], ['keys', target, 'ctrl-u']], `${what}: both answer the agent on show`);
+      assert.deepEqual(state.errors, []);
+      await ctx.close();
+    }
+  }
+  console.log("PASS Beta's question or actions read late, after a link's lookup, another agent or Settings, never come back; the agent on show answers");
 
   // --- A restart waits for the Loom that replaces the one asked ----------------------------------
   {
@@ -560,6 +843,27 @@ try {
     assert.deepEqual(state.errors, []);
     await ctx.close();
   }
+  {
+    // Loom 1 takes the restart and goes, cutting off its answer. The retry, with the same key, reaches
+    // Loom 2, which has none of Loom 1's keys: it must not restart too.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/settings', '#settings .group');
+    state.loseRestartReply = true;
+    const reloaded = page.waitForEvent('load', { timeout: 20000 });
+    await page.getByRole('button', { name: 'Restart', exact: true }).click();
+    await sheetButton(page, 'Restart').click();
+    await reloaded;
+    await page.getByRole('button', { name: 'Restart', exact: true }).waitFor();
+    await page.waitForTimeout(2000);
+    const asked = state.calls.filter(c => c.cmd === 'relaunch');
+    assert.equal(asked.length, 2, 'the cut-off request is asked again');
+    assert.ok(asked[0].key && asked[0].key === asked[1].key, 'with its key');
+    assert.deepEqual([state.restarts, state.booted], [1, 2], 'Loom 2 keeps running');
+    assert.deepEqual(asked.map(c => c.argv), [['--yes', '--booted', '1'], ['--yes', '--booted', '1']], 'both name Loom 1');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS a restart whose answer was lost restarts Loom once: the retry reaches its replacement, which keeps running');
   // Its confirm and the wait, at every width.
   for (const width of [320, 375, 768, 901, 1024, 1280]) {
     const { ctx, page, state } = await context(width);

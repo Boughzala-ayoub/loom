@@ -606,10 +606,10 @@ if (check(306)) {
 if (check(308)) {
   // A task notice the policy sends goes to the phones: what ended, and where a tap goes.
   const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
-  const p = { id: "p1", th, agent: "codex" } as any;
+  const p = { id: "p1", th, agent: "codex", stableId: "k1" } as any;
   th.panes.push(p);
   const sent: any[] = [], notifyHistory: any[] = [];
-  const c = fixture({ threads: [th], notifyHistory, paneById: (id: string) => th.panes.find((x) => x.id === id), paneName: () => "work:1", liveScreen: () => "",
+  const c = fixture({ threads: [th], notifyHistory, current: null, dashboardOpen: false, paneRows: () => "", paneById: (id: string) => th.panes.find((x) => x.id === id), paneName: () => "work:1", liveScreen: () => "",
     push: async (m: any) => { sent.push(m); return { sent: 1, failed: [] }; } });
   const at = Date.now(), t = { id: "t1", pane: "p1", startedAt: at - 4 * 60_000 } as any;
   const notice = (seq: number, state: string, more = {}) => lastFixture.pushNotice(t, { seq, task: "t1", at, state, signal: "end", ...more });
@@ -617,7 +617,7 @@ if (check(308)) {
   const response = task.promptMatch("All tests pass.");
   assert.match(response, /^[0-9a-f]{16}$/);
   await notice(5, "completed", { response });
-  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{ title: "work:1 · Codex finished · 4 min", body: "Its task is done.", tag: "p1", url: "/#/pane/p1/work%3A1" }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [{ title: "work:1 · Codex finished · 4 min", body: "Its task is done.", tag: "p1", url: "/#/pane/p1/work%3A1/k1" }]);
   await notice(6, "working");
   assert.equal(sent.length, 1, "working is no notice");
   await notice(7, "approval");
@@ -631,8 +631,10 @@ if (check(308)) {
   assert.equal(sent.length, 3, "a pane that's gone sends nothing");
   // loomctl remote push test: a notification that opens the first agent.
   assert.match((await c.remote.run({ _: ["push", "test"] })).text, /Sent to 1 phone/);
-  assert.deepEqual([sent[3].tag, sent[3].url], ["loom-test", "/#/pane/p1/work%3A1"]);
+  assert.deepEqual([sent[3].tag, sent[3].url], ["loom-test", "/#/pane/p1/work%3A1/k1"]);
   await assert.rejects(async () => c.remote.run({ _: ["push"] }), /remote push takes test/);
+  // The pane's stableId, in the links above and in its JSON: the pane Loom restores after a restart has it too.
+  assert.equal((await c.panes.run({ _: [] })).data[0].stableId, "k1");
   console.log("ok   task notices become phone notifications that open the agent, as the policy allows; remote push test");
 }
 
@@ -653,6 +655,20 @@ if (check(309)) {
   await c.relaunch.run({ _: [] });
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(relaunched, 2, "nothing working: no --yes needed");
-  assert.equal(typeof (await c.status.run()).data.booted, "number", "status says when this Loom started");
-  console.log("ok   relaunch wants --yes while a pane works and restarts after its answer; status says when Loom started");
+  const booted = (await c.status.run()).data.booted;
+  assert.equal(typeof booted, "number", "status says when this Loom started");
+  // --booted: the Loom it names restarts. Its replacement, a new process with a new booted and none of
+  // the old one's keys, gets the retry of a request whose answer was lost, and restarts nothing.
+  await c.relaunch.run({ _: [], yes: true, booted: String(booted) });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(relaunched, 3, "the Loom it names restarts");
+  await new Promise((r) => setTimeout(r, 5));
+  let replaced = 0;
+  const next = fixture({ threads: [th], current: th, dashboardOpen: false, paneRows: () => "", paneName: () => "work:1", relaunch: () => { replaced++; } });
+  assert.notEqual((await next.status.run()).data.booted, booted, "the replacement started later");
+  const retry = await next.relaunch.run({ _: [], yes: true, booted: String(booted) });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(replaced, 0, "the replacement keeps running");
+  assert.match(retry.text, /already restarted/);
+  console.log("ok   relaunch wants --yes while a pane works and restarts after its answer; status says when Loom started; --booted restarts only that Loom");
 }

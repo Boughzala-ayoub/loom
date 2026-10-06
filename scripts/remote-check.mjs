@@ -205,7 +205,7 @@ try {
     const message = JSON.parse(plain.subarray(0, -1));
     assert.equal(message.title, 'Loom');
     assert.equal(message.tag, 'loom-test');
-    assert.match(message.url, /^\/#\/pane\/[^/]+\/alpha%3A1$/, 'the test opens the first agent');
+    assert.match(message.url, /^\/#\/pane\/[^/]+\/alpha%3A1\/[0-9a-f-]{36}$/, 'the test opens the first agent, its stableId too');
     // Gone from its push service: Loom forgets it.
     answer = 410;
     assert.notEqual((await pushTest()).code, 0, 'a push no phone got fails');
@@ -551,6 +551,8 @@ try {
   // Restarting from the phone's Settings: Loom closes safely, starts again on
   // the same profile with its threads, and the page reloads from the new one.
   const before = ok('--json', 'status').json.booted;
+  const was = ok('--json', 'threads').json[0].panes[0];
+  assert.match(was.stableId ?? '', /^[0-9a-f-]{36}$/, 'each pane has a stableId');
   await page.goto(`${base}/#/settings`);
   await page.getByRole('button', { name: 'Restart', exact: true }).click();
   const reloaded = page.waitForEvent('load', { timeout: 90000 });
@@ -567,7 +569,15 @@ try {
     .stdout.trim().split(/\s+/).map(Number).filter(Boolean);
   assert.equal(pids.length, 1, 'one Loom on the profile: the old one has gone');
   child = { pid: pids[0] };
-  console.log('PASS restarting Loom from the phone: it closes, starts again on its profile, and the page reloads from it');
+  // The pane came back with a new id and the stableId saved with it, and a notification's link from
+  // before the restart finds it by that.
+  const back = ok('--json', 'threads').json[0].panes[0];
+  assert.notEqual(back.id, was.id, 'a new id');
+  assert.equal(back.stableId, was.stableId, 'the same stableId');
+  await page.goto(`${base}/#/pane/${encodeURIComponent(was.id)}/${encodeURIComponent(was.ref)}/${was.stableId}`);
+  await page.waitForFunction(h => location.hash === h, `#/pane/${encodeURIComponent(back.id)}/${encodeURIComponent(back.ref)}/${was.stableId}`, { timeout: 15000 });
+  assert.ok((await paneName(page)).startsWith(back.ref));
+  console.log('PASS restarting Loom from the phone: it closes, starts again on its profile, and the page reloads from it; a pane keeps its stableId and an old link finds it');
 
   // Revoked, the page asks to pair again.
   ok('remote', 'revoke');

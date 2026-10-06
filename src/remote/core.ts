@@ -7,6 +7,7 @@ import type { Agent } from "../agent";
 
 export type Pane = {
   id: string; ref: string; threadId: string; agent: Agent; title: string; state: string; lastOutput: string | null;
+  stableId?: string; // the same pane's id after Loom restarts, when `id` is new (older Looms: none)
   model: string | null; effort: string | null; notify: string;
   context: { usedTokens: number; windowTokens: number; remainingPercent: number } | null;
 };

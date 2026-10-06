@@ -1026,7 +1026,7 @@ function applyTheme(t: Theme) {
 
 /** A pane as saved: the command it booted with, the claude session it owns,
  * and the session's last-known effort level (hook-reported; resume re-pins it). */
-type PaneState = { cmd: string; startupSettings?: { model?: string; effort?: string }; sid?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off"; notifyIds?: string[] };
+type PaneState = { cmd: string; startupSettings?: { model?: string; effort?: string }; sid?: string; stableId?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off"; notifyIds?: string[] };
 /** A pane's task notices: every pane's setting (`inherit`), or its own on or off. */
 type PaneNotify = "inherit" | "on" | "off";
 /** Every pane's task notices, which kinds, and what a pane made from now on starts with. */
@@ -1551,6 +1551,8 @@ class Pane {
   notify: PaneNotify = "inherit";
   /** Runtime ids of this saved pane, including launches from earlier Loom runs. */
   notifyIds: string[] = [this.id];
+  /** This pane's own id across restarts, where `id` is new each start: saved with it and restored only into it. */
+  stableId: string = crypto.randomUUID();
   /** Enters a person gave it in Loom's window that may have sent a prompt no
    * task holds yet (manualEnter), oldest first. Never their text. */
   manual: ManualEnter[] = [];
@@ -2631,6 +2633,7 @@ class Thread {
     // A restored pane keeps its own setting; a new one starts as notifyPolicy.newPanes says.
     p.notify = st.notify === "on" || st.notify === "off" ? st.notify : restoring ? "inherit" : notifyPolicy.newPanes;
     if (restoring && Array.isArray(st.notifyIds)) p.notifyIds = [...new Set([...st.notifyIds.filter((id) => typeof id === "string" && id), p.id])];
+    if (restoring && typeof st.stableId === "string" && st.stableId) p.stableId = st.stableId;
     if (startupTurns) for (const id of p.notifyIds) startupNotify.set(id, p.notify);
     p.paintBell();
     this.panes.push(p);
@@ -2915,7 +2918,7 @@ const flushSave = (): Promise<unknown> => {
         branch: t.branch,
         name: t.name,
         open: t.open,
-        panes: t.panes.map((p) => ({ cmd: p.startup, startupSettings: p.startupSettings, sid: p.sid, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify,
+        panes: t.panes.map((p) => ({ cmd: p.startup, startupSettings: p.startupSettings, sid: p.sid, stableId: p.stableId, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify,
           notifyIds: p.notifyIds.filter((id) => journalUnreadable || id === p.id || typedTasks().some((t) => t.pane === id)) })),
         layout: t.layout,
         active: t.panes.indexOf(t.active!),
@@ -4073,7 +4076,8 @@ async function pushNotice(t: Task, e: TaskEvent) {
     ? (menu ? [menu.question.join(" ").trim(), ...menu.options.map((o, i) => `${menu.keys?.[i] ?? i + 1}. ${o}`)].join("\n") : "It's waiting on you.")
     // Never e.response: it names the agent's answer (promptMatch), it isn't the answer.
     : e.detail || (kind === "finish" ? "Its task is done." : "Its task failed.");
-  await push({ title, body: body.slice(0, 600), tag: p.id, url: `/#/pane/${encodeURIComponent(p.id)}/${encodeURIComponent(ref)}` });
+  // stableId finds the pane again once Loom restarts and the id is gone (remote/agents.ts follow).
+  await push({ title, body: body.slice(0, 600), tag: p.id, url: `/#/pane/${encodeURIComponent(p.id)}/${encodeURIComponent(ref)}/${encodeURIComponent(p.stableId)}` });
 }
 
 /** The last 500 tasks to finish stay, however many are open. */
@@ -7724,7 +7728,8 @@ function paneSettings(p: Pane) {
 }
 const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
-  title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, dir: p.th.dir, front: current === p.th && p.th.active === p,
+  // stableId: the same pane's id after Loom restarts, when its id is new.
+  title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, stableId: p.stableId, dir: p.th.dir, front: current === p.th && p.th.active === p,
   zoomed: p.th.zoomed === p,
   // Which launch this is (send --gen takes it), and what a shell with Loom's prompt last reported.
   generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit, atPrompt: p.atPrompt, turns: p.turns, notify: p.notify,
@@ -8158,10 +8163,12 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   relaunch: {
-    usage: "relaunch [--yes]",
-    help: "Restart Loom: it closes as closing its window does, then starts again, after an update the new version. Every pane comes back, agents in their sessions. A pane working on something stops, so with one working it wants --yes. status says updated: true while an update waits for this.",
-    options: { yes: "bool" },
+    usage: "relaunch [--yes] [--booted <ms>]",
+    help: "Restart Loom: it closes as closing its window does, then starts again, after an update the new version. Every pane comes back, agents in their sessions. A pane working on something stops, so with one working it wants --yes. status says updated: true while an update waits for this. --booted restarts only the Loom that started then (status's booted): a retry that reaches the Loom that replaced it restarts nothing.",
+    options: { yes: "bool", booted: "string" },
     run: (a) => {
+      // A retried request whose key died with the Loom it restarted: this one is its replacement.
+      if (a.booted !== undefined && a.booted !== String(bootedAt)) return { data: { stopping: [], booted: bootedAt }, text: `The Loom that started at ${a.booted} has already restarted; this one keeps running.` };
       const busy = working().map(paneName);
       if (busy.length && !flag(a, "yes")) throw new Error(`${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: a restart stops ${busy.length === 1 ? "it" : "them"}. Add --yes.`);
       // After this answer has gone out.
@@ -9072,7 +9079,7 @@ const CLI: Record<string, CliCommand> = {
         if (a._[1] !== "test" || a._.length > 2) throw new Error("remote push takes test.");
         const p = threads.flatMap((t) => t.panes).find((x) => x.agent !== "shell") ?? threads[0]?.panes[0];
         const r = await push({ title: "Loom", body: p ? `Notifications work. Tap to open ${paneName(p)}.` : "Notifications work.", tag: "loom-test",
-          url: p ? `/#/pane/${encodeURIComponent(p.id)}/${encodeURIComponent(paneName(p))}` : "/" });
+          url: p ? `/#/pane/${encodeURIComponent(p.id)}/${encodeURIComponent(paneName(p))}/${encodeURIComponent(p.stableId)}` : "/" });
         if (!r.sent && r.failed.length) throw new Error(`The test didn't reach a phone: ${r.failed.join("; ")}`);
         return { data: r, text: r.sent ? `Sent to ${r.sent} phone${r.sent === 1 ? "" : "s"}.${r.failed.length ? ` Failed: ${r.failed.join("; ")}` : ""}` : "No phone has notifications on. Turn them on in the phone's Settings." };
       }

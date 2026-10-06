@@ -145,6 +145,7 @@ shows one.
 | `id`, `ref`, `thread`, `threadId`, `n` | The pane's id, its `<thread>:<n>`, and its thread |
 | `agent`, `title`, `state`, `front` | What runs there, its title, its state, whether it's in front |
 | `dir`, `sessionId` | The thread's folder; the agent session it resumes |
+| `stableId` | The pane's own id across restarts, saved with it: after Loom restarts, the pane has a new `id` and the same `stableId`. No two panes share one. |
 | `generation` | Changes whenever the pane stops or starts. `--gen` takes it. |
 | `turns` | Agent panes: turns finished since it started. See [Knowing when work finished](#knowing-when-work-finished). |
 | `commands`, `failed`, `exit` | Shell panes: commands finished since it started, and whether the last failed, with its exit code (`null` when PowerShell can't say which) |
@@ -169,7 +170,7 @@ shows one.
 | `layout <cols\|rows\|grid> [--thread T]` | How a thread arranges its panes. |
 | `zoom [pane]` | Let a pane fill its thread, or put it back. |
 | `window <show\|minimize\|maximize\|restore\|phone>` | Bring the window up, resize it, or toggle the phone size. |
-| `relaunch [--yes]` | Restart Loom: it closes as closing its window does, then starts again, after an update the new version. Every pane comes back, agents in their sessions. A pane working on something stops, so with one working it wants `--yes`. Loom answers first, with its `booted`, then closes: the restart is done once `status` answers with another. Preferences on the PC and the phone's Settings have a Restart button that says so when an update is installed. |
+| `relaunch [--yes] [--booted <ms>]` | Restart Loom: it closes as closing its window does, then starts again, after an update the new version. Every pane comes back, agents in their sessions. A pane working on something stops, so with one working it wants `--yes`. Loom answers first, with its `booted`, then closes: the restart is done once `status` answers with another. `--booted` restarts only the Loom that started then: a retry that reaches the Loom that replaced it restarts nothing (the `--key` that would have caught it went with the old Loom). Preferences on the PC and the phone's Settings have a Restart button that says so when an update is installed. |
 | `vscode [thread]` | Open a thread's folder in VS Code. |
 
 The three steps of `window show` (unminimize, show, focus) each time out after 2 seconds. A stuck step does not block later commands. Windows may still finish that step after loomctl reports a timeout.

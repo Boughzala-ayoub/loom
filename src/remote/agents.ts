@@ -388,10 +388,11 @@ let older = false; // older lines on screen: the live view waits
 let keysOpen = pref("loom-keys", "") === "1";
 let wrap = pref("loom-wrap", "1") === "1";
 
-export function showPane(id: string) {
+/** null: a link names a pane the list doesn't have yet (remote.ts), so none is open until it is read:
+ * nothing typed, chosen or asked goes to the one open before, and what was typed stays. */
+export function showPane(id: string | null, stableId = "") {
   if (id !== open) {
     open = id;
-    openRef = findPane(id)?.ref ?? "";
     openState = "";
     shown = null;
     question = "";
@@ -407,13 +408,38 @@ export function showPane(id: string) {
       if (threadOf(p)?.zoomed !== p.id) await run("zoom", [p.id], { change: true });
     });
   }
+  // The pane's own, else a link's (#/pane/<id>/<ref>/<stableId>), even for the id already open; a link
+  // without one keeps what was known for that id, a lookup (null) in between too.
+  if (id !== null) {
+    openStable = findPane(id)?.stableId || stableId || (stableFor === id ? openStable : "");
+    stableFor = id;
+  }
   drawHead();
   drawKeys();
   reread();
 }
 export const openPane = () => open;
-let openRef = ""; // the open agent's ref: it finds the agent again once Loom restarts and its pane id is gone
-export const openPaneRef = () => openRef;
+// The open agent's stableId, and the pane id it was known for: it finds the agent again once Loom
+// restarts and its pane id is gone.
+let openStable = "", stableFor: string | null = null;
+
+/** After each read of the list. Once the open agent's pane is missing from it, the one pane with its
+ * stableId (saved with each pane, never shared) is the one Loom restored it as: the address follows,
+ * keeping that id, without a new history entry. A pane closed on the PC has no such pane, so it stays
+ * gone and what was typed for it goes to no other agent. Only while the address names this pane: an
+ * agent open before stays out of the way of one a link asks for. */
+export function follow() {
+  const id = open;
+  const p = findPane(id);
+  if (p) return void (openStable = p.stableId || openStable); // shown before the list had it
+  const named = location.hash.startsWith("#/pane/") ? decodeURIComponent(location.hash.split("/")[2] ?? "") : null;
+  if (!id || !openStable || stableFor !== id || named !== id) return;
+  const again = panes().filter((q) => q.stableId === openStable);
+  if (again.length !== 1) return;
+  history.replaceState(null, "", `#/pane/${encodeURIComponent(again[0].id)}/${encodeURIComponent(again[0].ref)}/${encodeURIComponent(openStable)}`);
+  showPane(again[0].id);
+  showList(again[0].id);
+}
 
 /** Opening a waiting agent, or tapping its screen, clears the wait as a click on its pane does on the PC. */
 function seen() {
@@ -425,8 +451,8 @@ screenBox.addEventListener("click", seen);
 export function drawHead() {
   const p = findPane(open);
   if (!p) {
-    whoName.textContent = "This agent is gone";
-    whoTitle.textContent = "Loom restarted, or it was closed. Go back to the list.";
+    whoName.textContent = open ? "This agent is gone" : "Opening the agent";
+    whoTitle.textContent = open ? "Loom restarted, or it was closed. Go back to the list." : "Reading Loom's agents.";
     stateChip.textContent = "";
     return;
   }
@@ -543,7 +569,11 @@ export async function screen() {
   if (id !== open || older || s.text === shown) return;
   shown = s.text;
   draw(s);
-  drawQuestion(id, await run<Menu | null>("menu", [id]).catch(() => null));
+  const m = await run<Menu | null>("menu", [id]).catch(() => null);
+  // Its buttons answer this pane: not once another is open or being looked up (null), nor off screen.
+  // Not drawn, it is read again.
+  if (id !== open || paneView.hidden) return void (shown = null);
+  drawQuestion(id, m);
 }
 
 /** Toggles Loom's phone size on the PC, with the open pane filling the window. */
@@ -685,6 +715,7 @@ async function paneActions() {
   if (!p) return;
   // Someone at the PC may have changed the window since.
   app.phoneSize = (await run<{ phone: boolean }>("status").catch(() => ({ phone: app.phoneSize }))).phone;
+  if (p.id !== open || paneView.hidden) return; // another opened or looked up meanwhile, or the view was left
   const t = threadOf(p)!;
   const items: (Node | string)[] = [];
   if (p.agent === "claude") {

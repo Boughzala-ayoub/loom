@@ -117,9 +117,13 @@ async function restartLoom() {
   const detail = busy.length ? `${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: restarting stops ${busy.length === 1 ? "it" : "them"}. Every agent comes back in its session.`
     : "Loom closes safely on the PC and starts again, the new version if you just updated. Every agent comes back in its session.";
   if (!(await confirmSheet("Restart Loom?", detail, "Restart", busy.length > 0))) return;
-  // The Loom that takes the request says which it is: Settings' reading may be of one restarted since.
+  // Asked of the Loom running now (Settings' reading may be of one restarted since), by its booted: a retry of
+  // a request cut off as it restarted reaches the Loom that replaced it, which then restarts nothing.
   let was: number | undefined;
-  if (!(await act(async () => { was = (await run<{ booted: number }>("relaunch", ["--yes"], { change: true })).booted; }))) return;
+  if (!(await act(async () => {
+    was = (await run<Status>("status")).booted;
+    await run("relaunch", ["--yes", "--booted", String(was)], { change: true });
+  }))) return;
   app.restarting = true;
   const banner = $("#offline");
   banner.classList.add("calm");
