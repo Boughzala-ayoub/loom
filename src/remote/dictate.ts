@@ -118,10 +118,11 @@ export const repaint = { mic: () => {} };
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopNow?.(true, false); });
 window.addEventListener("hashchange", () => stopNow?.(true, false));
 
-type Land = (text: string, pick: Pick, byHand: boolean) => void;
+type Land = (text: string, pick: Pick, byHand: boolean) => void | Promise<void>;
 
 /** Records until stopped, then hands what whisper heard to `land`, with the pick it was made with
- * and whether you stopped it yourself. A cancel uploads nothing. */
+ * and whether you stopped it yourself. A cancel uploads nothing. The next clip lands once `land`'s
+ * promise, a send it started, has settled. */
 export async function record(land: Land) {
   if (stopNow) return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") return toast("This browser can't record here. Open Loom's https address in Chrome.", true);
@@ -222,19 +223,21 @@ async function take(land: Land, before: Promise<void>) {
   if (!send) return repaint.mic();
   busy++;
   repaint.mic();
+  let sending: void | Promise<void> = undefined;
   try {
     const clip = new Blob(parts, { type });
     if (!clip.size) return toast("Nothing was recorded.");
     const p = await pick;
     const text = await post(await decode(clip), p.lang?.code ?? "en");
     await before;
-    land(text, p, byHand);
+    sending = land(text, p, byHand);
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), true);
   } finally {
     busy--;
     repaint.mic();
   }
+  await sending; // transcribed: the mic is free while it is sent, the next clip's landing isn't
 }
 
 /** The bars: the mic's own peak, tapered to the ends and rippling outward, flat while you don't talk

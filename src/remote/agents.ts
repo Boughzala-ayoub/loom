@@ -689,8 +689,12 @@ const toPane = sequence<{ id: string; t: Typed }>(async (items) => {
 });
 keyboard(keysBox, "Type here: each key goes straight to the agent", (t) => { if (open) toPane({ id: open, t }); });
 
-promptForm.onsubmit = async (e) => {
+promptForm.onsubmit = (e) => {
   e.preventDefault();
+  void sendPrompt();
+};
+/** Sends what the box holds, and settles once Loom has answered: a dictated ⏎ waits on it. */
+async function sendPrompt() {
   const text = promptText.value.trim();
   if (!text || !open) return;
   sendBtn.disabled = true;
@@ -709,7 +713,7 @@ promptForm.onsubmit = async (e) => {
   shown = null;
   setTimeout(reread, 300);
   sendBtn.disabled = false;
-};
+}
 // The box grows with what you type, up to 40% of the screen.
 promptText.addEventListener("input", () => {
   promptText.style.height = "";
@@ -734,8 +738,10 @@ function dictate() {
       promptText.value = add(promptText.value);
       promptText.dispatchEvent(new Event("input")); // grows to fit
     } else typed.set(key, add(typed.get(key) ?? ""));
+    // A ⏎ sends it, and the next clip lands only once this one has gone: landing on a box still being
+    // sent would send this one twice.
     if (here && visit === app.visit) {
-      if (pick.prefix?.enter && byHand) promptForm.requestSubmit();
+      if (pick.prefix?.enter && byHand) return sendPrompt();
     } else toast(`What you said to ${p.ref} is in its Message box.`);
   });
 }

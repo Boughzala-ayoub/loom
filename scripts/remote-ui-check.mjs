@@ -1474,6 +1474,50 @@ try {
     await ctx.close();
   }
   console.log('PASS a clip whose recorder stops late still lands before the clip recorded after it, and a cancelled one holds up nothing');
+  {
+    // Two clips with a sending prefix, the first transcribed last: each goes as its own message, the second
+    // once the first's submit has answered, so neither sentence goes twice.
+    const { ctx, page, state } = await context(375);
+    state.dictation.prefixes[0].enter = true;
+    await goto(page, '#/pane/a1', '#screen .line');
+    const sent = () => state.calls.filter(c => c.cmd === 'submit').map(c => c.stdin);
+    state.hold.add('dictate');
+    await dictate(page, 500);
+    await until('the first clip is on its way', () => state.held.dictate);
+    const first = state.held.dictate;
+    state.heard = 'second sentence';
+    await dictate(page, 500);
+    await until('the second clip answered', () => clips(state)[1]?.answered);
+    state.heard = 'first sentence';
+    state.hold.add('submit');
+    first();
+    await until('the first submit is on its way', () => state.held.submit);
+    await page.waitForTimeout(300);
+    assert.deepEqual(sent(), ['/prompt first sentence'], 'the second waits for the first to go');
+    state.held.submit();
+    await until('the second goes', () => sent().length === 2);
+    assert.deepEqual(sent(), ['/prompt first sentence', '/prompt second sentence']);
+    await until('the box empties', async () => (await box(page)) === '');
+    // The first refused: its text stays in the box, and the second is not dropped but lands after it and
+    // goes with it, so each sentence reaches the agent once.
+    state.held.dictate = null;
+    state.hold.add('dictate');
+    await dictate(page, 500);
+    await until('the third clip is on its way', () => state.held.dictate);
+    const third = state.held.dictate;
+    state.heard = 'fourth sentence';
+    await dictate(page, 500);
+    await until('the fourth clip answered', () => clips(state)[3]?.answered);
+    state.heard = 'third sentence';
+    state.refuseSend = true;
+    third();
+    await until('the fourth goes', () => sent().length === 4);
+    assert.deepEqual(sent().slice(2), ['/prompt third sentence', '/prompt third sentence fourth sentence']);
+    await until('the box empties again', async () => (await box(page)) === '');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS two clips with a sending prefix go as two messages, the second once the first has gone, and after a refused one it lands in the kept draft and goes with it');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));
