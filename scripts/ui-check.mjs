@@ -279,6 +279,9 @@ try {
       const to = async name => assert.equal((await cli('show', name)).ok, true, `show ${name}`);
       const box = () => page.inputValue('#commit-msg');
       const idle = () => page.waitForFunction(() => !document.querySelector('#commit-btn').disabled && !document.querySelector('#changes-more').disabled);
+      // A confirmed action starts after the dialog closes: wait for its git call, then for it to finish.
+      const ran = (word, n) => page.waitForFunction(([word, n]) => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args.includes(word)).length >= n, [word, n]);
+      const settle = async () => { await idle(); await page.waitForTimeout(300); };
       const shown = text => page.locator('#pane-menu:not(.hidden) .menu-item').filter({ hasText: text }).count();
       const repoItem = async label => {
         await page.click('#changes-more');
@@ -338,7 +341,8 @@ try {
       await page.waitForSelector('#confirm[open]');
       await to('review-keyboard-navigation');
       await page.click('#confirm-action');
-      await idle();
+      await ran('drop', 1);
+      await settle();
       assert.deepEqual(await gitCalls('stash').then(c => c.filter(a => a[2] === 'drop')), [[A, 'stash', 'drop', 'stash@{0}']], 'A drop confirmed after a switch drops from the listed thread');
       // A row still on screen while the next thread's status loads acts on its own thread.
       await to('search-polish');
@@ -371,13 +375,15 @@ try {
       await page.evaluate(() => { window.qa.failGit = 'commit'; });
       await amend();
       await page.click('#confirm-action');
-      await idle();
+      await ran('--amend', 1);
+      await settle();
       await page.evaluate(() => { window.qa.failGit = null; });
       assert.equal(await box(), 'Draft to keep', 'A failed amend keeps the draft');
       await amend();
       await to('review-keyboard-navigation');
       await page.click('#confirm-action');
-      await idle();
+      await ran('--amend', 2);
+      await settle();
       assert.deepEqual((await amends()).at(-1), [A, 'commit', '--amend', '-m', 'Draft to keep'], 'Confirmed after a switch, the amend is still A\'s');
       assert.equal(await box(), 'Message B', "The open thread's draft is untouched");
       await to('search-polish');
@@ -389,7 +395,7 @@ try {
       await held();
       await to('review-keyboard-navigation');
       await answer();
-      await idle();
+      await settle();
       assert.equal(await box(), 'Message B', "The open thread's draft is untouched");
       await to('search-polish');
       assert.equal(await box(), '', 'Amended while away, the draft is cleared');
@@ -400,7 +406,7 @@ try {
       await held();
       await page.fill('#commit-msg', 'Typed while amending');
       await answer();
-      await idle();
+      await settle();
       assert.equal(await box(), 'Typed while amending', 'A draft typed while git amended stays');
       assert.deepEqual(errors, []);
       checks++;
