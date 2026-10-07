@@ -13,7 +13,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, codexRunning, codexTitle, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
 import { icon } from "./icons";
-import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
+import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, literal, resolveArgs, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { renderRows } from "./rows";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
@@ -5884,7 +5884,7 @@ async function showTab() {
  * That base is also what makes a hunk button meaningful — a diff of `HEAD`
  * mixes both sides and cannot be applied to either. */
 const diffOf = (th: Thread, sec: Sec, paths: string[], full = diffFull) => async () => {
-  if (sec !== "untracked") return gitPreview(th.dir, [], "diff", ...(full ? ["-U999999"] : []), ...(sec === "staged" ? ["--cached"] : []), "--", ...paths);
+  if (sec !== "untracked") return gitPreview(th.dir, [], "diff", ...(full ? ["-U999999"] : []), ...(sec === "staged" ? ["--cached"] : []), "--", ...literal(paths));
   const parts: string[] = [];
   let bytes = 0;
   for (const u of paths) {
@@ -6103,8 +6103,8 @@ const fileMenu = (th: Thread, sec: Sec, files: Change[]): Menu => ({
     const n = files.length > 1 ? ` ${files.length} files` : "";
     const fight = files.every(conflicted);
     if (fight) {
-      menuItem(list, `Keep ours${n}`, () => void resolve("--ours", files));
-      menuItem(list, `Keep theirs${n}`, () => void resolve("--theirs", files));
+      menuItem(list, `Keep ours${n}`, () => void resolve("ours", files));
+      menuItem(list, `Keep theirs${n}`, () => void resolve("theirs", files));
     }
     menuItem(list, fight ? `Mark resolved${n}` : sec === "staged" ? `Unstage${n}` : `Stage${n}`, () =>
       void doAct(sec, !fight && sec === "staged" ? "unstage" : "stage", files),
@@ -6148,13 +6148,11 @@ async function gitDo(ask: string, ...args: string[]) {
 const conflicted = (c: Change) => c.x === "U" || c.y === "U" || (c.x === c.y && (c.x === "A" || c.x === "D"));
 
 /** Take one side of a conflict wholesale and mark it resolved. */
-async function resolve(side: "--ours" | "--theirs", files: Change[]) {
+async function resolve(side: "ours" | "theirs", files: Change[]) {
   const th = current;
   if (!th) return;
-  const paths = files.map((c) => c.path);
   try {
-    await git(th.dir, "checkout", side, "--", ...paths);
-    await git(th.dir, "add", "--", ...paths);
+    for (const args of resolveArgs(side, files.map((c) => c.path))) await git(th.dir, ...args);
   } catch (e) {
     toast(String(e));
   }
@@ -8676,8 +8674,7 @@ const CLI: Record<string, CliCommand> = {
           if (side !== "ours" && side !== "theirs") throw new Error(`Resolve with ours or theirs, not ${side}.`);
           const paths = rest.slice(1);
           if (!paths.length) throw new Error("Name the files to resolve.");
-          await run("checkout", `--${side}`, "--", ...paths);
-          await run("add", "--", ...paths);
+          for (const args of resolveArgs(side, paths)) await run(...args);
           return changed(`Resolved ${paths.length} with ${side}`);
         }
         default:

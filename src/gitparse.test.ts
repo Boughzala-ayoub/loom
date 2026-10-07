@@ -55,21 +55,69 @@ check("tree nests folders with counts", [t.count, t.files.map((f) => f.name), t.
 
 import { gitAct } from "./gitparse.ts";
 const F = (path: string, x = " ", y = "M") => ({ path, x, y });
-check("stage is add", gitAct("unstaged", "stage", [F("a.ts")]), [["add", "--", "a.ts"]]);
-check("unstage leaves the worktree alone", gitAct("staged", "unstage", [F("a.ts", "M", " ")]), [["restore", "--staged", "--", "a.ts"]]);
-check("discard unstaged restores from the index", gitAct("unstaged", "discard", [F("a.ts")]), [["restore", "--", "a.ts"]]);
+check("stage is add", gitAct("unstaged", "stage", [F("a.ts")]), [["add", "--", ":(literal)a.ts"]]);
+check("unstage leaves the worktree alone", gitAct("staged", "unstage", [F("a.ts", "M", " ")]), [["restore", "--staged", "--", ":(literal)a.ts"]]);
+check("discard unstaged restores from the index", gitAct("unstaged", "discard", [F("a.ts")]), [["restore", "--", ":(literal)a.ts"]]);
 check(
   "discard staged: new files are deleted, edits restored",
   gitAct("staged", "discard", [F("new.ts", "A", " "), F("old.ts", "M", " ")]),
-  [["rm", "-f", "--", "new.ts"], ["restore", "--staged", "--worktree", "--", "old.ts"]],
+  [["rm", "-f", "--", ":(literal)new.ts"], ["restore", "--staged", "--worktree", "--", ":(literal)old.ts"]],
 );
-check("discard untracked deletes the file", gitAct("untracked", "discard", [F("x.ts", "?", "?")]), [["clean", "-f", "-d", "--", "x.ts"]]);
+check("discard untracked deletes the file", gitAct("untracked", "discard", [F("x.ts", "?", "?")]), [["clean", "-f", "-d", "--", ":(literal)x.ts"]]);
 check("nothing selected runs nothing", gitAct("unstaged", "stage", []), []);
 check(
   "a huge selection is chunked",
   gitAct("unstaged", "stage", Array.from({ length: 250 }, (_, i) => F(`f${i}.ts`))).map((a) => a.length),
   [202, 52],
 );
+
+// The same verbs against real git: a selected name matches only itself, and a rename moves as one.
+// @ts-ignore Node-only test.
+import { execFileSync } from "node:child_process";
+// @ts-ignore Node-only test.
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+// @ts-ignore Node-only test.
+import { tmpdir } from "node:os";
+// @ts-ignore Node-only test.
+import { join } from "node:path";
+import { resolveArgs, type Act, type Change, type Sec } from "./gitparse.ts";
+let repo = "";
+const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=check", "-c", "user.email=check@loom", "-c", "core.autocrlf=false", ...args], { encoding: "utf8" });
+const status = () => parseStatus(git("status", "--porcelain=v1", "-z", "-uall"));
+const act = (sec: Sec, verb: Act, files: Change[]) => gitAct(sec, verb, files).forEach((args) => git(...args));
+const on = (...paths: string[]) => paths.map((p) => existsSync(join(repo, p)));
+const write = (files: Record<string, string>) => Object.entries(files).forEach(([p, text]) => writeFileSync(join(repo, p), text));
+function inRepo(body: () => void) {
+  repo = mkdtempSync(join(tmpdir(), "loom-gitact-"));
+  try {
+    git("init", "-q", "-b", "main");
+    git("commit", "-q", "--allow-empty", "-m", "start");
+    body();
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+}
+inRepo(() => {
+  write({ "a[1].txt": "picked\n", "a1.txt": "not picked\n" });
+  act("untracked", "stage", [{ path: "a[1].txt", x: "?", y: "?" }]);
+  check("real git: staging a[1].txt leaves a1.txt unselected", status(), [{ path: "a[1].txt", x: "A", y: " " }, { path: "a1.txt", x: "?", y: "?" }]);
+  act("staged", "unstage", [{ path: "a[1].txt", x: "A", y: " " }]);
+  act("untracked", "discard", [{ path: "a[1].txt", x: "?", y: "?" }]);
+  check("real git: deleting a[1].txt keeps a1.txt", [on("a[1].txt", "a1.txt"), status()], [[false, true], [{ path: "a1.txt", x: "?", y: "?" }]]);
+  // Both conflicted: keeping ours in a[1].txt must leave a1.txt's conflict alone.
+  write({ "a[1].txt": "base\n", "a1.txt": "base\n" });
+  git("add", "-A");
+  git("commit", "-qm", "base");
+  git("switch", "-qc", "theirs");
+  write({ "a[1].txt": "theirs\n", "a1.txt": "theirs\n" });
+  git("commit", "-qam", "theirs");
+  git("switch", "-q", "main");
+  write({ "a[1].txt": "ours\n", "a1.txt": "ours\n" });
+  git("commit", "-qam", "ours");
+  try { git("merge", "-q", "theirs"); } catch { /* the conflict is the point */ }
+  resolveArgs("ours", ["a[1].txt"]).forEach((args) => git(...args));
+  check("real git: keeping ours in a[1].txt leaves a1.txt conflicted", status(), [{ path: "a1.txt", x: "U", y: "U" }]);
+});
 
 import { hunkPatch } from "./gitparse.ts";
 const two = [

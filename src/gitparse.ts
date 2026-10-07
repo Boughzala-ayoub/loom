@@ -174,7 +174,11 @@ export function tree(paths: string[]): Node {
 export type Sec = "unstaged" | "staged" | "untracked";
 export type Act = "stage" | "unstage" | "discard";
 
-/** The git invocations one button press becomes, e.g. `[["add","--","a.ts"]]`.
+/** Picked paths as pathspecs that match only themselves. `--` ends the options
+ * but still leaves `a[1].txt` a glob, which also matches `a1.txt`. */
+export const literal = (paths: string[]) => paths.map((p) => `:(literal)${p}`);
+
+/** The git invocations one button press becomes, e.g. `[["add","--",":(literal)a.ts"]]`.
  * Chunked at 200 paths so selecting a whole monorepo can't overrun the
  * command line. Discard is the dangerous one: restoring the worktree from the
  * index, throwing away a staged edit, and deleting a file git never had are
@@ -182,7 +186,7 @@ export type Act = "stage" | "unstage" | "discard";
 export function gitAct(sec: Sec, act: Act, files: Change[]): string[][] {
   const cmd = (pre: string[], f: Change[]) => {
     const out: string[][] = [];
-    for (let i = 0; i < f.length; i += 200) out.push([...pre, "--", ...f.slice(i, i + 200).map((c) => c.path)]);
+    for (let i = 0; i < f.length; i += 200) out.push([...pre, "--", ...literal(f.slice(i, i + 200).map((c) => c.path))]);
     return out;
   };
   if (!files.length) return [];
@@ -197,6 +201,12 @@ export function gitAct(sec: Sec, act: Act, files: Change[]): string[][] {
     ...cmd(["restore", "--staged", "--worktree"], files.filter((c) => c.x !== "A")),
   ];
 }
+
+/** Take one side of a conflict wholesale and mark it resolved. */
+export const resolveArgs = (side: "ours" | "theirs", paths: string[]) => [
+  ["checkout", `--${side}`, "--", ...literal(paths)],
+  ["add", "--", ...literal(paths)],
+];
 
 /** The patch `git apply` needs to move a single hunk: this file's own header
  * lines, then the hunk `at` sits in. Everything before the first `@@` is the
