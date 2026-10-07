@@ -6,7 +6,13 @@ const claudeComposer = claudeCapture.lines.join("\n");
 // @ts-ignore Node-only test; the app intentionally has no Node typings.
 import assert from "node:assert/strict";
 // @ts-ignore Node-only test.
-import { readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// @ts-ignore Node-only test.
+import { execFileSync } from "node:child_process";
+// @ts-ignore Node-only test.
+import { tmpdir } from "node:os";
+// @ts-ignore Node-only test.
+import { join } from "node:path";
 // @ts-ignore Node-only test.
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
@@ -14,9 +20,10 @@ import * as cli from "./cli.ts";
 import * as task from "./task.ts";
 import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
+import * as gitparse from "./gitparse.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "gitStatus"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -685,4 +692,33 @@ if (check(310)) {
   screen = claudeComposer;
   assert.equal(c.read.run({ _: ["p"], menu: true }).data.menu, null);
   console.log("ok   read --menu carries the pane's question, as menu reads it, or null");
+}
+if (check(208)) {
+  // loomctl git, which the phone uses too, against real Git: a named file is
+  // literal and a rename moves as one, as with the panel's buttons.
+  const repo = mkdtempSync(join(tmpdir(), "loom-cli-git-"));
+  const real = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=check", "-c", "user.email=check@loom", "-c", "core.autocrlf=false", ...args], { encoding: "utf8" });
+  try {
+    real("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "old.txt"), "keep\n");
+    real("add", "-A");
+    real("commit", "-qm", "start");
+    real("mv", "old.txt", "new.txt");
+    writeFileSync(join(repo, "a[1].txt"), "picked\n");
+    writeFileSync(join(repo, "a1.txt"), "not picked\n");
+    const th = { id: "t", name: "t", dir: repo, branch: "main", changed: null, setStat() {} };
+    const c = fixture({ ...gitparse, cliThread: () => th, git: async (_: string, ...args: string[]) => real(...args), invoke: async () => "", changesOpen: false, save() {} });
+    const git = (flags: Record<string, true>, ...words: string[]) => c.git.run({ _: ["t", ...words], yes: true, ...flags });
+    await git({}, "unstage", "new.txt");
+    await git({}, "stage", "a[1].txt");
+    const s = (await git({}, "status")).data;
+    assert.deepEqual([s.staged.map((f: any) => f.path), s.unstaged.map((f: any) => [f.path, f.y]), s.untracked.map((f: any) => f.path)],
+      [["a[1].txt"], [["old.txt", "D"]], ["a1.txt", "new.txt"]], "unstaging the rename staged no deletion, and staging a[1].txt left a1.txt");
+    await git({}, "unstage", "a[1].txt");
+    await git({ untracked: true }, "discard", "a[1].txt");
+    assert.deepEqual([existsSync(join(repo, "a[1].txt")), existsSync(join(repo, "a1.txt"))], [false, true], "deleting a[1].txt keeps a1.txt");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+  console.log("ok   loomctl git stages, unstages and deletes the named file only, and a rename as both names");
 }
