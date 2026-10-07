@@ -6461,7 +6461,7 @@ async function readChanges() {
         const picked = selSec === sec && sel.has(c.path);
         const row = document.createElement("div");
         row.className = `file${picked ? " sel" : ""}`;
-        row.title = c.path;
+        row.title = c.orig ? `${c.orig} → ${c.path}` : c.path;
         row.style.setProperty("--depth", String(depth));
         const name = document.createElement("span");
         name.className = "file-name";
@@ -6609,7 +6609,8 @@ async function gitStatus(th: Thread) {
   if (ask) upstream = await git(th.dir, "rev-parse", "--abbrev-ref", "@{upstream}").then((s) => s.trim(), () => "");
   const [behind = 0, ahead = 0] = span ? span.split("\t").map(Number) : [];
   th.setStat({ ...sumStat(head.values()), files: status.length });
-  const row = (c: Change, stats: Map<string, Stat>) => ({ path: c.path, x: c.x, y: c.y, ...(stats.get(c.path) ?? { add: 0, del: 0 }) });
+  // orig rides along: stage, unstage and discard take a rename's rows from here.
+  const row = (c: Change, stats: Map<string, Stat>) => ({ ...c, ...(stats.get(c.path) ?? { add: 0, del: 0 }) });
   const tracked = status.filter((c) => c.x !== "?");
   return {
     thread: th.id, name: th.name, dir: th.dir, branch: th.branch, upstream, ahead, behind, midway,

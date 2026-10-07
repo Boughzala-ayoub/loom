@@ -19,7 +19,7 @@ check(
     { path: "b.ts", x: " ", y: "M" },
     { path: "c.ts", x: "M", y: "M" },
     { path: "new.ts", x: "?", y: "?" },
-    { path: "moved.ts", x: "R", y: " " },
+    { path: "moved.ts", x: "R", y: " ", orig: "old.ts" },
     { path: "gone.ts", x: "D", y: " " },
   ],
 );
@@ -64,6 +64,7 @@ check(
   [["rm", "-f", "--", ":(literal)new.ts"], ["restore", "--staged", "--worktree", "--", ":(literal)old.ts"]],
 );
 check("discard untracked deletes the file", gitAct("untracked", "discard", [F("x.ts", "?", "?")]), [["clean", "-f", "-d", "--", ":(literal)x.ts"]]);
+check("a copy's source is left alone", gitAct("staged", "discard", [{ ...F("copy.ts", "C", " "), orig: "src.ts" }]), [["restore", "--staged", "--worktree", "--", ":(literal)copy.ts"]]);
 check("nothing selected runs nothing", gitAct("unstaged", "stage", []), []);
 check(
   "a huge selection is chunked",
@@ -117,6 +118,22 @@ inRepo(() => {
   try { git("merge", "-q", "theirs"); } catch { /* the conflict is the point */ }
   resolveArgs("ours", ["a[1].txt"]).forEach((args) => git(...args));
   check("real git: keeping ours in a[1].txt leaves a1.txt conflicted", status(), [{ path: "a1.txt", x: "U", y: "U" }]);
+});
+inRepo(() => {
+  write({ "old.txt": "keep this\n" });
+  git("add", "old.txt");
+  git("commit", "-qm", "old");
+  git("mv", "old.txt", "new.txt");
+  act("staged", "unstage", status());
+  check("real git: unstaging a rename leaves no staged deletion", status(), [{ path: "old.txt", x: " ", y: "D" }, { path: "new.txt", x: "?", y: "?" }]);
+  act("untracked", "stage", status().filter((c) => c.x === "?"));
+  act("unstaged", "stage", status().filter((c) => c.x === " "));
+  check("real git: staging both sides again is the rename", status(), [{ path: "new.txt", x: "R", y: " ", orig: "old.txt" }]);
+  write({ "new.txt": "keep this\nand an edit\n" });
+  act("unstaged", "discard", status().filter((c) => c.y !== " "));
+  check("real git: discarding an edit to a renamed file keeps the rename staged", status(), [{ path: "new.txt", x: "R", y: " ", orig: "old.txt" }]);
+  act("staged", "discard", status());
+  check("real git: discarding a staged rename brings the old name back", [status(), on("old.txt", "new.txt")], [[], [true, false]]);
 });
 
 import { hunkPatch } from "./gitparse.ts";

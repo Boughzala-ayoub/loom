@@ -7,12 +7,14 @@ export type Change = {
   x: string;
   /** Working-tree status letter, " " when the tree matches the index. */
   y: string;
+  /** Where a renamed or copied file came from. */
+  orig?: string;
 };
 
 /** `git status --porcelain=v1 -z`: `XY path` entries NUL-separated; a rename
- * or copy is followed by one more NUL-terminated entry, the original path,
- * which is dropped — the panel shows where the file is now. With `--branch`
- * the first entry is the `## ` branch line, which parseBranch reads. */
+ * or copy is followed by one more NUL-terminated entry, the original path.
+ * The panel shows where the file is now; acting on a rename needs both. With
+ * `--branch` the first entry is the `## ` branch line, which parseBranch reads. */
 export function parseStatus(z: string): Change[] {
   const out: Change[] = [];
   const parts = z.split("\0");
@@ -22,7 +24,7 @@ export function parseStatus(z: string): Change[] {
     const x = e[0];
     const y = e[1];
     out.push({ path: e.slice(3), x, y });
-    if (x === "R" || x === "C" || y === "R" || y === "C") i++;
+    if (x === "R" || x === "C" || y === "R" || y === "C") out[out.length - 1].orig = parts[++i];
   }
   return out;
 }
@@ -184,9 +186,12 @@ export const literal = (paths: string[]) => paths.map((p) => `:(literal)${p}`);
  * index, throwing away a staged edit, and deleting a file git never had are
  * three different commands, and running the wrong one loses work. */
 export function gitAct(sec: Sec, act: Act, files: Change[]): string[][] {
+  // A rename in this section is both names: unstaging only the new one leaves
+  // the old one staged as deleted. A copy's source has nothing of its own to undo.
+  const paths = (c: Change) => ((sec === "staged" ? c.x : c.y) === "R" && c.orig ? [c.path, c.orig] : [c.path]);
   const cmd = (pre: string[], f: Change[]) => {
     const out: string[][] = [];
-    for (let i = 0; i < f.length; i += 200) out.push([...pre, "--", ...literal(f.slice(i, i + 200).map((c) => c.path))]);
+    for (let i = 0; i < f.length; i += 200) out.push([...pre, "--", ...literal(f.slice(i, i + 200).flatMap(paths))]);
     return out;
   };
   if (!files.length) return [];
