@@ -892,7 +892,15 @@ try {
         assert.equal((await readNow()).cursor.hidden, true, 'The app hid the cursor');
         await out(claude, '\x1b[?25h');
         assert.equal((await readNow()).cursor.hidden, false);
-        assert.equal((await cli('read', 'search-polish:1', '--styles', '--lines', '5')).ok, false, '--styles is for the screen');
+        // With --lines, --styles styles those lines: one row per line of the text, in order.
+        const styled = await cli('read', 'search-polish:1', '--styles', '--lines', '5');
+        assert.equal(styled.ok, true, JSON.stringify(styled));
+        const lines = styled.data.text.split('\n');
+        assert.deepEqual([lines.length, lines[0], lines[2], lines[4]], [5, '● Done.', `> ${ask}`, '  ? for shortcuts'], styled.data.text);
+        assert.equal(styled.data.text, (await readNow('--lines', '5')).text, 'The same lines as a plain read');
+        assert.deepEqual(styled.data.rows.map(r => r.y), [0, 1, 2, 3, 4]);
+        assert.deepEqual(styled.data.rows.map(r => r.runs.map(run => run.text).join('').trimEnd()), lines, 'Each row reads as its line');
+        assert.deepEqual(styled.data.rows[2].runs.at(-1), { x: 2 + ask.length, text: ' ', inverse: true }, 'The caret keeps its inverse style');
         const codex = (await cli('panes')).data.find(p => p.agent === 'codex');
         assert.equal((await cli('read', codex.id)).data.input.kind, 'unknown', "Codex's input was never checked: unknown, not a guess");
       }
