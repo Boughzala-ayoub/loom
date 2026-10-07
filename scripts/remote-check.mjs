@@ -2,10 +2,13 @@
 // HTTP server's refusals, and the phone app in headless Chrome at 320 to
 // 1280 px: a cmd.exe pane, the Changes tab on the temporary repo (a hunk, a
 // commit, a branch, a stash), Usage, Settings, creating and closing threads,
-// and a phone's notifications through a stand-in push service on 127.0.0.1.
+// and a phone's notifications through a stand-in push service on 127.0.0.1,
+// and dictation: a sentence Windows' speech synthesizer says into Chrome's
+// fake microphone, through the phone's mic and the real whisper.
 // REMOTE_WIDTHS=375 runs one width. Needs a
-// release build with --features tauri/custom-protocol (loom.exe and
-// loomctl.exe beside it, or LOOM_TEST_EXE). A temporary profile and Git
+// build with --features tauri/custom-protocol (loom.exe and loomctl.exe
+// beside it, or LOOM_TEST_EXE; a debug one keeps its own data folder) and a
+// whisper model in that data folder's models\. A temporary profile and Git
 // folder; restores the shared files a test Loom rewrites. The test Loom's
 // window shows on the desktop while it runs, and is resized once.
 // Set PLAYWRIGHT_MODULE to an installed playwright module path if it isn't local.
@@ -17,7 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, exis
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { createServer } from 'node:net';
+import { createServer, connect } from 'node:net';
 import { createServer as httpServer } from 'node:http';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
@@ -27,7 +30,8 @@ assert.ok(existsSync(ctl), `loomctl.exe must sit beside ${exe}`);
 const out = resolve('node_modules/.cache/remote-check');
 const fromDist = process.env.REMOTE_CHECK_DIST === '1';
 mkdirSync(out, { recursive: true });
-const data = join(process.env.APPDATA, 'dev.ayoub.loom');
+// A debug build keeps its state apart from the installed Loom's (lib.rs data_dir).
+const data = join(process.env.APPDATA, /[\\/]debug[\\/]/.test(exe) ? 'dev.ayoub.loom-dev' : 'dev.ayoub.loom');
 const plugin = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'opencode/plugins/loom.js');
 const shared = [join(data, 'claude-hooks.json'), join(data, 'shell-init.ps1'), plugin]
   .map((file, i) => ({ file, backup: join(out, `${i}-${basename(file)}.backup`), had: existsSync(file) }));
@@ -44,6 +48,20 @@ const plain = join(dir, 'plain');
 mkdirSync(plain);
 const profile = join(dir, 'workspace.json');
 writeFileSync(profile, JSON.stringify({ silent: true, ui: { thread: 0 }, threads: [{ repo, dir: repo, branch: '', name: 'alpha', panes: [{ cmd: 'cmd' }] }] }));
+// The phone's mic shows on agents only: an OpenCode 1 that only waits stands in for one (Loom runs it through cmd).
+const bin = join(dir, 'bin');
+mkdirSync(bin);
+writeFileSync(join(bin, 'opencode.cmd'), '@echo off\r\nif "%~1"=="--version" (echo opencode v1.0.0& exit /b 0)\r\nif not "%~1"=="" exit /b 1\r\necho Stand-in agent ready.\r\npowershell -NoProfile -Command Start-Sleep 3600\r\n');
+// The sentence the phone dictates, said by Windows' own speech synthesizer: 16-bit, 16 kHz, mono.
+const SENTENCE = 'Please run the tests and fix the login bug.';
+const speech = join(dir, 'said.wav');
+spawnSync('powershell', ['-NoProfile', '-Command', `Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SetOutputToWaveFile('${speech}', (New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo(16000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, [System.Speech.AudioFormat.AudioChannel]::Mono))); $s.Speak('${SENTENCE}'); $s.Dispose()`]);
+assert.ok(existsSync(speech), 'System.Speech must say the sentence into a WAV');
+const wav = readFileSync(speech);
+const at = wav.indexOf('data') + 8;
+const pcm = wav.subarray(at, at + (wav.readUInt32LE(at - 4) & ~1));
+/** The sentence's words, give or take what base fumbles: whisper heard it if these four are there. */
+const heardIt = text => ['please', 'run', 'fix', 'login'].every(w => text.toLowerCase().replace(/[^a-z]+/g, ' ').split(' ').includes(w));
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
 const freePort = async () => {
@@ -68,7 +86,7 @@ const ok = (...args) => {
 };
 let child;
 async function launch() {
-  child = spawn(exe, [profile], { stdio: 'ignore' });
+  child = spawn(exe, [profile], { stdio: 'ignore', env: { ...process.env, PATH: `${bin};${process.env.PATH}` } });
   for (let i = 0; i < 100; i++) {
     if (loomctl('status').code === 0) return;
     await pause(300);
@@ -221,10 +239,11 @@ try {
   console.log('PASS notifications: the worker, a phone signs up, a push reaches its push service encrypted and signed, a gone one is forgotten');
 
   // The phone page, at every width.
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
+  // A microphone that says the sentence once (%noloop), allowed without a prompt.
+  browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${speech}%noloop`] });
   const pageErrors = [];
   const context = async (width, stored) => {
-    const c = await browser.newContext({ viewport: { width, height: 760 }, deviceScaleFactor: 2, isMobile: width < 900, hasTouch: width < 900 });
+    const c = await browser.newContext({ viewport: { width, height: 760 }, deviceScaleFactor: 2, isMobile: width < 900, hasTouch: width < 900, permissions: ['microphone'] });
     if (stored) await c.addInitScript(t => localStorage.setItem('loom-token', t), stored);
     if (fromDist) await c.route(`${base}/**`, route => {
       const path = new URL(route.request().url()).pathname;
@@ -266,6 +285,63 @@ try {
   assert.match(phoneToken, /^[0-9a-f]{64}$/);
   await page.context().close();
   console.log('PASS pairing from the page');
+
+  // Dictation: /api/dictate's refusals, the sentence's samples through the real whisper, then the
+  // phone's mic recording it from Chrome's fake microphone, and the Dictation sheet changing the PC.
+  {
+    const dictate = (body, query = '', headers = auth) => fetch(`${base}/api/dictate${query}`, { method: 'POST', headers, body });
+    // A request's head alone, as a socket sends it: refused before any of its body is read.
+    const refused = head => new Promise((resolve, reject) => {
+      const s = connect(port, '127.0.0.1', () => s.write(head));
+      let got = '';
+      s.on('data', d => (got += d));
+      s.on('end', () => resolve(Number(got.split(' ')[1])));
+      s.on('error', reject);
+    });
+    assert.equal((await dictate(new Uint8Array(4), '', {})).status, 401, 'No token, no transcription');
+    assert.equal((await dictate(new Uint8Array(4), '?lang=EN')).status, 400, 'A language is a whisper code');
+    assert.equal((await dictate(new Uint8Array(3))).status, 400, 'Whole 16-bit samples');
+    assert.equal(await refused(`POST /api/dictate HTTP/1.1\r\nAuthorization: Bearer ${token}\r\nContent-Length: ${(6 << 20) + 2}\r\n\r\n`), 413, 'A clip is 6 MiB at most');
+    assert.equal(await refused(`POST /api/dictate HTTP/1.1\r\nContent-Length: ${(1 << 20) + 2}\r\n\r\n`), 413, "A stranger's body stays a prompt's 1 MiB");
+    assert.equal(await refused(`POST /api/cli HTTP/1.1\r\nAuthorization: Bearer ${token}\r\nContent-Length: ${(1 << 20) + 2}\r\n\r\n`), 413, '/api/cli keeps 1 MiB');
+    assert.deepEqual(await (await dictate(new Uint8Array(0))).json(), { ok: true, text: '' }, 'An empty clip only loads the model');
+    assert.deepEqual(await (await dictate(new Uint8Array(32000))).json(), { ok: true, text: '' }, 'Silence is nothing to transcribe');
+    const direct = await (await dictate(pcm, '?lang=en')).json();
+    assert.ok(direct.ok && heardIt(direct.text), `whisper heard the sentence's samples: ${JSON.stringify(direct)}`);
+    console.log(`PASS /api/dictate: refusals, silence, and "${SENTENCE}" heard as "${direct.text}"`);
+
+    // The phone's mic, on a stand-in agent added for it.
+    const tid = ok('--json', 'threads').json[0].id;
+    const agent = ok('--json', 'add', tid, '--cmd', 'opencode').json;
+    page = await context(375, phoneToken);
+    await page.goto(`${base}/#/pane/${encodeURIComponent(agent.id)}`);
+    await page.locator('#pane .who b', { hasText: '· opencode' }).waitFor();
+    await page.click('#mic');
+    await page.locator('#rec').waitFor();
+    await page.locator('#rec .info span', { hasText: 'English · /prompt' }).waitFor();
+    await fits(page, '375 recording');
+    // The whole sentence, and a little of the silence after it.
+    await pause(pcm.length / 32 + 700);
+    await page.click('#rec .stop');
+    await page.waitForFunction(() => document.querySelector('#prompt textarea').value.startsWith('/prompt '), null, { timeout: 90000 });
+    const box = await page.inputValue('#prompt textarea');
+    assert.ok(heardIt(box), `the phone's box has what whisper heard: ${JSON.stringify(box)}`);
+    assert.equal(await page.locator('#rec').isHidden(), true);
+    // The sheet picks on the PC: French, then back to English.
+    await page.click('#more');
+    await sheetButton(page, 'Dictation · English · /prompt').click();
+    await page.locator('#sheet.on .dict-row').first().waitFor();
+    await fits(page, '375 dictation sheet');
+    await page.locator('#sheet .dict-row .pick', { hasText: 'French' }).click();
+    const pickedLang = () => ok('--json', 'dictation').json.langs.find(l => l.on).code;
+    for (let i = 0; i < 40 && pickedLang() !== 'fr'; i++) await pause(250);
+    assert.equal(pickedLang(), 'fr', "The phone's sheet picks the PC's language");
+    await page.locator('#sheet .dict-row .pick[aria-pressed=true]', { hasText: 'French' }).waitFor();
+    ok('dictation', 'lang', 'en');
+    await page.context().close();
+    ok('close', agent.id, '--yes');
+    console.log(`PASS the phone's mic: the recording bar, "/prompt" and what whisper heard in the box (${JSON.stringify(box)}), and the sheet picking French on the PC`);
+  }
 
   // A file the Changes tab can stage, diff, commit and discard.
   writeFileSync(join(repo, 'notes.txt'), 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n');

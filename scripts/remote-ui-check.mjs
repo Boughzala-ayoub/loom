@@ -31,7 +31,8 @@ await new Promise(r => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 assert.equal((await fetch(base)).status, 200, 'the page must be served');
 console.log('HTTP 200, bundle', readFileSync('dist/remote.html', 'utf8').match(/assets\/remote-[^" ]+\.js/)[0]);
-const browser = await chromium.launch({ channel: 'chrome', headless: true });
+// A fake microphone (a beep) that needs no prompt: the phone's dictation records from it.
+const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
 async function until(what, f, ms = 8000) {
@@ -55,9 +56,26 @@ const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 10
 const PUSH_KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8';
 /** push: true for a phone that may get notifications, 'old-key' for one subscribed before Loom's key changed. */
 async function context(width, token = true, push = false) {
-  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false, restarts: 0, zoomed: new Set() };
-  const ctx = await browser.newContext({ viewport: { width, height: 800 } });
+  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false, restarts: 0, zoomed: new Set(),
+    // The PC's mic menu (main.ts langs, prefixes), and what the mocked whisper hears in each clip posted to /api/dictate.
+    dictation: { langs: [{ label: 'English', code: 'en', on: true }, { label: 'auto', code: '', on: false }, { label: 'French', code: 'fr', on: false }], prefixes: [{ text: '/prompt ', enter: false, on: true }, { text: '', enter: false, on: false }] },
+    heard: 'run the tests', clips: [] };
+  const ctx = await browser.newContext({ viewport: { width, height: 800 }, permissions: ['microphone'] });
   if (token) await ctx.addInitScript(() => localStorage.setItem('loom-token', 'fixture-token'));
+  // The microphone, watched: how long MediaRecorder ran (window.recorded), the stream the page got (window.opened),
+  // and getUserMedia held open while window.holdMic, until window.releaseMic().
+  await ctx.addInitScript(() => {
+    const { start, stop } = MediaRecorder.prototype;
+    MediaRecorder.prototype.start = function (...a) { window.recorded = { at: performance.now() }; return start.apply(this, a); };
+    MediaRecorder.prototype.stop = function (...a) { if (window.recorded) window.recorded.ms = performance.now() - window.recorded.at; return stop.apply(this, a); };
+    const ask = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async c => {
+      const s = await ask(c);
+      window.opened = s;
+      if (window.holdMic) await new Promise(r => (window.releaseMic = r));
+      return s;
+    };
+  });
   if (push) {
     await ctx.grantPermissions(['notifications'], { origin: base });
     // Headless Chrome can't reach a push service: the subscription is made up, the worker is real.
@@ -77,7 +95,16 @@ async function context(width, token = true, push = false) {
     }, push === 'old-key');
   }
   await ctx.route('**/api/**', async route => {
-    const req = route.request(), c = req.postDataJSON();
+    const req = route.request();
+    // A clip: 16-bit samples at 16 kHz, so 32 KB a second; an empty one only warms the model.
+    if (new URL(req.url()).pathname === '/api/dictate') {
+      const body = req.postDataBuffer() ?? Buffer.alloc(0);
+      const samples = new Int16Array(body.buffer, body.byteOffset, body.length >> 1);
+      state.clips.push({ bytes: body.length, lang: new URL(req.url()).searchParams.get('lang'), auth: req.headers().authorization, peak: samples.reduce((m, s) => Math.max(m, Math.abs(s)), 0) });
+      if (body.length && state.hold.delete('dictate')) await new Promise(r => (state.held.dictate = r));
+      return route.fulfill({ json: { ok: true, text: body.length ? state.heard : '' } });
+    }
+    const c = req.postDataJSON();
     state.calls.push(c);
     if (req.url().endsWith('/pair')) return route.fulfill({ json: { ok: true, token: 'fixture-token' } });
     if (req.url().endsWith('/api/push')) {
@@ -114,6 +141,7 @@ async function context(width, token = true, push = false) {
     // Another thread named Alpha: its Claude is Alpha:1 too.
     if (state.twins) threads.push(thread('c', 'Alpha'));
     if (state.changedTitle) threads[1].panes[0].title = 'Another agent has changed its title';
+    if (state.shell) threads[1].panes[0].agent = 'shell';
     // Loom restarted on the PC (restartPc): the same agents, with new pane ids and the sids saved with them.
     if (state.newIds) for (const t of threads) t.panes[0].id = `new-${t.panes[0].id}`;
     // again: restarted that many times more (new-a1, again-new-a1, again-again-new-a1).
@@ -152,6 +180,24 @@ async function context(width, token = true, push = false) {
         if (c.argv[0] === 'remove') state.startups = state.startups.filter(s => s.label !== c.argv[1]);
         data = state.startups; break;
       case 'close-plan': data = { rev: 'plan', lost: { tracked: 1, commits: 1 } }; break;
+      case 'dictation': {
+        // As main.ts runs it: lang and prefix pick (adding a new one), --enter sets a prefix's ⏎, remove drops one.
+        const d = state.dictation, at = c.argv.indexOf('--enter');
+        const [how, ...rest] = at < 0 ? c.argv : c.argv.slice(0, at);
+        const words = rest.join(' ').trim(), code = words === 'auto' ? '' : words;
+        if (how === 'lang') { const l = d.langs.find(x => x.code === code) ?? (d.langs.push({ label: code, code }), d.langs.at(-1)); d.langs.forEach(x => (x.on = x === l)); }
+        if (how === 'prefix') {
+          const p = d.prefixes.find(x => x.text.trim() === words) ?? (d.prefixes.push({ text: words ? `${words} ` : '', enter: false }), d.prefixes.at(-1));
+          if (at >= 0) p.enter = c.argv[at + 1] === 'on';
+          d.prefixes.forEach(x => (x.on = x === p));
+        }
+        if (how === 'remove') {
+          const [what, ...name] = rest, list = what === 'lang' ? d.langs : d.prefixes, w = name.join(' ').trim();
+          const i = list.findIndex(x => (what === 'lang' ? x.code === (w === 'auto' ? '' : w) : x.text.trim() === w));
+          if (i >= 0 && list.length > 1) { const [gone] = list.splice(i, 1); if (gone.on) list[0].on = true; }
+        }
+        data = d; break;
+      }
       case 'git': {
         const [id, action = 'status'] = c.argv;
         const held = `${id} ${action}`;
@@ -197,6 +243,11 @@ async function fits(page, width, name) {
   checks++;
   if (width === 375 || width === 901) await page.screenshot({ path: resolve(out, `${width}-${name}.png`), fullPage: true });
 }
+/** A finger's worth: every control shown under `root` is at least 44 px tall. */
+async function taps(page, width, root) {
+  const small = await page.evaluate(r => [...document.querySelectorAll(`${r} button, ${r} input`)].filter(e => e.offsetParent && e.getBoundingClientRect().height < 44).map(e => e.outerHTML.slice(0, 80)), root);
+  assert.deepEqual(small, [], `${width}: controls under 44 px in ${root}`);
+}
 try {
   for (const width of (process.env.REMOTE_WIDTHS || '320,375,768,901,1024,1280').split(',').map(Number)) {
     const { ctx, page } = await context(width, false);
@@ -208,6 +259,9 @@ try {
     await p.locator('#list .seg button').filter({ hasText: 'Activity' }).click(); await p.locator('#list .card').first().waitFor(); await fits(p, width, 'activity');
     await goto(p, '#/pane/a1', '#screen .line'); await fits(p, width, 'pane-question'); await p.click('#keys-btn'); await fits(p, width, 'keyboard');
     await p.locator('#keys [data-key=fn]').click(); await fits(p, width, 'function-keys'); await p.click('#more'); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'pane-menu'); await close(p);
+    // Dictating: the recording bar in the box's place, then the Dictation sheet from ⋯.
+    await p.click('#mic'); await p.locator('#rec .info b', { hasText: '0:01' }).waitFor(); await fits(p, width, 'recording'); await taps(p, width, '#rec'); await p.getByRole('button', { name: 'Cancel dictation' }).click();
+    await p.click('#more'); await p.locator('#sheet button', { hasText: 'Dictation · English · /prompt' }).click(); await p.locator('#sheet.on .dict-row').first().waitFor(); await fits(p, width, 'dictation-sheet'); await taps(p, width, '#sheet'); await sheetButton(p, 'Done').click();
     await goto(p, '#/pane/zz1/Alpha%3A1', '#pane .who b:has-text("This agent is gone")'); await fits(p, width, 'pane-gone');
     await goto(p, '#/new', '#new form'); await fits(p, width, 'new-thread'); await p.locator('#new [data-kind=checkout]').click(); await fits(p, width, 'new-folder');
     await goto(p, '#/changes/a', '#changes .file'); await fits(p, width, 'changes'); await p.locator('#changes .picker').click(); await fits(p, width, 'thread-picker'); await close(p);
@@ -220,7 +274,8 @@ try {
     await goto(p, '#/commit/a/abc1234', '#diff .commit-head'); await fits(p, width, 'commit');
     await goto(p, '#/files/a', '#files .list-row'); await fits(p, width, 'files'); await goto(p, '#/file/a/alpha.txt', '#diff .r'); await fits(p, width, 'file');
     await goto(p, '#/usage', '#usage .provider'); await fits(p, width, 'usage'); await goto(p, '#/context/a1', '#context .bars'); await fits(p, width, 'context');
-    await goto(p, '#/settings', '#settings .group'); await fits(p, width, 'settings'); await p.locator('#settings .setting').filter({ hasText: 'Theme' }).locator('button').click(); await fits(p, width, 'themes'); await close(p);
+    await goto(p, '#/settings', '#settings .group'); await fits(p, width, 'settings');
+    await p.locator('#settings .setting', { hasText: 'Language and prefix' }).locator('button').click(); await p.locator('#sheet.on .dict-row').first().waitFor(); await fits(p, width, 'settings-dictation'); await sheetButton(p, 'Done').click(); await p.locator('#settings .setting').filter({ hasText: 'Theme' }).locator('button').click(); await fits(p, width, 'themes'); await close(p);
     await p.getByRole('button', { name: 'Unpair all', exact: true }).click(); await fits(p, width, 'unpair-confirm'); await close(p);
     assert.deepEqual(state.errors, [], `${width}: errors in the page`);
     await c2.close();
@@ -1113,6 +1168,162 @@ try {
     await ctx.close();
   }
   console.log('PASS a subscription made with an old key is replaced at start, one on the current key is kept');
+
+  // --- Dictation (docs/phone-dictation-study.md) ---------------------------------------------------
+  const clips = state => state.clips.filter(c => c.bytes > 0);
+  const box = page => page.inputValue('#prompt textarea');
+  const hide = (page, hidden) => page.evaluate(h => { Object.defineProperty(document, 'hidden', { value: h, configurable: true }); document.dispatchEvent(new Event('visibilitychange')); }, hidden);
+  const micClosed = page => page.waitForFunction(() => window.opened?.getTracks().every(t => t.readyState === 'ended'), null, { timeout: 5000 });
+  /** Taps the mic, lets the fake microphone record for `ms` once MediaRecorder runs, and taps stop. */
+  async function dictate(page, ms = 1500) {
+    await page.evaluate(() => (window.recorded = null));
+    await page.click('#mic');
+    await page.waitForFunction(() => window.recorded);
+    await page.waitForTimeout(ms);
+    await page.click('#rec .stop');
+  }
+  {
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1', '#screen .line');
+    await dictate(page);
+    await until('the text in the box', async () => (await box(page)) === '/prompt run the tests');
+    const [warm, clip] = state.clips;
+    assert.deepEqual([warm.bytes, warm.lang], [0, null], 'an empty post warms the model as the mic opens');
+    const [ms, secs] = [await page.evaluate(() => window.recorded.ms), clip.bytes / 32000];
+    assert.ok(clip.bytes % 2 === 0 && Math.abs(secs - ms / 1000) < 0.3, `16-bit samples at 16 kHz: ${clip.bytes} bytes for ${Math.round(ms)} ms`);
+    assert.deepEqual([clip.lang, clip.auth], ['en', 'Bearer fixture-token'], "the PC's language, with this phone's token");
+    assert.ok(clip.peak > 0, 'the fake microphone was heard');
+    await micClosed(page);
+    assert.ok(!state.calls.some(c => c.cmd === 'submit'), 'a prefix without ⏎ waits for Send');
+    // Onto a draft: after a space, with no prefix.
+    await page.fill('#prompt textarea', 'also');
+    await dictate(page, 500);
+    await until('appended to the draft', async () => (await box(page)) === 'also run the tests');
+    // French, then auto, picked in the sheet: the clip's language follows, and auto sends none.
+    for (const [row, code, query] of [['French', 'fr', 'fr'], ['auto', '', null]]) {
+      await page.click('#more');
+      await page.locator('#sheet button', { hasText: 'Dictation ·' }).click();
+      await page.locator('#sheet .dict-row .pick', { hasText: row }).click();
+      await until(`${row} picked on the PC`, () => state.dictation.langs.find(l => l.on).code === code);
+      await page.locator('#sheet .dict-row .pick[aria-pressed=true]', { hasText: row }).waitFor();
+      await sheetButton(page, 'Done').click();
+      await page.fill('#prompt textarea', '');
+      const n = clips(state).length;
+      await dictate(page, 500);
+      await until(`the ${row} clip`, () => clips(state).length === n + 1);
+      assert.equal(clips(state)[n].lang, query);
+      await until('its text', async () => (await box(page)) === '/prompt run the tests');
+    }
+    // ⏎ on the prefix, from the sheet: what was said goes through submit.
+    await page.click('#more');
+    await page.locator('#sheet button', { hasText: 'Dictation ·' }).click();
+    await page.getByRole('button', { name: '/prompt sends what was said' }).click();
+    await until('⏎ on the PC', () => state.dictation.prefixes[0].enter);
+    await sheetButton(page, 'Done').click();
+    await page.fill('#prompt textarea', '');
+    await dictate(page, 500);
+    await until('the submit', () => state.calls.some(c => c.cmd === 'submit'));
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit').map(c => [c.argv, c.stdin]), [[['a1', '-'], '/prompt run the tests']]);
+    await until('the box empties once sent', async () => (await box(page)) === '');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS dictation: the clip is 16 kHz 16-bit samples with the PC\'s language, the text lands after the prefix or onto a draft, the sheet picks French and auto, and a ⏎ prefix submits it');
+  {
+    // A transcript that comes after you moved on is never sent, ⏎ or not: it waits as its agent's draft.
+    const { ctx, page, state } = await context(375);
+    state.dictation.prefixes[0].enter = true;
+    await goto(page, '#/pane/a1', '#screen .line');
+    state.hold.add('dictate');
+    await dictate(page, 500);
+    await until('the clip is on its way', () => state.held.dictate);
+    await page.evaluate(() => (location.hash = '#/pane/b1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
+    await page.fill('#prompt textarea', 'for Beta');
+    state.held.dictate();
+    await page.locator('#toast').filter({ hasText: 'What you said to Alpha:1 is in its Message box.' }).waitFor();
+    assert.equal(await box(page), 'for Beta', "Beta's box stays Beta's");
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:1' }).waitFor();
+    assert.equal(await box(page), '/prompt run the tests', "Alpha's draft");
+    // Left for Settings with Alpha still the agent open: its box takes it, and it isn't sent either.
+    await page.fill('#prompt textarea', '');
+    state.hold.add('dictate');
+    await dictate(page, 500);
+    await until('the clip is on its way', () => state.held.dictate);
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await page.locator('#settings .group').first().waitFor();
+    state.held.dictate();
+    await page.locator('#toast').filter({ hasText: 'What you said to Alpha:1' }).waitFor();
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:1' }).waitFor();
+    assert.equal(await box(page), '/prompt run the tests');
+    await page.waitForTimeout(300);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit'), [], 'a late transcript is never sent');
+    // Only agents have the mic, as on the PC.
+    assert.ok(await page.locator('#mic').isVisible());
+    state.shell = true;
+    await page.evaluate(() => (location.hash = '#/pane/b1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Beta:1 · shell' }).waitFor();
+    assert.ok(await page.locator('#mic').isHidden(), 'no mic on a shell');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS a late transcript becomes its agent\'s draft, never sent, after another agent or Settings; no mic on a shell');
+  {
+    // Hiding the page stops the recording and transcribes it, without sending; cancel uploads nothing.
+    const { ctx, page, state } = await context(375);
+    state.dictation.prefixes[0].enter = true;
+    await goto(page, '#/pane/a1', '#screen .line');
+    await page.click('#mic');
+    await page.waitForFunction(() => window.recorded);
+    await page.waitForTimeout(700);
+    await hide(page, true);
+    await until('the clip goes', () => clips(state).length === 1);
+    assert.ok(await page.locator('#rec').isHidden(), 'the bar goes with it');
+    await micClosed(page);
+    await until('its text', async () => (await box(page)) === '/prompt run the tests');
+    await page.waitForTimeout(300);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit'), [], 'what a hidden page caught waits for Send');
+    // Hidden while the microphone still opens: it closes once it has, and nothing goes.
+    await hide(page, false);
+    await page.evaluate(() => Object.assign(window, { holdMic: true, releaseMic: null }));
+    await page.click('#mic');
+    await page.waitForFunction(() => window.releaseMic);
+    await hide(page, true);
+    await page.evaluate(() => window.releaseMic());
+    await micClosed(page);
+    // Leaving the agent stops it too.
+    await hide(page, false);
+    await page.evaluate(() => (window.holdMic = false));
+    await page.fill('#prompt textarea', '');
+    await page.evaluate(() => (window.recorded = null));
+    await page.click('#mic');
+    await page.waitForFunction(() => window.recorded);
+    await page.waitForTimeout(500);
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await until('the clip of the agent left', () => clips(state).length === 2);
+    await micClosed(page);
+    await page.locator('#toast').filter({ hasText: 'What you said to Alpha:1' }).waitFor();
+    // Cancel: the mic closes and nothing is sent to be transcribed.
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:1' }).waitFor();
+    await page.fill('#prompt textarea', '');
+    await page.evaluate(() => (window.recorded = null));
+    await page.click('#mic');
+    await page.waitForFunction(() => window.recorded);
+    await page.waitForTimeout(500);
+    await page.getByRole('button', { name: 'Cancel dictation' }).click();
+    await micClosed(page);
+    await page.waitForTimeout(800);
+    assert.equal(clips(state).length, 2, 'a cancelled clip uploads nothing');
+    assert.equal(await box(page), '');
+    assert.ok(await page.locator('#rec').isHidden() && (await page.locator('#prompt').isVisible()), 'the box is back');
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit'), []);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS hiding the page or leaving the agent stops and transcribes without sending, a mic still opening closes once open, and cancel uploads nothing');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));
