@@ -6060,10 +6060,10 @@ const runTo = (order: string[], to: string) => {
 
 /** The verbs a row carries: glyphs on hover, words in the selection bar.
  * `files` is read at click time — the row may have been redrawn since. */
-function actBtns(sec: Sec, files: () => Change[], words = false) {
+function actBtns(th: Thread, sec: Sec, files: () => Change[], words = false) {
   const b: HTMLButtonElement[] = [];
   const add = (glyph: string, word: string, title: string, act: Act) =>
-    b.push(mini(words ? word : glyph, title, () => void doAct(sec, act, files())));
+    b.push(mini(words ? word : glyph, title, () => void doAct(th, sec, act, files())));
   if (sec === "staged") add("−", "Unstage", "Unstage", "unstage");
   else add("+", "Stage", "Stage", "stage");
   if (sec === "untracked") add("✕", "Delete", "Delete — git has no copy of it", "discard");
@@ -6071,10 +6071,11 @@ function actBtns(sec: Sec, files: () => Change[], words = false) {
   return b;
 }
 
-/** Run one verb over some files, asking first when it throws work away. */
-async function doAct(sec: Sec, act: Act, files: Change[]) {
-  const th = current;
-  if (!th || !files.length) return;
+/** Run one verb over some files, asking first when it throws work away.
+ * `th` is the thread the rows were drawn for: the panel shows them until the
+ * next thread's status arrives, and the same path there is someone else's. */
+async function doAct(th: Thread, sec: Sec, act: Act, files: Change[]) {
+  if (!files.length) return;
   const what = files.length === 1 ? files[0].path : `${files.length} files`;
   if (act === "discard") {
     const q =
@@ -6103,16 +6104,16 @@ const fileMenu = (th: Thread, sec: Sec, files: Change[]): Menu => ({
     const n = files.length > 1 ? ` ${files.length} files` : "";
     const fight = files.every(conflicted);
     if (fight) {
-      menuItem(list, `Keep ours${n}`, () => void resolve("ours", files));
-      menuItem(list, `Keep theirs${n}`, () => void resolve("theirs", files));
+      menuItem(list, `Keep ours${n}`, () => void resolve(th, "ours", files));
+      menuItem(list, `Keep theirs${n}`, () => void resolve(th, "theirs", files));
     }
     menuItem(list, fight ? `Mark resolved${n}` : sec === "staged" ? `Unstage${n}` : `Stage${n}`, () =>
-      void doAct(sec, !fight && sec === "staged" ? "unstage" : "stage", files),
+      void doAct(th, sec, !fight && sec === "staged" ? "unstage" : "stage", files),
     );
     menuItem(
       list,
       sec === "untracked" ? `Delete${n || " file"}` : `Discard changes${n}`,
-      () => void doAct(sec, "discard", files),
+      () => void doAct(th, sec, "discard", files),
       true,
     );
     menuItem(list, `Copy path${n}`, () => void navigator.clipboard.writeText(files.map((c) => c.path).join("\n")));
@@ -6124,10 +6125,10 @@ const fileMenu = (th: Thread, sec: Sec, files: Change[]): Menu => ({
 
 /** One repo-wide git command from the ⋯: confirm when it can lose work, show
  * the button busy while it runs, and put git's own words up when it refuses.
- * Re-reads HEAD afterwards because half of these move the branch. */
-async function gitDo(ask: string, ...args: string[]) {
-  const th = current;
-  if (!th) return;
+ * Re-reads HEAD afterwards because half of these move the branch. `th` is the
+ * thread the menu or bar was drawn for, not whichever is open by the time you
+ * click or confirm. */
+async function gitDo(th: Thread, ask: string, ...args: string[]) {
   if (ask && !(await confirm(ask, { title: "Loom", kind: "warning" }))) return;
   const b = $<HTMLButtonElement>("#changes-more");
   b.disabled = true;
@@ -6148,9 +6149,7 @@ async function gitDo(ask: string, ...args: string[]) {
 const conflicted = (c: Change) => c.x === "U" || c.y === "U" || (c.x === c.y && (c.x === "A" || c.x === "D"));
 
 /** Take one side of a conflict wholesale and mark it resolved. */
-async function resolve(side: "ours" | "theirs", files: Change[]) {
-  const th = current;
-  if (!th) return;
+async function resolve(th: Thread, side: "ours" | "theirs", files: Change[]) {
   try {
     for (const args of resolveArgs(side, files.map((c) => c.path))) await git(th.dir, ...args);
   } catch (e) {
@@ -6161,43 +6160,45 @@ async function resolve(side: "ours" | "theirs", files: Change[]) {
 }
 
 /** Right-click a commit in the log. */
-const commitMenuFor = (sha: string): Menu => ({
+const commitMenuFor = (th: Thread, sha: string): Menu => ({
   placeholder: "",
   rows: (list) => {
     menuItem(list, "Revert this commit", () =>
-      void gitDo(`Revert ${sha}?\nA new commit undoing it lands on this branch.`, "-c", "core.editor=true", "revert", "--no-edit", sha),
+      void gitDo(th, `Revert ${sha}?\nA new commit undoing it lands on this branch.`, "-c", "core.editor=true", "revert", "--no-edit", sha),
     );
     menuItem(
       list,
       "Reset to here (keep changes)",
-      () => void gitDo(`Move the branch back to ${sha}?\nEverything after it stays in the tree, staged.`, "reset", "--soft", sha),
+      () => void gitDo(th, `Move the branch back to ${sha}?\nEverything after it stays in the tree, staged.`, "reset", "--soft", sha),
       true,
     );
     menuItem(
       list,
       "Reset to here (throw changes away)",
-      () => void gitDo(`Reset hard to ${sha}?\nEvery change after it is lost.`, "reset", "--hard", sha),
+      () => void gitDo(th, `Reset hard to ${sha}?\nEvery change after it is lost.`, "reset", "--hard", sha),
       true,
     );
     menuItem(list, "Copy SHA", () => void navigator.clipboard.writeText(sha));
   },
 });
 
+/** The ⋯'s menu for a list git just gave for `th`. Dropped when you left `th`
+ * while git answered: it would put one thread's list over another's. */
+const showGitMenu = (th: Thread, m: Menu) => void (th === current && showMenu($("#changes-more"), m));
+
 /** Branches, newest first, with the input adding one. `switch` refuses while
  * the tree is dirty or the branch is checked out in another worktree — git's
  * complaint goes to the toast, which is the answer either way. */
-async function showBranches() {
-  const th = current;
-  if (!th) return;
+async function showBranches(th: Thread) {
   const out = await git(th.dir, "branch", "--format=%(refname:short)", "--sort=-committerdate").catch(() => "");
   const names = out.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 40);
-  showMenu($("#changes-more"), {
+  showGitMenu(th, {
     placeholder: "new branch…",
-    add: (v) => void gitDo("", "switch", "-c", v),
+    add: (v) => void gitDo(th, "", "switch", "-c", v),
     rows: (list) => {
       if (!names.length) return note(list, "no branches yet");
       for (const n of names)
-        menuItem(list, n === th.branch ? `${n} ✓` : n, () => void gitDo("", "switch", n));
+        menuItem(list, n === th.branch ? `${n} ✓` : n, () => void gitDo(th, "", "switch", n));
     },
   });
 }
@@ -6205,12 +6206,10 @@ async function showBranches() {
 /** The stash, applied rather than popped and picked by name: the stack is
  * shared with every other worktree of this repo, so "the top one" is not
  * necessarily yours. */
-async function showStashes() {
-  const th = current;
-  if (!th) return;
+async function showStashes(th: Thread) {
   const out = await git(th.dir, "stash", "list", "--format=%gd%x09%gs").catch(() => "");
   const rows = out.trim() ? out.trim().split("\n").map((l) => l.split("\t")) : [];
-  showMenu($("#changes-more"), {
+  showGitMenu(th, {
     placeholder: "",
     rows: (list) => {
       if (!rows.length) return note(list, "no stashes");
@@ -6222,9 +6221,9 @@ async function showStashes() {
         s.title = msg ?? ref;
         d.append(
           s,
-          mini("✕", "Drop this stash", () => (hideMenu(), void gitDo(`Drop ${ref}?`, "stash", "drop", ref))),
+          mini("✕", "Drop this stash", () => (hideMenu(), void gitDo(th, `Drop ${ref}?`, "stash", "drop", ref))),
         );
-        d.onclick = () => (hideMenu(), void gitDo("", "stash", "apply", ref));
+        d.onclick = () => (hideMenu(), void gitDo(th, "", "stash", "apply", ref));
         list.append(d);
       }
     },
@@ -6233,17 +6232,17 @@ async function showStashes() {
 
 /** Amend with whatever is staged; the message box replaces the message when
  * it has something in it. */
-async function amend() {
-  const th = current;
+async function amend(th: Thread) {
   const box = $<HTMLTextAreaElement>("#commit-msg");
   const m = box.value.trim();
   await gitDo(
+    th,
     `Amend the last commit?\n${m ? "Its message becomes what is in the box." : "Its message is kept."}`,
     "commit",
     "--amend",
     ...(m ? ["-m", m] : ["--no-edit"]),
   );
-  if (th) th.commitDraft = "";
+  th.commitDraft = "";
   if (current === th) box.value = "";
   save();
 }
@@ -6254,30 +6253,30 @@ const repoMenu: Menu = {
   rows: (list) => {
     const th = current;
     if (!th) return;
-    menuItem(list, "Fetch", () => void gitDo("", "fetch", "--all", "--prune"));
-    menuItem(list, "Pull (rebase)", () => void gitDo("", "pull", "--rebase", "--autostash"));
-    menuItem(list, "Push", () => void gitDo("", "push", "-u", "origin", "HEAD"));
+    menuItem(list, "Fetch", () => void gitDo(th, "", "fetch", "--all", "--prune"));
+    menuItem(list, "Pull (rebase)", () => void gitDo(th, "", "pull", "--rebase", "--autostash"));
+    menuItem(list, "Push", () => void gitDo(th, "", "push", "-u", "origin", "HEAD"));
     menuItem(
       list,
       "Force push (with lease)",
-      () => void gitDo(`Force-push ${th.branch}?\nIt overwrites the remote branch unless someone else has pushed since you last fetched.`, "push", "--force-with-lease"),
+      () => void gitDo(th, `Force-push ${th.branch}?\nIt overwrites the remote branch unless someone else has pushed since you last fetched.`, "push", "--force-with-lease"),
       true,
     );
-    menuItem(list, "Switch branch…", () => void showBranches());
-    menuItem(list, "Amend last commit", () => void amend());
+    menuItem(list, "Switch branch…", () => void showBranches(th));
+    menuItem(list, "Amend last commit", () => void amend(th));
     menuItem(list, "Undo last commit (keep changes)", () =>
-      void gitDo("Undo the last commit?\nIts changes come back as staged work.", "reset", "--soft", "HEAD~1"),
+      void gitDo(th, "Undo the last commit?\nIts changes come back as staged work.", "reset", "--soft", "HEAD~1"),
     );
     menuItem(list, "Stash all changes", () =>
-      void gitDo("", "stash", "push", "-u", "-m", `loom ${th.name}`),
+      void gitDo(th, "", "stash", "push", "-u", "-m", `loom ${th.name}`),
     );
-    menuItem(list, "Restore a stash…", () => void showStashes());
+    menuItem(list, "Restore a stash…", () => void showStashes(th));
   },
 };
 
 /** Continue / skip / abort, when git has stopped half way through something.
  * `core.editor=true` because nothing here can pop an editor and wait. */
-function midwayBar(state: string) {
+function midwayBar(th: Thread, state: string) {
   const bar = document.createElement("div");
   bar.className = "sel-bar warn";
   const label = document.createElement("span");
@@ -6285,18 +6284,18 @@ function midwayBar(state: string) {
   const btns =
     state === "merge"
       ? [
-          mini("Commit", "Finish the merge", () => void gitDo("", "-c", "core.editor=true", "commit", "--no-edit")),
-          mini("Abort", "Undo the merge", () => void gitDo("Abort the merge?", "merge", "--abort")),
+          mini("Commit", "Finish the merge", () => void gitDo(th, "", "-c", "core.editor=true", "commit", "--no-edit")),
+          mini("Abort", "Undo the merge", () => void gitDo(th, "Abort the merge?", "merge", "--abort")),
         ]
       : state === "revert"
         ? [
-            mini("Continue", "Finish the revert", () => void gitDo("", "-c", "core.editor=true", "revert", "--continue")),
-            mini("Abort", "Undo the revert", () => void gitDo("Abort the revert?", "revert", "--abort")),
+            mini("Continue", "Finish the revert", () => void gitDo(th, "", "-c", "core.editor=true", "revert", "--continue")),
+            mini("Abort", "Undo the revert", () => void gitDo(th, "Abort the revert?", "revert", "--abort")),
           ]
         : [
-            mini("Continue", "Go on with the rebase", () => void gitDo("", "-c", "core.editor=true", "rebase", "--continue")),
-            mini("Skip", "Drop the commit being applied", () => void gitDo("Skip this commit?", "rebase", "--skip")),
-            mini("Abort", "Put the branch back", () => void gitDo("Abort the rebase?", "rebase", "--abort")),
+            mini("Continue", "Go on with the rebase", () => void gitDo(th, "", "-c", "core.editor=true", "rebase", "--continue")),
+            mini("Skip", "Drop the commit being applied", () => void gitDo(th, "Skip this commit?", "rebase", "--skip")),
+            mini("Abort", "Put the branch back", () => void gitDo(th, "Abort the rebase?", "rebase", "--abort")),
           ];
   bar.append(label, ...btns);
   return bar;
@@ -6388,7 +6387,7 @@ async function readChanges() {
   disposeFileRows();
   disposeFileRows = () => {};
   body.textContent = "";
-  if (midway) body.append(midwayBar(midway));
+  if (midway) body.append(midwayBar(th, midway));
   if (selSec) {
     const sec = selSec;
     const bar = document.createElement("div");
@@ -6397,7 +6396,7 @@ async function readChanges() {
     n.textContent = `${sel.size} selected`;
     bar.append(
       n,
-      ...actBtns(sec, () => secRows[sec].filter((c) => sel.has(c.path)), true),
+      ...actBtns(th, sec, () => secRows[sec].filter((c) => sel.has(c.path)), true),
       mini("✕", "Clear the selection", clearSel),
     );
     body.append(bar);
@@ -6419,7 +6418,7 @@ async function readChanges() {
     };
     const hActs = document.createElement("span");
     hActs.className = "acts";
-    hActs.append(...actBtns(sec, () => rows)); // on the header the verbs mean "all of it"
+    hActs.append(...actBtns(th, sec, () => rows)); // on the header the verbs mean "all of it"
     h.append(chev, t, all, hActs);
     h.onclick = () => {
       foldedSections.has(title) ? foldedSections.delete(title) : foldedSections.add(title);
@@ -6443,7 +6442,7 @@ async function readChanges() {
         row.innerHTML = `<i class="chev"></i><span>${esc(d.name)}</span><b>${d.count}</b>`;
         const acts = document.createElement("span");
         acts.className = "acts";
-        acts.append(...actBtns(sec, under));
+        acts.append(...actBtns(th, sec, under));
         row.append(acts);
         row.onclick = (e) => {
           if (e.ctrlKey || e.metaKey) return select(sec, under().map((c) => c.path), false);
@@ -6468,7 +6467,7 @@ async function readChanges() {
         name.textContent = f.name;
         const acts = document.createElement("span");
         acts.className = "acts";
-        acts.append(...actBtns(sec, () => [c]));
+        acts.append(...actBtns(th, sec, () => [c]));
         const st = document.createElement("span");
         st.className = "file-stat";
         const s = stats.get(c.path);
@@ -6510,7 +6509,7 @@ async function readChanges() {
         d.innerHTML = `<b>${esc(sha)}</b> ${esc(msg.join(" "))}`;
         d.title = "Show this commit — right-click to revert or reset";
         d.onclick = () => openTab(th, `${sha} (commit)`, { commit: sha });
-        d.oncontextmenu = (e) => (e.preventDefault(), showMenu(d, commitMenuFor(sha)));
+        d.oncontextmenu = (e) => (e.preventDefault(), showMenu(d, commitMenuFor(th, sha)));
         body.append(d);
       }
   }
@@ -6529,21 +6528,31 @@ function note(el: HTMLElement, text: string) {
   el.append(d);
 }
 
+/** A commit took `draft` as its message: empty the thread's box, unless you
+ * typed something else into it while git ran. */
+function usedDraft(th: Thread, draft: string) {
+  if (th.commitDraft !== draft) return;
+  th.commitDraft = "";
+  if (current === th) $<HTMLTextAreaElement>("#commit-msg").value = "";
+  save();
+}
+
 /** Commit everything the thread has changed, and push when asked. Orca's box
  * does the same; the staged/unstaged split above is for reading. */
 async function commitAll(push = false, all = true) {
   const th = current;
   const msg = $<HTMLTextAreaElement>("#commit-msg");
-  if (!th || !msg.value.trim()) return msg.focus();
+  // The message as you pressed Commit: by the time `add` answers the box may
+  // show another thread's draft, or what you went on to type.
+  const draft = msg.value;
+  if (!th || !draft.trim()) return msg.focus();
   const btn = $<HTMLButtonElement>("#commit-btn");
   btn.disabled = true;
   let err = "";
   try {
     if (all) await git(th.dir, "add", "-A");
-    await git(th.dir, "commit", "-m", msg.value.trim());
-    th.commitDraft = "";
-    if (current === th) msg.value = "";
-    save();
+    await git(th.dir, "commit", "-m", draft.trim());
+    usedDraft(th, draft);
     if (push) await git(th.dir, "push", "-u", "origin", "HEAD");
   } catch (e) {
     err = String(e);

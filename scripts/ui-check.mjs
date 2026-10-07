@@ -38,7 +38,7 @@ try {
       if (location.search.includes('legacy-opencode2')) state.threads[0].panes.forEach(p => p.cmd = 'opencode2');
       if (location.search.includes('stale-codex')) state.threads[0].panes = [{ cmd: 'codex', sid: 'pane-a', sessionId: 'missing-session' }];
       if (location.search.includes('restore')) state = JSON.parse(localStorage.getItem('qa-state'));
-      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [], pendingSessions: [], pendingWrites: [], pendingCodex: [] };
+      const qa = window.qa = { calls: [], panes: [], saved: null, failCreate: false, sessions: [], failSessions: false, beeps: 0, holdKills: false, pendingKills: [], pendingSessions: [], pendingWrites: [], pendingCodex: [], heldGit: [] };
       // Count chimes instead of playing them; only createOscillator matters.
       const node = { connect() { return node; }, start() {}, stop() {}, frequency: { setValueAtTime() {} }, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } };
       window.AudioContext = class { state = 'running'; currentTime = 0; destination = node; resume() {} createGain() { return node; } createOscillator() { qa.beeps++; return node; } };
@@ -135,6 +135,9 @@ try {
         if (cmd === 'worktree_remove') return `C:\\Users\\test\\AppData\\Local\\loom\\trash\\1-${args.dir.split('\\').pop()}`;
         if (cmd === 'git_run') {
           const a = args.args;
+          // qa.holdGit = [verb, sub?]: that call waits in qa.heldGit for the test to answer it. qa.failGit: that verb fails.
+          if (qa.holdGit && a[0] === qa.holdGit[0] && (!qa.holdGit[1] || a[1] === qa.holdGit[1])) return new Promise(resolve => qa.heldGit.push(resolve));
+          if (qa.failGit && a[0] === qa.failGit) throw new Error('Test: git refused');
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
           if (a[0] === 'status' && qa.statusFor?.[args.dir] !== undefined) return qa.statusFor[args.dir]; // one worktree's own status
           if (a[0] === 'status') return (a.includes('--branch') ? '## main...origin/main [ahead 2]\0' : '') + (qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0') + (a.includes('--ignored=matching') ? qa.ignored ?? '' : '');
@@ -246,21 +249,118 @@ try {
       checks++;
     }
     const escape = () => page.keyboard.press('Escape');
+    const call = (cmd, argv, stdin, key, timeout = 5) => page.evaluate(async ([cmd, argv, stdin, key, timeout]) => {
+      const id = window.qa.cliIds = (window.qa.cliIds ?? 0) + 1;
+      await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin, cwd: null, timeout, key } });
+      for (const end = Date.now() + 15000; Date.now() < end;) {
+        const reply = window.qa.calls.find(c => c.cmd === 'cli_reply' && c.args.id === id);
+        if (reply) return reply.args.reply;
+        await new Promise(r => setTimeout(r, 20));
+      }
+      return { hung: [cmd, ...argv].join(' ') };
+    }, [cmd, argv, stdin ?? null, key ?? null, timeout]);
+    const cli = (cmd, ...argv) => call(cmd, argv);
+    if (width === 1280) {
+      // A Changes action keeps the thread and the message it began with: switching
+      // threads (loomctl show, which works under a dialog too) while git answers
+      // moves neither, and a list git gave for a thread you left never shows.
+      await page.goto(base);
+      await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved && window.qa.calls.some(c => c.cmd === 'cli_ready'));
+      const A = 'C:\\projects\\loom\\search-polish';
+      const gitCalls = verb => page.evaluate(verb => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args[0] === verb).map(c => [c.args.dir, ...c.args.args]), verb);
+      const hold = async (...verb) => {
+        await page.evaluate(verb => { window.qa.heldGit = []; window.qa.holdGit = verb; }, verb);
+        return async (out = '') => {
+          await page.waitForFunction(() => window.qa.heldGit.length > 0);
+          await page.evaluate(out => { window.qa.holdGit = null; window.qa.heldGit.splice(0).forEach(answer => answer(out)); }, out);
+        };
+      };
+      const held = () => page.waitForFunction(() => window.qa.heldGit.length > 0);
+      const to = async name => assert.equal((await cli('show', name)).ok, true, `show ${name}`);
+      const box = () => page.inputValue('#commit-msg');
+      const idle = () => page.waitForFunction(() => !document.querySelector('#commit-btn').disabled && !document.querySelector('#changes-more').disabled);
+      const shown = text => page.locator('#pane-menu:not(.hidden) .menu-item').filter({ hasText: text }).count();
+      const repoItem = async label => {
+        await page.click('#changes-more');
+        await page.locator('#pane-menu:not(.hidden) .menu-item').filter({ hasText: label }).click();
+      };
+      await page.click('#changes-btn');
+      await page.waitForSelector('.file');
+      // Committing: the message is the one in the box when you pressed Commit.
+      await page.fill('#commit-msg', 'Message A');
+      let answer = await hold('add');
+      await page.click('#commit-btn');
+      await held();
+      await to('review-keyboard-navigation');
+      await page.fill('#commit-msg', 'Message B');
+      await answer();
+      await idle();
+      assert.deepEqual(await gitCalls('commit'), [[A, 'commit', '-m', 'Message A']], 'The commit keeps its thread and message');
+      assert.equal(await box(), 'Message B', "The other thread's draft is untouched");
+      await to('search-polish');
+      assert.equal(await box(), '', 'The committed draft is cleared');
+      await page.fill('#commit-msg', 'First A');
+      answer = await hold('add');
+      await page.click('#commit-btn');
+      await held();
+      await page.fill('#commit-msg', 'Second A, typed while git ran');
+      await answer();
+      await idle();
+      assert.deepEqual((await gitCalls('commit'))[1], [A, 'commit', '-m', 'First A']);
+      assert.equal(await box(), 'Second A, typed while git ran', 'A draft typed while git ran stays');
+      // A branch or stash list that arrives after you left its thread never shows.
+      answer = await hold('branch');
+      await repoItem(/^Switch branch/);
+      await held();
+      await to('review-keyboard-navigation');
+      await answer('branch-from-A\n');
+      await page.waitForTimeout(200);
+      assert.equal(await shown('branch-from-A'), 0, "A's branches never show over another thread");
+      answer = await hold('stash', 'list');
+      await to('search-polish');
+      await repoItem(/^Restore a stash/);
+      await held();
+      await to('review-keyboard-navigation');
+      await answer('stash@{0}\tOn loom/search-polish: from A\n');
+      await page.waitForTimeout(200);
+      assert.equal(await shown('from A'), 0, "A's stashes never show over another thread");
+      // A list still open when the thread changes acts on the thread it lists.
+      await to('search-polish');
+      await repoItem(/^Switch branch/);
+      await page.waitForSelector('#pane-menu:not(.hidden) .menu-item');
+      await to('review-keyboard-navigation');
+      await page.locator('#pane-menu:not(.hidden) .menu-item').filter({ hasText: /^main$/ }).click();
+      await idle();
+      assert.deepEqual(await gitCalls('switch'), [[A, 'switch', 'main']], "A branch from A's list switches A");
+      await to('search-polish');
+      await repoItem(/^Restore a stash/);
+      await page.locator('#pane-menu:not(.hidden) button[title="Drop this stash"]').click();
+      await page.waitForSelector('#confirm[open]');
+      await to('review-keyboard-navigation');
+      await page.click('#confirm-action');
+      await idle();
+      assert.deepEqual(await gitCalls('stash').then(c => c.filter(a => a[2] === 'drop')), [[A, 'stash', 'drop', 'stash@{0}']], 'A drop confirmed after a switch drops from the listed thread');
+      // A row still on screen while the next thread's status loads acts on its own thread.
+      await to('search-polish');
+      await page.waitForSelector('.file');
+      answer = await hold('status');
+      await to('review-keyboard-navigation');
+      await held();
+      const row = page.locator('#changes-body .file').first();
+      await row.hover();
+      await row.locator('button[title="Discard these changes"]').click();
+      await page.click('#confirm-action');
+      await answer(' M src/main.ts\0');
+      await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'git_run' && c.args.args[0] === 'restore'));
+      assert.deepEqual(await gitCalls('restore'), [[A, 'restore', '--', ':(literal)src/main.ts']], 'Discarding a row discards in the thread it lists');
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS Changes actions keep their thread and message across a thread switch ${width}px`);
+    }
     if (width === 1280) {
       // loomctl's stop against a pane still starting, and a restart that fails (LOOM_CLI_REVIEW F5, F7).
       await page.goto(base + '?hold-session&dashboard'); // dashboard: the Codex pane has a saved session
       await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'cli_ready') && window.qa.pendingSessions.length > 0);
-      const call = (cmd, argv, stdin, key, timeout = 5) => page.evaluate(async ([cmd, argv, stdin, key, timeout]) => {
-        const id = window.qa.cliIds = (window.qa.cliIds ?? 0) + 1;
-        await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id, cmd, argv, stdin, cwd: null, timeout, key } });
-        for (const end = Date.now() + 15000; Date.now() < end;) {
-          const reply = window.qa.calls.find(c => c.cmd === 'cli_reply' && c.args.id === id);
-          if (reply) return reply.args.reply;
-          await new Promise(r => setTimeout(r, 20));
-        }
-        return { hung: [cmd, ...argv].join(' ') };
-      }, [cmd, argv, stdin ?? null, key ?? null, timeout]);
-      const cli = (cmd, ...argv) => call(cmd, argv);
       const stopped = await cli('stop', 'search-polish:1', '--yes');
       assert.equal(stopped.ok, true, JSON.stringify(stopped));
       await page.evaluate(() => { window.qa.sessionsReleased = true; window.qa.pendingSessions.splice(0).forEach(r => r(true)); });
