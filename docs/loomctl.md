@@ -494,6 +494,9 @@ when time runs out.
 | `set font N` | The terminals' text size, 8 to 24 points, as Ctrl+= and Ctrl+- set it. |
 | `startups [add <label> <command...> \| remove <label>]` | The agents and terminals the `+` menu offers, which `new` and `add --agent` pick from. |
 | `dictation` | The mic menu's languages and prefixes, each with its pick. `F4` and the phone's mic use the same pick. |
+| `dictation lang <code\|auto>` | Pick a language by its whisper code or its label, adding a new code to the list. `auto` detects it per clip. |
+| `dictation prefix [text...] [--enter on\|off]` | Pick a prefix, adding it if new, and set whether it sends what was said. No text picks no prefix. |
+| `dictation remove lang <code>` / `remove prefix [text...]` | Drop one from its list. The last of each stays. |
 | `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
 | `notify --check SEQ,...` | Whether those events may go out as notices now. |
 | `remote [on [--port N] \| off \| pair \| revoke \| push test]` | The phone remote: its state, start or stop it, show a pairing code for a phone, unpair every phone, or send the phones with notifications on a test one. See [Phone remote](#phone-remote). |
@@ -569,7 +572,10 @@ then, the text waits as the first agent's draft and nothing is sent. Hiding
 the page or leaving the agent stops the recording and transcribes what it
 caught, without sending. A clip holds 3 minutes. `/api/dictate` takes 6 MiB
 within 60 seconds from a paired phone, and `/api/cli` keeps 1 MiB and 10
-seconds. `dictation` gives the phone the PC's lists.
+seconds. **Dictation** in an agent's `⋯`, or in Settings, opens both lists as
+the PC's mic menu has them. Tap a row to pick it, `⏎` to have a prefix send
+what was said, `✕` to drop one, or add one under its list. Each is a
+`dictation` command, so the PC's menu and `F4` change with it.
 
 **Notifications on this phone**, in the phone's Settings, sends it the task
 notices as phone notifications: an agent finished, asks something, or failed.

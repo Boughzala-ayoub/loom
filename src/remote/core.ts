@@ -166,10 +166,10 @@ export function topBar(title: string | Node, actions: Node[] = [], backTo = "") 
 
 let sheetDone: ((v: unknown) => void) | null = null;
 /** A sheet over the screen, from the bottom. Resolves with what was picked, or null. */
-export function sheet<T = unknown>(items: (Node | string)[], title = ""): Promise<T | null> {
+export function sheet<T = unknown>(items: (Node | string)[], title = "", close = "Cancel"): Promise<T | null> {
   closeSheet();
   const box = $("#sheet");
-  box.replaceChildren(...(title ? [el("h2", "", title)] : []), ...items, button("Cancel", () => closeSheet(), "ghost"));
+  box.replaceChildren(...(title ? [el("h2", "", title)] : []), ...items, button(close, () => closeSheet(), "ghost"));
   box.hidden = $("#scrim").hidden = false;
   requestAnimationFrame(() => { box.classList.add("on"); $("#scrim").classList.add("on"); });
   return new Promise((resolve) => (sheetDone = resolve as (v: unknown) => void));
@@ -267,6 +267,8 @@ const PATHS = {
   settings: "M4 7h9M19 7h1M4 17h1M11 17h9M18.5 7a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0ZM10.5 17a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Z",
   send: "M12 19V5M6 11l6-6 6 6",
   mic: "M12 3a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3ZM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21",
+  check: "M5 12.5l4.5 4.5L19 7.5",
+  enter: "M19 5v6a3 3 0 0 1-3 3H6M10 10l-4 4 4 4",
   pen: "M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6M18.4 3.6a2 2 0 0 1 2.8 2.8L13 14.6l-3.6.8.8-3.6z",
   back: "M15 5l-7 7 7 7",
   more: "M5 10.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4ZM12 10.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4ZM19 10.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4Z",

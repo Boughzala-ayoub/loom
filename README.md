@@ -270,7 +270,7 @@ The page is an app with four tabs, and it wears the PC's theme.
   what it last heard and said, its question's options as buttons and a reply
   box. Open an agent to read its screen, send a prompt or answer a question.
   The mic beside its message box dictates through the PC's whisper, with the
-  PC's language and prefix.
+  PC's language and prefix, which its `⋯` and Settings change.
   Long lines wrap to the phone, and scrolling up past the top reads the
   agent's history. The keyboard button opens a PC keyboard: Esc, Tab, Ctrl,
   Alt and Shift held for the next key, arrows, Home, End, PgUp, PgDn, F1 to

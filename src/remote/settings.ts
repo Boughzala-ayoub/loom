@@ -2,6 +2,7 @@
  * and this phone's own choices. Each PC setting is a loomctl command. */
 import { $, act, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar } from "./core";
 import { b64u, unb64u } from "../push";
+import { dictationSheet, lists, pickLabel, readLists } from "./dictate";
 
 type Theme = { name: string; scheme: string; current: boolean; vars: Record<string, string> };
 type Notify = { all: string; kinds: { finish: boolean; fail: boolean; blocked: boolean }; newPanes: string };
@@ -35,6 +36,7 @@ export async function read() {
     run<Trashed[]>("trash").catch(() => trash),
     pushState().catch(() => {}),
     run<Status>("status").catch(() => loom),
+    readLists().catch(() => {}),
   ]);
   loom = ls;
   // An older Loom answers a command it lacks with an error: each reading keeps its shape.
@@ -222,6 +224,10 @@ const current = themes.find((t) => t.current);
   nodes.push(...group("Appearance",
     setting("Theme", "On the PC, and this phone wears it too", pickTheme),
     setting("Terminal text size", "The PC's agents and terminals, in points", stepper),
+  ));
+  // The mic's language and prefix: one pick, the PC's F4 and this phone's mic alike.
+  if (lists) nodes.push(...group("Dictation",
+    setting("Language and prefix", `${pickLabel()}. F4 on the PC uses the same.`, button("Change", () => dictationSheet(draw))),
   ));
 
   if (notify && settings) nodes.push(...group("Notifications",

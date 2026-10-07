@@ -8750,9 +8750,53 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   dictation: {
-    usage: "dictation",
-    help: "The mic's languages and prefixes, as its menu lists them, and which of each dictation uses: the PC's F4 and the phone's mic alike.",
-    run: () => dictationData(),
+    usage: "dictation [lang <code|auto> | prefix [text...] [--enter on|off] | remove lang <code> | remove prefix [text...]]",
+    help: "The mic's languages and prefixes, as its menu lists them, and which of each dictation uses: the PC's F4 and the phone's mic alike. lang and prefix pick one, adding it if new (a prefix with no text is none), and --enter says whether that prefix sends what was said. remove drops one; the last of each stays.",
+    options: { enter: "string" },
+    run: (a) => {
+      const [how, ...rest] = a._;
+      const words = rest.join(" ").trim();
+      const enter = str(a, "enter");
+      if (enter !== undefined && (how !== "prefix" || !/^(on|off)$/.test(enter))) throw new Error("--enter is on or off, for dictation prefix.");
+      // A language by its code or its label; auto is the one whisper detects per clip.
+      const findLang = (w: string) => langs.find((l) => l.code === (w.toLowerCase() === "auto" ? "" : w.toLowerCase()) || l.label.toLowerCase() === w.toLowerCase());
+      const findPrefix = (w: string) => prefixes.find((p) => p.text.trim() === w);
+      if (how === "lang") {
+        if (!words) throw new Error("Name the language: a whisper code such as fr, or auto.");
+        let l = findLang(words);
+        if (!l) {
+          if (!/^[a-z]{2,8}$/i.test(words)) throw new Error(`${words} isn't a whisper language code, such as fr, ar or ja.`);
+          langs.push((l = { label: words.toLowerCase(), code: words.toLowerCase() }));
+        }
+        lang = l;
+      } else if (how === "prefix") {
+        // It is typed into the pane on the PC: one line, nothing that presses a key.
+        if (/[\x00-\x1f\x7f]/.test(rest.join(" ")) || words.length > 200) throw new Error("A prefix is one line of text.");
+        let p = findPrefix(words);
+        // Trailing space or the transcript runs into the command name, as the menu adds it.
+        if (!p) prefixes.push((p = { text: words ? `${words} ` : "", enter: false }));
+        if (enter) p.enter = enter === "on";
+        prefix = p;
+      } else if (how === "remove") {
+        const [what, ...name] = rest;
+        const w = name.join(" ").trim();
+        if (what === "lang" || what === "prefix") {
+          const list: (Lang | Prefix)[] = what === "lang" ? langs : prefixes;
+          const gone = what === "lang" ? (w ? findLang(w) : undefined) : findPrefix(w);
+          if (!gone) throw new Error(`No ${what === "lang" ? "language" : "prefix"} "${w}" in the list. loomctl dictation lists them.`);
+          if (list.length === 1) throw new Error(`The last ${what === "lang" ? "language" : "prefix"} stays: dictation needs one.`);
+          list.splice(list.indexOf(gone), 1);
+          if (lang === gone) lang = langs[0];
+          if (prefix === gone) prefix = prefixes[0];
+        } else throw new Error("dictation remove takes lang or prefix.");
+      } else if (how !== undefined) throw new Error(`dictation takes lang, prefix or remove, not ${how}.`);
+      if (how !== undefined) {
+        save();
+        paintLang();
+        paintPrefix();
+      }
+      return dictationData();
+    },
   },
   vscode: {
     usage: "vscode [thread]",

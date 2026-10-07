@@ -735,5 +735,41 @@ if (check(209)) {
   assert.match(d.text, /^\* +language +French +fr$/m);
   assert.match(d.text, /^\* +prefix +\/prompt +sent the moment it lands$/m);
   assert.match(d.text, /language +auto +detected per clip/);
-  console.log("ok   loomctl dictation lists the mic's languages and prefixes with the PC's pick");
+  // The phone's Dictation sheet changes the PC's pick and lists, saved as the mic menu saves them.
+  let saved = 0;
+  const e = fixture({ langs, lang: langs[0], prefixes, prefix: prefixes[0], save: () => saved++, paintLang() {}, paintPrefix() {} });
+  const run = (...argv: string[]) => {
+    const enter = argv.indexOf("--enter");
+    const a: any = { _: enter < 0 ? argv : argv.slice(0, enter) };
+    if (enter >= 0) a.enter = argv[enter + 1];
+    return JSON.parse(JSON.stringify(e.dictation.run(a).data));
+  };
+  const on = (d: any) => [d.langs.find((l: any) => l.on)?.code, d.prefixes.find((p: any) => p.on)?.text, d.prefixes.find((p: any) => p.on)?.enter];
+  assert.deepEqual(on(run("lang", "fr")), ["fr", "/prompt ", true]);
+  assert.deepEqual(on(run("lang", "Auto")), ["", "/prompt ", true], "auto, by its label, detects");
+  assert.deepEqual(on(run("lang", "English")), ["en", "/prompt ", true]);
+  let got = run("lang", "JA");
+  assert.deepEqual([on(got)[0], got.langs.at(-1)], ["ja", { label: "ja", code: "ja", on: true }], "a new code is added and picked");
+  assert.throws(() => run("lang", "x\u0000"), /whisper language code/);
+  assert.throws(() => run("lang"), /Name the language/);
+  got = run("prefix", "/review", "--enter", "on");
+  assert.deepEqual([on(got), got.prefixes.length], [["ja", "/review ", true], 3], "a new prefix, with a space after it, sending itself");
+  assert.deepEqual(on(run("prefix", "/prompt", "--enter", "off")), ["ja", "/prompt ", false], "an old one, picked by its text, waits now");
+  assert.deepEqual(on(run("prefix")), ["ja", "", false], "no text is no prefix");
+  assert.throws(() => run("prefix", "/x\r"), /one line/);
+  assert.throws(() => run("lang", "fr", "--enter", "on"), /--enter/);
+  assert.throws(() => run("prefix", "/x", "--enter", "maybe"), /--enter/);
+  got = run("remove", "lang", "ja");
+  assert.deepEqual([on(got)[0], got.langs.some((l: any) => l.code === "ja")], ["en", false], "removing the pick picks the first");
+  got = run("remove", "prefix", "/review");
+  assert.deepEqual(got.prefixes.map((p: any) => p.text), ["/prompt ", ""]);
+  assert.throws(() => run("remove", "lang", "zz"), /No language "zz"/);
+  assert.throws(() => run("remove", "lang"), /No language ""/, "remove lang needs a name, not auto by default");
+  run("remove", "lang", "fr"); run("remove", "lang", "auto");
+  assert.throws(() => run("remove", "lang", "en"), /last language stays/);
+  run("remove", "prefix");
+  assert.throws(() => run("remove", "prefix", "/prompt"), /last prefix stays/);
+  assert.throws(() => run("louder"), /takes lang, prefix or remove/);
+  assert.equal(saved, 12, "each change saved, and only the changes");
+  console.log("ok   loomctl dictation lists the mic's languages and prefixes with the PC's pick, and picks, adds and removes them");
 }

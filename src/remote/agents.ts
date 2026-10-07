@@ -6,7 +6,7 @@ import {
   type Pane, type Thread,
 } from "./core";
 import { keyboard, type Typed } from "./keyboard";
-import { bar as recBar, record, repaint, transcribing } from "./dictate";
+import { dictationSheet, lists, pickLabel, readLists, bar as recBar, record, repaint, transcribing } from "./dictate";
 
 type Run = { x: number; text: string; bold?: boolean; dim?: boolean; italic?: boolean; underline?: boolean; inverse?: boolean; fg?: number | string; bg?: number | string };
 type Screen = { text: string; cols: number; alt?: boolean; rows: { runs: Run[] }[] };
@@ -776,6 +776,13 @@ function paneActions() {
     bell.append(b);
   }
   items.push(el("p", "", "Task notices for this agent"), bell);
+  if (p.agent !== "shell") {
+    // What the mic will use, read again as the sheet opens: someone at the PC may have changed it.
+    const label = () => (lists ? `Dictation · ${pickLabel()}` : "Dictation");
+    const dictation = item(label(), () => dictationSheet(), "", { icon: "mic" });
+    void readLists().then(() => (dictation.lastChild!.textContent = label()), () => {});
+    items.push(dictation);
+  }
   if (p.agent === "claude") items.push(item("Context", () => go(`#/context/${encodeURIComponent(p.id)}`), "", { icon: "layers" }));
   const fitLabel = () => (app.phoneSize ? "Desktop size on the PC" : "Fit Loom to phone");
   const fit = item(fitLabel(), fitPhone, "", { icon: "phone" });

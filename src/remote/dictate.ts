@@ -1,7 +1,7 @@
 /** Dictation on the phone (docs/phone-dictation-study.md): the page records, Loom's whisper on the PC
  * turns the clip into text (POST /api/dictate, remote.rs), and the text comes back for the Message box,
  * with the language and prefix the PC's mic uses. */
-import { app, el, hooks, iconButton, run, sleep, store, toast, button, ui } from "./core";
+import { act, app, el, hooks, iconButton, run, sheet, sleep, store, toast, button, ui } from "./core";
 
 export type Lang = { label: string; code: string; on: boolean };
 export type Prefix = { text: string; enter: boolean; on: boolean };
@@ -19,6 +19,61 @@ export async function readLists() {
 }
 /** "English · /prompt ⏎": what the next clip will use. */
 export const pickLabel = (p = picked()) => `${p.lang?.label ?? "English"} · ${p.prefix?.text.trim() || "no prefix"}${p.prefix?.enter ? " ⏎" : ""}`;
+
+/** The PC's mic menu on the phone: tap a row to pick it, ⏎ to have that prefix send what was said
+ * (which picks it too), ✕ to drop one, or add one under its list. Each change is a loomctl dictation
+ * command, so F4 and the PC's menu change with it. `after` runs after each change (Settings redraws). */
+export function dictationSheet(after = () => {}) {
+  const box = el("div", "dictation");
+  const change = (argv: string[]) => void act(async () => {
+    const got = await run<Lists>("dictation", argv, { change: true });
+    if (Array.isArray(got?.langs) && Array.isArray(got?.prefixes)) lists = got;
+    draw();
+    after();
+  });
+  const row = (label: string, detail: string, on: boolean, pick: () => void, ...more: Node[]) => {
+    const r = el("div", "dict-row");
+    const b = button(on ? ui("check") : el("i"), pick, "pick");
+    b.setAttribute("aria-pressed", String(on));
+    const what = el("span", "what");
+    what.append(el("b", "", label), el("span", "", detail));
+    b.append(what);
+    r.append(b, ...more);
+    return r;
+  };
+  const adder = (placeholder: string, label: string, add: (v: string) => void) => {
+    const form = el("form", "pair");
+    const input = el("input");
+    Object.assign(input, { placeholder, autocapitalize: "off", spellcheck: false });
+    input.setAttribute("aria-label", label);
+    form.append(input, el("button", "primary", "Add"));
+    form.onsubmit = (e) => { e.preventDefault(); if (input.value.trim()) add(input.value.trim()); };
+    return form;
+  };
+  const draw = () => {
+    const l = lists;
+    if (!l) return box.replaceChildren(el("p", "hint", "Reading the PC's lists…"));
+    // Keep one of each: an empty list leaves nothing to dictate with (main.ts langMenu, prefixMenu).
+    const drop = (what: string, name: string, label: string, n: number) => (n > 1 ? [iconButton("close", `Remove ${label}`, () => change(["remove", what, name]))] : []);
+    box.replaceChildren(
+      el("p", "hint", "F4 on the PC uses the same pick."),
+      el("p", "head", "Language"),
+      ...l.langs.map((x) => row(x.label, x.code || "detected per clip", x.on, () => change(["lang", x.code || "auto"]), ...drop("lang", x.code || "auto", x.label, l.langs.length))),
+      adder("Add a whisper code: ja, ko, hi", "Add a language", (v) => change(["lang", v])),
+      el("p", "head", "Prefix"),
+      ...l.prefixes.map((x) => {
+        const name = x.text.trim(), label = name || "(no prefix)";
+        const auto = iconButton("enter", `${label} sends what was said`, () => change(["prefix", name, "--enter", x.enter ? "off" : "on"]));
+        auto.setAttribute("aria-pressed", String(x.enter));
+        return row(label, x.enter ? "Sends what was said" : "Waits for Send", x.on, () => change(["prefix", name]), auto, ...drop("prefix", name, label, l.prefixes.length));
+      }),
+      adder("Add a prefix: /review", "Add a prefix", (v) => change(["prefix", v])),
+    );
+  };
+  draw();
+  void sheet([box], "Dictation", "Done");
+  void readLists().then(draw, (e) => toast(e instanceof Error ? e.message : String(e), true));
+}
 
 /** The most one clip holds: 3 minutes of 16-bit samples at 16 kHz is 5.5 MiB, under /api/dictate's 6. */
 const LIMIT_MS = 180_000;

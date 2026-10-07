@@ -388,6 +388,20 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
 #sheet > p { margin-top: 8px; }
 #sheet .item svg { width: 20px; height: 20px; color: var(--muted); }
 #sheet .item.danger svg { color: var(--err); }
+/* The Dictation sheet: the PC's mic menu, a row per language and per prefix, each list's Add under it. */
+.dictation { display: grid; gap: 4px; }
+.dictation .head { margin: 12px 4px 2px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.dictation .pair { margin: 4px 0 2px; }
+.dict-row { display: flex; align-items: center; gap: 4px; }
+.dict-row .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 4px 12px; border: 0; border-radius: 12px; background: none; text-align: left; }
+.dict-row .pick:active { background: var(--press); }
+.dict-row .pick[aria-pressed="true"] { background: var(--lit); }
+.dict-row .pick > :first-child { flex: none; width: 20px; height: 20px; }
+.dict-row .what { min-width: 0; display: grid; }
+.dict-row .what b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+.dict-row .pick[aria-pressed="true"] .what b { font-weight: 600; }
+.dict-row .what span { color: var(--faint); font-size: 13px; }
+.dict-row .icon-btn[aria-pressed="true"] { background: var(--lit); color: var(--text); }
 @media (min-width: 900px) { #sheet { left: 50%; right: auto; bottom: 24px; width: 440px; border: 1px solid var(--edge-hi); border-radius: 22px; transform: translate(-50%, 24px); opacity: 0; transition: transform 0.2s, opacity 0.2s; } #sheet.on { transform: translate(-50%, 0); opacity: 1; } }
 /* Over the top bar, a tap goes through to Back and ⋯ under it. */
 #toast { position: fixed; left: 12px; right: 12px; top: 12px; z-index: 10; padding: 13px 16px; border: 1px solid var(--edge-hi); border-radius: 14px; background: var(--raise); box-shadow: var(--shadow); pointer-events: none; }
