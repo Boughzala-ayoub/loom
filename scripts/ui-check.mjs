@@ -356,6 +356,55 @@ try {
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS Changes actions keep their thread and message across a thread switch ${width}px`);
+      // Amending empties the box only when git amended, and only the draft it used.
+      const amends = () => gitCalls('commit').then(c => c.filter(a => a.includes('--amend')));
+      const amend = async () => {
+        await repoItem(/^Amend last commit/);
+        await page.waitForSelector('#confirm[open]');
+      };
+      await to('search-polish');
+      await page.fill('#commit-msg', 'Draft to keep');
+      await amend();
+      await page.click('#confirm button[value=cancel]');
+      await page.waitForTimeout(200);
+      assert.deepEqual([await box(), await amends()], ['Draft to keep', []], 'Cancel keeps the draft and amends nothing');
+      await page.evaluate(() => { window.qa.failGit = 'commit'; });
+      await amend();
+      await page.click('#confirm-action');
+      await idle();
+      await page.evaluate(() => { window.qa.failGit = null; });
+      assert.equal(await box(), 'Draft to keep', 'A failed amend keeps the draft');
+      await amend();
+      await to('review-keyboard-navigation');
+      await page.click('#confirm-action');
+      await idle();
+      assert.deepEqual((await amends()).at(-1), [A, 'commit', '--amend', '-m', 'Draft to keep'], 'Confirmed after a switch, the amend is still A\'s');
+      assert.equal(await box(), 'Message B', "The open thread's draft is untouched");
+      await to('search-polish');
+      assert.equal(await box(), '', 'The amended draft is cleared');
+      await page.fill('#commit-msg', 'Amend while switching');
+      answer = await hold('commit');
+      await amend();
+      await page.click('#confirm-action');
+      await held();
+      await to('review-keyboard-navigation');
+      await answer();
+      await idle();
+      assert.equal(await box(), 'Message B', "The open thread's draft is untouched");
+      await to('search-polish');
+      assert.equal(await box(), '', 'Amended while away, the draft is cleared');
+      await page.fill('#commit-msg', 'Amend this');
+      answer = await hold('commit');
+      await amend();
+      await page.click('#confirm-action');
+      await held();
+      await page.fill('#commit-msg', 'Typed while amending');
+      await answer();
+      await idle();
+      assert.equal(await box(), 'Typed while amending', 'A draft typed while git amended stays');
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS amend keeps its draft unless git amended with it ${width}px`);
     }
     if (width === 1280) {
       // loomctl's stop against a pane still starting, and a restart that fails (LOOM_CLI_REVIEW F5, F7).

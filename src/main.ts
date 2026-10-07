@@ -6127,14 +6127,16 @@ const fileMenu = (th: Thread, sec: Sec, files: Change[]): Menu => ({
  * the button busy while it runs, and put git's own words up when it refuses.
  * Re-reads HEAD afterwards because half of these move the branch. `th` is the
  * thread the menu or bar was drawn for, not whichever is open by the time you
- * click or confirm. */
+ * click or confirm. False when you cancelled or git refused. */
 async function gitDo(th: Thread, ask: string, ...args: string[]) {
-  if (ask && !(await confirm(ask, { title: "Loom", kind: "warning" }))) return;
+  if (ask && !(await confirm(ask, { title: "Loom", kind: "warning" }))) return false;
   const b = $<HTMLButtonElement>("#changes-more");
   b.disabled = true;
+  let ok = true;
   try {
     await git(th.dir, ...args);
   } catch (e) {
+    ok = false;
     toast(String(e));
   }
   b.disabled = false;
@@ -6143,6 +6145,7 @@ async function gitDo(th: Thread, ask: string, ...args: string[]) {
   save();
   await refreshChanges();
   void pollStats();
+  return ok;
 }
 
 /** A conflicted file: both sides touched it and git wants a decision. */
@@ -6231,20 +6234,18 @@ async function showStashes(th: Thread) {
 }
 
 /** Amend with whatever is staged; the message box replaces the message when
- * it has something in it. */
+ * it has something in it. The box empties only once git has amended with it. */
 async function amend(th: Thread) {
-  const box = $<HTMLTextAreaElement>("#commit-msg");
-  const m = box.value.trim();
-  await gitDo(
+  const draft = th.commitDraft;
+  const m = draft.trim();
+  const ok = await gitDo(
     th,
     `Amend the last commit?\n${m ? "Its message becomes what is in the box." : "Its message is kept."}`,
     "commit",
     "--amend",
     ...(m ? ["-m", m] : ["--no-edit"]),
   );
-  th.commitDraft = "";
-  if (current === th) box.value = "";
-  save();
+  if (ok) usedDraft(th, draft);
 }
 
 /** Everything git that isn't about one file: the ⋯ beside Create PR. */
