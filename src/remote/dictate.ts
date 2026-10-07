@@ -104,6 +104,11 @@ export const recording = () => !!stopNow;
 export const cancel = () => stopNow?.(false);
 /** Clips on their way to whisper. */
 let busy = 0;
+/** Settles once every clip sent so far has landed or failed: whisper may answer a later clip first, and
+ * the text must still go in the order it was said. */
+// ponytail: one queue for every agent, so a slow clip for one holds back another's. Per-agent queues if
+// two agents are ever dictated to at once.
+let landed: Promise<void> = Promise.resolve();
 export const transcribing = () => busy > 0;
 /** Set by agents.ts: repaint the mic as recording and transcribing come and go. */
 export const repaint = { mic: () => {} };
@@ -200,14 +205,22 @@ export async function record(land: (text: string, pick: Pick, byHand: boolean) =
   if (!send) return repaint.mic();
   busy++;
   repaint.mic();
+  // This clip's place in line: it lands after the ones before it, and the next waits for it.
+  const before = landed;
+  let done!: () => void;
+  const mine = new Promise<void>((r) => (done = r));
+  landed = before.then(() => mine);
   try {
     const clip = new Blob(parts, { type });
     if (!clip.size) return toast("Nothing was recorded.");
     const p = await pick;
-    land(await post(await decode(clip), p.lang?.code ?? "en"), p, byHand);
+    const text = await post(await decode(clip), p.lang?.code ?? "en");
+    await before;
+    land(text, p, byHand);
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), true);
   } finally {
+    done();
     busy--;
     repaint.mic();
   }

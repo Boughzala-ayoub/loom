@@ -106,10 +106,18 @@ async function context(width, token = true, push = false) {
     if (new URL(req.url()).pathname === '/api/dictate') {
       const body = req.postDataBuffer() ?? Buffer.alloc(0);
       const samples = new Int16Array(body.buffer, body.byteOffset, body.length >> 1);
-      state.clips.push({ bytes: body.length, lang: new URL(req.url()).searchParams.get('lang'), auth: req.headers().authorization, peak: samples.reduce((m, s) => Math.max(m, Math.abs(s)), 0) });
+      const clip = { bytes: body.length, lang: new URL(req.url()).searchParams.get('lang'), auth: req.headers().authorization, peak: samples.reduce((m, s) => Math.max(m, Math.abs(s)), 0) };
+      state.clips.push(clip);
       if (state.revoked) return route.fulfill({ status: 401, json: { ok: false, error: 'Pair this phone again.' } });
       if (body.length && state.hold.delete('dictate')) await new Promise(r => (state.held.dictate = r));
-      return route.fulfill({ json: { ok: true, text: body.length ? state.heard : '' } });
+      // failNext: whisper fails on the next clip.
+      if (body.length && state.failNext) {
+        state.failNext = false;
+        await route.fulfill({ json: { ok: false, error: 'whisper failed' } });
+        return void (clip.answered = true);
+      }
+      await route.fulfill({ json: { ok: true, text: body.length ? state.heard : '' } });
+      return void (clip.answered = true);
     }
     const c = req.postDataJSON();
     state.calls.push(c);
@@ -1396,6 +1404,45 @@ try {
     await ctx.close();
   }
   console.log("PASS a recorder that can't start closes the microphone and gives the box back, the next tap records, and one that stops by itself transcribes without sending");
+  {
+    // Two clips in flight, the first one's reply held until the second's has come: the text lands in the
+    // order it was said, and the mic takes the second clip while the first is transcribing.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1', '#screen .line');
+    state.heard = 'first sentence';
+    state.hold.add('dictate');
+    await dictate(page, 500);
+    await until('the first clip is on its way', () => state.held.dictate);
+    const first = state.held.dictate;
+    state.heard = 'second sentence';
+    await dictate(page, 500);
+    await until('the second clip answered', () => clips(state)[1]?.answered);
+    await page.waitForTimeout(300);
+    assert.equal(await box(page), '', 'the second waits for the first');
+    state.heard = 'first sentence';
+    first();
+    await until('both, in order', async () => (await box(page)) === '/prompt first sentence second sentence');
+    // A clip that fails behind a held one costs only itself: the held one lands, and so does the next.
+    await page.fill('#prompt textarea', '');
+    state.held.dictate = null;
+    state.hold.add('dictate');
+    await dictate(page, 500);
+    await until('the third clip is on its way', () => state.held.dictate);
+    const third = state.held.dictate;
+    state.failNext = true;
+    await dictate(page, 500);
+    await page.locator('#toast').filter({ hasText: 'whisper failed' }).waitFor();
+    state.heard = 'third';
+    third();
+    await until('the held one lands', async () => (await box(page)) === '/prompt third');
+    state.heard = 'fifth';
+    await dictate(page, 500);
+    await until('the next one lands', async () => (await box(page)) === '/prompt third fifth');
+    assert.equal(clips(state).length, 5);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS two clips in flight land in the order they were said when the second is transcribed first, and a failed one holds up nothing');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));
