@@ -55,7 +55,7 @@ const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 10
 const PUSH_KEY = 'BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8';
 /** push: true for a phone that may get notifications, 'old-key' for one subscribed before Loom's key changed. */
 async function context(width, token = true, push = false) {
-  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false, restarts: 0 };
+  const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false, restarts: 0, zoomed: new Set() };
   const ctx = await browser.newContext({ viewport: { width, height: 800 } });
   if (token) await ctx.addInitScript(() => localStorage.setItem('loom-token', 'fixture-token'));
   if (push) {
@@ -134,6 +134,9 @@ async function context(width, token = true, push = false) {
         data = { stopping: [], booted: state.booted }; break;
       }
       case 'threads': data = threads; break;
+      // zoom toggles; show says whether the pane already fills its thread (main.ts paneData).
+      case 'show': data = { zoomed: state.zoomed.has(c.argv[0]) }; break;
+      case 'zoom': state.zoomed.delete(c.argv[0]) || state.zoomed.add(c.argv[0]); data = { zoomed: state.zoomed.has(c.argv[0]) }; break;
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
       case 'menu': data = question(c.argv[0]); break;
       case 'read': data = { text: 'sample screen', cols: 120, rows: [{ runs: [{ x: 0, text: 'sample screen' }] }], ...(c.argv.includes('--menu') ? { menu: question(c.argv[0]) } : {}) }; break;
@@ -486,9 +489,16 @@ try {
     await page.evaluate(() => (location.hash = '#/pane/b1'));
     await page.locator('#pane .who b').filter({ hasText: 'Beta:1' }).waitFor();
     assert.equal(await page.inputValue('#prompt textarea'), '', "Alpha's message isn't Beta's");
+    // The agent opened on the phone comes to the front on the PC and fills its thread; opening one
+    // that's still zoomed there leaves it zoomed (zoom toggles).
+    await until('Beta zoomed on the PC', () => state.zoomed.has('b1'));
     await page.evaluate(() => (location.hash = '#/pane/a1'));
     await page.locator('#pane .who b').filter({ hasText: 'Alpha:1' }).waitFor();
     assert.equal(await page.inputValue('#prompt textarea'), 'for Alpha only', 'it comes back with Alpha');
+    await until('Alpha shown again', () => state.calls.filter(c => c.cmd === 'show' && c.argv[0] === 'a1').length === 2);
+    await page.waitForTimeout(300);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'zoom').map(c => c.argv[0]), ['a1', 'b1'], 'each agent zoomed once');
+    assert.deepEqual([...state.zoomed], ['a1', 'b1']);
     // A reply lost on the way holds the screen up until its deadline, not for good.
     state.hold.add('menu'); // the next read of the screen never answers
     await until('the read is lost', () => state.held.menu);
@@ -878,7 +888,7 @@ try {
     await page.click('#prompt button.primary');
     await until('the message', () => state.calls.some(c => c.cmd === 'submit'));
     assert.deepEqual(state.calls.filter(c => c.cmd === 'submit').map(c => [c.argv[0], c.stdin]), [['a3', 'Message intended for Alpha:2']]);
-    assert.ok(!state.calls.some(c => c.argv?.includes('b1') && c.key), 'Beta was never changed');
+    assert.ok(!state.calls.some(c => c.argv?.includes('b1') && c.key && c.cmd !== 'show' && c.cmd !== 'zoom'), 'Beta was never changed, past opening it');
     assert.deepEqual(state.errors, []);
     await ctx.close();
   }

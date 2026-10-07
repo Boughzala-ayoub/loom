@@ -391,12 +391,13 @@ export function showPane(id: string | null, stableId = "") {
     screenBox.replaceChildren();
     questionBox.hidden = true;
     notice("");
-    // With Loom fitted to the phone, the agent you open fills the PC's window too, at the phone's width.
+    // The agent you open is brought to the front on the PC and fills its thread there. zoom toggles, so
+    // only show's own reply (not the list, up to 2 s old) says whether it's needed, and only if still open.
     const p = findPane(id);
     seen();
-    if (p && app.phoneSize) void act(async () => {
-      await run("show", [p.id], { change: true });
-      if (threadOf(p)?.zoomed !== p.id) await run("zoom", [p.id], { change: true });
+    if (p) void act(async () => {
+      const d = await run<{ zoomed?: boolean }>("show", [p.id], { change: true });
+      if (!d.zoomed && open === p.id) await run("zoom", [p.id], { change: true });
     });
   }
   // The pane's own, else a link's (#/pane/<id>/<ref>/<stableId>), even for the id already open; a link
