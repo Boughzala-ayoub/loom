@@ -231,6 +231,20 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
 #prompt .primary { flex: none; display: inline-grid; place-items: center; width: 44px; min-height: 44px; padding: 0; border-radius: 22px; }
 #prompt .primary svg { width: 20px; height: 20px; }
 #prompt:has(textarea:placeholder-shown) .primary { background: var(--line-strong); color: var(--faint); }
+/* The last clip on its way to whisper: the mic still takes the next. */
+#mic.busy { color: var(--text); background: var(--lit); }
+/* Dictating: the bar takes the box's place. Red, as the PC's Speak button records: an open mic you can't miss. */
+#dock:has(#rec:not([hidden])) #prompt { display: none; }
+#rec { display: flex; align-items: center; gap: 6px; padding: 4px; border: 1px solid color-mix(in srgb, var(--err) 45%, transparent); border-radius: 27px; background: var(--raise); }
+#rec .icon-btn { min-width: 44px; min-height: 44px; border-radius: 22px; }
+#rec .mid { flex: 1; min-width: 0; display: grid; gap: 3px; padding: 2px 0; }
+#rec .wave { display: flex; align-items: center; gap: 3px; height: 22px; }
+#rec .wave i { flex: 1 1 0; max-width: 4px; height: 100%; border-radius: 2px; background: var(--text); transform: scaleY(0.08); transition: transform 70ms linear; }
+#rec .info { display: flex; gap: 8px; min-width: 0; color: var(--muted); font-size: 13px; }
+#rec .info b { flex: none; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+#rec .info span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#rec .stop { flex: none; display: inline-grid; place-items: center; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 22px; background: var(--err); color: #fff; }
+#rec .stop svg { width: 18px; height: 18px; fill: currentColor; }
 
 /* Changes ------------------------------------------------------------------- */
 .top .title { flex: 1; min-width: 0; display: flex; }

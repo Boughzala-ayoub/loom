@@ -25,6 +25,10 @@ const HEAD: usize = 16 << 10;
 const BODY: usize = 1 << 20;
 /// How long a client may take to send its request, or to take the answer.
 const FRAME: Duration = Duration::from_secs(10);
+/// A dictated clip: the phone stops at 3 minutes, 5.5 MiB of samples, and a
+/// minute's upload on mobile data takes seconds, not one.
+const CLIP: usize = 6 << 20;
+const CLIP_FRAME: Duration = Duration::from_secs(60);
 /// A pairing code lasts this long, or until this many wrong guesses.
 const PAIRING: Duration = Duration::from_secs(600);
 const GUESSES: u8 = 5;
@@ -212,7 +216,7 @@ async fn accept(app: AppHandle, listener: TcpListener) {
 
 /// One request per connection, then the connection closes.
 async fn serve(app: &AppHandle, mut stream: TcpStream) -> std::io::Result<()> {
-    let request = crate::control::within(FRAME, read(&mut stream)).await?;
+    let request = read(&mut stream, |r| phone(app, r).is_some()).await?;
     let gzip = request.as_ref().is_ok_and(|r| r.header("accept-encoding").is_some_and(|v| v.contains("gzip")));
     let reply = match request {
         Ok(request) => match crate::control::unless_gone(&mut stream, route(app, &request)).await {
@@ -240,10 +244,28 @@ impl Request {
     }
 }
 
-/// An HTTP/1.1 request with a Content-Length body, or the reply that refuses it.
-async fn read(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Result<Request, Reply>> {
-    let mut buf = Vec::new();
+/// The most a request's body may hold, and how long from its first byte its
+/// client may take to send it all: a clip for /api/dictate, a prompt otherwise.
+fn limits(path: &str) -> (usize, Duration) {
+    if path.split('?').next() == Some("/api/dictate") { (CLIP, CLIP_FRAME) } else { (BODY, FRAME) }
+}
+
+/// More of the request, unless its deadline passes first.
+async fn more(stream: &mut (impl AsyncRead + Unpin), buf: &mut Vec<u8>, until: tokio::time::Instant) -> std::io::Result<()> {
     let mut chunk = [0u8; 4096];
+    let n = tokio::time::timeout_at(until, stream.read(&mut chunk)).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+    if n == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    buf.extend_from_slice(&chunk[..n]);
+    Ok(())
+}
+
+/// An HTTP/1.1 request with a Content-Length body, or the reply that refuses it.
+/// Its head comes within FRAME; its path says how big and slow the rest may be.
+async fn read(stream: &mut (impl AsyncRead + Unpin), paired: impl Fn(&Request) -> bool) -> std::io::Result<Result<Request, Reply>> {
+    let begun = tokio::time::Instant::now();
+    let mut buf = Vec::new();
     let end = loop {
         if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break i;
@@ -251,11 +273,7 @@ async fn read(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Result<R
         if buf.len() > HEAD {
             return Ok(Err(Reply::error(431, "The request's headers are too long.")));
         }
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            return Err(std::io::ErrorKind::UnexpectedEof.into());
-        }
-        buf.extend_from_slice(&chunk[..n]);
+        more(stream, &mut buf, begun + FRAME).await?;
     };
     let Ok(head) = std::str::from_utf8(&buf[..end]) else { return Ok(Err(Reply::error(400, "The request isn't text."))) };
     let mut lines = head.split("\r\n");
@@ -267,15 +285,13 @@ async fn read(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Result<R
         return Ok(Err(Reply::error(411, "Send the body with a Content-Length.")));
     }
     let Ok(length) = request.header("content-length").unwrap_or("0").parse::<usize>() else { return Ok(Err(Reply::error(400, "Bad Content-Length."))) };
-    if length > BODY {
+    // Only a paired phone may take a clip's size and time: a stranger keeps a prompt's.
+    let (most, frame) = if paired(&request) { limits(&request.path) } else { (BODY, FRAME) };
+    if length > most {
         return Ok(Err(Reply::error(413, "The request is too large.")));
     }
     while request.body.len() < length {
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 {
-            return Err(std::io::ErrorKind::UnexpectedEof.into());
-        }
-        request.body.extend_from_slice(&chunk[..n]);
+        more(stream, &mut request.body, begun + frame).await?;
     }
     request.body.truncate(length);
     Ok(Ok(request))
@@ -293,6 +309,7 @@ async fn route(app: &AppHandle, request: &Request) -> Reply {
         ("GET", p) if p.starts_with("/assets/") => asset(app, &p[1..]).cached(),
         ("POST", "/api/pair") => pair(app, request),
         ("POST", "/api/cli") => cli(app, request).await,
+        ("POST", "/api/dictate") => dictate(app, request).await,
         ("POST", "/api/push") => push(app, request),
         _ => Reply::error(404, "Not found."),
     }
@@ -490,6 +507,30 @@ async fn cli(app: &AppHandle, request: &Request) -> Reply {
     Reply::json(200, crate::control::ask(app, command).await)
 }
 
+/// A clip the phone recorded (docs/phone-dictation-study.md): 16-bit samples at
+/// 16 kHz, mono, as the body, and `?lang=` the language whisper hears (none: it
+/// detects). An empty body loads the model while you talk. Answers the text.
+async fn dictate(app: &AppHandle, request: &Request) -> Reply {
+    if phone(app, request).is_none() {
+        return unpaired();
+    }
+    let query = request.path.split_once('?').map_or("", |(_, q)| q);
+    let lang = query.split('&').find_map(|kv| kv.strip_prefix("lang=")).filter(|l| !l.is_empty()).map(String::from);
+    // A whisper code, so nothing reaches its C string that could stop Loom.
+    if lang.as_ref().is_some_and(|l| l.len() > 8 || !l.bytes().all(|b| b.is_ascii_lowercase())) {
+        return Reply::error(400, "That isn't a language code.");
+    }
+    if request.body.len() % 2 != 0 {
+        return Reply::error(400, "Send 16-bit samples.");
+    }
+    let (app, pcm) = (app.clone(), request.body.clone());
+    match tauri::async_runtime::spawn_blocking(move || crate::dictate::phone(&app, &pcm, lang.as_deref())).await {
+        Ok(Ok(text)) => Reply::json(200, json!({ "ok": true, "text": text })),
+        Ok(Err(error)) => Reply::error(500, &error),
+        Err(error) => Reply::error(500, &error.to_string()),
+    }
+}
+
 fn hash(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -558,7 +599,25 @@ mod tests {
     use super::*;
 
     fn parse(raw: &[u8]) -> std::io::Result<Result<Request, Reply>> {
-        tauri::async_runtime::block_on(read(&mut &raw[..]))
+        tauri::async_runtime::block_on(read(&mut &raw[..], |_| true))
+    }
+
+    #[test]
+    fn a_clip_may_be_six_times_a_prompt_and_only_from_a_paired_phone() {
+        let head = |path: &str, length: usize| format!("POST {path} HTTP/1.1\r\nContent-Length: {length}\r\n\r\n").into_bytes();
+        let status = |raw: &[u8], paired: bool| tauri::async_runtime::block_on(read(&mut &raw[..], |_| paired)).map(|r| r.err().map(|e| e.status));
+        // Past the limit: refused before a byte of the body. Under it: read on, so a short body is no request.
+        assert_eq!(status(&head("/api/dictate?lang=fr", CLIP + 1), true).unwrap(), Some(413));
+        assert_eq!(status(&head("/api/dictate", CLIP), true).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(status(&head("/api/cli", BODY + 1), true).unwrap(), Some(413), "a prompt keeps 1 MiB");
+        assert_eq!(status(&head("/api/cli", BODY), true).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
+        assert_eq!(status(&head("/api/dictate", BODY + 1), false).unwrap(), Some(413), "a stranger's clip is a prompt");
+        assert_eq!((limits("/api/dictate?lang=en"), limits("/api/cli"), limits("/api/dictatex")), ((CLIP, CLIP_FRAME), (BODY, FRAME), (BODY, FRAME)));
+        // A whole clip arrives whole.
+        let mut raw = head("/api/dictate", 4);
+        raw.extend([1, 0, 255, 127]);
+        let r = parse(&raw).unwrap().ok().unwrap();
+        assert_eq!(r.body, [1, 0, 255, 127]);
     }
 
     #[test]

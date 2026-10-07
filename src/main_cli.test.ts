@@ -23,7 +23,7 @@ import { agentOf } from "./agent.ts";
 import * as gitparse from "./gitparse.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "gitStatus"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "gitStatus", "dictationData"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -721,4 +721,19 @@ if (check(208)) {
     rmSync(repo, { recursive: true, force: true });
   }
   console.log("ok   loomctl git stages, unstages and deletes the named file only, and a rename as both names");
+}
+if (check(209)) {
+  // The phone's mic reads the PC's lists and picks: the same objects the mic menu shows.
+  const langs = [{ label: "English", code: "en" }, { label: "auto", code: "" }, { label: "French", code: "fr" }];
+  const prefixes = [{ text: "/prompt ", enter: true }, { text: "", enter: false }];
+  const c = fixture({ langs, lang: langs[2], prefixes, prefix: prefixes[0] });
+  const d = c.dictation.run({ _: [] });
+  assert.deepEqual(JSON.parse(JSON.stringify(d.data)), {
+    langs: [{ label: "English", code: "en", on: false }, { label: "auto", code: "", on: false }, { label: "French", code: "fr", on: true }],
+    prefixes: [{ text: "/prompt ", enter: true, on: true }, { text: "", enter: false, on: false }],
+  });
+  assert.match(d.text, /^\* +language +French +fr$/m);
+  assert.match(d.text, /^\* +prefix +\/prompt +sent the moment it lands$/m);
+  assert.match(d.text, /language +auto +detected per clip/);
+  console.log("ok   loomctl dictation lists the mic's languages and prefixes with the PC's pick");
 }

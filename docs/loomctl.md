@@ -493,6 +493,7 @@ when time runs out.
 | `set overlay off\|background\|always` | When the agent overlay shows. |
 | `set font N` | The terminals' text size, 8 to 24 points, as Ctrl+= and Ctrl+- set it. |
 | `startups [add <label> <command...> \| remove <label>]` | The agents and terminals the `+` menu offers, which `new` and `add --agent` pick from. |
+| `dictation` | The mic menu's languages and prefixes, each with its pick. `F4` and the phone's mic use the same pick. |
 | `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
 | `notify --check SEQ,...` | Whether those events may go out as notices now. |
 | `remote [on [--port N] \| off \| pair \| revoke \| push test]` | The phone remote: its state, start or stop it, show a pairing code for a phone, unpair every phone, or send the phones with notifications on a test one. See [Phone remote](#phone-remote). |
@@ -556,6 +557,19 @@ wrapping off. The phone's browser keeps its folded threads, the list view, the
 keys row, wrapping, commit message drafts and the PC's last theme; Loom keeps
 none of them. What can lose work asks first on the phone, and loomctl wants
 `--yes` for it.
+
+The mic beside an agent's message box dictates with the PC's whisper. Tap it
+and talk. A bar takes the box's place with the wave, the time, the language
+and the prefix. Tap stop and the page decodes the clip to 16 kHz mono 16-bit
+samples and posts them to `POST /api/dictate?lang=<code>` with its token. Loom
+transcribes them with the model `F4` uses and answers the text. The page puts
+it in the box, after the PC's prefix if the box was empty when you tapped, and
+a `⏎` prefix sends it as a `submit` task. If you've opened another agent by
+then, the text waits as the first agent's draft and nothing is sent. Hiding
+the page or leaving the agent stops the recording and transcribes what it
+caught, without sending. A clip holds 3 minutes. `/api/dictate` takes 6 MiB
+within 60 seconds from a paired phone, and `/api/cli` keeps 1 MiB and 10
+seconds. `dictation` gives the phone the PC's lists.
 
 **Notifications on this phone**, in the phone's Settings, sends it the task
 notices as phone notifications: an agent finished, asks something, or failed.

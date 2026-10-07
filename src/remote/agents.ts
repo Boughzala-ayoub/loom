@@ -6,6 +6,7 @@ import {
   type Pane, type Thread,
 } from "./core";
 import { keyboard, type Typed } from "./keyboard";
+import { bar as recBar, record, repaint, transcribing } from "./dictate";
 
 type Run = { x: number; text: string; bold?: boolean; dim?: boolean; italic?: boolean; underline?: boolean; inverse?: boolean; fg?: number | string; bg?: number | string };
 type Screen = { text: string; cols: number; alt?: boolean; rows: { runs: Run[] }[] };
@@ -363,11 +364,13 @@ keysBtn.setAttribute("aria-controls", "keys");
 const sendBtn = el("button", "primary");
 sendBtn.append(ui("send"));
 sendBtn.setAttribute("aria-label", "Send");
-promptForm.append(keysBtn, promptText, sendBtn);
+const micBtn = iconButton("mic", "Dictate", () => dictate());
+micBtn.id = "mic";
+promptForm.append(keysBtn, promptText, micBtn, sendBtn);
 {
   const dock = el("div");
   dock.id = "dock";
-  dock.append(questionBox, keysBox, promptForm);
+  dock.append(questionBox, keysBox, promptForm, recBar);
   const more = iconButton("more", "Actions", () => paneActions());
   more.id = "more";
   paneView.append(topBar(who, [stateChip, more], "#/"), noticeBar, screenBox, dock);
@@ -458,6 +461,8 @@ screenBox.addEventListener("click", seen);
 
 export function drawHead() {
   const p = findPane(open);
+  // As the PC's Speak button: an agent's pane only. A prefix typed into PowerShell is an error.
+  micBtn.hidden = !p || p.agent === "shell";
   if (!p) {
     whoName.textContent = open ? "This agent is gone" : "Opening the agent";
     whoTitle.textContent = open ? "Loom restarted, or it was closed. Go back to the list." : "Reading Loom's agents.";
@@ -713,6 +718,33 @@ promptText.addEventListener("input", () => {
 promptText.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) promptForm.requestSubmit();
 });
+
+/** The mic: what you say goes in this agent's Message box, after the PC's prefix when the box was empty
+ * as you tapped. A ⏎ prefix sends it, if you're still on this visit to the agent and stopped it yourself.
+ * Once you've moved on, it is that agent's draft, never sent on its own. */
+function dictate() {
+  const p = findPane(open), key = draftKey(), visit = app.visit;
+  if (!p || p.agent === "shell" || key === null) return;
+  const wasEmpty = !promptText.value.trim();
+  void record((text, pick, byHand) => {
+    if (!text) return toast("Nothing heard.");
+    const add = (box: string) => (wasEmpty && !box.trim() ? `${pick.prefix?.text ?? ""}${text}` : [box.trimEnd(), text].filter(Boolean).join(" "));
+    const here = draftKey() === key;
+    if (here) {
+      promptText.value = add(promptText.value);
+      promptText.dispatchEvent(new Event("input")); // grows to fit
+    } else typed.set(key, add(typed.get(key) ?? ""));
+    if (here && visit === app.visit) {
+      if (pick.prefix?.enter && byHand) promptForm.requestSubmit();
+    } else toast(`What you said to ${p.ref} is in its Message box.`);
+  });
+}
+repaint.mic = () => {
+  const busy = transcribing();
+  micBtn.classList.toggle("busy", busy);
+  micBtn.setAttribute("aria-label", busy ? "Dictate (transcribing the last clip)" : "Dictate");
+  promptText.placeholder = busy ? "Transcribing…" : "Message";
+};
 
 const MODELS = ["opus[1m]", "sonnet[1m]", "fable[1m]", "haiku", "default"];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max", "auto"];

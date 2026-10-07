@@ -107,17 +107,37 @@ pub fn dictate_stop(
     std::thread::sleep(std::time::Duration::from_millis(150));
 
     let raw = std::mem::take(&mut *rec.samples.lock().unwrap());
-    let mono = to_mono(&raw, rec.channels);
-    // A stray double-click, or a muted/dead mic — nothing to transcribe. Actual
-    // non-speech is whisper's job to spot, see NO_SPEECH.
-    if mono.len() < rec.rate as usize / 5 || peak(&mono) < 0.001 {
+    clip(&app, &to_mono(&raw, rec.channels), rec.rate, lang.as_deref())
+}
+
+/// A clip the phone app recorded (remote.rs, docs/phone-dictation-study.md):
+/// 16-bit samples at 16 kHz, mono. None yet means it just started recording,
+/// so the model loads while you talk, as dictate_start has it do.
+pub fn phone(app: &AppHandle, pcm: &[u8], lang: Option<&str>) -> Result<String, String> {
+    if pcm.is_empty() {
+        return ensure_ctx(app).map(|_| String::new());
+    }
+    let mono: Vec<f32> = pcm.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+    clip(app, &mono, RATE, lang)
+}
+
+/// What the PC's mic and the phone's both end in: the gate, the model, whisper.
+/// `""` = nothing worth pasting. The model's lock makes them take turns.
+fn clip(app: &AppHandle, mono: &[f32], rate: u32, lang: Option<&str>) -> Result<String, String> {
+    if silent(mono, rate) {
         return Ok(String::new());
     }
-    let audio = resample(&mono, rec.rate);
-
-    ensure_ctx(&app)?;
+    let audio = resample(mono, rate);
+    ensure_ctx(app)?;
+    let state = app.state::<Dictation>();
     let slot = state.ctx.lock().unwrap();
-    transcribe(slot.as_ref().ok_or("no model")?, &audio, lang.as_deref())
+    transcribe(slot.as_ref().ok_or("no model")?, &audio, lang)
+}
+
+/// A stray double-click, or a muted/dead mic: nothing to transcribe. Actual
+/// non-speech is whisper's job to spot, see NO_SPEECH.
+fn silent(mono: &[f32], rate: u32) -> bool {
+    mono.len() < rate as usize / 5 || peak(mono) < 0.001
 }
 
 fn transcribe(ctx: &WhisperContext, audio: &[f32], lang: Option<&str>) -> Result<String, String> {
@@ -326,7 +346,7 @@ fn clean(segments: impl Iterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean, peak, resample, to_mono, RATE};
+    use super::{clean, peak, resample, silent, to_mono, RATE};
 
     fn tone(hz: f64, rate: u32, secs: f64) -> Vec<f32> {
         (0..(rate as f64 * secs) as usize)
@@ -370,6 +390,19 @@ mod tests {
         assert_eq!(to_mono(&[1.0, 0.0], 1), vec![1.0, 0.0]);
         assert!(peak(&[0.0, -0.0004, 0.0002]) < 0.001); // dead mic, never sent to whisper
         assert!(peak(&[0.0, -0.2]) > 0.001);
+    }
+
+    /// The gate both stops share: under 0.2 s or silent never reaches whisper.
+    #[test]
+    fn short_or_silent_clips_are_not_transcribed() {
+        let speech = tone(300.0, RATE, 1.0);
+        assert!(!silent(&speech, RATE));
+        assert!(silent(&speech[..RATE as usize / 5 - 1], RATE), "a tap, not a sentence");
+        assert!(!silent(&speech[..RATE as usize / 5], RATE));
+        assert!(silent(&vec![0.0004; RATE as usize], RATE), "a dead mic");
+        assert!(silent(&[], RATE));
+        // The PC's mic runs at its own rate: 0.2 s of it, not 3200 samples.
+        assert!(silent(&tone(300.0, 48_000, 0.1), 48_000));
     }
 
     /// The capture path end to end on the real default device: start the thread,

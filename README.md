@@ -269,6 +269,8 @@ The page is an app with four tabs, and it wears the PC's theme.
   **Activity** is the PC's Overview: every agent, waiting ones first, with
   what it last heard and said, its question's options as buttons and a reply
   box. Open an agent to read its screen, send a prompt or answer a question.
+  The mic beside its message box dictates through the PC's whisper, with the
+  PC's language and prefix.
   Long lines wrap to the phone, and scrolling up past the top reads the
   agent's history. The keyboard button opens a PC keyboard: Esc, Tab, Ctrl,
   Alt and Shift held for the next key, arrows, Home, End, PgUp, PgDn, F1 to
@@ -377,6 +379,10 @@ transcribing, or `⚠ mic` with the reason in its tooltip when something fails.
 Text lands in the pane that was focused when you started talking, so clicking
 around mid-sentence doesn't misdeliver it, and leaving the window counts as
 letting go of `F4` — an alt-tab can't leave the mic open behind your back.
+
+The phone app has the same mic beside an agent's message box. The phone
+records and this PC transcribes, so the text comes back into the phone's box
+with your prefix. See [Phone remote](docs/loomctl.md#phone-remote).
 
 What counts as speech is whisper's own `no_speech_prob`, not a loudness
 threshold — a quiet room here measures rms 0.02, louder than a soft-spoken

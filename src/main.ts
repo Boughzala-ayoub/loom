@@ -7685,6 +7685,17 @@ async function setKeepAwake(enabled: boolean) {
   }
 }
 
+/** `loomctl dictation`: both of the mic menu's lists, each with its pick marked. */
+function dictationData() {
+  return {
+    data: { langs: langs.map((l) => ({ ...l, on: l === lang })), prefixes: prefixes.map((p) => ({ ...p, on: p === prefix })) },
+    text: table([
+      ...langs.map((l) => [l === lang ? "*" : " ", "language", l.label, l.code || "detected per clip"]),
+      ...prefixes.map((p) => [p === prefix ? "*" : " ", "prefix", p.text.trim() || "(no prefix)", p.enter ? "sent the moment it lands" : "waits for your Enter"]),
+    ]),
+  };
+}
+
 /** The mic's arrow names what the next dictation will use: a hover tells it. */
 function paintSpeakMore() {
   const b = $("#speak-more");
@@ -8737,6 +8748,11 @@ const CLI: Record<string, CliCommand> = {
       } else if (how !== undefined) throw new Error(`startups takes add or remove, not ${how}.`);
       return { data: startups.map((x) => ({ label: x.label, cmd: x.cmd })), text: table(startups.map((x) => [x.label, x.cmd])) };
     },
+  },
+  dictation: {
+    usage: "dictation",
+    help: "The mic's languages and prefixes, as its menu lists them, and which of each dictation uses: the PC's F4 and the phone's mic alike.",
+    run: () => dictationData(),
   },
   vscode: {
     usage: "vscode [thread]",
