@@ -100,6 +100,8 @@ bar.append(cancelBtn, mid, stopBtn);
 /** The running clip's stop: send it to be transcribed (`by` says whether you asked, so ⏎ may send), or drop it. */
 let stopNow: ((send: boolean, byHand?: boolean) => void) | null = null;
 export const recording = () => !!stopNow;
+/** Drops the running clip, a microphone still opening included: nothing is sent to be transcribed. */
+export const cancel = () => stopNow?.(false);
 /** Clips on their way to whisper. */
 let busy = 0;
 export const transcribing = () => busy > 0;

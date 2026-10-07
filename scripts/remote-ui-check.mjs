@@ -101,12 +101,15 @@ async function context(width, token = true, push = false) {
       const body = req.postDataBuffer() ?? Buffer.alloc(0);
       const samples = new Int16Array(body.buffer, body.byteOffset, body.length >> 1);
       state.clips.push({ bytes: body.length, lang: new URL(req.url()).searchParams.get('lang'), auth: req.headers().authorization, peak: samples.reduce((m, s) => Math.max(m, Math.abs(s)), 0) });
+      if (state.revoked) return route.fulfill({ status: 401, json: { ok: false, error: 'Pair this phone again.' } });
       if (body.length && state.hold.delete('dictate')) await new Promise(r => (state.held.dictate = r));
       return route.fulfill({ json: { ok: true, text: body.length ? state.heard : '' } });
     }
     const c = req.postDataJSON();
     state.calls.push(c);
     if (req.url().endsWith('/pair')) return route.fulfill({ json: { ok: true, token: 'fixture-token' } });
+    // revoked: this phone was unpaired on the PC, so every call answers 401.
+    if (state.revoked) return route.fulfill({ status: 401, json: { ok: false, error: 'Pair this phone again.' } });
     if (req.url().endsWith('/api/push')) {
       if (c.off) state.push = { on: false, sub: null };
       if (c.subscription) state.push = { on: true, sub: c.subscription };
@@ -1324,6 +1327,38 @@ try {
     await ctx.close();
   }
   console.log('PASS hiding the page or leaving the agent stops and transcribes without sending, a mic still opening closes once open, and cancel uploads nothing');
+  {
+    // Unpaired mid-dictation: the pairing form takes the screen, and the microphone closes with nothing sent
+    // to be transcribed. First on dictation's own 401, the warm-up post's, while the microphone still opens.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1', '#screen .line');
+    state.revoked = true;
+    await page.evaluate(() => Object.assign(window, { holdMic: true, releaseMic: null }));
+    await page.click('#mic');
+    await page.locator('#pairing').waitFor();
+    await page.waitForFunction(() => window.releaseMic);
+    await page.evaluate(() => window.releaseMic());
+    await micClosed(page);
+    assert.ok(await page.locator('#rec').isHidden(), 'no recording bar left behind');
+    // Paired again, then unpaired by a loomctl call's 401 (the screen's next read) while a clip records.
+    state.revoked = false;
+    await page.evaluate(() => (window.holdMic = false));
+    await page.fill('#pairing input[name=code]', '123456');
+    await page.locator('#pairing form').evaluate(f => f.requestSubmit());
+    await page.locator('#screen .line').first().waitFor();
+    await page.evaluate(() => (window.recorded = null));
+    await page.click('#mic');
+    await page.waitForFunction(() => window.recorded);
+    state.revoked = true;
+    await page.locator('#pairing').waitFor();
+    await micClosed(page);
+    await page.waitForTimeout(500);
+    assert.equal(clips(state).length, 0, 'what was recorded before the unpairing is never sent');
+    assert.ok(await page.locator('#rec').isHidden());
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS unpairing on a dictation or loomctl 401 closes the microphone, one still opening included, and sends nothing');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));

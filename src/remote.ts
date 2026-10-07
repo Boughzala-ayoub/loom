@@ -5,6 +5,7 @@ import "./remote.css";
 import { $, app, closeSheet, el, findPane, go, hooks, Offline, pref, run, sleep, store, toast, ui, type IconName, type Thread } from "./remote/core";
 import { drawHead, drawList, focusOnPc, follow, list, newView, openPane, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
 import { diffView, filesView, read as readChanges, showCommit, showDiff, showFile, showFiles, showSummary, summary } from "./remote/changes";
+import { cancel as cancelDictation } from "./remote/dictate";
 import { contextView, read as readUsage, showContext, usageView } from "./remote/usage";
 import { closeStale, read as readSettings, settingsView, syncPush, wear } from "./remote/settings";
 
@@ -93,6 +94,8 @@ function route() {
 // --- Pairing and the loops -----------------------------------------------------
 
 function pairing() {
+  // Every 401 lands here, dictation's and loomctl's: a clip must not keep recording behind the form.
+  cancelDictation();
   root.hidden = true;
   $("#pairing").hidden = false;
 }
