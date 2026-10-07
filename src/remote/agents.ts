@@ -724,7 +724,8 @@ promptText.addEventListener("keydown", (e) => {
 });
 
 /** The mic: what you say goes in this agent's Message box, after the PC's prefix when the box was empty
- * as you tapped. A ⏎ prefix sends it, if you're still on this visit to the agent and stopped it yourself.
+ * as you tapped. A ⏎ prefix sends it when it is the whole message, if you're still on this visit to the agent
+ * and stopped it yourself.
  * Once you've moved on, it is that agent's draft, never sent on its own. */
 function dictate() {
   const p = findPane(open), key = draftKey(), visit = app.visit;
@@ -732,16 +733,20 @@ function dictate() {
   const wasEmpty = !promptText.value.trim();
   void record((text, pick, byHand) => {
     if (!text) return toast("Nothing heard.");
-    const add = (box: string) => (wasEmpty && !box.trim() ? `${pick.prefix?.text ?? ""}${text}` : [box.trimEnd(), text].filter(Boolean).join(" "));
     const here = draftKey() === key;
+    const box = here ? promptText.value : typed.get(key) ?? "";
+    // Alone, the clip is the whole message, after the prefix. Otherwise it joins what the box holds: text
+    // you typed, or an earlier send whose answer never came, which Loom may already have taken.
+    const alone = wasEmpty && !box.trim();
+    const message = alone ? `${pick.prefix?.text ?? ""}${text}` : [box.trimEnd(), text].filter(Boolean).join(" ");
     if (here) {
-      promptText.value = add(promptText.value);
+      promptText.value = message;
       promptText.dispatchEvent(new Event("input")); // grows to fit
-    } else typed.set(key, add(typed.get(key) ?? ""));
-    // A ⏎ sends it, and the next clip lands only once this one has gone: landing on a box still being
-    // sent would send this one twice.
+    } else typed.set(key, message);
+    // A ⏎ sends only a message the clip made alone, so nothing already sent goes again under a new key;
+    // and the next clip lands only once this one has gone.
     if (here && visit === app.visit) {
-      if (pick.prefix?.enter && byHand) return sendPrompt();
+      if (pick.prefix?.enter && byHand && alone) return sendPrompt();
     } else toast(`What you said to ${p.ref} is in its Message box.`);
   });
 }

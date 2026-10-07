@@ -142,6 +142,9 @@ async function context(width, token = true, push = false) {
       // The change ran, then the connection broke in the middle of its answer.
       if (state.corruptSend) { state.corruptSend = false; return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true,"data":' }); }
       if (state.refuseSend) { state.refuseSend = false; return route.fulfill({ json: { ok: false, error: 'That pane is busy.' } }); }
+      // loseAcks: Loom takes the next one, but every answer to its key, the retries' too, breaks off.
+      if (state.loseAcks === true) state.loseAcks = c.key;
+      if (state.loseAcks && c.key === state.loseAcks) return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true,"data":' });
     }
     // failThreads: the next that many reads of the threads never reach Loom; offline: nothing does.
     if (state.offline || (c.cmd === 'threads' && state.failThreads > 0)) { state.failThreads--; return route.abort('failed'); }
@@ -1498,8 +1501,8 @@ try {
     await until('the second goes', () => sent().length === 2);
     assert.deepEqual(sent(), ['/prompt first sentence', '/prompt second sentence']);
     await until('the box empties', async () => (await box(page)) === '');
-    // The first refused: its text stays in the box, and the second is not dropped but lands after it and
-    // goes with it, so each sentence reaches the agent once.
+    // The first refused: its text stays in the box, and the second is not dropped but joins it there and
+    // waits for Send, as after a send whose answer was lost.
     state.held.dictate = null;
     state.hold.add('dictate');
     await dictate(page, 500);
@@ -1511,13 +1514,42 @@ try {
     state.heard = 'third sentence';
     state.refuseSend = true;
     third();
-    await until('the fourth goes', () => sent().length === 4);
-    assert.deepEqual(sent().slice(2), ['/prompt third sentence', '/prompt third sentence fourth sentence']);
-    await until('the box empties again', async () => (await box(page)) === '');
+    await until('the fourth joins the third', async () => (await box(page)) === '/prompt third sentence fourth sentence');
+    await page.waitForTimeout(300);
+    assert.deepEqual(sent().slice(2), ['/prompt third sentence'], 'the box waits for Send');
     assert.deepEqual(state.errors, []);
     await ctx.close();
   }
-  console.log('PASS two clips with a sending prefix go as two messages, the second once the first has gone, and after a refused one it lands in the kept draft and goes with it');
+  console.log('PASS two clips with a sending prefix go as two messages, the second once the first has gone, and after a refused one it joins the kept draft and waits for Send');
+  {
+    // A sending clip whose answers are all lost: Loom took it once (its key's retries add nothing), but the
+    // phone can't tell, so its text stays in the box. The next clip joins it there and waits for Send: sent
+    // under a new key, the box would give the agent the first sentence twice.
+    const { ctx, page, state } = await context(375);
+    state.dictation.prefixes[0].enter = true;
+    await goto(page, '#/pane/a1', '#screen .line');
+    const submits = () => state.calls.filter(c => c.cmd === 'submit');
+    const accepted = () => [...new Map(submits().map(c => [c.key, c.stdin])).values()]; // one task per key, as Loom keeps them
+    state.hold.add('dictate');
+    await dictate(page, 500);
+    await until('the first clip is on its way', () => state.held.dictate);
+    const first = state.held.dictate;
+    state.heard = 'second sentence';
+    await dictate(page, 500);
+    await until('the second clip answered', () => clips(state)[1]?.answered);
+    state.heard = 'first sentence';
+    state.loseAcks = true;
+    first();
+    await until('four tries with the first key', () => submits().length >= 4, 15000);
+    await until('the second clip lands', async () => (await box(page)).includes('second sentence') || submits().length > 4, 15000);
+    await page.waitForTimeout(500);
+    assert.deepEqual(accepted(), ['/prompt first sentence'], 'the agent got the first sentence once');
+    assert.equal(submits().length, 4, 'four tries, all with the first key');
+    assert.equal(await box(page), '/prompt first sentence second sentence', 'both sentences wait in the box');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS after a send whose answers were all lost, the next clip waits in the box with it instead of sending it again under a new key');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));
