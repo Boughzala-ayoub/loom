@@ -27,6 +27,7 @@ export const app = {
   agents: ["claude", "codex", "opencode"],
   phoneSize: false,
   restarting: false, // Loom is restarting on the PC: the loops wait, the page reloads when it's back
+  visit: 0, // counts route()s: work a screen began acts only while the same visit to it lasts
 };
 export const panes = () => app.threads.flatMap((t) => t.panes);
 export const findPane = (id: string | null) => panes().find((p) => p.id === id);

@@ -391,14 +391,7 @@ export function showPane(id: string | null, stableId = "") {
     screenBox.replaceChildren();
     questionBox.hidden = true;
     notice("");
-    // The agent you open is brought to the front on the PC and fills its thread there. zoom toggles, so
-    // only show's own reply (not the list, up to 2 s old) says whether it's needed, and only if still open.
-    const p = findPane(id);
     seen();
-    if (p) void act(async () => {
-      const d = await run<{ zoomed?: boolean }>("show", [p.id], { change: true });
-      if (!d.zoomed && open === p.id) await run("zoom", [p.id], { change: true });
-    });
   }
   // The pane's own, else a link's (#/pane/<id>/<ref>/<stableId>), even for the id already open; a link
   // without one keeps what was known for that id, a lookup (null) in between too.
@@ -419,6 +412,18 @@ export function showPane(id: string | null, stableId = "") {
   reread();
 }
 export const openPane = () => open;
+
+/** The open agent comes to the front on the PC and fills its thread there: on each visit to its screen
+ * (remote.ts), never on the background reads. zoom toggles, so only show's own reply (not the list, up to
+ * 2 s old) says whether it's needed, and only while that visit lasts: a reply that comes after you left,
+ * or left and came back, zooms nothing. */
+export function focusOnPc() {
+  const p = findPane(open), visit = app.visit;
+  if (p) void act(async () => {
+    const d = await run<{ zoomed?: boolean }>("show", [p.id], { change: true });
+    if (!d.zoomed && visit === app.visit) await run("zoom", [p.id], { change: true });
+  });
+}
 // The open agent's stableId, and the pane id it was known for: it finds the agent again once Loom
 // restarts and its pane id is gone.
 let openStable = "", stableFor: string | null = null;

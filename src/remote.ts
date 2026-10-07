@@ -3,7 +3,7 @@
  * posted to /api/cli. See docs/phone-remote-study.md. */
 import "./remote.css";
 import { $, app, closeSheet, el, findPane, go, hooks, Offline, pref, run, sleep, store, toast, ui, type IconName, type Thread } from "./remote/core";
-import { drawHead, drawList, follow, list, newView, openPane, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
+import { drawHead, drawList, focusOnPc, follow, list, newView, openPane, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
 import { diffView, filesView, read as readChanges, showCommit, showDiff, showFile, showFiles, showSummary, summary } from "./remote/changes";
 import { contextView, read as readUsage, showContext, usageView } from "./remote/usage";
 import { closeStale, read as readSettings, settingsView, syncPush, wear } from "./remote/settings";
@@ -43,18 +43,20 @@ function view(): View {
     case "pane": {
       // A notification's link, #/pane/<id>/<ref>/<stableId>, names the pane's lasting id too: once Loom
       // restarted the id is gone and the stableId finds the pane (follow). It can name a pane newer than
-      // the list: that is read first, and shown only if this link is still the one on show.
+      // the list: that is read first, and shown only if this visit to the link is still on (the same
+      // link left and opened again is another visit). Each visit brings the agent up on the PC.
       const show = () => {
         showPane(a, c);
         showList(a);
         follow();
+        focusOnPc();
       };
       return { tab: "agents", primary: list, detail: paneView, enter: () => {
         if (findPane(a) || !b) return show();
         showPane(null); // until it is read, the agent open before takes no input
         showList(null);
-        const at = location.hash;
-        void refresh().catch(() => {}).finally(() => { if (location.hash === at) show(); });
+        const at = app.visit;
+        void refresh().catch(() => {}).finally(() => { if (app.visit === at) show(); });
       } };
     }
     case "new": return { tab: "agents", primary: list, detail: newView, enter: () => { showNew(); showList(null); } };
@@ -71,6 +73,7 @@ function view(): View {
 }
 
 function route() {
+  app.visit++;
   const v = view();
   const detail = v.detail ?? (v.hint ? placeholder : undefined);
   if (v.hint) placeholder.firstElementChild!.replaceChildren(el("b", "", v.hint[0]), v.hint[1]);

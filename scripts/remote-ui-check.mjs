@@ -100,7 +100,7 @@ async function context(width, token = true, push = false) {
     // A command's next reply waits for state.held[cmd]() (menu, status). An agent's question comes with
     // its screen (read --menu), so holding menu holds that read.
     const holdAs = c.cmd === 'read' && c.argv.includes('--menu') ? 'menu' : c.cmd;
-    if (state.hold.delete(holdAs)) await new Promise(r => (state.held[holdAs] = r));
+    if (holdAs !== 'show' && state.hold.delete(holdAs)) await new Promise(r => (state.held[holdAs] = r));
     let data;
     const threads = [thread('a', 'Alpha'), thread('b', 'Beta', 'codex')];
     // siblings: Alpha:2 runs Codex (sameKind: a second Claude) beside Alpha:1's Claude. closeFirst: Alpha:1 closed
@@ -135,7 +135,7 @@ async function context(width, token = true, push = false) {
       }
       case 'threads': data = threads; break;
       // zoom toggles; show says whether the pane already fills its thread (main.ts paneData).
-      case 'show': data = { zoomed: state.zoomed.has(c.argv[0]) }; break;
+      case 'show': state.pcFront = c.argv[0]; data = { zoomed: state.zoomed.has(c.argv[0]) }; break;
       case 'zoom': state.zoomed.delete(c.argv[0]) || state.zoomed.add(c.argv[0]); data = { zoomed: state.zoomed.has(c.argv[0]) }; break;
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
       case 'menu': data = question(c.argv[0]); break;
@@ -169,6 +169,8 @@ async function context(width, token = true, push = false) {
       }
       default: data = {};
     }
+    // A held show answers late with what was true when it was asked.
+    if (c.cmd === 'show' && state.hold.delete('show')) await new Promise(r => (state.held.show = r));
     await route.fulfill({ json: { ok: true, data } });
   });
   const page = await ctx.newPage();
@@ -950,6 +952,84 @@ try {
     }
   }
   console.log("PASS Beta's question or actions read late, after a link's lookup, another agent or Settings, never come back; the agent on show answers");
+
+  // --- The agent opened on the phone comes up on the PC, once each visit ----------------------------------
+  {
+    // Back to the same agent after Settings, with the PC moved on meanwhile: it comes up and fills its thread again.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1', '#question button');
+    await until('Alpha zoomed on the PC', () => state.zoomed.has('a1'));
+    await page.fill('#prompt textarea', 'kept for Alpha');
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await page.locator('#settings .group').first().waitFor();
+    state.pcFront = 'b1'; // someone at the PC brings Beta up and puts Alpha back in its grid
+    state.zoomed.delete('a1');
+    const since = state.calls.length;
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:1' }).waitFor();
+    await until('Alpha zoomed again', () => state.zoomed.has('a1'));
+    assert.equal(state.pcFront, 'a1', 'Alpha in front on the PC again');
+    assert.equal(await page.inputValue('#prompt textarea'), 'kept for Alpha', 'the draft stays');
+    // The reads every 2 s and every second bring nothing up.
+    await page.waitForTimeout(2500);
+    assert.deepEqual(state.calls.slice(since).filter(c => c.cmd === 'show' || c.cmd === 'zoom').map(c => `${c.cmd} ${c.argv[0]}`), ['show a1', 'zoom a1']);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // A show answered after you left the agent zooms nothing.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '', '#list .agent');
+    state.hold.add('show');
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await until("Alpha's show, held", () => state.held.show);
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await page.locator('#settings .group').first().waitFor();
+    state.held.show();
+    await page.waitForTimeout(1000);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'zoom'), [], 'no zoom once you left');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // Alpha, Beta, Alpha again: the first visit's show, answered last, leaves Alpha zoomed (zoom toggles).
+    const { ctx, page, state } = await context(375);
+    await goto(page, '', '#list .agent');
+    state.hold.add('show');
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await until("the first Alpha show, held", () => state.held.show);
+    await page.evaluate(() => (location.hash = '#/pane/b1'));
+    await until('Beta zoomed', () => state.zoomed.has('b1'));
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await until('Alpha zoomed', () => state.zoomed.has('a1'));
+    state.held.show();
+    await page.waitForTimeout(1000);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'zoom').map(c => c.argv[0]), ['b1', 'a1'], "the first visit's late show zooms nothing");
+    assert.deepEqual([...state.zoomed].sort(), ['a1', 'b1']);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  {
+    // A link left and opened again while its agent is looked up: only the last visit shows it, so it comes up once.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/b1/Beta%3A1', '#screen .line');
+    await until('Beta zoomed', () => state.zoomed.has('b1'));
+    Object.assign(state, { added: true, blocked: [] });
+    await page.evaluate(() => (location.hash = '#/pane/a3/Alpha%3A2/k-a3'));
+    await until('the list read for the link', () => state.blocked.length);
+    await page.evaluate(() => (location.hash = '#/settings'));
+    await page.locator('#settings .group').first().waitFor();
+    await page.evaluate(() => (location.hash = '#/pane/a3/Alpha%3A2/k-a3'));
+    await until('the list read again', () => state.blocked.length >= 2);
+    unblock(state);
+    await page.locator('#pane .who b').filter({ hasText: 'Alpha:2' }).waitFor();
+    await page.waitForTimeout(1000);
+    assert.deepEqual(state.calls.filter(c => (c.cmd === 'show' || c.cmd === 'zoom') && c.argv[0] === 'a3').map(c => c.cmd), ['show', 'zoom'], 'Alpha:2 comes up once');
+    assert.ok(state.zoomed.has('a3'));
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS the agent opened on the phone comes up on the PC once each visit: again after Settings with its draft, never on the background reads, a show answered after you left or came back zooms nothing, and a link opened again while it is looked up comes up once');
 
   // --- A restart waits for the Loom that replaces the one asked ----------------------------------
   {
