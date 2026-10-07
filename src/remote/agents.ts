@@ -432,6 +432,8 @@ export function focusOnPc() {
 let openStable = "", stableFor: string | null = null;
 /** Unsent messages by agent: its stableId, which a restart keeps, else its pane id. None while a link's agent is looked up. */
 const typed = new Map<string, string>();
+/** What each agent's box is sending now, by the same key: on its way, it is no draft for a new clip to join. */
+const outgoing = new Map<string, string>();
 const draftKey = () => (open === null ? null : (stableFor === open && openStable) || open);
 
 /** After each read of the list. Once the open agent's pane is missing from it, the one pane with its
@@ -702,6 +704,7 @@ async function sendPrompt() {
   // An agent gets a task Loom follows to its end. A shell gets the line typed:
   // submit needs Loom's PowerShell prompt and would add a PowerShell comment.
   const cmd = findPane(id)?.agent === "shell" ? "send" : "submit";
+  outgoing.set(key, text);
   await act(async () => {
     await run(cmd, [id, "-"], { stdin: text, change: true, timeout: 60 });
     // Only the message that went: one typed while it was on its way, here or for another agent, stays.
@@ -710,6 +713,7 @@ async function sendPrompt() {
     promptText.value = "";
     promptText.style.height = "";
   }, "Sent");
+  if (outgoing.get(key) === text) outgoing.delete(key);
   shown = null;
   setTimeout(reread, 300);
   sendBtn.disabled = false;
@@ -730,7 +734,8 @@ promptText.addEventListener("keydown", (e) => {
 function dictate() {
   const p = findPane(open), key = draftKey(), visit = app.visit;
   if (!p || p.agent === "shell" || key === null) return;
-  const wasEmpty = !promptText.value.trim();
+  // Empty, or holding only a message on its way: what you say now is a message of its own.
+  const wasEmpty = !promptText.value.trim() || promptText.value.trim() === outgoing.get(key);
   void record((text, pick, byHand) => {
     if (!text) return toast("Nothing heard.");
     const here = draftKey() === key;

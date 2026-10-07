@@ -1550,6 +1550,45 @@ try {
     await ctx.close();
   }
   console.log('PASS after a send whose answers were all lost, the next clip waits in the box with it instead of sending it again under a new key');
+  {
+    // The next clip recorded while the first is being sent: the first's text, on its way, is no draft for the
+    // clip to join. Once that send answers, the second goes too, as its own message after the prefix.
+    const { ctx, page, state } = await context(375);
+    state.dictation.prefixes[0].enter = true;
+    await goto(page, '#/pane/a1', '#screen .line');
+    const sent = () => state.calls.filter(c => c.cmd === 'submit').map(c => c.stdin);
+    state.heard = 'first sentence';
+    state.hold.add('submit');
+    await dictate(page, 500);
+    await until('the first send is waiting for its answer', () => state.held.submit);
+    assert.equal(await box(page), '/prompt first sentence');
+    state.heard = 'second sentence';
+    await dictate(page, 500);
+    await until('the second clip answered', () => clips(state)[1]?.answered);
+    await page.waitForTimeout(300);
+    assert.equal(await box(page), '/prompt first sentence', 'the second waits for the first send');
+    state.held.submit();
+    await until('the second goes', () => sent().length === 2);
+    assert.deepEqual(sent(), ['/prompt first sentence', '/prompt second sentence']);
+    await until('the box empties', async () => (await box(page)) === '');
+    // The same, but every answer to the third's send is lost: its text stays, so the fourth, recorded while
+    // it was on its way, joins it and waits for Send rather than sending it again under a new key.
+    state.heard = 'third sentence';
+    state.loseAcks = true;
+    await dictate(page, 500);
+    await until('the third send is on its way', () => sent().length === 3);
+    state.heard = 'fourth sentence';
+    await dictate(page, 500);
+    await until('the fourth clip lands', async () => (await box(page)).includes('fourth sentence') || sent().length > 6, 15000);
+    await page.waitForTimeout(500);
+    const accepted = [...new Map(state.calls.filter(c => c.cmd === 'submit').map(c => [c.key, c.stdin])).values()];
+    assert.deepEqual(accepted, ['/prompt first sentence', '/prompt second sentence', '/prompt third sentence'], 'the third once');
+    assert.equal(sent().length, 6, "four tries with the third's key");
+    assert.equal(await box(page), '/prompt third sentence fourth sentence');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS a clip recorded while the one before it is being sent goes too, after its prefix, once that send answers, and waits in the box when the answers to that send are lost');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));
