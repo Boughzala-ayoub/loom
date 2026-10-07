@@ -411,6 +411,37 @@ try {
       assert.deepEqual(errors, []);
       checks++;
       console.log(`PASS amend keeps its draft unless git amended with it ${width}px`);
+      // Leaving the window (or opening the Overview) while the microphone is still
+      // opening closes it once it opens, as letting go of F4 does, and what it heard
+      // goes to the pane it began in, not the one in front by then.
+      const paneId = async ref => (await cli('panes')).data.find(p => p.ref === ref).id;
+      const [micPane, otherPane] = [await paneId('search-polish:1'), await paneId('review-keyboard-navigation:1')];
+      const micCalls = cmd => page.evaluate(cmd => window.qa.calls.filter(c => c.cmd === cmd).length, cmd);
+      const typedInto = (id, text) => page.evaluate(([id, text]) => window.qa.calls.some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data.includes(text)), [id, text]);
+      for (const leave of ['blur', 'overview']) {
+        await to('search-polish:1');
+        const said = `words said as the window lost focus (${leave})`;
+        await page.evaluate(said => { window.qa.dictation = said; window.qa.holdDictateStart = true; }, said);
+        const stops = await micCalls('dictate_stop');
+        await page.keyboard.down('F4');
+        await page.waitForFunction(() => window.qa.pendingDictateStart);
+        if (leave === 'blur') {
+          await to('review-keyboard-navigation');
+          await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+        } else assert.equal((await cli('overview', 'open')).ok, true);
+        await page.evaluate(() => { window.qa.holdDictateStart = false; window.qa.pendingDictateStart(); });
+        await page.waitForTimeout(400);
+        assert.deepEqual([await micCalls('dictate_stop'), await page.locator('#dictate').getAttribute('class')], [stops + 1, ''], `${leave} while the mic opened stops it once open`);
+        assert.deepEqual([await typedInto(micPane, said), await typedInto(otherPane, said)], [true, false], 'The words go to the pane they were said to');
+        await page.keyboard.up('F4');
+        await page.waitForTimeout(200);
+        assert.equal(await micCalls('dictate_stop'), stops + 1, 'Letting go of F4 afterwards stops nothing more');
+        if (leave === 'overview') assert.equal((await cli('overview', 'close')).ok, true);
+      }
+      await page.evaluate(() => { window.qa.dictation = ''; });
+      assert.deepEqual(errors, []);
+      checks++;
+      console.log(`PASS leaving the window while the mic opens stops it in its own pane ${width}px`);
     }
     if (width === 1280) {
       // loomctl's stop against a pane still starting, and a restart that fails (LOOM_CLI_REVIEW F5, F7).

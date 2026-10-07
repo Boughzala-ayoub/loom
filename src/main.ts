@@ -3362,7 +3362,7 @@ function toggleDashboard(on = !dashboardOpen) {
     hideMenu();
     togglePreferences(false);
     closeFind(false);
-    if (recording) mic(micStop);
+    mic(micStop); // also a start still opening the microphone, once it has
     if (matchMedia("(max-width: 760px)").matches) toggleSide(false);
     renderDashboard();
     void refreshDashboardMessages(true);
@@ -9700,11 +9700,11 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   );
 
   // Push to talk: F4 down starts (below), F4 up stops. Leaving the window counts
-  // as letting go — a keyup that never arrives would leave the mic open.
+  // as letting go — a keyup that never arrives would leave the mic open. Both
+  // queue behind a start still opening the microphone; with nothing recording
+  // micStop does nothing.
   window.addEventListener("keyup", (e) => e.key === "F4" && mic(micStop), true);
-  window.addEventListener("blur", () => {
-    if (recording) mic(micStop);
-  });
+  window.addEventListener("blur", () => mic(micStop));
 
   // Same keys as aa (F2 zoom, F3 next waiting pane, F5 VS Code), Ctrl+Tab
   // between threads, plus Ctrl+F
