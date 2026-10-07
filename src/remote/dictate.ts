@@ -118,11 +118,28 @@ export const repaint = { mic: () => {} };
 document.addEventListener("visibilitychange", () => { if (document.hidden) stopNow?.(true, false); });
 window.addEventListener("hashchange", () => stopNow?.(true, false));
 
+type Land = (text: string, pick: Pick, byHand: boolean) => void;
+
 /** Records until stopped, then hands what whisper heard to `land`, with the pick it was made with
  * and whether you stopped it yourself. A cancel uploads nothing. */
-export async function record(land: (text: string, pick: Pick, byHand: boolean) => void) {
+export async function record(land: Land) {
   if (stopNow) return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") return toast("This browser can't record here. Open Loom's https address in Chrome.", true);
+  // Its place in line, taken as you tap, before another clip can start: it lands after the clips before
+  // it, and the next waits for it, however late a recorder stops or whisper answers. Every way out of
+  // the clip, a cancel or a failure too, gives the place up.
+  const before = landed;
+  let done!: () => void;
+  const mine = new Promise<void>((r) => (done = r));
+  landed = before.then(() => mine);
+  try {
+    await take(land, before);
+  } finally {
+    done();
+  }
+}
+
+async function take(land: Land, before: Promise<void>) {
   let byHand = true;
   // Ends this clip once, whoever asks first: a tap, the page hiding, the recorder stopping by itself, or
   // the cleanup below. A later call is a no-op, so it never touches the next clip's bar or stop.
@@ -205,11 +222,6 @@ export async function record(land: (text: string, pick: Pick, byHand: boolean) =
   if (!send) return repaint.mic();
   busy++;
   repaint.mic();
-  // This clip's place in line: it lands after the ones before it, and the next waits for it.
-  const before = landed;
-  let done!: () => void;
-  const mine = new Promise<void>((r) => (done = r));
-  landed = before.then(() => mine);
   try {
     const clip = new Blob(parts, { type });
     if (!clip.size) return toast("Nothing was recorded.");
@@ -220,7 +232,6 @@ export async function record(land: (text: string, pick: Pick, byHand: boolean) =
   } catch (e) {
     toast(e instanceof Error ? e.message : String(e), true);
   } finally {
-    done();
     busy--;
     repaint.mic();
   }

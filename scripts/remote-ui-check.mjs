@@ -67,6 +67,12 @@ async function context(width, token = true, push = false) {
   // encoder that refuses to start; window.endBeforeStart, a stream whose tracks end before recording begins.
   await ctx.addInitScript(() => {
     const { start, stop } = MediaRecorder.prototype;
+    // window.delayStop: a recorder made while it is set fires its stop event that many ms late.
+    const onstop = Object.getOwnPropertyDescriptor(MediaRecorder.prototype, 'onstop');
+    Object.defineProperty(MediaRecorder.prototype, 'onstop', { configurable: true, get() { return onstop.get.call(this); }, set(fn) {
+      const late = window.delayStop || 0;
+      onstop.set.call(this, fn && (e => setTimeout(() => fn.call(this, e), late)));
+    } });
     MediaRecorder.prototype.start = function (...a) {
       if (window.failStart) throw new DOMException('The encoder could not start', 'NotSupportedError');
       window.recorded = { at: performance.now() };
@@ -116,7 +122,8 @@ async function context(width, token = true, push = false) {
         await route.fulfill({ json: { ok: false, error: 'whisper failed' } });
         return void (clip.answered = true);
       }
-      await route.fulfill({ json: { ok: true, text: body.length ? state.heard : '' } });
+      // heard: the text, or a function of the clip's size that ties each text to its recording.
+      await route.fulfill({ json: { ok: true, text: body.length ? (typeof state.heard === 'function' ? state.heard(body.length) : state.heard) : '' } });
       return void (clip.answered = true);
     }
     const c = req.postDataJSON();
@@ -1443,6 +1450,30 @@ try {
     await ctx.close();
   }
   console.log('PASS two clips in flight land in the order they were said when the second is transcribed first, and a failed one holds up nothing');
+  {
+    // The first clip's recorder stops 2 s late, and the second is recorded and answered meanwhile: the
+    // second still lands after it. Each text follows its clip's size, so it stays tied to its recording.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/pane/a1', '#screen .line');
+    state.heard = bytes => (bytes > 20000 ? 'first sentence' : 'second sentence');
+    await page.evaluate(() => (window.delayStop = 2000));
+    await dictate(page, 1000);
+    await page.evaluate(() => (window.delayStop = 0));
+    await dictate(page, 350);
+    await until('both clips', async () => (await box(page)).includes('first sentence') && (await box(page)).includes('second sentence'));
+    assert.equal(await box(page), '/prompt first sentence second sentence');
+    // A cancelled clip gives its place up: the next one lands.
+    await page.fill('#prompt textarea', '');
+    await page.evaluate(() => (window.recorded = null));
+    await page.click('#mic');
+    await page.waitForFunction(() => window.recorded);
+    await page.getByRole('button', { name: 'Cancel dictation' }).click();
+    await dictate(page, 1000);
+    await until('the clip after a cancel', async () => (await box(page)) === '/prompt first sentence');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS a clip whose recorder stops late still lands before the clip recorded after it, and a cancelled one holds up nothing');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));
