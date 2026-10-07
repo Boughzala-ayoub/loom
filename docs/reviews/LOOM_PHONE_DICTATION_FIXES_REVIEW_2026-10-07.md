@@ -6,7 +6,13 @@ No tracked changes were present at the end of the review. The production build, 
 
 ## Status
 
-Open. Each finding is fixed in its own commit after this one, with its regression check in `scripts/remote-ui-check.mjs`.
+All three are fixed, each in its own commit with its regression check in `scripts/remote-ui-check.mjs`. Each check failed on the commit before its fix and passes after it.
+
+- 1: `8e27a89`. `pairing()`, where every 401 lands, cancels the clip.
+- 2: `c8b0939`. The recording runs in one `try`/`finally`, and the recorder stopping by itself ends the clip.
+- 3: `2bd2100`. Clips land in the order they were recorded, and a failed clip holds up nothing.
+
+After the fixes, `npm test` passed all 17 files, and `scripts/remote-ui-check.mjs` passed 25 checks and 216 layout views at 320 to 1280 px on the served `dist/` bundle. `npm run tauri build` built the installer. `scripts/remote-check.mjs` passed on the release `loom.exe` and its embedded bundle at 320, 375, 768, 1024 and 1280 px, with the real whisper.
 
 ## 1. [P1] Revoked pairing leaves the microphone recording with hidden controls
 
