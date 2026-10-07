@@ -119,7 +119,17 @@ export async function record(land: (text: string, pick: Pick, byHand: boolean) =
   if (stopNow) return;
   if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") return toast("This browser can't record here. Open Loom's https address in Chrome.", true);
   let byHand = true;
-  const stopped = new Promise<boolean>((resolve) => (stopNow = (send, hand = true) => { stopNow = null; byHand = hand; resolve(send); }));
+  // Ends this clip once, whoever asks first: a tap, the page hiding, the recorder stopping by itself, or
+  // the cleanup below. A later call is a no-op, so it never touches the next clip's bar or stop.
+  let end!: (send: boolean, hand?: boolean) => void;
+  const stopped = new Promise<boolean>((resolve) => (end = (send, hand = true) => {
+    if (stopNow !== end) return;
+    stopNow = null;
+    bar.hidden = true;
+    byHand = hand;
+    resolve(send);
+  }));
+  stopNow = end;
   // Made in the tap, so it may play: the chimes and the wave.
   const audio = new AudioContext();
   const pick = readLists().then(picked, () => picked()); // the PC's pick now; the last one read if Loom can't say
@@ -135,53 +145,63 @@ export async function record(land: (text: string, pick: Pick, byHand: boolean) =
   if (!(stream instanceof MediaStream)) {
     // Stopped while the microphone opened: it closes as soon as it has.
     void asked.then((s) => s.getTracks().forEach((t) => t.stop()), () => {});
-    stopNow = null;
-    bar.hidden = true;
+    end(false);
     repaint.mic();
     void audio.close();
     if (stream instanceof Error) toast(stream.name === "NotAllowedError" ? "The microphone is blocked for this page: allow it in the browser's site settings." : `The microphone didn't open: ${stream.message}`, true);
     return;
   }
-  const rec = new MediaRecorder(stream);
   const parts: Blob[] = [];
-  rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
-  const ended = new Promise((r) => (rec.onstop = r));
-  rec.start();
-  const began = performance.now();
-  // Phones turn the screen off after 30 s without a touch, and nobody touches it while talking.
-  const lock = navigator.wakeLock?.request("screen").catch(() => null);
-  const analyser = audio.createAnalyser();
-  analyser.fftSize = 1024;
-  audio.createMediaStreamSource(stream).connect(analyser);
-  const frame = new Float32Array(analyser.fftSize);
-  void audio.resume().catch(() => {});
-  chime(audio, 660, 990);
-  navigator.vibrate?.(20);
-  const tick = setInterval(() => {
-    analyser.getFloatTimeDomainData(frame);
-    draw(frame.reduce((m, s) => Math.max(m, Math.abs(s)), 0));
-    const ms = performance.now() - began;
-    const s = Math.floor(ms / 1000);
-    time.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-    if (ms >= LIMIT_MS) {
-      toast("Three minutes is the most one clip holds: it stopped there.");
-      stopNow?.(true);
-    }
-  }, 60);
-  const send = await stopped;
-  clearInterval(tick);
-  rec.stop();
-  await ended;
-  stream.getTracks().forEach((t) => t.stop());
-  void lock?.then((l) => l?.release()).catch(() => {});
-  chime(audio, 990, 660);
-  setTimeout(() => void audio.close().catch(() => {}), 400);
-  bar.hidden = true;
+  let type = "", send = false, tick: number | undefined, lock: Promise<WakeLockSentinel | null> | undefined;
+  // A recorder that fails to start, or anything after it, still closes the microphone and gives the box back.
+  try {
+    const rec = new MediaRecorder(stream);
+    type = rec.mimeType;
+    rec.ondataavailable = (e) => { if (e.data.size) parts.push(e.data); };
+    // It stops by itself when its track ends (a call takes the microphone) or on an error: that ends the
+    // clip as hiding the page does, transcribed and never sent on its own.
+    const ended = new Promise((r) => (rec.onstop = () => { r(null); end(true, false); }));
+    rec.start();
+    const began = performance.now();
+    // Phones turn the screen off after 30 s without a touch, and nobody touches it while talking.
+    lock = navigator.wakeLock?.request("screen").catch(() => null);
+    const analyser = audio.createAnalyser();
+    analyser.fftSize = 1024;
+    audio.createMediaStreamSource(stream).connect(analyser);
+    const frame = new Float32Array(analyser.fftSize);
+    void audio.resume().catch(() => {});
+    chime(audio, 660, 990);
+    navigator.vibrate?.(20);
+    tick = window.setInterval(() => {
+      analyser.getFloatTimeDomainData(frame);
+      draw(frame.reduce((m, s) => Math.max(m, Math.abs(s)), 0));
+      const ms = performance.now() - began;
+      const s = Math.floor(ms / 1000);
+      time.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+      if (ms >= LIMIT_MS) {
+        toast("Three minutes is the most one clip holds: it stopped there.");
+        end(true);
+      }
+    }, 60);
+    send = await stopped;
+    if (rec.state !== "inactive") rec.stop();
+    await ended;
+    chime(audio, 990, 660);
+  } catch (e) {
+    send = false;
+    toast(`The microphone didn't record: ${e instanceof Error ? e.message : String(e)}`, true);
+  } finally {
+    end(false);
+    clearInterval(tick);
+    stream.getTracks().forEach((t) => t.stop());
+    void lock?.then((l) => l?.release()).catch(() => {});
+    setTimeout(() => void audio.close().catch(() => {}), 400);
+  }
   if (!send) return repaint.mic();
   busy++;
   repaint.mic();
   try {
-    const clip = new Blob(parts, { type: rec.mimeType });
+    const clip = new Blob(parts, { type });
     if (!clip.size) return toast("Nothing was recorded.");
     const p = await pick;
     land(await post(await decode(clip), p.lang?.code ?? "en"), p, byHand);

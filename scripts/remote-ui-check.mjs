@@ -63,16 +63,22 @@ async function context(width, token = true, push = false) {
   const ctx = await browser.newContext({ viewport: { width, height: 800 }, permissions: ['microphone'] });
   if (token) await ctx.addInitScript(() => localStorage.setItem('loom-token', 'fixture-token'));
   // The microphone, watched: how long MediaRecorder ran (window.recorded), the stream the page got (window.opened),
-  // and getUserMedia held open while window.holdMic, until window.releaseMic().
+  // and getUserMedia held open while window.holdMic, until window.releaseMic(). Faults: window.failStart, an
+  // encoder that refuses to start; window.endBeforeStart, a stream whose tracks end before recording begins.
   await ctx.addInitScript(() => {
     const { start, stop } = MediaRecorder.prototype;
-    MediaRecorder.prototype.start = function (...a) { window.recorded = { at: performance.now() }; return start.apply(this, a); };
+    MediaRecorder.prototype.start = function (...a) {
+      if (window.failStart) throw new DOMException('The encoder could not start', 'NotSupportedError');
+      window.recorded = { at: performance.now() };
+      return start.apply(this, a);
+    };
     MediaRecorder.prototype.stop = function (...a) { if (window.recorded) window.recorded.ms = performance.now() - window.recorded.at; return stop.apply(this, a); };
     const ask = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async c => {
       const s = await ask(c);
       window.opened = s;
       if (window.holdMic) await new Promise(r => (window.releaseMic = r));
+      if (window.endBeforeStart) s.getTracks().forEach(t => t.stop());
       return s;
     };
   });
@@ -1359,6 +1365,37 @@ try {
     await ctx.close();
   }
   console.log('PASS unpairing on a dictation or loomctl 401 closes the microphone, one still opening included, and sends nothing');
+  {
+    // A recorder that can't start: its stream's tracks ended first (start() throws), or the encoder refuses
+    // with the tracks live. The microphone closes, the box comes back, and the next tap records.
+    const { ctx, page, state } = await context(375);
+    state.dictation.prefixes[0].enter = true;
+    await goto(page, '#/pane/a1', '#screen .line');
+    for (const fault of ['endBeforeStart', 'failStart']) {
+      await page.evaluate(f => Object.assign(window, { [f]: true, opened: null }), fault);
+      await page.click('#mic');
+      await page.waitForFunction(() => window.opened);
+      await until(`${fault}: the box is back`, async () => (await page.locator('#rec').isHidden()) && (await page.locator('#prompt').isVisible()), 3000);
+      await micClosed(page);
+      await page.locator('#toast').filter({ hasText: "The microphone didn't record" }).waitFor();
+      await page.evaluate(f => (window[f] = false), fault);
+    }
+    assert.equal(clips(state).length, 0, 'nothing recorded, nothing sent');
+    await page.evaluate(() => (window.recorded = null));
+    await page.click('#mic');
+    await page.waitForFunction(() => window.recorded);
+    await page.waitForTimeout(500);
+    // The track ends mid-clip (a call takes the microphone): the recorder stops by itself, and what it
+    // caught is transcribed but waits for Send, as when the page hides.
+    await page.evaluate(() => window.opened.getTracks().forEach(t => t.stop()));
+    await until('its text', async () => (await box(page)) === '/prompt run the tests');
+    assert.ok(await page.locator('#rec').isHidden(), 'the bar goes with it');
+    await page.waitForTimeout(300);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit'), []);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log("PASS a recorder that can't start closes the microphone and gives the box back, the next tap records, and one that stops by itself transcribes without sending");
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));
