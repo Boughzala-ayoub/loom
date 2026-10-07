@@ -29,17 +29,22 @@ const git = (tid: string, args: string[], opts: { stdin?: string; change?: boole
 
 export const summary = el("section", "screen primary");
 summary.id = "changes";
+// The thread picker is the screen's title: the thread's name, what changed under it.
 const pickerBtn = button("", () => pickThread(), "picker");
+const noThread = el("h1", "", "Changes");
 const body = el("div", "body");
-const page = el("div", "body");
-page.append(pickerBtn, body);
-body.style.padding = "0";
-summary.append(topBar("Changes", [iconButton("refresh", "Refresh", () => void read(true)), iconButton("more", "Git actions", () => repoActions())]), page);
+const titleBox = el("div", "title");
+titleBox.append(pickerBtn, noThread);
+summary.append(topBar(titleBox, [iconButton("refresh", "Refresh", () => void read(true)), iconButton("more", "Git actions", () => repoActions())]), body);
 function paintPicker(t: { name: string; changed?: { add: number; del: number; files: number } }) {
   const who = el("span", "who");
   const n = t.changed?.files ?? 0;
-  who.append(el("b", "", t.name), el("span", "", n ? `${n} file${n === 1 ? "" : "s"} changed` : "No changes"));
-  pickerBtn.replaceChildren(who, stat(t.changed), ui("fold"));
+  const name = el("b", "", t.name);
+  name.append(ui("fold"));
+  const sub = el("span", "", n ? `${n} file${n === 1 ? "" : "s"} changed` : "No changes");
+  if (n) sub.append(" · ", stat(t.changed));
+  who.append(name, sub);
+  pickerBtn.replaceChildren(who);
   pickerBtn.setAttribute("aria-label", `Changes in ${t.name}: pick another thread`);
 }
 
@@ -50,12 +55,14 @@ export function showSummary(id: string | null) {
     thread = null;
     body.replaceChildren(empty("No threads", "Start a thread on the Agents tab first."));
     pickerBtn.hidden = true;
+    noThread.hidden = false;
     return;
   }
   if (t.id !== thread) (status = null), (statusKey = "");
   thread = t.id;
   setPref("loom-changes", t.id);
   pickerBtn.hidden = false;
+  noThread.hidden = true;
   paintPicker(t);
   if (!status) body.replaceChildren(el("p", "hint", "Reading git…"));
   void read(true);
@@ -103,7 +110,9 @@ function draw(tid: string, s: Status) {
     const files = s[sec];
     if (!files.length) continue;
     const head = el("div", "section-title");
-    head.append(el("span", "grow", `${title} ${files.length}`));
+    const name = el("span", "grow", title);
+    name.append(el("span", "n", String(files.length)));
+    head.append(name);
     if (sec === "staged") head.append(button("Unstage all", () => void change(tid, ["unstage", "--staged"], "Unstaged"), "ghost"));
     else head.append(button("Stage all", () => void change(tid, ["stage", `--${sec}`], "Staged"), "ghost"));
     const box = el("div", "files");
@@ -130,13 +139,22 @@ function draw(tid: string, s: Status) {
 
 function branchCard(tid: string, s: Status) {
   const card = el("div", "branch-card");
-  const name = el("div", "branch");
-  name.append(ui("branch"), s.branch || "(no branch)");
   const far = s.ahead || s.behind ? [s.ahead ? `${s.ahead} to push` : "", s.behind ? `${s.behind} to pull` : ""].filter(Boolean).join(", ") : "up to date";
-  card.append(name, el("div", "upstream", s.upstream ? `${s.upstream}: ${far}` : "Not pushed yet"));
+  const tile = el("span", "tile");
+  tile.append(ui("branch"));
+  const names = el("span", "names");
+  names.append(el("span", "branch", s.branch || "(no branch)"), el("span", "upstream", s.upstream || "Not pushed yet"));
+  const head = el("div", "head");
+  head.append(tile, names, ...(s.upstream ? [el("span", "chip", far)] : []));
+  card.append(head);
   const row = el("div", "row");
-  if (s.behind) row.append(button("Pull", () => void change(tid, ["pull"], "Pulled")));
-  row.append(button(s.upstream ? "Push" : "Publish branch", () => void change(tid, ["push"], "Pushed")), button("Create PR", () => void openPR(tid)));
+  const pill = (label: string, icon: "pull" | "push" | "pr", onclick: () => void) => {
+    const b = button(ui(icon), onclick);
+    b.append(label);
+    return b;
+  };
+  if (s.behind) row.append(pill("Pull", "pull", () => void change(tid, ["pull"], "Pulled")));
+  row.append(pill(s.upstream ? "Push" : "Publish branch", "push", () => void change(tid, ["push"], "Pushed")), pill("Create PR", "pr", () => void openPR(tid)));
   card.append(row);
   if (s.midway) {
     const bar = el("div", "midway");
@@ -156,8 +174,22 @@ function fileRow(tid: string, sec: Sec, f: File) {
   const open = button("", () => go(`#/diff/${encodeURIComponent(tid)}/${sec}/${encodeURIComponent(f.path)}`), "open");
   const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
   open.append(el("b", "", base(f.path)), el("span", "", dir || " "));
-  row.append(el("span", `letter ${l}`, l), open, stat(f), iconButton("more", `${f.path}: actions`, () => fileActions(tid, sec, f)));
+  const size = el("span", "size");
+  size.append(stat(f), blocks(f));
+  row.append(el("span", `letter ${l}`, l), open, size, iconButton("more", `${f.path}: actions`, () => fileActions(tid, sec, f)));
   return row;
+}
+
+/** Five blocks, as a code host draws a file's change: more lit for a bigger change, green for what
+ * was added, red for what was taken out. ponytail: a log scale of lines changed, not the file's size. */
+function blocks(f: { add: number; del: number }) {
+  const total = f.add + f.del;
+  const lit = total ? Math.min(5, Math.ceil(Math.log10(total + 1) * 2)) : 0;
+  const added = total ? Math.round((lit * f.add) / total) : 0;
+  const box = el("span", "blocks");
+  box.setAttribute("aria-hidden", "true");
+  for (let i = 0; i < 5; i++) box.append(el("i", i < added ? "a" : i < lit ? "d" : ""));
+  return box;
 }
 
 function fileActions(tid: string, sec: Sec, f: File) {

@@ -10,33 +10,49 @@
   </head>
 
   <body>
-    <!-- One bar: where you are on the left, what needs you on the right. -->
-    <header id="bar">
-      <button id="side-toggle" class="icon" aria-label="Toggle projects" aria-controls="side" aria-expanded="true" title="Toggle projects (Ctrl+B)"><i class="i i-menu"></i></button>
-      <img src="/src/logo.svg" class="mark" alt="" />
-      <nav id="crumbs" aria-label="Current thread">
-        <span id="wsrepo"></span>
-        <span id="wsname"></span>
-        <span id="wsbranch" class="chip hidden"></span>
-        <span id="wsstat"></span>
-      </nav>
-      <span class="spacer"></span>
-      <button id="dashboard-btn" aria-label="Overview" aria-pressed="false" title="Overview (Shift+right-click or Ctrl+Shift+D)"><i class="i i-layout-grid"></i><span class="lbl">Overview</span></button>
-      <button id="search" title="Go to any thread or agent (Ctrl+K)"><i class="i i-search"></i><span class="lbl">Go to agent…</span><kbd>Ctrl K</kbd></button>
-      <button id="waiting" class="hidden" title="Choose a waiting agent. F3 jumps to the next one."></button>
-      <button id="plan" class="hidden" title="Claude plan usage"></button>
-      <button id="codex-plan" class="hidden" title="Codex plan usage"></button>
-      <button id="new-thread" class="primary" title="Cut a new thread: a worktree with an agent in it"><i class="i i-plus"></i><span class="lbl">Thread</span></button>
-      <button id="phone-window" class="icon" aria-label="Fit window for Galaxy A26" aria-pressed="false" title="Fit window for Galaxy A26 (portrait)"><i class="i i-phone" aria-hidden="true"></i></button>
-      <button id="preferences-btn" class="icon" aria-label="Preferences" aria-expanded="false" aria-controls="preferences" title="Preferences"><i class="i i-sliders"></i></button>
-    </header>
-
     <div id="body">
+      <!-- The places, a rail on the left: the phone's tabs, then the window's
+           own buttons. Under 760 px it turns into the top bar. -->
+      <nav id="rail" aria-label="Places">
+        <button id="side-toggle" class="icon" aria-label="Toggle projects" aria-controls="side" aria-expanded="true" title="Toggle projects (Ctrl+B)"><i class="i i-sidebar"></i></button>
+        <span class="rail-gap"></span>
+        <button id="rail-agents" class="icon" aria-label="Agents" aria-pressed="true" title="Agents: back to the thread"><i class="i i-agents"></i></button>
+        <button id="dashboard-btn" class="icon" aria-label="Overview" aria-pressed="false" title="Overview (Shift+right-click or Ctrl+Shift+D)"><i class="i i-layout-grid"></i></button>
+        <button id="rail-changes" class="icon" aria-label="Changes" title="Changes in this thread (Ctrl+Shift+G)"><i class="i i-file-diff"></i></button>
+        <button id="rail-usage" class="icon" aria-label="Plan usage" title="Claude and Codex plan usage"><i class="i i-gauge"></i></button>
+        <span class="spacer"></span>
+        <button id="phone-window" class="icon" aria-label="Fit window for Galaxy A26" aria-pressed="false" title="Fit window for Galaxy A26 (portrait)"><i class="i i-phone" aria-hidden="true"></i></button>
+        <button id="preferences-btn" class="icon" aria-label="Preferences" aria-expanded="false" aria-controls="preferences" title="Preferences"><i class="i i-sliders"></i></button>
+      </nav>
+
+      <!-- The sidebar's head: the logo, who is waiting, Ctrl+K, New thread and
+           the Overview. Its own box so a narrow window can keep it in the top
+           bar while the projects go into the drawer. -->
+      <div id="side-top">
+        <div class="side-head">
+          <img src="/src/logo.svg" class="mark" alt="" />
+          <span class="side-title">Loom</span>
+          <span class="spacer"></span>
+          <button id="waiting" class="hidden" title="Choose a waiting agent. F3 jumps to the next one."></button>
+          <button id="search" class="icon" aria-label="Go to agent" title="Go to any thread or agent (Ctrl+K)"><i class="i i-search"></i></button>
+        </div>
+        <div class="side-rows">
+          <button id="new-thread" class="side-row" title="Cut a new thread: a worktree with an agent in it"><i class="i i-new"></i><span class="lbl">New thread</span></button>
+          <button id="side-overview" class="side-row" title="Overview (Ctrl+Shift+D)"><i class="i i-layout-grid"></i><span class="lbl">Overview</span><b id="side-waiting"></b></button>
+        </div>
+      </div>
+
       <!-- Threads, grouped under the checkout they were cut from. Rows are built in main.ts. -->
       <aside id="side">
         <label class="filter"><i class="i i-search"></i><input id="side-filter" aria-label="Filter threads" spellcheck="false" placeholder="Filter threads" title="Filter by project, name, branch or agent" /></label>
+        <div class="side-label">Projects</div>
         <div id="threads"></div>
         <p id="side-empty" class="hidden muted">No thread matches that filter.</p>
+        <!-- Plan usage: one row per account, each opens its limits. -->
+        <div id="plans">
+          <button id="plan" class="hidden" title="Claude plan usage"></button>
+          <button id="codex-plan" class="hidden" title="Codex plan usage"></button>
+        </div>
         <div id="side-resize" class="side-resize" title="Drag to resize, double-click to reset"></div>
       </aside>
 
@@ -46,10 +62,12 @@
             <h1 id="dashboard-title">Overview</h1>
             <div class="dashboard-actions"><button id="dashboard-back">Back to thread</button><button id="dashboard-next" class="primary">Next waiting <kbd>F3</kbd></button></div>
           </div>
-          <div id="dashboard-counts" role="group" aria-label="Filter by status or group"></div>
-          <div class="dashboard-filters">
-            <label class="filter"><i class="i i-search"></i><input id="dashboard-query" type="search" aria-label="Search threads, agents, branches or output" placeholder="Search sessions or output" spellcheck="false" /></label>
-            <select id="dashboard-project" aria-label="Filter by project"><option value="">All projects</option></select>
+          <div class="dashboard-toolbar">
+            <div id="dashboard-counts" role="group" aria-label="Filter by status or group"></div>
+            <div class="dashboard-filters">
+              <label class="filter"><i class="i i-search"></i><input id="dashboard-query" type="search" aria-label="Search threads, agents, branches or output" placeholder="Search sessions or output" spellcheck="false" /></label>
+              <select id="dashboard-project" aria-label="Filter by project"><option value="">All projects</option></select>
+            </div>
           </div>
           <div class="dashboard-results"><span id="dashboard-results" role="status"></span><button id="dashboard-reset" class="hidden">Clear filters</button><span class="spacer"></span><button id="dashboard-new-group" aria-haspopup="dialog"><i class="i i-plus" aria-hidden="true"></i>Create group</button><button id="dashboard-select" aria-pressed="false" title="Tick sessions to act on several at once (X on a focused session)"><i class="i i-check" aria-hidden="true"></i>Select</button><button id="dashboard-compact" aria-pressed="false"><i class="i i-layout-rows" aria-hidden="true"></i>Compact view</button></div>
           <div id="dashboard-list" aria-label="Agent sessions"></div>
@@ -63,22 +81,27 @@
             <button id="dashboard-bulk-done">Done</button>
           </div>
           <details class="dashboard-help muted"><summary>How statuses work</summary><p>Waiting means an agent signaled for attention. Working follows terminal activity; quiet agents may still be thinking. Previewing a session keeps its waiting alert. Opening its thread or sending input clears it.</p></details>
+          <p class="muted keys-hint dashboard-keys"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> preview</span><span><kbd>1</kbd>–<kbd>9</kbd> answer</span><span><kbd>R</kbd> reply</span><span><kbd>X</kbd> select</span><span><kbd>F3</kbd> next waiting</span></p>
         </section>
         <!-- The panes and the open diffs as tabs, Orca's bar, with the thread's
              own actions on the right. Always up while a thread shows: coming and
              going would resize every pane. -->
         <div id="strip" class="hidden">
+          <!-- Where you are: project / thread, the branch when it isn't the
+               usual loom/<thread>, then what the thread has changed. -->
+          <nav id="crumbs" aria-label="Current thread">
+            <i class="i i-folder" aria-hidden="true"></i>
+            <span id="wsrepo"></span>
+            <span id="wsname"></span>
+            <span id="wsbranch" class="chip hidden"></span>
+            <span id="wsstat"></span>
+          </nav>
           <div id="tabs"></div>
           <div id="wsactions">
             <button id="add-pane" class="icon" title="Add a pane to this thread" aria-label="Add a pane"><i class="i i-plus"></i></button>
-            <span class="split-btn">
-              <button id="dictate" title="Dictate into the focused pane — click, or hold F4"><i class="i i-mic"></i><span class="lbl">Speak</span></button>
-              <button id="lang" aria-description="Dictation language" title="Language dictation transcribes as"></button>
-              <button id="prefix" aria-description="Dictation prefix" title="What dictation types before the transcript"></button>
-            </span>
-            <button id="layout" title="Cycle pane layout: grid / rows / columns"></button>
-            <button id="changes-btn" title="Changes in this thread's worktree (Ctrl+Shift+G)"><i class="i i-diff"></i><span class="lbl">Changes</span><b id="changes-n"></b></button>
+            <button id="layout" class="icon" title="Cycle pane layout: grid / rows / columns"></button>
             <button id="wsmore" class="icon" title="Thread actions" aria-label="Thread actions"><i class="i i-more"></i></button>
+            <button id="changes-btn" class="icon" aria-label="Changes" title="Changes in this thread's worktree (Ctrl+Shift+G)"><i class="i i-panel-right"></i><b id="changes-n"></b></button>
           </div>
         </div>
 
@@ -90,6 +113,12 @@
               <p>Each thread is a branch of work with its own agents. Run as many as you like; they keep going while you look elsewhere.</p>
               <button id="open-first" class="primary">New thread</button>
               <p class="muted keys-hint"><span><kbd>Ctrl K</kbd> go to an agent</span><span><kbd>F3</kbd> next waiting</span><span><kbd>F1</kbd> all shortcuts</span></p>
+            </div>
+            <!-- Dictation, floating over the panes: the mic, and its language,
+                 prefix and hide switch a click away. F4 works hidden or not. -->
+            <div id="speak" class="hidden">
+              <button id="dictate" title="Dictate into the focused pane: click, or hold F4"><i class="i i-mic"></i><span class="lbl">Speak</span></button>
+              <button id="speak-more" class="icon" aria-label="Dictation language and prefix" aria-haspopup="menu" title="Dictation language and prefix"><i class="i i-chevron"></i></button>
             </div>
             <!-- One file's diff, over the panes. Esc or ✕ closes. -->
             <div id="diff" class="hidden">
@@ -167,6 +196,7 @@
       <p id="notices-help" class="muted">A pane's bell sets its own on or off, which wins over this; the kinds apply to every pane. With the v3 email bridge, turning off also holds back notices not sent yet, and turning on again sends none of them. An older sender's queue isn't covered, and a notice already sent can't be called back.</p>
       <div class="preference-row"><span>Plan usage</span><button id="plan-usage" title="Claude and Codex plan usage in the top bar">shown</button></div>
       <div class="preference-row"><span>Agent overlay</span><button id="overlay-pref" aria-pressed="false">off</button></div>
+      <div class="preference-row"><span id="speak-pref-label">Speak button</span><button id="speak-pref" aria-labelledby="speak-pref-label" aria-pressed="true" title="The floating microphone over the panes. F4 dictates either way.">shown</button></div>
       <div class="preference-row"><span id="keep-awake-label">Keep PC awake</span><button id="keep-awake" aria-labelledby="keep-awake-label" aria-describedby="keep-awake-help" aria-pressed="false">off</button></div>
       <p id="keep-awake-help" class="muted">Keep the PC and screen on while Loom is running, even when minimized.</p>
       <div class="preference-actions"><button id="vscode" title="Open this thread in VS Code (F5)">Open in VS Code</button><button id="shortcuts">Keyboard shortcuts <kbd>F1</kbd></button><button id="restart-loom" title="Close Loom safely and start it again: after an update, the new version">Restart Loom</button></div>

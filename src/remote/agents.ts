@@ -1,9 +1,8 @@
-/** Agents: the threads as the PC's sidebar draws them (a warp rail per
- * project, a knot per thread), what every agent last heard and said, one
- * agent's screen, and starting threads. */
+/** Agents: the threads as the PC's sidebar draws them, what every agent last
+ * heard and said, one agent's screen, and starting threads. */
 import {
   act, age, agentIcon, app, back, base, button, closeSheet, confirmSheet, el, findPane, findThread, go, iconButton,
-  item, panes, pref, promptSheet, replace, replaceAround, run, sequence, setPref, sheet, stat, threadOf, tick, toast, topBar, ui,
+  item, logo, panes, pref, promptSheet, replace, replaceAround, run, sequence, setPref, sheet, stat, threadOf, tick, toast, topBar, ui,
   type Pane, type Thread,
 } from "./core";
 import { keyboard, type Typed } from "./keyboard";
@@ -27,7 +26,6 @@ let saidAt = 0;
 let listKey = "";
 let held = false; // a card kept as it was while its reply is typed: redrawn once you leave its box
 let open: string | null = null; // the agent on show, for the list's highlight
-const shuttled = new Map<string, string>(); // each thread's last state, to run the shuttle as work starts
 
 export const list = el("section", "screen primary");
 list.id = "list";
@@ -47,8 +45,13 @@ for (const [v, label] of [["threads", "Threads"], ["activity", "Activity"]]) {
   find.append(ui("search"), findBox);
   const body = el("div", "body");
   body.append(find, views, rows);
-  views.style.marginBottom = "14px";
-  list.append(topBar("Loom", [iconButton("plus", "New thread", () => go("#/new"))]), body);
+  const brand = el("h1", "brand");
+  brand.append(logo(), "Loom");
+  // New thread floats over the list, bottom right.
+  const add = button(ui("pen"), () => go("#/new"), "fab");
+  add.append("New thread");
+  add.setAttribute("aria-label", "New thread"); // scripts/remote-check.mjs finds it by this
+  list.append(topBar(brand), body, add);
 }
 
 export function showList(current: string | null) {
@@ -73,7 +76,7 @@ export function drawList() {
     listKey = key;
     for (const b of views.querySelectorAll<HTMLElement>("button")) b.setAttribute("aria-pressed", String(b.dataset.view === view));
     const banner = waiting.length ? [waitingBanner(waiting)] : [];
-    const next = !app.threads.length ? [empty("No threads yet", "Start one with + at the top.")] : [...banner, ...(view === "activity" ? activity() : byThread())];
+    const next = !app.threads.length ? [empty("No threads yet", "Start one with New thread, below.")] : [...banner, ...(view === "activity" ? activity() : byThread())];
     // The card whose reply is being typed stays as it was, its box never rebuilt, until you leave the box.
     const card = typing?.closest<HTMLElement>(".card");
     const at = card ? next.findIndex((n) => n instanceof HTMLElement && n.matches(".card") && n.dataset.pane === card.dataset.pane) : -1;
@@ -85,20 +88,6 @@ export function drawList() {
   for (const a of rows.querySelectorAll<HTMLElement>(".when")) {
     const when = age(a.dataset.thread ? latest(a.dataset.thread) : findPane(a.dataset.pane!)?.lastOutput ?? null);
     if (a.textContent !== when) a.textContent = when;
-  }
-  // The shuttle runs down a thread's rail as its agents start work.
-  for (const t of app.threads) {
-    const was = shuttled.get(t.id);
-    shuttled.set(t.id, t.state);
-    if (was && was !== "working" && t.state === "working") {
-      const row = rows.querySelector<HTMLElement>(`.thread[data-id="${t.id}"]`);
-      if (row) {
-        row.classList.remove("shuttle");
-        row.style.setProperty("--run", `${row.offsetHeight - 30}px`);
-        void row.offsetWidth;
-        row.classList.add("shuttle");
-      }
-    }
   }
   if (view === "activity") void readSaid();
 }
@@ -114,9 +103,7 @@ function waitingBanner(waiting: Pane[]) {
   const b = button("", () => go(`#/pane/${encodeURIComponent(first.id)}`), "waiting-banner");
   const text = el("span", "text");
   text.append(waiting.length === 1 ? "1 agent is waiting on you" : `${waiting.length} agents are waiting on you`, el("small", "", `${first.ref}: ${first.title || first.agent}`));
-  const knot = el("span", "knot");
-  knot.style.cssText = "border-color: var(--warn); background: var(--warn); box-shadow: 0 0 0 4px var(--warn-dim)";
-  b.append(knot, text, el("span", "chip waiting", "Open"));
+  b.append(el("span", "dot"), text, el("span", "chip waiting", "Open"));
   return b;
 }
 
@@ -154,10 +141,8 @@ function threadBlock(t: Thread) {
   const shut = folded.has(t.id) && !query;
   const head = button("", () => fold(t.id), "thread-head");
   head.setAttribute("aria-expanded", String(!shut));
+  // Line two, as the PC's sidebar has it: a folded thread's agents, its branch, then what changed and when.
   const sub = el("span", "sub");
-  sub.append(el("span", "branch", t.branch || base(t.dir)));
-  if (t.changed?.files) sub.append(stat(t.changed));
-  const side = el("span", "side");
   if (shut) {
     const pips = el("span", "pips");
     pips.append(...[...t.panes].sort((a, b) => rank(a) - rank(b)).slice(0, 4).map((p) => {
@@ -166,18 +151,20 @@ function threadBlock(t: Thread) {
       return pip;
     }));
     if (t.panes.length > 4) pips.append(el("span", "", `+${t.panes.length - 4}`));
-    side.append(pips);
+    sub.append(pips);
   }
+  sub.append(el("span", "branch", t.branch || base(t.dir)));
+  if (t.changed?.files) sub.append(stat(t.changed));
   const when = el("span", "when");
   when.dataset.thread = t.id;
-  side.append(when);
-  head.append(el("span", "name", t.name), side, sub);
+  sub.append(when);
+  head.append(el("span", "name", t.name), sub);
   const top = el("div", "thread-top");
   const more = iconButton("more", `${t.name}: actions`, () => threadActions(t));
   top.append(head, more);
   const box = el("div", `thread ${t.state}`);
   box.dataset.id = t.id;
-  box.append(el("span", "knot"), top);
+  box.append(top);
   if (!shut) {
     const agents = el("div", "agents");
     const shown = t.panes.filter((p) => !query || matches(t) || matches(t, p));
@@ -373,7 +360,9 @@ promptText.setAttribute("aria-label", "Message");
 const keysBtn = iconButton("keyboard", "Keys", () => { keysOpen = !keysOpen; setPref("loom-keys", keysOpen ? "1" : ""); drawKeys(); });
 keysBtn.id = "keys-btn";
 keysBtn.setAttribute("aria-controls", "keys");
-const sendBtn = el("button", "primary", "Send");
+const sendBtn = el("button", "primary");
+sendBtn.append(ui("send"));
+sendBtn.setAttribute("aria-label", "Send");
 promptForm.append(keysBtn, promptText, sendBtn);
 {
   const dock = el("div");
@@ -565,7 +554,9 @@ function drawQuestion(id: string, m: Menu | null) {
   if (!m) return questionBox.replaceChildren();
   questionBox.replaceChildren(el("p", "", m.question.join("\n").trim()), ...m.options.map((o, i) => {
     const n = m.keys?.[i] ?? String(i + 1);
-    return button(`${n}. ${o}`, () => void act(() => run("choose", [id, n, "--menu", m.rev], { change: true })));
+    const b = button(el("span", "n", n), () => void act(() => run("choose", [id, n, "--menu", m.rev], { change: true })));
+    b.append(o);
+    return b;
   }));
 }
 

@@ -144,11 +144,11 @@ export function wear(t: Pick<Theme, "scheme" | "vars">) {
   for (const k of [...root.style]) if (k.startsWith("--")) root.style.removeProperty(k);
   for (const [k, v] of Object.entries(t.vars ?? {})) root.style.setProperty(k, v);
   root.dataset.scheme = t.scheme;
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", t.vars?.["--panel"] ?? "#121a2d");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", t.vars?.["--panel"] ?? "#0f0f0f");
   setPref("loom-theme", JSON.stringify({ scheme: t.scheme, vars: t.vars }));
 }
 
-const DEFAULT: Record<string, string> = { "--bg": "#0c1120", "--text": "#e8eaf1", "--accent": "#7ea6ef", "--ok": "#7cc08d", "--warn": "#f2bb44", "--err": "#e5605a" };
+const DEFAULT: Record<string, string> = { "--bg": "#0f0f0f", "--text": "#ececec", "--accent": "#ececec", "--ok": "#6fbf86", "--warn": "#e9b44c", "--err": "#ef6d64" };
 const color = (t: Theme, k: string) => t.vars?.[k] ?? DEFAULT[k];
 function dots(t: Theme) {
   const box = el("span", "dots");

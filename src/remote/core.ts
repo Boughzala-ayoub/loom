@@ -259,12 +259,15 @@ export function stat(s: { add: number; del: number } | undefined) {
 // --- Icons: 24 px strokes, drawn for this app -------------------------------
 
 const PATHS = {
-  agents: "M5 4v16M5 7h9a3 3 0 0 1 3 3v0a3 3 0 0 1-3 3H5M5 17h11",
-  changes: "M7 4v10M7 14a3 3 0 1 0 0 6a3 3 0 0 0 0-6ZM17 4a3 3 0 1 0 0 6a3 3 0 0 0 0-6ZM17 10c0 4-4 4-10 6",
-  usage: "M4 18a8 8 0 1 1 16 0M12 18l4-6M4 18h16",
-  settings: "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4",
+  // Stacked panes: several agents, one prompt.
+  agents: "M6 8h7a3 3 0 0 1 3 3v6a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-6a3 3 0 0 1 3-3ZM8 4h10a3 3 0 0 1 3 3v8M6.5 12l2 2-2 2",
+  changes: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM12 8.5v6M9 11.5h6M9 17.5h6",
+  usage: "M4 18a8 8 0 1 1 16 0M12 18l4-6",
+  settings: "M4 7h9M19 7h1M4 17h1M11 17h9M18.5 7a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0ZM10.5 17a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Z",
+  send: "M12 19V5M6 11l6-6 6 6",
+  pen: "M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6M18.4 3.6a2 2 0 0 1 2.8 2.8L13 14.6l-3.6.8.8-3.6z",
   back: "M15 5l-7 7 7 7",
-  more: "M5 12h.01M12 12h.01M19 12h.01",
+  more: "M5 10.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4ZM12 10.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4ZM19 10.8a1.2 1.2 0 1 0 0 2.4a1.2 1.2 0 1 0 0-2.4Z",
   plus: "M12 5v14M5 12h14",
   minus: "M5 12h14",
   search: "M11 18a7 7 0 1 0 0-14a7 7 0 0 0 0 14ZM20 20l-4-4",
@@ -309,5 +312,18 @@ export function ui(name: IconName) {
   const path = document.createElementNS(ns, "path");
   path.setAttribute("d", PATHS[name]);
   svg.append(path);
+  return svg;
+}
+
+/** Loom's logo (src/logo.svg, which the PC wears too): a prompt and a cursor on a tile. */
+export function logo() {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 32 32");
+  svg.setAttribute("class", "logo");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = '<rect x="1" y="1" width="30" height="30" rx="8" fill="#0e1626" stroke="#2a3c5c" stroke-width="1.5"/>'
+    + '<path d="M8.5 11 L14.5 16 L8.5 21" fill="none" stroke="#d97757" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+    + '<rect x="18.5" y="11.5" width="4.5" height="9" rx="1" fill="#d97757"/>';
   return svg;
 }

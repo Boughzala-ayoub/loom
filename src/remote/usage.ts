@@ -35,15 +35,13 @@ function fmtReset(iso: string | null) {
   return `Resets ${d.toLocaleDateString(undefined, { weekday: "short" })} ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
 }
 
-/** A limit as a thread along its rail, with a knot where it stands. */
+/** A limit as a bar: white, amber once it nears, red at the end. */
 function meter(percent: number, severity = "") {
   const m = el("div", `meter ${severity}`);
   const p = Math.max(0, Math.min(100, percent));
   const runEl = el("span", "run");
   runEl.style.width = `${p}%`;
-  const dot = el("span", "dot");
-  dot.style.left = `${p}%`;
-  m.append(runEl, dot);
+  m.append(runEl);
   m.setAttribute("role", "meter");
   m.setAttribute("aria-valuenow", String(Math.round(p)));
   m.setAttribute("aria-valuemin", "0");
@@ -86,7 +84,9 @@ export function draw() {
     const who = el("div", "who");
     // By the minute: seconds would redraw the tab on each 2 s read of the threads.
     const fresh = plan?.fetchedAt && Date.now() - Date.parse(plan.fetchedAt) < 60000;
-    who.append(el("b", "", plan?.tier ? `${name} ${TIERS[plan.tier] ?? plan.tier}` : name), el("span", "", refresh.disabled ? "Refreshing…" : plan?.fetchedAt ? (fresh ? "Updated just now" : `Updated ${age(plan.fetchedAt)} ago`) : plans ? "No reading" : "Reading…"));
+    const named = el("b", "", name);
+    if (plan?.tier) named.append(" ", el("span", "tier", TIERS[plan.tier] ?? plan.tier));
+    who.append(named, el("span", "", refresh.disabled ? "Refreshing…" : plan?.fetchedAt ? (fresh ? "Updated just now" : `Updated ${age(plan.fetchedAt)} ago`) : plans ? "No reading" : "Reading…"));
     const page = el("a", "", "Details");
     Object.assign(page, { href: PAGES[kind], target: "_blank", rel: "noreferrer" });
     head.append(agentIcon(kind), who, page);

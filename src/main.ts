@@ -178,6 +178,28 @@ const BASE = Object.fromEntries(
 const THEMES: Theme[] = [
   { label: "loom", vars: {} },
   {
+    // Loom's dye palette before the grey: indigo ground, weld yellow, woad blue.
+    label: "loom indigo",
+    vars: {
+      "--bg": "#0c1120",
+      "--panel": "#121a2d",
+      "--raise": "#19233b",
+      "--line": "#243150",
+      "--line-strong": "#34436a",
+      "--text": "#e8eaf1",
+      "--muted": "#9ba4bc",
+      "--faint": "#848da7",
+      "--accent": "#7ea6ef",
+      "--accent-dim": "rgba(126, 166, 239, 0.14)",
+      "--ok": "#7cc08d",
+      "--err": "#e5605a",
+      "--warn": "#f2bb44",
+      "--blue": "#93b4e8",
+      "--magenta": "#c3a3dc",
+      "--cyan": "#7fc6cf",
+    },
+  },
+  {
     // Loom's first palette, navy and copper, before the dye colours.
     label: "loom classic",
     vars: {
@@ -989,13 +1011,13 @@ let theme: Theme = THEMES[0];
 
 /** ANSI and app chrome share a palette. Light themes use ink for bright white. */
 const buildTermTheme = () => ({
-  background: cssVar("--bg"),
+  background: cssVar("--panel"), // the pane card's own surface, a step up from the ground
   foreground: cssVar("--text"),
   cursor: cssVar("--accent"),
   cursorAccent: cssVar("--bg"),
   selectionBackground: cssVar("--line-strong"),
   selectionForeground: cssVar("--text"),
-  black: theme.scheme === "light" ? cssVar("--text") : cssVar("--bg"),
+  black: theme.scheme === "light" ? cssVar("--text") : cssVar("--panel"), // a TUI's "black" fill is the terminal's own ground
   brightBlack: cssVar("--faint"),
   white: cssVar("--muted"),
   brightWhite: cssVar("--text"),
@@ -1048,7 +1070,8 @@ let paneCount = 1; // the new-thread form's pane count, persisted so it keeps yo
 let soundEnabled = true;
 let taskbarEnabled = true;
 let keepAwake = false;
-let planUsage = true; // Preferences → Plan usage: off = no top-bar chips and no account API calls; persisted
+let planUsage = true; // Preferences → Plan usage: off = no usage rows and no account API calls; persisted
+let speakShown = true; // Preferences → Speak button: the floating mic over the panes; F4 works either way; persisted
 const OVERLAY_MODES = ["off", "background", "always"] as const;
 type OverlayMode = (typeof OVERLAY_MODES)[number];
 let overlayMode: OverlayMode = "off"; // Preferences → Agent overlay; persisted
@@ -2508,6 +2531,8 @@ class Thread {
   private pips = document.createElement("span");
   private stat = document.createElement("span");
   private age = document.createElement("span");
+  /** The branch, on the open thread's second line (styles.css shows it only there). */
+  private branchEl = document.createElement("span");
   private fold = mini(glyph("chevron"), "Fold agents", () => this.setOpen(!this.listed));
   private add = mini(glyph("plus"), "Add agent or CLI to this thread", () => this.addMenu(this.add));
   /** Lines changed against HEAD and files touched, from pollStats(). */
@@ -2542,7 +2567,8 @@ class Thread {
     this.age.className = "thread-age";
     const meta = document.createElement("div");
     meta.className = "thread-meta";
-    meta.append(this.pips, this.stat, this.age);
+    this.branchEl.className = "thread-branch";
+    meta.append(this.branchEl, this.pips, this.stat, this.age);
     top.append(this.fold, this.label, tools, meta);
     this.label.ondblclick = () => renameThread(this);
     this.list.className = "agents";
@@ -2613,6 +2639,7 @@ class Thread {
     // The branch is usually loom/<name>, which the row already says; it lives
     // in the tooltip and the top bar instead of a line of its own.
     this.row.title = `${this.name}\n${this.branch ? `Branch ${this.branch}` : "Folder without a Git branch"}\n${this.dir}`;
+    if (this.branchEl.textContent !== this.branch) this.branchEl.textContent = this.branch;
     this.stat.innerHTML = statHtml(s);
     if (this === current) paintHead();
   }
@@ -2945,6 +2972,7 @@ const flushSave = (): Promise<unknown> => {
       notify: notifyPolicy,
       keepAwake,
       planUsage,
+      speakButton: speakShown,
       overlay: overlayMode,
       overlayCap,
       ui: { thread: threads.indexOf(current!), dashboard: dashboardOpen, dashboardCompact, sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
@@ -3012,9 +3040,12 @@ function paintWaiting() {
     waitingShown = n;
     const b = $("#waiting");
     b.classList.toggle("hidden", !n);
-    // The word is its own span: the phone layout keeps only the count (styles.css).
-    b.replaceChildren(String(n), Object.assign(document.createElement("span"), { className: "lbl", textContent: " waiting" }));
+    // The bell and the count; the word is its own span, for screen readers (styles.css hides it).
+    b.replaceChildren(glyph("bell"), String(n), Object.assign(document.createElement("span"), { className: "lbl", textContent: " waiting" }));
     b.setAttribute("aria-label", `${n} waiting`);
+    // The Overview, where every agent is, says so too: a dot on the rail, the count in the sidebar.
+    $("#dashboard-btn").classList.toggle("has-waiting", n > 0);
+    $("#side-waiting").textContent = n ? `${n} waiting` : "";
     // The beacon pulses for a newcomer, then holds still (styles.css #waiting.ping).
     if (more) (b.classList.remove("ping"), void b.offsetWidth, b.classList.add("ping"));
   }
@@ -3215,6 +3246,9 @@ function toggleDashboard(on = !dashboardOpen) {
   document.body.classList.toggle("dashboard-open", on);
   $("#dashboard").classList.toggle("hidden", !on);
   $("#dashboard-btn").setAttribute("aria-pressed", String(on));
+  $("#rail-agents").setAttribute("aria-pressed", String(!on));
+  $("#side-overview").setAttribute("aria-pressed", String(on));
+  paintSpeak();
   clearInterval(dashboardTimer);
   if (on) {
     hideMenu();
@@ -4847,6 +4881,15 @@ $("#dashboard-list").onkeydown = e => {
 };
 dashboardProject.onchange = renderDashboard;
 $("#dashboard-btn").onclick = () => { if (dashboardOpen) show(current); else toggleDashboard(true); };
+// The rest of the rail: back to the thread, its changes, both accounts' usage.
+$("#rail-agents").onclick = () => { if (dashboardOpen && current) show(current); };
+$("#side-overview").onclick = () => $("#dashboard-btn").click();
+$("#rail-changes").onclick = () => {
+  if (!current) return;
+  if (dashboardOpen) show(current);
+  toggleChanges();
+};
+$("#rail-usage").onclick = () => showMenu($("#rail-usage"), planMenus.both);
 $("#dashboard-back").onclick = () => show(current);
 $("#dashboard-next").onclick = jumpWaiting;
 $("#dashboard-reset").onclick = () => {
@@ -5182,7 +5225,7 @@ function renderSide() {
     const count = document.createElement("span");
     count.className = "project-n";
     count.textContent = String(rowsOf(repo).length);
-    h.append(glyph("chevron"), name, count, mini(glyph("plus"), `New worktree in ${basename(repo)}`, () => newThread(repo)));
+    h.append(glyph("folder"), name, count, mini(glyph("plus"), `New worktree in ${basename(repo)}`, () => newThread(repo)));
     const group = document.createElement("div");
     group.className = "group";
     group.id = `project-${uid()}`;
@@ -5549,6 +5592,7 @@ function paintTabs() {
   const th = current;
   tabsEl.textContent = "";
   $("#strip").classList.toggle("hidden", !th); // only the empty state has no bar
+  paintSpeak();
   if (!th) return;
   // The panes are the first tab: a way back that keeps the diffs open. It wears
   // the focused pane's agent mark, so it reads as the agent, not another diff.
@@ -5774,6 +5818,7 @@ function toggleChanges(on = !changesOpen) {
   changesOpen = on;
   changes.classList.toggle("hidden", !on);
   changesBtn.classList.toggle("on", on);
+  changesBtn.setAttribute("aria-pressed", String(on));
   current?.panes.forEach((p) => p.resize()); // the stage just changed width
   if (on) void refreshChanges();
   save();
@@ -7310,7 +7355,13 @@ const makePlanMenu = (provider: PlanProvider): Menu => ({
     }
   },
 });
-const planMenus = { claude: makePlanMenu("claude"), codex: makePlanMenu("codex") };
+const planMenus = { claude: makePlanMenu("claude"), codex: makePlanMenu("codex"), both: { placeholder: "", rows: () => {} } as Menu };
+/** The rail's Usage button: both accounts, one under the other. */
+planMenus.both.rows = (list) => {
+  if (!planUsage) return void list.append(Object.assign(document.createElement("div"), { className: "menu-note", textContent: "Plan usage is off. Turn it on in Preferences." }));
+  planMenus.claude.rows(list);
+  planMenus.codex.rows(list);
+};
 
 /** The palette. Built in, so no add input — every row is one of THEMES. */
 const themeMenu: Menu = {
@@ -7361,7 +7412,10 @@ function paintPlan(provider: PlanProvider) {
   const text = s ? `${Math.round(s.percent)}%` : "—";
   if (b.dataset.text !== text || !b.firstChild) {
     b.dataset.text = text;
-    b.replaceChildren(icon(provider), document.createTextNode(text));
+    const bar = Object.assign(document.createElement("span"), { className: "plan-bar" });
+    bar.style.setProperty("--pct", `${Math.min(100, Math.round(s?.percent ?? 0))}%`);
+    b.replaceChildren(icon(provider), Object.assign(document.createElement("span"), { className: "plan-name", textContent: info.name }), bar,
+      Object.assign(document.createElement("span"), { className: "plan-pct", textContent: text }));
   }
   b.setAttribute("aria-label", `${info.name} usage${s ? `, ${Math.round(s.percent)}% used` : " unavailable"}`);
   if (!s) { b.title = `${info.name}: ${planErrors[provider] || "Fetching usage…"}`; return; }
@@ -7428,7 +7482,7 @@ function pollPlan(provider: PlanProvider, force = false): Promise<void> {
   return planPolls[provider] ??= fetchPlan(provider, force).finally(() => {
     delete planPolls[provider];
     paintPlan(provider);
-    if (!menu.classList.contains("hidden") && openMenu === planMenus[provider]) renderMenu();
+    if (!menu.classList.contains("hidden") && (openMenu === planMenus[provider] || openMenu === planMenus.both)) renderMenu();
   });
 }
 
@@ -7482,8 +7536,8 @@ function paintPlanUsage() {
   const b = $("#plan-usage");
   b.textContent = planUsage ? "shown" : "off";
   b.title = planUsage
-    ? "Claude and Codex plan usage in the top bar — click to hide it and stop asking the accounts"
-    : "Plan usage is off: no chips, no calls to the usage endpoints — click to show it";
+    ? "Claude and Codex plan usage in the sidebar — click to hide it and stop asking the accounts"
+    : "Plan usage is off: no usage rows, no calls to the usage endpoints — click to show it";
   b.setAttribute("aria-pressed", String(planUsage));
 }
 
@@ -7514,27 +7568,64 @@ async function setKeepAwake(enabled: boolean) {
   }
 }
 
-/** A dictation setting beside Speak: its current value, then a caret. Always
- * in sight, so a glance says what the next dictation will type. */
-function paintSetting(b: HTMLElement, value: string, title: string) {
-  const label = document.createElement("span");
-  label.className = "lbl";
-  label.textContent = value;
-  b.replaceChildren(label, glyph("chevron"));
-  b.title = title;
+/** The mic's arrow names what the next dictation will use: a hover tells it. */
+function paintSpeakMore() {
+  const b = $("#speak-more");
+  b.title = `${lang.code ? `Transcribed as ${lang.label}` : "Language detected per clip"} · ${prefix.text.trim() ? `prefix ${prefix.text.trim()}` : "no prefix"}${prefix.enter ? ", sent the moment it lands" : ", waits for your Enter"} — click to change`;
+  b.setAttribute("aria-label", `Dictation settings: ${lang.label}, ${prefix.text.trim() || "no prefix"}`);
 }
-
+// Declarations, not consts: both run from menus wired before this line.
 function paintLang() {
-  paintSetting($("#lang"), lang.label, lang.code
-    ? `Dictation is transcribed as ${lang.label} — click to change`
-    : "Dictation language is detected per clip — click to change");
+  paintSpeakMore();
+}
+function paintPrefix() {
+  paintSpeakMore();
 }
 
-function paintPrefix() {
-  paintSetting($("#prefix"), `${prefix.text.trim() || "no prefix"}${prefix.enter ? " ⏎" : ""}`, prefix.enter
-    ? "Dictation is sent the moment it lands — click to change"
-    : "Dictation is inserted and waits for your Enter — click to change");
+/** The floating mic: over the panes while a thread is up, unless hidden in Preferences. */
+function paintSpeak() {
+  $("#speak").classList.toggle("hidden", !current || dashboardOpen || !speakShown);
+  const b = $("#speak-pref");
+  b.textContent = speakShown ? "shown" : "hidden";
+  b.setAttribute("aria-pressed", String(speakShown));
 }
+
+/** The mic's menu: the language and the prefix lists as they are, each with a
+ * way to add one (that list on its own, with its field), then Hide. */
+const speakMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    const head = (text: string) => list.append(Object.assign(document.createElement("div"), { className: "menu-note menu-head", textContent: text }));
+    const more = (text: string, m: Menu) => {
+      const row = document.createElement("div");
+      row.className = "menu-item menu-more";
+      row.append(glyph("plus"), Object.assign(document.createElement("span"), { textContent: text }));
+      row.onclick = () => {
+        const at = anchor;
+        hideMenu();
+        showMenu(at, m);
+      };
+      list.append(row);
+    };
+    head("Language");
+    langMenu.rows(list);
+    more("Add a language…", langMenu);
+    head("Prefix");
+    prefixMenu.rows(list);
+    more("Add a prefix…", prefixMenu);
+    const hide = document.createElement("div");
+    hide.className = "menu-item menu-hide";
+    hide.title = "F4 still dictates. Show the button again from Preferences.";
+    hide.append(glyph("eye-off"), Object.assign(document.createElement("span"), { textContent: "Hide this button" }));
+    hide.onclick = () => {
+      hideMenu();
+      speakShown = false;
+      paintSpeak();
+      save();
+    };
+    list.append(hide);
+  },
+};
 
 const hideMenu = () => menu.classList.add("hidden");
 
@@ -8336,6 +8427,7 @@ const CLI: Record<string, CliCommand> = {
       // After a change: the branch may have moved, and the panel and sidebar show it.
       const changed = async (text: string) => {
         th.branch = (await run("rev-parse", "--abbrev-ref", "HEAD").catch(() => th.branch)).trim() || th.branch;
+        th.setStat(th.changed);
         save();
         if (th === current && changesOpen) void refreshChanges();
         return { data: await gitStatus(th), text };
@@ -9205,6 +9297,7 @@ async function main() {
     notify?: { on?: boolean; kinds?: Partial<Record<NotifyKind, boolean>>; newPanes?: PaneNotify };
     keepAwake?: boolean;
     planUsage?: boolean;
+    speakButton?: boolean;
     overlay?: boolean | OverlayMode;
     overlayCap?: number;
     ui?: { thread?: number; dashboard?: boolean; dashboardCompact?: boolean; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
@@ -9239,6 +9332,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   };
   await setKeepAwake(saved.keepAwake === true);
   planUsage = saved.planUsage !== false;
+  speakShown = saved.speakButton !== false;
   // true was "in background" before there was an "always".
   overlayMode = saved.overlay === true ? "background" : OVERLAY_MODES.find(m => m === saved.overlay) ?? "off";
   overlayCap = saved.overlayCap ?? overlayCap;
@@ -9395,14 +9489,13 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   $("#vscode").onclick = () =>
     current && invoke("open_vscode", { dir: current.dir }).catch((e) => toast(String(e)));
   const dictate = $("#dictate");
-  const prefixBtn = $("#prefix");
-  const langBtn = $("#lang");
+  const speakMore = $("#speak-more");
   const themeBtn = $("#theme");
   // keep pane focus
-  for (const b of [dictate, prefixBtn, langBtn, themeBtn, $("#notification-sound"), $("#notification-taskbar"), $("#plan-usage")]) b.onmousedown = (e) => e.preventDefault();
+  for (const b of [dictate, speakMore, themeBtn, $("#notification-sound"), $("#notification-taskbar"), $("#plan-usage")]) b.onmousedown = (e) => e.preventDefault();
   dictate.onclick = () => mic(recording ? micStop : micStart);
-  prefixBtn.onclick = () => showMenu(prefixBtn, prefixMenu);
-  langBtn.onclick = () => showMenu(langBtn, langMenu);
+  speakMore.onclick = () => showMenu(speakMore, speakMenu);
+  $("#speak-pref").onclick = () => ((speakShown = !speakShown), paintSpeak(), save());
   themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
   $("#notification-sound").onclick = () => ((soundEnabled = !soundEnabled), paintNotifications(), save());
   $("#notification-taskbar").onclick = () => {
@@ -9417,7 +9510,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   $("#keep-awake").onclick = () => void setKeepAwake(!keepAwake);
   $("#plan-usage").onclick = () => {
     planUsage = !planUsage;
-    if (openMenu === planMenus.claude || openMenu === planMenus.codex) hideMenu();
+    if (openMenu === planMenus.claude || openMenu === planMenus.codex || openMenu === planMenus.both) hideMenu();
     for (const provider of ["claude", "codex"] as const) {
       paintPlan(provider);
       void pollPlan(provider); // back on: fresh numbers now, not in five minutes

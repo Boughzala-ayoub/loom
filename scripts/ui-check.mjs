@@ -212,8 +212,8 @@ try {
           const zoom = head.querySelector('button[title="Zoom (F2)"]').getBoundingClientRect();
           return Math.abs(bounds.right - close.right - 4) > 1 || Math.abs(close.left - zoom.right - 2) > 1;
         }).map(head => head.querySelector('.pane-title').textContent);
-        const bar = document.querySelector('#bar').getBoundingClientRect();
-        const clippedHeader = [...document.querySelectorAll('#bar > button')].filter(el => {
+        const bar = document.querySelector('#rail').getBoundingClientRect();
+        const clippedHeader = [...document.querySelectorAll('#rail > button')].filter(el => {
           const r = el.getBoundingClientRect();
           return r.width && r.height && (r.top < bar.top || r.bottom > bar.bottom);
         }).map(el => el.id);
@@ -2130,9 +2130,11 @@ try {
       const failed = mode.includes('error');
       assert.equal(await page.locator('#plan .ico').count(), 1);
       assert.equal(await page.locator('#codex-plan .ico').count(), 1);
-      assert.equal((await page.locator('#codex-plan').textContent()).trim(), failed ? '—' : mode.includes('weekly') ? '94%' : '42%', 'Codex chip shows the most-used limit, matching usageoverlayv2');
+      assert.equal((await page.locator('#codex-plan .plan-pct').textContent()).trim(), failed ? '—' : mode.includes('weekly') ? '94%' : '42%', 'Codex row shows the most-used limit, matching usageoverlayv2');
       if (mode.includes('weekly')) assert.match(await page.locator('#codex-plan').getAttribute('class'), /sev-critical/);
       for (const [id, name, url] of [['plan', 'Claude', 'https://claude.ai/settings/usage'], ['codex-plan', 'Codex', 'https://chatgpt.com/codex/settings/usage']]) {
+        // The usage rows sit at the foot of the sidebar: in the drawer on a narrow window.
+        if (width <= 760 && !(await page.locator('#' + id).isVisible())) await page.click('#side-toggle');
         await page.click('#' + id);
         const site = page.locator('.plan-site');
         assert.equal(await site.getAttribute('href'), url);
@@ -2283,8 +2285,9 @@ try {
         bg: row.querySelector('.theme-preview').style.getPropertyValue('--bg'),
         accent: row.querySelector('.theme-preview').style.getPropertyValue('--accent'),
       })));
-      assert.equal(palettes.length, 39);
+      assert.equal(palettes.length, 40);
       assert.deepEqual(palettes.find(p => p.label === 'loom classic'), { label: 'loom classic', bg: '#0a0f1b', accent: '#d97757' }, 'The original navy and copper palette stays available');
+      assert.deepEqual(palettes.find(p => p.label === 'loom indigo'), { label: 'loom indigo', bg: '#0c1120', accent: '#7ea6ef' }, 'The dye palette from before the grey stays available');
       await escape();
       for (const [i, palette] of [...palettes, palettes[0]].entries()) {
         await openThemes();
@@ -2337,13 +2340,19 @@ try {
       await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
       await page.waitForTimeout(250);
     }
-    // Language and prefix sit beside Speak, showing what the next dictation will use.
-    for (const id of ['lang', 'prefix', ...(width > 760 ? ['layout'] : [])]) {
-      assert.equal(await page.locator('#strip #' + id).isVisible(), true, id + ' must be visible in the thread strip');
-    }
+    // The mic floats over the panes; its arrow names the language and prefix the next dictation
+    // will use, and its menu lists both with the ones in use marked.
+    if (width > 1100 || !(await page.locator('#changes').isVisible())) assert.equal(await page.locator('#speak #dictate').isVisible(), true, 'The mic floats over the panes');
+    if (width > 760) assert.equal(await page.locator('#strip #layout').isVisible(), true, 'layout must be visible in the thread strip');
     // Stacked panes have no grid layout to change, so the narrow strip leaves it out.
     if (width <= 760) assert.equal(await page.locator('#layout').isVisible(), false, 'The layout button hides where panes stack');
-    assert.match(await page.locator('#prefix').textContent(), /\/prompt/, 'The prefix in use is shown without opening anything');
+    assert.match(await page.locator('#speak-more').getAttribute('aria-label'), /\/prompt/, 'The prefix in use is named without opening anything');
+    if (await page.locator('#speak-more').isVisible()) {
+      await page.click('#speak-more');
+      assert.deepEqual(await page.locator('#menu-list .menu-item.on > span:first-child').allTextContents(), ['English', '/prompt '], 'The mic menu lists the language and prefix in use');
+      await audit('speak-menu');
+      await escape();
+    }
     assert.equal(await page.locator('#switch-thread').count(), 0);
     if (width <= 760) await page.click('#side-toggle');
     await audit('sidebar-hierarchy');
@@ -2508,9 +2517,9 @@ try {
         if (!name.width) continue;
         const tools = row.querySelector('.thread-tools').getBoundingClientRect();
         const meta = row.querySelector('.thread-meta').getBoundingClientRect();
-        if (row.closest('.thread').classList.contains('listed')) {
-          if (name.right > meta.left || meta.right > tools.left || Math.abs(name.top - tools.top) > 1) failures.push('expanded header overlaps');
-        } else if (name.right > tools.left || meta.top < name.bottom) failures.push('collapsed header overlaps');
+        // Open or folded, a thread is two lines: its name and tools, then what it changed.
+        if (name.right > tools.left || meta.top < name.bottom || Math.abs(name.top - tools.top) > 4)
+          failures.push(row.closest('.thread').classList.contains('listed') ? 'expanded header overlaps' : 'collapsed header overlaps');
       }
       for (const row of side.querySelectorAll('.agent')) {
         if (!row.getBoundingClientRect().height) continue;
@@ -2601,11 +2610,15 @@ try {
         await audit('preferences');
         await page.click('#theme');
       } else {
-        await page.click('#' + id);
+        // Language and prefix live in the mic's menu, which waits for an open changes card to close on a narrow window.
+        if (!(await page.locator('#speak-more').isVisible())) await page.click('#changes-close');
+        await page.click('#speak-more');
       }
       await audit(id + '-menu');
       if (id !== 'theme') {
-        await page.locator('.menu-item').nth(1).locator('span').first().click();
+        // The second of each list: the second language row, and the second prefix, "(no prefix)".
+        const row = id === 'lang' ? page.locator('#menu-list .menu-item').nth(1) : page.locator('#menu-list .menu-item').filter({ hasText: '(no prefix)' });
+        await row.locator('span').first().click();
         // save() is throttled to one write per 300 ms, so the pick lands a moment later.
         await page.waitForFunction(key => window.qa.saved[key] === 1, id, { timeout: 5000 }).catch(() => assert.fail(id + ' selection must be saved'));
         await audit(id + '-selected');
@@ -2629,7 +2642,8 @@ try {
     await page.keyboard.press('F1');
     await audit('shortcuts');
     await escape();
-    for (const id of ['add-pane', 'wsmore', 'plan']) {
+    // Usage from the rail: both accounts in one menu, a tap away at every width.
+    for (const id of ['add-pane', 'wsmore', 'rail-usage']) {
       await page.click('#' + id);
       await audit(id + '-menu');
       await escape();
