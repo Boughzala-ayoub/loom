@@ -6,7 +6,12 @@ The earlier pairing and `MediaRecorder` failure cases now pass. The dictation ch
 
 ## Status
 
-Open. Each finding is fixed in its own commit after this one, with its regression check in `scripts/remote-ui-check.mjs`.
+Both are fixed, each in its own commit with its regression check in `scripts/remote-ui-check.mjs`. Each check failed on the commit before its fix and passes after it.
+
+- 1: `03284c6`. A clip takes its place in line as you tap, and a `finally` around the whole clip gives it up.
+- 2: `7c9e122`. A dictated `⏎` sends through `sendPrompt()`, and the clip keeps its place in line until that send has settled.
+
+After the fixes, `npm test` passed all 17 files, `scripts/task-check.mjs` passed all 115 checks, and `scripts/remote-ui-check.mjs` passed 27 checks and 216 layout views at 320 to 1280 px on the served bundle `assets/remote-DPKHVIed.js`. `npm run tauri build` built the installer, and `scripts/remote-check.mjs` passed on the release `loom.exe` and its embedded bundle at 320, 375, 768, 1024 and 1280 px, with the real whisper. Its first run stopped at "Loom must start and answer loomctl", because the test Loom took more than 30 s to start. The rerun passed in full.
 
 ## 1. [P2] Clip order still depends on recorder shutdown timing
 
