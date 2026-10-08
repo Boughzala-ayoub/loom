@@ -296,14 +296,15 @@ fn restored(r: &Trashed) -> std::io::Result<bool> {
         fs::read_dir(r.entry_at.parent().unwrap())?;
         return Ok(true);
     }
-    // Manual repair may register the trash folder using another entry name.
+    // Manual repair may register the trash folder using another entry name, or
+    // in the repository at its new path: whatever repository the folder's link
+    // names, if that one records the folder back, the folder is a live checkout.
     let dot = match fs::read_to_string(r.at.join(".git")) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         r => r?,
     };
     let Some(entry) = dot.trim().strip_prefix("gitdir:") else { return Ok(false) };
     let entry = r.at.join(entry.trim());
-    if entry.parent().map(spelled) != r.entry.parent().map(spelled) { return Ok(false); }
     match fs::read_to_string(entry.join("gitdir")) {
         Ok(back) => Ok(spelled(&entry.join(back.trim())) == spelled(&r.at.join(".git"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -524,6 +525,34 @@ mod tests {
         assert_eq!(git(&at, &["show", ":a"]), "staged");
         assert!(!file.exists(), "a checkout put back by hand must cancel expiry");
         assert_eq!(git(&repo, &["for-each-ref", "refs/loom-trash"]), "", "a cancelled record left its ref");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn purge_keeps_a_checkout_repaired_after_its_repository_moved() {
+        let dir = std::env::temp_dir().join(format!("loom-repaired-moved-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, moved, wt, trash) = (dir.join("repo"), dir.join("moved"), dir.join("topic"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "topic", wt.to_str().unwrap()]);
+        let at = PathBuf::from(remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap());
+        let file = fs::read_dir(&trash).unwrap().flatten().find(|e| e.path().extension().is_some_and(|x| x == "json")).unwrap().path();
+        let r: Trashed = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        // The repository moves, then its retained record goes back by hand and git repairs the checkout.
+        fs::rename(&repo, &moved).unwrap();
+        let (git_dir, entry) = (moved.join(".git"), r.entry.file_name().unwrap());
+        fs::rename(git_dir.join("loom-trash").join(r.entry_at.file_name().unwrap()), git_dir.join("worktrees").join(entry)).unwrap();
+        git(&moved, &["worktree", "repair", at.to_str().unwrap()]);
+        fs::write(at.join("unsaved.txt"), "live work").unwrap();
+        assert_eq!(git(&at, &["branch", "--show-current"]).trim(), "topic");
+        assert_eq!(git(&at, &["status", "--porcelain"]).trim(), "?? unsaved.txt");
+        assert!(git(&moved, &["worktree", "list"]).to_lowercase().contains(&at.to_string_lossy().replace('\\', "/").to_lowercase()));
+        purge(&trash, Duration::ZERO);
+        assert!(at.join("unsaved.txt").exists(), "purge erased a live checkout because its saved repository path is gone");
+        assert_eq!(git(&at, &["branch", "--show-current"]).trim(), "topic");
+        assert_eq!(git(&at, &["status", "--porcelain"]).trim(), "?? unsaved.txt");
         fs::remove_dir_all(dir).unwrap();
     }
 
