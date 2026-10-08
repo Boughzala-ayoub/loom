@@ -233,30 +233,42 @@ fn ensure_ctx(app: &AppHandle) -> Result<(), String> {
 /// http crate, no second TLS stack in the binary. `.partial` + rename so a
 /// killed download isn't mistaken for a model next time.
 fn ensure_model(app: &AppHandle) -> Result<PathBuf, String> {
-    use std::os::windows::process::CommandExt;
     let dir = crate::data_dir(app).join("models");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     if let Some(p) = existing_model(&dir) {
         return Ok(p);
     }
     let part = dir.join("model.partial");
+    // ensure_ctx holds the model lock through this, so every other dictation
+    // waits on it: 20 s to connect, a minute under 1 KB/s, an hour in all.
+    fetch(MODEL_URL, &part, 20, 60, 3600)?;
+    let dst = dir.join(MODEL_URL.rsplit('/').next().unwrap_or("model.bin"));
+    std::fs::rename(&part, &dst).map_err(|e| e.to_string())?;
+    Ok(dst)
+}
+
+/// `url` into `part` with curl.exe, giving up when it can't connect within
+/// `connect` seconds, moves under 1 KB/s for `stall` seconds, or runs past
+/// `total`. On any failure `part` is removed, so the next dictation starts over.
+fn fetch(url: &str, part: &Path, connect: u32, stall: u32, total: u32) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("curl")
-        .args(["-sSfL", "-o"])
-        .arg(&part)
-        .arg(MODEL_URL)
+        .args(["-sSfL", "--connect-timeout", &connect.to_string(), "--speed-limit", "1024", "--speed-time", &stall.to_string(), "--max-time", &total.to_string(), "-o"])
+        .arg(part)
+        .arg(url)
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output()
         .map_err(|e| format!("curl: {e}"))?;
     if !out.status.success() {
-        let _ = std::fs::remove_file(&part);
+        let _ = std::fs::remove_file(part);
+        // 28: a deadline passed (the transfer stalled or ran too long); 7: no connection.
+        let why = match out.status.code() { Some(28) => "it stalled or took too long", Some(7) => "it couldn't connect", _ => "curl failed" };
         return Err(format!(
-            "model download failed: {}",
+            "model download failed ({why}); dictation tries again next time: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    let dst = dir.join(MODEL_URL.rsplit('/').next().unwrap_or("model.bin"));
-    std::fs::rename(&part, &dst).map_err(|e| e.to_string())?;
-    Ok(dst)
+    Ok(())
 }
 
 fn existing_model(dir: &Path) -> Option<PathBuf> {
@@ -347,6 +359,31 @@ fn clean(segments: impl Iterator<Item = String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{clean, peak, resample, silent, to_mono, RATE};
+
+    /// A server that answers 200 with one byte of a long body, then sends nothing more.
+    #[test]
+    fn a_model_download_that_stalls_ends_and_leaves_no_partial_file() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/ggml-test.bin", server.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut s, _) = server.accept().unwrap();
+            let _ = s.read(&mut [0; 4096]);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\nx");
+            std::thread::sleep(std::time::Duration::from_secs(120)); // stalled, connection open
+        });
+        let part = std::env::temp_dir().join(format!("loom-model-stall-{}.partial", std::process::id()));
+        let (done, got) = std::sync::mpsc::channel();
+        let target = part.clone();
+        let started = std::time::Instant::now();
+        // Short deadlines for the test; the real download's are the same kind, longer.
+        std::thread::spawn(move || { let _ = done.send(super::fetch(&url, &target, 2, 2, 30)); });
+        let result = got.recv_timeout(std::time::Duration::from_secs(20)).expect("a stalled model download never ended");
+        let err = result.unwrap_err();
+        assert!(err.contains("model download failed (it stalled or took too long)"), "the failure says what failed: {err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(15));
+        assert!(!part.exists(), "a failed download left its partial file");
+    }
 
     fn tone(hz: f64, rate: u32, secs: f64) -> Vec<f32> {
         (0..(rate as f64 * secs) as usize)
