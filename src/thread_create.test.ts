@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 // @ts-ignore Node-only test.
 import { basename, join } from "node:path";
 // @ts-ignore Node-only test.
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 // @ts-ignore Node-only test.
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
@@ -104,6 +104,22 @@ try {
   renameSync(away, `${away}-gone`);
   await assert.rejects(create(offline, "offline-case", "", "feature", 1), /Could not read from remote repository/, "an unreachable origin made a thread from local HEAD");
   assert.equal(real(offline, "for-each-ref", "--format=%(refname)", "refs/heads/").trim(), "refs/heads/main", "a branch was made");
+  // The production git_run rejects with stderr alone, including paths that look like diagnostics.
+  real(offline, "remote", "set-url", "origin", join(dir, "couldn't find remote ref", "unavailable"));
+  let fetchError = "";
+  const stderrOnly = creator(join(dir, "misleading-threads"), (cwd, ...args) => {
+    const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+    if (result.status !== 0) {
+      if (args[0] === "fetch") fetchError = result.stderr;
+      throw result.stderr;
+    }
+    return result.stdout;
+  });
+  await assert.rejects(stderrOnly(offline, "misleading-case", "", "feature", 1), /Couldn't fetch feature from origin.*does not appear to be a git repository/s);
+  assert.doesNotMatch(fetchError, /^fatal: couldn't find remote ref/m);
+  assert.equal(real(offline, "for-each-ref", "--format=%(refname)", "refs/heads/").trim(), "refs/heads/main");
+  assert.equal(real(offline, "for-each-ref", "refs/loom-fetch/"), "");
+  console.log("ok   a missing-ref phrase inside an unavailable origin path still propagates stderr");
   // No origin at all: a base found nowhere is a new branch, as before.
   const lone = join(dir, "lone");
   mkdirSync(lone);

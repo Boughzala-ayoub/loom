@@ -6901,7 +6901,7 @@ async function resolveBase(repo: string, ref: string, own: string): Promise<stri
   if (await commit(ref)) return ref;
   if (!(await git(repo, "remote")).split(/\r?\n/).includes("origin")) return null;
   const missing = await git(repo, "fetch", "origin", `+${ref}:${own}`).then(() => false, (e) => {
-    if (/couldn't find remote ref/i.test(String(e))) return true;
+    if (String(e).split(/\r?\n/).includes(`fatal: couldn't find remote ref ${ref}`)) return true;
     throw new Error(`Couldn't fetch ${ref} from origin, so no thread was made: ${e instanceof Error ? e.message : String(e)}`);
   });
   return missing ? null : await commit(own);
