@@ -191,8 +191,9 @@ The three steps of `window show` (unminimize, show, focus) each time out after 2
 to your terminal. Without `--name` or `--base`, it opens that folder or brings
 up the thread already open on it. `--name` and `--base` require Git.
 `--base` alone also supplies the worktree name. With `--name login` it creates a worktree on a new
-branch `loom/login`, from `--base` if given (else from the current HEAD). The
-worktree goes in `~\loom\<repo>\login`, and a name already taken gets a
+branch `loom/login`, from `--base` if given (else from the current HEAD). A
+base only origin has is fetched, and the thread starts from origin's commit
+for it. The worktree goes in `~\loom\<repo>\login`, and a name already taken gets a
 number added. `--panes N` opens 1 to 16 panes. Nothing is created if an
 argument is wrong.
 

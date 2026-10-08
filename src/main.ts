@@ -6887,13 +6887,16 @@ async function pollStats(all = false) {
  * ~\orca\workspaces. Never inside the repo, where git would see it as untracked. */
 const worktreeDir = async (repo: string, slug: string) => join(await homeDir(), "loom", basename(repo), slug);
 
-/** Does `ref` name something in `repo`? Fetches it from origin first if not,
- * so a branch that only exists on the remote still counts. */
-async function refExists(repo: string, ref: string) {
-  const ok = () => git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}").then(() => true, () => false);
-  if (await ok()) return true;
-  await git(repo, "fetch", "origin", ref).catch(() => {});
-  return ok();
+/** What to cut a thread from for `ref` in `repo`: `ref` itself when it names a
+ * commit here, else the commit origin has for it, fetched now. A fetch makes
+ * no branch of the bare name, only origin/<ref> (when origin's refspec covers
+ * it) and FETCH_HEAD, so the commit is read from those, at once. null when
+ * neither here nor origin has it. */
+async function resolveBase(repo: string, ref: string): Promise<string | null> {
+  const commit = (r: string) => git(repo, "rev-parse", "--verify", "--quiet", r + "^{commit}").then((s) => s.trim() || null, () => null);
+  if (await commit(ref)) return ref;
+  if (!(await git(repo, "fetch", "origin", ref).then(() => true, () => false))) return null;
+  return (await commit(`refs/remotes/origin/${ref}`)) ?? (await commit("FETCH_HEAD"));
 }
 
 /** Cut a thread from `repo`, or — no name given — open the checkout itself as
@@ -6914,12 +6917,13 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     // A missing base becomes the branch itself — unless it is spelled like a
     // remote ref (origin/x) that just isn't there, which is a typo, not a wish.
     let fresh = "";
-    if (base && !(await refExists(repo, base))) {
+    const found = base && (await resolveBase(repo, base));
+    if (base && !found) {
       const remotes = (await git(repo, "remote").catch(() => "")).split(/\r?\n/).filter(Boolean);
       if (remotes.includes(base.split("/")[0])) throw new Error(`${base} is not a branch on that remote`);
       fresh = base;
       base = "";
-    }
+    } else if (found) base = found; // a branch only on origin: its commit, as fetched
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     if (!slug) throw new Error("name needs a letter or digit in it");
     // A new thread is a new branch off `base`, the way Orca cuts one: a name
