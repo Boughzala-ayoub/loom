@@ -2,11 +2,11 @@
 // @ts-ignore Node-only test.
 import assert from "node:assert/strict";
 // @ts-ignore Node-only test.
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, renameSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, renameSync, utimesSync, existsSync } from "node:fs";
 // @ts-ignore Node-only test.
 import { tmpdir } from "node:os";
 // @ts-ignore Node-only test.
-import { join } from "node:path";
+import { basename, join } from "node:path";
 // @ts-ignore Node-only test.
 import { execFileSync } from "node:child_process";
 // @ts-ignore Node-only test.
@@ -20,7 +20,7 @@ const code = ts.transpileModule(fns.map(n => n.getText(source)).join("\n") + "\n
 const real = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
 /** createThread in a sandbox, folders under `dir`, git real unless `git` wraps it. */
 function creator(dir: string, git = (cwd: string, ...args: string[]) => real(cwd, ...args)) {
-  const sandbox = createContext({ crypto, MAX_PANES: 8, shuttingDown: false, threads: [], git: async (cwd: string, ...args: string[]) => git(cwd, ...args),
+  const sandbox = createContext({ crypto, setTimeout, MAX_PANES: 8, shuttingDown: false, threads: [], git: async (cwd: string, ...args: string[]) => git(cwd, ...args),
     worktreeDir: async (_: string, slug: string) => join(dir, slug), openThread: (t: unknown) => t,
     invoke: async (cmd: string, args: { path: string }) => (cmd === "canonical_directory" ? realpathSync.native(args.path) : undefined) });
   runInContext(code, sandbox);
@@ -133,4 +133,44 @@ try {
   assert.deepEqual([collected, real(kept.dir, "rev-parse", "HEAD").trim()], [1, v2], "git gc pruned the base before git worktree add used it");
   assert.equal(real(aged, "for-each-ref", "refs/loom-fetch/"), "", "the fetch's own ref stayed behind");
   console.log("ok   a fetched base keeps its ref until git worktree add has used it, so git gc meanwhile can't prune it");
+
+  // Another git holds the lock on the fetch's own ref while createThread deletes it. Loom never touches that lock.
+  let fetchRef = "", deletes = 0;
+  const lockOf = (repo: string) => join(repo, ".git", ...fetchRef.split("/")) + ".lock";
+  const clone = (name: string) => (real(dir, "clone", "-q", "--single-branch", "--branch", "main", origin, join(dir, name)), join(dir, name));
+  /** createThread in `repo`, git real, `hook` run before each git command. */
+  const locking = (repo: string, hook: (args: string[]) => void) => creator(join(dir, `${basename(repo)}-threads`), (cwd, ...args) => {
+    if (args[0] === "fetch") fetchRef = args[args.length - 1].split(":")[1];
+    if (args[0] === "update-ref") deletes++;
+    hook(args);
+    return real(cwd, ...args);
+  });
+  // A short hold is waited out.
+  const brief = clone("brief");
+  await locking(brief, (args) => {
+    if (args[0] === "update-ref" && deletes === 1) writeFileSync(lockOf(brief), ""), setTimeout(() => rmSync(lockOf(brief)), 600);
+  })(brief, "brief-case", "", "feature", 1);
+  assert.ok(deletes > 1, "one try at deleting the ref");
+  assert.equal(real(brief, "for-each-ref", "refs/loom-fetch/"), "", "the ref stayed behind after another git's short hold");
+  // A hold that lasts: the thread is made, and the error says so and names the ref left behind.
+  const held = clone("held");
+  await assert.rejects(locking(held, (args) => {
+    if (args[0] === "update-ref" && !existsSync(lockOf(held))) writeFileSync(lockOf(held), "");
+  })(held, "held-case", "", "feature", 1), (e: Error) => {
+    assert.match(e.message, /^Made held-case in .+, but Loom couldn't delete its temporary ref refs\/loom-fetch\/[0-9a-f-]+: .*cannot lock ref/s);
+    assert.ok(e.message.includes(fetchRef), "the error doesn't name the ref left");
+    return true;
+  }, "a ref that couldn't be deleted went unsaid");
+  assert.ok(existsSync(lockOf(held)), "another git's lock was removed");
+  rmSync(lockOf(held));
+  assert.deepEqual([real(held, "for-each-ref", "--format=%(refname)", "refs/loom-fetch/").trim(), real(held, "rev-parse", "loom/held-case").trim()], [fetchRef, v2]);
+  // A creation that fails with the ref held too: its own error first, then the ref.
+  const broken = clone("broken");
+  await assert.rejects(locking(broken, (args) => {
+    if (args[0] !== "worktree" || args[1] !== "add") return;
+    writeFileSync(lockOf(broken), "");
+    throw "fatal: test: no space left on device"; // as Loom's git rejects: git's own words
+  })(broken, "broken-case", "", "feature", 1), /^Error: fatal: test: no space left on device\nLoom also couldn't delete its temporary ref refs\/loom-fetch\//);
+  rmSync(lockOf(broken));
+  console.log("ok   the fetch's own ref is deleted through another git's short hold on it, and a ref left behind is reported");
 } finally { rmSync(dir, { recursive: true, force: true }); }

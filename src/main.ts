@@ -6919,6 +6919,7 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
   if (!Number.isInteger(n) || n < 1 || n > MAX_PANES) throw new Error(`A thread takes 1 to ${MAX_PANES} panes, not ${n}.`);
   let dir = repo;
   let branch = "";
+  let left = ""; // the fetch's own ref, when it couldn't be deleted
   // A base with no name still means "cut me a worktree" — the branch names it.
   name ||= base;
   if (name) {
@@ -6926,6 +6927,20 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     // creation, until git worktree add has made a branch of it: referenced by
     // nothing else, an old commit is git gc's to prune meanwhile.
     const own = base && `refs/loom-fetch/${crypto.randomUUID()}`;
+    // Deleting it waits out another git's lock on it for about two seconds,
+    // then says what's left: Loom never breaks a lock that isn't its own.
+    const release = async () => {
+      for (let n = 1; own; n++) {
+        try {
+          await git(repo, "update-ref", "-d", own);
+          break;
+        } catch (e) {
+          if (n === 10) return `couldn't delete its temporary ref ${own}: ${e instanceof Error ? e.message : String(e)}\nDelete it with git update-ref -d ${own} in ${repo}.`;
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+      return "";
+    };
     try {
       // A missing base becomes the branch itself — unless it is spelled like a
       // remote ref (origin/x) that just isn't there, which is a typo, not a wish.
@@ -6973,9 +6988,12 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
           } else if (!/already exists/.test(String(e))) throw e;
         }
       }
-    } finally {
-      if (own) await git(repo, "update-ref", "-d", own).catch(() => {});
+    } catch (e) {
+      const stuck = await release();
+      if (!stuck) throw e;
+      throw new Error(`${e instanceof Error ? e.message : String(e)}\nLoom also ${stuck}`);
     }
+    left = await release();
   } else {
     const have = threads.find((t) => t.dir === dir);
     if (have) {
@@ -6984,7 +7002,10 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     }
     branch = (await git(repo, "rev-parse", "--abbrev-ref", "HEAD").catch(() => "")).trim();
   }
-  return openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd, startupSettings }));
+  const th = await openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd, startupSettings }));
+  // The thread is made and open: the error says so, and what's left to delete.
+  if (left) throw new Error(`Made ${th.name} in ${th.dir}, but Loom ${left}`);
+  return th;
 }
 
 /** "+ Thread": a native <dialog> — repo, name, agent, base branch, pane count.
