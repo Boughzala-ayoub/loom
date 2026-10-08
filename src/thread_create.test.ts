@@ -2,7 +2,7 @@
 // @ts-ignore Node-only test.
 import assert from "node:assert/strict";
 // @ts-ignore Node-only test.
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, renameSync } from "node:fs";
 // @ts-ignore Node-only test.
 import { tmpdir } from "node:os";
 // @ts-ignore Node-only test.
@@ -96,4 +96,20 @@ try {
   assert.equal(real(raced.dir, "rev-parse", "HEAD").trim(), v2, "the thread started from another fetch's FETCH_HEAD");
   assert.equal(real(single, "for-each-ref", "refs/loom-fetch/") + real(narrow, "for-each-ref", "refs/loom-fetch/"), "", "a fetch's own ref stayed behind");
   console.log("ok   a base fetched from origin is the commit this fetch got, not a stale origin/<base> or another fetch's FETCH_HEAD");
+
+  // origin can't be reached: that is git's error, not a base origin lacks, so no new branch from local HEAD.
+  const away = join(dir, "away"), offline = join(dir, "offline");
+  real(dir, "clone", "-q", "--bare", origin, away);
+  real(dir, "clone", "-q", "--single-branch", "--branch", "main", away, offline);
+  renameSync(away, `${away}-gone`);
+  await assert.rejects(create(offline, "offline-case", "", "feature", 1), /Could not read from remote repository/, "an unreachable origin made a thread from local HEAD");
+  assert.equal(real(offline, "for-each-ref", "--format=%(refname)", "refs/heads/").trim(), "refs/heads/main", "a branch was made");
+  // No origin at all: a base found nowhere is a new branch, as before.
+  const lone = join(dir, "lone");
+  mkdirSync(lone);
+  real(lone, "init", "-q", "-b", "main");
+  real(lone, "commit", "-q", "--allow-empty", "-m", "start");
+  const solo = await create(lone, "", "", "solo", 1);
+  assert.deepEqual([solo.branch, real(solo.dir, "rev-parse", "HEAD").trim()], ["solo", real(lone, "rev-parse", "HEAD").trim()]);
+  console.log("ok   an origin that can't be reached stops the thread with git's error; with no origin a missing base is still a new branch");
 } finally { rmSync(dir, { recursive: true, force: true }); }

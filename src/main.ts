@@ -6892,14 +6892,20 @@ const worktreeDir = async (repo: string, slug: string) => join(await homeDir(), 
  * this call uses and read from there. Not origin/<ref>: a fetch updates it only
  * when origin's refspec covers it, so it can be a fetch behind. Not FETCH_HEAD:
  * every fetch in the repository rewrites it. null when neither here nor origin
- * has it. */
+ * has it: no origin, or origin answered that it has no such ref. A fetch that
+ * fails any other way (unreachable, refused, misconfigured) throws: it says
+ * nothing about the base, and a guess would start an agent on other code. */
 async function resolveBase(repo: string, ref: string): Promise<string | null> {
   const commit = (r: string) => git(repo, "rev-parse", "--verify", "--quiet", r + "^{commit}").then((s) => s.trim() || null, () => null);
   if (await commit(ref)) return ref;
+  if (!(await git(repo, "remote")).split(/\r?\n/).includes("origin")) return null;
   const own = `refs/loom-fetch/${crypto.randomUUID()}`;
   try {
-    if (!(await git(repo, "fetch", "origin", `+${ref}:${own}`).then(() => true, () => false))) return null;
-    return await commit(own);
+    const missing = await git(repo, "fetch", "origin", `+${ref}:${own}`).then(() => false, (e) => {
+      if (/couldn't find remote ref/i.test(String(e))) return true;
+      throw new Error(`Couldn't fetch ${ref} from origin, so no thread was made: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    return missing ? null : await commit(own);
   } finally {
     await git(repo, "update-ref", "-d", own).catch(() => {});
   }
