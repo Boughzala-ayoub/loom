@@ -15,7 +15,7 @@ import { agentOf, codexRunning, codexTitle, launch, opencodeCommand, ownSession,
 import { icon } from "./icons";
 import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, literal, resolveArgs, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { renderRows } from "./rows";
-import { applyStash, dropStash, listStashes, stashCommit } from "./stash";
+import { applyStash, listStashes, stashCommit } from "./stash";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
@@ -6451,7 +6451,7 @@ async function showStashes(th: Thread) {
 /** The menu's drop, confirmed as gitDo asks: the stash it listed, by commit (stash.ts). */
 async function dropListed(th: Thread, ref: string, sha: string) {
   if (!(await confirm(`Drop ${ref}?`, { title: "Loom", kind: "warning" }))) return;
-  await dropStash((...args) => git(th.dir, ...args), sha).catch((e) => toast(String(e)));
+  await invoke("stash_drop", { dir: th.dir, sha }).catch((e) => toast(String(e)));
   await refreshChanges();
   void pollStats();
 }
@@ -8908,7 +8908,7 @@ const CLI: Record<string, CliCommand> = {
           return changed("Stash applied");
         case "stash-drop":
           sure(`Dropping ${rest[0] ?? "a stash"} deletes it.`);
-          await dropStash(run, await stashCommit(run, word(0, "a stash")));
+          await invoke("stash_drop", { dir: th.dir, sha: await stashCommit(run, word(0, "a stash")) });
           return changed("Stash dropped");
         case "revert":
           await run("-c", "core.editor=true", "revert", "--no-edit", word(0, "a commit"));

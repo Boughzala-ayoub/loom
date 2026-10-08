@@ -158,7 +158,6 @@ try {
           if (a[0] === 'log') return 'abc123 Improve workspace navigation\n';
           if (a[0] === 'branch') return 'main\nloom/search-polish\n';
           if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\t5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c\tOn main: workspace polish\n';
-          if (a[0] === 'stash' && a[1] === 'drop') return 'Dropped stash@{0} (5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c)\n';
           if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
           if (a.includes('--show-toplevel')) return args.dir;
           if (a[0] === 'rev-parse') return location.search.includes('long-location') ? '' : 'main';
@@ -351,9 +350,11 @@ try {
       await page.waitForSelector('#confirm[open]');
       await to('review-keyboard-navigation');
       await page.click('#confirm-action');
-      await ran('drop', 1);
+      await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'stash_drop'));
       await settle();
-      assert.deepEqual(await gitCalls('stash').then(c => c.filter(a => a[2] === 'drop')), [[A, 'stash', 'drop', 'stash@{0}']], 'A drop confirmed after a switch drops from the listed thread');
+      // By its commit, through stash_drop, which holds git's lock on the list: never git stash drop's place.
+      assert.deepEqual(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'stash_drop').map(c => [c.args.dir, c.args.sha])), [[A, '5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c']], 'A drop confirmed after a switch drops from the listed thread');
+      assert.deepEqual(await gitCalls('stash').then(c => c.filter(a => a[2] === 'drop')), [], 'A stash dropped by its place');
       // A row still on screen while the next thread's status loads acts on its own thread.
       await to('search-polish');
       await page.waitForSelector('.file');

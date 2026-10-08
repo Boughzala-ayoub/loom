@@ -737,9 +737,10 @@ if (check(213)) {
     real(repo, "commit", "-qm", "start");
     real(repo, "worktree", "add", "-q", "-b", "other", other);
     const th = { id: "t", name: "t", dir: repo, branch: "main", changed: null, setStat() {} };
-    let beforeDrop = () => {};
-    const c = fixture({ ...gitparse, ...stash, cliThread: () => th, invoke: async () => "", changesOpen: false, save() {},
-      git: async (_: string, ...args: string[]) => ((args[0] === "stash" && args[1] === "drop" && beforeDrop()), real(repo, ...args)) });
+    const drops: unknown[] = [];
+    const c = fixture({ ...gitparse, ...stash, cliThread: () => th, changesOpen: false, save() {},
+      invoke: async (cmd: string, args: unknown) => (cmd === "stash_drop" && drops.push(args), ""),
+      git: async (_: string, ...args: string[]) => (assert.ok(!(args[0] === "stash" && args[1] === "drop"), "a stash dropped by its place"), real(repo, ...args)) });
     const git = (...words: string[]) => c.git.run({ _: ["t", ...words], yes: true });
     const stashOn = (dir: string, text: string, message: string) => (writeFileSync(join(dir, "f.txt"), text), real(dir, "stash", "push", "-q", "-m", message));
     const listed = async () => (await git("stashes")).data.stashes as { ref: string; sha?: string; message: string }[];
@@ -750,22 +751,17 @@ if (check(213)) {
     await git("stash-apply", a);
     assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "A\n", "applying the listed stash applied another worktree's");
     real(repo, "checkout", "--", "f.txt");
+    // git drops only by place, worked out before it locks the list: the drop is
+    // stash_drop's, by the commit listed, under that lock (stash.rs races it).
     await git("stash-drop", a);
-    assert.deepEqual((await listed()).map((x) => x.message.replace(/^On \w+: /, "")), ["B"], "dropping the listed stash dropped another");
-    // Another worktree stashes between Loom finding the place and dropping it:
-    // the stash that went instead goes back, and the drop refuses.
-    stashOn(repo, "C\n", "C");
-    const cId = await pick("C");
-    let raced = false;
-    beforeDrop = () => { if (!raced) (raced = true), stashOn(other, "D\n", "D"); };
-    await assert.rejects(git("stash-drop", cId), /changed/);
-    assert.deepEqual((await listed()).map((x) => x.message.replace(/^On \w+: /, "")).sort(), ["B", "C", "D"], "a stash was lost to a drop that raced");
-    beforeDrop = () => {};
+    await git("stash-drop", "stash@{1}"); // an older caller's place, read once, now
+    assert.deepEqual(JSON.parse(JSON.stringify(drops)), [{ dir: repo, sha: a }, { dir: repo, sha: a }], "dropping the listed stash dropped another");
+    assert.match(a, /^[0-9a-f]{40}$/);
     await assert.rejects(git("stash-drop", "0123456789abcdef"), /No stash/, "a stash no longer listed is refused");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
-  console.log("ok   loomctl git applies and drops the stash it listed, whatever another worktree stashes meanwhile");
+  console.log("ok   loomctl git applies the stash it listed, whatever another worktree stashes meanwhile, and drops it by its commit");
 }
 if (check(209)) {
   // The phone's mic reads the PC's lists and picks: the same objects the mic menu shows.

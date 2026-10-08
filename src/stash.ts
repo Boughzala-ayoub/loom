@@ -2,7 +2,10 @@
  * list, so stash@{0} is whichever stash was pushed last, from any of them: a
  * place in the list names a different stash as soon as another worktree
  * stashes or drops. A stash's commit never changes, so the Changes panel,
- * loomctl and the phone pick one by its commit and act on that. */
+ * loomctl and the phone pick one by its commit and act on that: applyStash
+ * here, and a drop through stash_drop (src-tauri/src/stash.rs), which holds
+ * git's lock on the list while it takes that commit out. git drops only by
+ * place, worked out before it takes that lock. */
 
 /** git, run in the thread's folder: its standard output. */
 export type Git = (...args: string[]) => Promise<string>;
@@ -32,18 +35,3 @@ export async function stashCommit(git: Git, named: string): Promise<string> {
 /** Applies the stash whose commit is `sha`. git takes a stash's commit here,
  * so nothing another worktree does to the list can change which one. */
 export const applyStash = (git: Git, sha: string) => git("stash", "apply", sha);
-
-/** Drops the stash whose commit is `sha`. git drops only by place, so this
- * finds its place now and drops that, then reads which commit git says went.
- * Another worktree can push or drop in between: then the stash git dropped is
- * put back (stash store, with its message: a stash commit's subject is its
- * list message) and this refuses, having lost nothing. */
-export async function dropStash(git: Git, sha: string): Promise<void> {
-  const target = (await listStashes(git)).find((s) => s.sha === sha);
-  if (!target) throw new Error("That stash isn't in the list any more, so nothing was dropped.");
-  const out = await git("stash", "drop", target.ref);
-  const went = /\(([0-9a-f]{40})\)/.exec(out)?.[1];
-  if (went === sha) return;
-  if (went) await git("stash", "store", "-m", (await git("show", "-s", "--format=%s", went)).trim() || "Put back by Loom", went);
-  throw new Error(`The stash list changed while Loom dropped ${target.ref}${went ? ", so the stash that went instead is back in the list" : ""}. Nothing is lost: list the stashes again.`);
-}
