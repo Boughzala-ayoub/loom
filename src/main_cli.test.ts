@@ -763,6 +763,35 @@ if (check(213)) {
   }
   console.log("ok   loomctl git applies the stash it listed, whatever another worktree stashes meanwhile, and drops it by its commit");
 }
+if (check(217)) {
+  // A SHA-256 repository lists 64-digit stash commits: the phone hands loomctl the full one.
+  const repo = mkdtempSync(join(tmpdir(), "loom-cli-sha256-"));
+  const real = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=check", "-c", "user.email=check@loom", "-c", "core.autocrlf=false", ...args], { encoding: "utf8" });
+  try {
+    real("init", "-q", "-b", "main", "--object-format=sha256");
+    writeFileSync(join(repo, "f.txt"), "base\n");
+    real("add", "-A");
+    real("commit", "-qm", "start");
+    writeFileSync(join(repo, "f.txt"), "A\n");
+    real("stash", "push", "-q", "-m", "A");
+    const th = { id: "t", name: "t", dir: repo, branch: "main", changed: null, setStat() {} };
+    const drops: unknown[] = [];
+    const c = fixture({ ...gitparse, ...stash, cliThread: () => th, changesOpen: false, save() {},
+      invoke: async (cmd: string, args: unknown) => (cmd === "stash_drop" && drops.push(args), ""),
+      git: async (_: string, ...args: string[]) => real(...args) });
+    const git = (...words: string[]) => c.git.run({ _: ["t", ...words], yes: true });
+    const a = (await git("stashes")).data.stashes[0].sha as string;
+    assert.match(a, /^[0-9a-f]{64}$/);
+    await git("stash-apply", a);
+    assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "A\n", "the listed SHA-256 stash wasn't applied");
+    await git("stash-drop", a);
+    await git("stash-drop", a.slice(0, 50)); // a prefix longer than SHA-1's 40
+    assert.deepEqual(JSON.parse(JSON.stringify(drops)), [{ dir: repo, sha: a }, { dir: repo, sha: a }]);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+  console.log("ok   loomctl git applies and drops a SHA-256 repository's stash by its full commit or a prefix of it");
+}
 if (check(209)) {
   // The phone's mic reads the PC's lists and picks: the same objects the mic menu shows.
   const langs = [{ label: "English", code: "en" }, { label: "auto", code: "" }, { label: "French", code: "fr" }];

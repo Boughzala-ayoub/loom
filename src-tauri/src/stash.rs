@@ -241,6 +241,25 @@ mod tests {
     }
 
     #[test]
+    fn a_sha256_repository_drops_a_stash_by_its_64_digit_commit() {
+        let base = std::env::temp_dir().join(format!("loom-stash-sha256-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        ok(&base, &["init", "-q", "-b", "main", "--object-format=sha256"]);
+        fs::write(base.join("f.txt"), "base\n").unwrap();
+        ok(&base, &["add", "-A"]);
+        ok(&base, &["commit", "-qm", "start"]);
+        let a = stash(&base, "A");
+        let b = stash(&base, "B");
+        assert_eq!(a.len(), 64);
+        drop(&base, &a).unwrap();
+        assert_eq!((listed(&base), ok(&base, &["rev-parse", "refs/stash"])), (vec!["B".to_owned()], b.clone()));
+        drop(&base, &b).unwrap();
+        assert!(listed(&base).is_empty());
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn a_lock_someone_else_holds_drops_nothing_and_stays() {
         // Review 3's case: refs/stash.lock held. Before, the undo after a wrong drop failed here.
         let (base, repo, other) = fixture("held");

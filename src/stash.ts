@@ -21,11 +21,12 @@ export async function listStashes(git: Git): Promise<Stash[]> {
   });
 }
 
-/** The commit a caller named, by its commit (a 7 to 40 digit prefix, as listed)
- * or, from an older caller, by its place, read once, now. */
+/** The commit a caller named, by its commit (a prefix of 7 digits up to the
+ * whole, 40 in a SHA-1 repository and 64 in a SHA-256 one, as listed) or, from
+ * an older caller, by its place, read once, now. */
 export async function stashCommit(git: Git, named: string): Promise<string> {
   const list = await listStashes(git);
-  const hit = /^[0-9a-f]{7,40}$/i.test(named)
+  const hit = /^[0-9a-f]{7,64}$/i.test(named)
     ? list.filter((s) => s.sha.startsWith(named.toLowerCase()))
     : list.filter((s) => s.ref === named);
   if (hit.length === 1) return hit[0].sha;
