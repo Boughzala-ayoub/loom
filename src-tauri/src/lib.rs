@@ -18,6 +18,7 @@ mod usage;
 mod pipe;
 mod control;
 mod remote;
+mod procs;
 mod deletion;
 mod workspace;
 

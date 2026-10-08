@@ -50,14 +50,15 @@ export const hooks = { unpaired: () => {}, changed: () => {} };
 /** One loomctl command. A change carries a key, so the retry after a dropped
  * connection gets the first run's answer instead of running it again. Each
  * waits as long as Loom would, then gives up: a reply lost on the way (the phone
- * changed networks) must not hold up the screen and every key after it. */
-export async function run<T>(cmd: string, argv: string[] = [], opts: { stdin?: string; change?: boolean; timeout?: number } = {}): Promise<T> {
+ * changed networks) must not hold up the screen and every key after it. `path`
+ * asks remote.rs itself instead of loomctl: /api/procs, the task manager's reading. */
+export async function run<T>(cmd: string, argv: string[] = [], opts: { stdin?: string; change?: boolean; timeout?: number; path?: string } = {}): Promise<T> {
   const key = opts.change ? `phone-${[...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")}` : null;
   const timeout = opts.timeout ?? 30;
   for (let attempt = 0; ; attempt++) {
     let res: Response | undefined, reply: { ok?: boolean; error?: string; data?: unknown } | null = null;
     try {
-      res = await fetch("/api/cli", {
+      res = await fetch(opts.path ?? "/api/cli", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${app.token}` },
         body: JSON.stringify({ cmd, argv, stdin: opts.stdin ?? null, key, timeout }),
@@ -176,7 +177,7 @@ export function sheet<T = unknown>(items: (Node | string)[], title = "", close =
 }
 export function closeSheet(value: unknown = null) {
   const box = $("#sheet");
-  box.classList.remove("on");
+  box.className = ""; // "on", and a sheet's own look (the task manager's)
   $("#scrim").classList.remove("on");
   box.hidden = $("#scrim").hidden = true;
   const done = sheetDone;

@@ -1,7 +1,7 @@
 // The phone remote against the real app: loomctl remote on/pair/revoke, the
 // HTTP server's refusals, and the phone app in headless Chrome at 320 to
 // 1280 px: a cmd.exe pane, the Changes tab on the temporary repo (a hunk, a
-// commit, a branch, a stash), Usage, Settings, creating and closing threads,
+// commit, a branch, a stash), Usage, Settings and its task manager, creating and closing threads,
 // and a phone's notifications through a stand-in push service on 127.0.0.1,
 // and dictation: a sentence Windows' speech synthesizer says into Chrome's
 // fake microphone, through the phone's mic and the real whisper.
@@ -130,6 +130,7 @@ try {
     assert.equal((await fetch(base + path)).status, 404, `${path} must not be served`);
   }
   assert.equal((await api('/api/cli', { cmd: 'status', argv: [] })).status, 401, 'No token, no commands');
+  assert.equal((await api('/api/procs', {})).status, 401, 'No token, no task manager');
   assert.equal((await api('/api/cli', { cmd: 'status', argv: [] }, { Authorization: 'Bearer 00' })).status, 401, 'A made-up token, no commands');
   res = await api('/api/pair', { code: '000000' });
   assert.equal(res.status, 403);
@@ -149,6 +150,15 @@ try {
   assert.equal((await res.json()).data.threads, 1);
   assert.equal((await api('/api/cli', { cmd: 'status', argv: 'x' }, auth)).status, 400, 'Words must be a list');
   assert.equal((await api('/api/cli', { cmd: 'status', argv: [], stdin: 5 }, auth)).status, 400, 'stdin must be text');
+  // The task manager's reading, from Windows through remote.rs (procs.rs): every process with its numbers, System too.
+  res = await api('/api/procs', {}, auth);
+  assert.equal(res.status, 200);
+  const pc = (await res.json()).data;
+  const system = pc.procs.find(p => p.pid === 4);
+  assert.ok(system?.name === 'System' && typeof system.cpu === 'number' && system.memory > 0, `System, which no Loom may open: ${JSON.stringify(system)}`);
+  assert.ok(pc.procs.some(p => p.pid === child.pid && p.name === 'loom.exe'), 'the test Loom itself');
+  assert.ok(pc.memory.used < pc.memory.total && pc.uptime > 0 && pc.cpu >= 0 && pc.cpu <= 100, JSON.stringify({ ...pc, procs: pc.procs.length }));
+  console.log(`PASS /api/procs for a paired phone only: ${pc.procs.length} processes, CPU ${pc.cpu}%, System at ${system.cpu}%`);
   assert.match(ok('remote').out, /1 phone paired/);
   assert.ok(!readFileSync(profile.replace(/\.json$/, '.remote.json'), 'utf8').includes(token), 'Only a hash of the token is saved');
   code = ok('--json', 'remote', 'pair').json.pairing;
@@ -487,8 +497,14 @@ try {
     await fits(page, `${width} themes`);
     await sheetButton(page, 'Cancel').click();
     await sheetDone(page);
+    await page.locator('#settings .setting', { hasText: 'Task manager' }).locator('button').click();
+    await page.locator('#sheet.on .proc', { hasText: 'loom' }).first().waitFor({ timeout: 10000 });
+    await page.waitForTimeout(250); // the sheet's way in
+    await fits(page, `${width} task manager`);
+    await sheetButton(page, 'Close').click();
+    await sheetDone(page);
     await page.context().close();
-    console.log(`PASS ${width} px: threads, finding, folding, thread menu, activity, pane, wrapping, keyboard, send, actions, older lines and scrolling back, new thread, changes (hunk, stage, commit, log), usage, settings`);
+    console.log(`PASS ${width} px: threads, finding, folding, thread menu, activity, pane, wrapping, keyboard, send, actions, older lines and scrolling back, new thread, changes (hunk, stage, commit, log), usage, settings, task manager`);
   }
 
   // Git from the phone and loomctl: refusals without --yes, branches, stashes, discard, PR without GitHub.

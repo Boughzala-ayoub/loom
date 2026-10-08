@@ -50,6 +50,28 @@ const status = id => ({ thread: id, name: id === 'a' ? 'Alpha' : 'Beta', branch:
   commits: [{ sha: 'abc1234', subject: 'A recent commit message with a useful description' }] });
 const question = pane => ({ question: ['May I change this file?'], options: ['Yes, go ahead', 'No, keep it'], keys: ['1', '2'], rev: `menu-${pane}` });
 const patch = name => `diff --git a/${name} b/${name}\nindex 1234567..7654321 100644\n--- a/${name}\n+++ b/${name}\n@@ -1 +1 @@\n-old ${name}\n+new ${name}\n`;
+// The PC as procs.rs reads it, protected processes with numbers too: chrome × 34, 60 svchosts, a name 60
+// characters long, and a CPU that moves with each read (state.procsReads counts them).
+const LONG = 'Contoso.Enterprise.Synchronization.BackgroundWorkersHost.x64';
+assert.equal(LONG.length, 60);
+const MB = 2 ** 20;
+function reading(state) {
+  const n = (state.procsReads = (state.procsReads ?? 0) + 1);
+  return { cpu: 20 + (n % 4) * 9.5, memory: { used: 13.3 * 1024 * MB, total: 15.6 * 1024 * MB, commit: 29.3 * 1024 * MB, limit: 47.6 * 1024 * MB }, uptime: 3 * 86400 + 4 * 3600 + 120,
+    procs: [
+      ...Array.from({ length: 34 }, (_, i) => ({ pid: 1000 + i, name: 'chrome.exe', cpu: 0.6, memory: (40 + i) * MB })),
+      { pid: 4, name: 'System', cpu: 0.4, memory: 12288 }, // 12 KB
+      { pid: 236, name: 'Secure System', cpu: 0, memory: 66 * MB },
+      { pid: 3960, name: 'Memory Compression', cpu: 0, memory: 215 * MB },
+      { pid: 6396, name: 'MsMpEng.exe', cpu: 1.8, memory: 387 * MB },
+      { pid: 7001, name: `${LONG}.exe`, cpu: 12.3, memory: 2.2 * 1024 * MB },
+      ...Array.from({ length: 60 }, (_, i) => ({ pid: 2000 + i * 4, name: 'svchost.exe', cpu: i % 7 ? 0 : 0.1, memory: (2 + (i % 9)) * MB })),
+      { pid: 9001, name: 'loom.exe', cpu: 2.2, memory: 310 * MB },
+    ] };
+}
+// Two of the PC's own themes (main.ts THEMES), dark and light, as loomctl theme hands them to the phone.
+const mainTs = readFileSync('src/main.ts', 'utf8');
+const palette = label => JSON.parse(mainTs.match(new RegExp(`label: "${label}",[\\s\\S]*?vars: (\\{[^}]*\\})`))[1].replace(/,\s*\}$/, '}'));
 
 /** A page whose /api answers like Loom. `hold` keeps a `git <thread> <action>` reply until state.held[it]() runs. */
 // RFC 8291's example public key: any P-256 point does for a subscription that is made up.
@@ -195,7 +217,10 @@ async function context(width, token = true, push = false) {
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
       case 'menu': data = question(c.argv[0]); break;
       case 'read': data = { text: 'sample screen', cols: 120, rows: [{ runs: [{ x: 0, text: 'sample screen' }] }], ...(c.argv.includes('--menu') ? { menu: question(c.argv[0]) } : {}) }; break;
-      case 'theme': data = ['loom', 'nord', 'light'].map((name, i) => ({ name, scheme: i === 2 ? 'light' : 'dark', current: i === 0, vars: {} })); break;
+      // theme: { name, scheme, vars }, a real palette the PC wears (the default's vars are the page's own).
+      case 'theme': data = state.theme ? [{ ...state.theme, current: true }] : ['loom', 'nord', 'light'].map((name, i) => ({ name, scheme: i === 2 ? 'light' : 'dark', current: i === 0, vars: {} })); break;
+      // The task manager's reading comes from remote.rs itself, not loomctl (core.ts run's path).
+      case 'procs': if (!req.url().endsWith('/api/procs')) return route.fulfill({ status: 404, json: { ok: false, error: 'Not found.' } }); data = reading(state); break;
       case 'set': data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': 'on', font: '13' }; break;
       case 'notify': data = { all: 'on', kinds: { finish: true, fail: true, blocked: true }, newPanes: 'inherit' }; break;
       case 'remote': data = { phones: 1, address: 'https://pc.tailnet.example', port: 7420 }; break;
@@ -309,6 +334,98 @@ try {
   }
   assert.deepEqual(overflow, [], 'no view may be wider than the window');
   console.log(`PASS ${checks} views fit their width`);
+
+  // --- The task manager (Settings, On the PC) -----------------------------------------------
+  // In a dark and a light theme at every width: the modal fits, a 60-character name is cut short with its
+  // numbers on screen, and chrome × 34 opens to its processes.
+  const openTasks = async page => {
+    await goto(page, '#/settings', '#settings .group');
+    await page.locator('#settings .setting', { hasText: 'Task manager' }).getByRole('button', { name: 'Open' }).click();
+    await page.locator('#sheet.on .proc').first().waitFor();
+    await page.waitForTimeout(250); // the sheet's way in, before a screenshot
+  };
+  const names = page => page.locator('#sheet .proc .name').allInnerTexts();
+  for (const [theme, scheme] of [['woad', 'dark'], ['paper', 'light']]) {
+    for (const width of (process.env.REMOTE_WIDTHS || '320,375,768,901,1024,1280').split(',').map(Number)) {
+      const { ctx, page, state } = await context(width);
+      state.theme = { name: theme, scheme, vars: palette(theme) };
+      await openTasks(page);
+      assert.equal(await page.evaluate(() => document.documentElement.dataset.scheme), scheme);
+      await fits(page, width, `tasks-${theme}`);
+      await taps(page, width, '#sheet');
+      const long = await page.evaluate(long => {
+        const row = [...document.querySelectorAll('#sheet .proc')].find(r => r.querySelector('.name').textContent === long);
+        const name = row.querySelector('.name'), nums = [...row.querySelectorAll('.num')], list = document.querySelector('#sheet .procs');
+        return { cut: name.scrollWidth > name.clientWidth && getComputedStyle(name).textOverflow === 'ellipsis', shown: nums.map(n => n.textContent),
+          right: Math.max(...nums.map(n => n.getBoundingClientRect().right)), edge: Math.min(innerWidth, list.getBoundingClientRect().right), scroll: list.scrollWidth, width: list.clientWidth };
+      }, LONG);
+      assert.deepEqual(long.shown, ['12.3%', '2.2 GB'], `${width}: the long name's numbers`);
+      assert.ok(long.right <= long.edge, `${width} ${theme}: the long name pushes its numbers off the list (${long.right} > ${long.edge})`);
+      assert.ok(long.scroll <= long.width, `${width} ${theme}: the list scrolls sideways (${long.scroll} > ${long.width})`);
+      if (width <= 375) assert.ok(long.cut, `${width}: the long name must be cut short with an ellipsis`);
+      if (width !== 1024) await page.screenshot({ path: resolve(out, `${width}-tasks-${theme}.png`) });
+      const chrome = page.locator('#sheet .proc', { hasText: 'chrome' });
+      assert.equal(await chrome.locator('.n').innerText(), '× 34');
+      assert.deepEqual(await chrome.locator('.num').allInnerTexts(), ['20.4%', '1.9 GB'], 'chrome summed');
+      await chrome.click();
+      await until('chrome opens to its processes', async () => (await page.locator('#sheet .pid').count()) === 34);
+      await fits(page, width, `tasks-open-${theme}`);
+      if (width !== 1024) await page.screenshot({ path: resolve(out, `${width}-tasks-open-${theme}.png`) });
+      assert.deepEqual(state.errors, [], `${width}: errors in the page`);
+      await ctx.close();
+    }
+  }
+  assert.deepEqual(overflow, [], 'no view may be wider than the window');
+  {
+    const { ctx, page, state } = await context(375);
+    const reads = () => state.calls.filter(c => c.cmd === 'procs').length;
+    await openTasks(page);
+    // By CPU, then by memory; the filter keeps what matches.
+    assert.deepEqual((await names(page)).slice(0, 2), ['chrome', LONG]);
+    await page.locator('#sheet .seg button', { hasText: 'Memory' }).click();
+    assert.deepEqual((await names(page)).slice(0, 2), [LONG, 'chrome']);
+    await page.fill('#sheet input[type=search]', 'CHROM');
+    assert.deepEqual(await names(page), ['chrome']);
+    await page.fill('#sheet input[type=search]', 'nothing like it');
+    await page.locator('#sheet .procs .hint').waitFor();
+    await page.fill('#sheet input[type=search]', '');
+    // Every 2 s while it is open, each reading a point on the CPU line.
+    const first = reads();
+    await page.waitForTimeout(4500);
+    assert.ok(reads() - first >= 2 && reads() - first <= 3, `two or three reads in 4.5 s, not ${reads() - first}`);
+    assert.ok((await page.locator('#sheet .spark polyline').getAttribute('points')).split(' ').length >= 3, 'the CPU line grows');
+    await page.screenshot({ path: resolve(out, '375-tasks-line.png') });
+    // Out of view, no reads; back in view, reads again.
+    await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); });
+    await page.waitForTimeout(300); // one already on its way may land
+    const hidden = reads();
+    await page.waitForTimeout(4500);
+    assert.equal(reads(), hidden, 'no reads while the page is hidden');
+    await page.evaluate(() => { delete document.hidden; document.dispatchEvent(new Event('visibilitychange')); });
+    await until('reads again in view', () => reads() > hidden, 4000);
+    // Offline: the last numbers stay, and the line under them says why they don't move.
+    state.offline = true;
+    await page.locator('#sheet .quiet.error').waitFor({ timeout: 6000 });
+    assert.ok((await page.locator('#sheet .proc').count()) > 0, 'the last reading stays');
+    state.offline = false;
+    await until('answering again', async () => !(await page.locator('#sheet .quiet.error').count()), 6000);
+    // Closed: no more reads.
+    await page.locator('#sheet').getByRole('button', { name: 'Close', exact: true }).click();
+    const closed = reads();
+    await page.waitForTimeout(4500);
+    assert.equal(reads(), closed, 'no reads once it is closed');
+    // Unpaired on the PC while it is open: the pairing form, the modal gone, no more reads.
+    await openTasks(page);
+    state.revoked = true;
+    await page.locator('#pairing').waitFor({ state: 'visible', timeout: 6000 });
+    await until('the modal goes', () => page.locator('#sheet').isHidden(), 4000);
+    const gone = reads();
+    await page.waitForTimeout(4500);
+    assert.equal(reads(), gone, 'no reads once unpaired');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS the task manager fits every width in woad and paper, cuts a 60-character name short, sums and opens groups, sorts and filters, reads every 2 s only while open and in view, and keeps its last numbers offline');
 
   // --- A late git reply stays with its own thread -------------------------------------
   for (const width of [375, 1024]) {

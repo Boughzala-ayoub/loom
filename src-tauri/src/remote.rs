@@ -311,6 +311,7 @@ async fn route(app: &AppHandle, request: &Request) -> Reply {
         ("POST", "/api/cli") => cli(app, request).await,
         ("POST", "/api/dictate") => dictate(app, request).await,
         ("POST", "/api/push") => push(app, request),
+        ("POST", "/api/procs") => procs(app, request).await,
         _ => Reply::error(404, "Not found."),
     }
 }
@@ -527,6 +528,19 @@ async fn dictate(app: &AppHandle, request: &Request) -> Reply {
     match tauri::async_runtime::spawn_blocking(move || crate::dictate::phone(&app, &pcm, lang.as_deref())).await {
         Ok(Ok(text)) => Reply::json(200, json!({ "ok": true, "text": text })),
         Ok(Err(error)) => Reply::error(500, &error),
+        Err(error) => Reply::error(500, &error.to_string()),
+    }
+}
+
+/// The phone's task manager: the PC's CPU, memory and processes (procs.rs).
+/// Read here, not through loomctl: the window would only hand Rust's answer
+/// back to Rust, every 2 s while the phone shows it.
+async fn procs(app: &AppHandle, request: &Request) -> Reply {
+    if phone(app, request).is_none() {
+        return unpaired();
+    }
+    match tauri::async_runtime::spawn_blocking(crate::procs::read).await {
+        Ok(data) => Reply::json(200, json!({ "ok": true, "data": data })),
         Err(error) => Reply::error(500, &error.to_string()),
     }
 }

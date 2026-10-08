@@ -3,6 +3,7 @@
 import { $, act, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar } from "./core";
 import { b64u, unb64u } from "../push";
 import { dictationSheet, lists, pickLabel, readLists } from "./dictate";
+import { openTasks } from "./tasks";
 
 type Theme = { name: string; scheme: string; current: boolean; vars: Record<string, string> };
 type Notify = { all: string; kinds: { finish: boolean; fail: boolean; blocked: boolean }; newPanes: string };
@@ -249,6 +250,7 @@ const current = themes.find((t) => t.current);
     nodes.push(...group("On the PC",
       setting("Restart Loom", loom.updated ? "An update is installed: restart to use it" : "Closes safely and starts again. Every agent comes back",
         button(loom.updated ? "Restart to update" : "Restart", () => void restartLoom(), loom.updated ? "primary" : "")),
+      setting("Task manager", "The PC's CPU, memory and processes", button("Open", () => void openTasks())),
       setting("Keep the PC awake", "While Loom runs, the PC doesn't sleep", toggle(settings.awake === "on", "Keep the PC awake", (on) => run("set", ["awake", on ? "on" : "off"], { change: true }))),
       setting("Agent overlay", "The small list of agents over other windows", choice(settings.overlay, [["off", "Off"], ["background", "In background"], ["always", "Always"]], (v) => run("set", ["overlay", v], { change: true })), true),
       setting("Plan usage", "Ask Claude and Codex for your limits", toggle(settings["plan-usage"] === "on", "Plan usage", (on) => run("set", ["plan-usage", on ? "on" : "off"], { change: true }))),

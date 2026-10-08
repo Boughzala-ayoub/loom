@@ -94,8 +94,10 @@ function route() {
 // --- Pairing and the loops -----------------------------------------------------
 
 function pairing() {
-  // Every 401 lands here, dictation's and loomctl's: a clip must not keep recording behind the form.
+  // Every 401 lands here, dictation's and loomctl's: a clip must not keep recording behind the form,
+  // nor a sheet stay up over it (the task manager's would keep reading).
   cancelDictation();
+  closeSheet();
   root.hidden = true;
   $("#pairing").hidden = false;
 }

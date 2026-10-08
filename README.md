@@ -292,7 +292,13 @@ The page is an app with four tabs, and it wears the PC's theme.
 - **Settings** has the PC's Preferences (theme, terminal text size, task
   notices, sound, taskbar flash, keeping the PC awake, the agent overlay, plan
   usage), its window, the agents the `+` menu starts, this phone's own
-  choices, unpairing, and the deleted worktrees in Loom's trash.
+  choices, unpairing, and the deleted worktrees in Loom's trash. Its Task
+  manager row opens the PC's CPU, memory and processes. Loom reads them from
+  Windows itself every 2 seconds while they're on screen, so Task Manager
+  doesn't need to be open. Processes with the same name share a row, as in
+  Task Manager's Apps view, so Chrome is one row, chrome × 34, with its CPU
+  and memory summed. Sort by CPU or memory, filter by name, and tap a row for
+  each process in it. It can't end a process.
 
 See [docs/loomctl.md](docs/loomctl.md#phone-remote).
 

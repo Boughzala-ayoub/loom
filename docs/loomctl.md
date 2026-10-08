@@ -589,6 +589,19 @@ subscription; `remote revoke` drops them. `loomctl remote push test` sends
 every such phone one that opens an agent, and `loomctl remote` counts the
 phones with notifications on and says how the last push went.
 
+**Task manager**, under On the PC in the phone's Settings, shows the PC's CPU,
+memory and processes. It's the one screen that runs no loomctl command. The
+page posts to `/api/procs` every 2 seconds while it's open and in view, and
+remote.rs answers a paired phone itself, without the window. It lists every
+process with `NtQuerySystemInformation`, the call Task Manager uses, so System,
+services and other users' processes have numbers too and Loom opens none of
+them. A process's CPU is its CPU time since the last reading over the PC's,
+and the PC's is the time passed times its logical cores, so 100% is every core
+busy. Its memory is its private working set, Task Manager's Memory column. The
+PC's CPU comes from `GetSystemTimes`, memory and commit from
+`GlobalMemoryStatusEx`, and the uptime from `GetTickCount64`. Nothing on it
+ends a process.
+
 ## Answering questions
 
 `menu` recognizes Claude's session survey. Its JSON includes `keys: ["1","2","3","0"]` and `selected: -1`. Use `choose <pane> 0` to dismiss, or 1/2/3 to rate. Loom sends that digit without Enter; `--menu REV` and `--gen N` still guard the write.

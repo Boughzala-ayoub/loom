@@ -36,7 +36,7 @@ function fmtReset(iso: string | null) {
 }
 
 /** A limit as a bar: white, amber once it nears, red at the end. */
-function meter(percent: number, severity = "") {
+export function meter(percent: number, severity = "") {
   const m = el("div", `meter ${severity}`);
   const p = Math.max(0, Math.min(100, percent));
   const runEl = el("span", "run");
@@ -160,7 +160,7 @@ export async function showContext(id: string) {
   const top = el("div", "limit");
   top.append(el("span", "label", `${tokens(prof.ctx)} of ${window ? tokens(window) : "?"} tokens`), el("span", "pct", `${used}%`), meter(used, used >= 90 ? "critical" : used >= 70 ? "warning" : ""));
   nodes.push(top);
-  if (prof.series.length > 1) nodes.push(el("div", "section-title", "After each turn"), spark(prof, window));
+  if (prof.series.length > 1) nodes.push(el("div", "section-title", "After each turn"), spark(prof.series, Math.max(window, ...prof.series, 1), `Context after each of ${prof.series.length} turns`));
   const total = prof.buckets.reduce((s, b) => s + b.tokens, 0) || 1;
   const bars = el("div", "bars");
   const colors = ["var(--accent)", "var(--magenta)", "var(--cyan)", "var(--warn)", "var(--ok)", "var(--blue)", "var(--err)"];
@@ -180,15 +180,15 @@ export async function showContext(id: string) {
   ctxBody.replaceChildren(...nodes);
 }
 
-/** Context after each turn, against the window; compactions are the falls. */
-function spark(prof: Profile, window: number) {
+/** A series against its most, as a line over a shaded area: a session's context
+ * after each turn (compactions are the falls), or the PC's CPU (tasks.ts). */
+export function spark(series: number[], max: number, label: string) {
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("class", "spark");
   svg.setAttribute("viewBox", "0 0 100 40");
   svg.setAttribute("preserveAspectRatio", "none");
-  const max = Math.max(window, ...prof.series, 1);
-  const pts = prof.series.map((v, i) => `${(i / (prof.series.length - 1)) * 100},${40 - (v / max) * 38}`);
+  const pts = series.map((v, i) => `${(i / (series.length - 1)) * 100},${40 - (v / max) * 38}`);
   const area = document.createElementNS(ns, "path");
   area.setAttribute("d", `M0,40 L${pts.join(" L")} L100,40 Z`);
   area.setAttribute("fill", "color-mix(in srgb, var(--accent) 18%, transparent)");
@@ -200,6 +200,6 @@ function spark(prof: Profile, window: number) {
   line.setAttribute("vector-effect", "non-scaling-stroke");
   svg.append(area, line);
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", `Context after each of ${prof.series.length} turns`);
+  svg.setAttribute("aria-label", label);
   return svg;
 }
