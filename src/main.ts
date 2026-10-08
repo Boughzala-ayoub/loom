@@ -6937,6 +6937,8 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     );
     const dirs = new Set(threads.map((t) => t.dir.toLowerCase()));
     for (let i = 1; ; i++) {
+      // ponytail: 100 names; a repository with more loom/<slug>-N than that gets an error, not a hang.
+      if (i > 100) throw new Error(`No free name for ${slug}: ${slug} to ${slug}-100 are all taken.`);
       const cand = i === 1 ? slug : `${slug}-${i}`;
       branch = fresh || `loom/${cand}`;
       dir = await worktreeDir(repo, cand);
@@ -6946,11 +6948,16 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
       await invoke("worktree_prepare", { repo, dir });
       // git itself is the "does the folder exist" check: it refuses a
       // non-empty one, and that is the one error worth trying the next name on.
+      // A branch made by someone else meanwhile is the other "already exists":
+      // loom/<slug> takes the next number, the new branch you named stops here.
       try {
         await git(repo, "worktree", "add", "-b", branch, dir, ...(base ? [base] : []));
         break;
       } catch (e) {
-        if (!/already exists/.test(String(e))) throw e;
+        if (/a branch named .* already exists/i.test(String(e))) {
+          if (fresh) throw new Error(`A branch named ${fresh} appeared while the thread was being made. Use it as the base to continue it, or pick another name.`);
+          taken.add(branch);
+        } else if (!/already exists/.test(String(e))) throw e;
       }
     }
   } else {

@@ -52,4 +52,25 @@ try {
   assert.deepEqual([fresh.branch, real(fresh.dir, "rev-parse", "HEAD").trim()], ["brand-new", main]);
   await assert.rejects(create(local, "typo", "", "origin/nope", 1), /not a branch on that remote/);
   console.log("ok   a base found nowhere is a new branch off HEAD, and a missing origin/x is refused");
+
+  // Another creator makes the new branch between the base check and git worktree add.
+  let adds = 0;
+  const racing = (branch: string) => creator(join(dir, `race-${branch.replace(/\W/g, "-")}`), (cwd, ...args) => {
+    if (args[0] === "worktree" && args[1] === "add") {
+      if (++adds > 4) throw new Error("test stop: worktree add retried without end");
+      if (adds === 1) real(cwd, "branch", branch);
+    }
+    return real(cwd, ...args);
+  });
+  await assert.rejects(racing("fresh")(local, "", "", "fresh", 1), (e: Error) => {
+    assert.match(e.message, /fresh/);
+    assert.doesNotMatch(e.message, /test stop/, "an explicit new branch that appeared meanwhile retried without end");
+    return true;
+  });
+  assert.equal(adds, 1, "one try: the branch the caller named is taken");
+  // loom/<slug> taken meanwhile still moves on to the next number.
+  adds = 0;
+  const auto = await racing("loom/auto")(local, "auto", "", "", 1);
+  assert.deepEqual([auto.branch, adds], ["loom/auto-2", 2]);
+  console.log("ok   a new branch made by someone else meanwhile stops the thread, and loom/<slug> takes the next number");
 } finally { rmSync(dir, { recursive: true, force: true }); }
