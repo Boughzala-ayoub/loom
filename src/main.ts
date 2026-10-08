@@ -6888,15 +6888,21 @@ async function pollStats(all = false) {
 const worktreeDir = async (repo: string, slug: string) => join(await homeDir(), "loom", basename(repo), slug);
 
 /** What to cut a thread from for `ref` in `repo`: `ref` itself when it names a
- * commit here, else the commit origin has for it, fetched now. A fetch makes
- * no branch of the bare name, only origin/<ref> (when origin's refspec covers
- * it) and FETCH_HEAD, so the commit is read from those, at once. null when
- * neither here nor origin has it. */
+ * commit here, else the commit origin has for it, fetched now into a ref only
+ * this call uses and read from there. Not origin/<ref>: a fetch updates it only
+ * when origin's refspec covers it, so it can be a fetch behind. Not FETCH_HEAD:
+ * every fetch in the repository rewrites it. null when neither here nor origin
+ * has it. */
 async function resolveBase(repo: string, ref: string): Promise<string | null> {
   const commit = (r: string) => git(repo, "rev-parse", "--verify", "--quiet", r + "^{commit}").then((s) => s.trim() || null, () => null);
   if (await commit(ref)) return ref;
-  if (!(await git(repo, "fetch", "origin", ref).then(() => true, () => false))) return null;
-  return (await commit(`refs/remotes/origin/${ref}`)) ?? (await commit("FETCH_HEAD"));
+  const own = `refs/loom-fetch/${crypto.randomUUID()}`;
+  try {
+    if (!(await git(repo, "fetch", "origin", `+${ref}:${own}`).then(() => true, () => false))) return null;
+    return await commit(own);
+  } finally {
+    await git(repo, "update-ref", "-d", own).catch(() => {});
+  }
 }
 
 /** Cut a thread from `repo`, or — no name given — open the checkout itself as

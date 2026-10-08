@@ -20,7 +20,7 @@ const code = ts.transpileModule(fns.map(n => n.getText(source)).join("\n") + "\n
 const real = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
 /** createThread in a sandbox, folders under `dir`, git real unless `git` wraps it. */
 function creator(dir: string, git = (cwd: string, ...args: string[]) => real(cwd, ...args)) {
-  const sandbox = createContext({ MAX_PANES: 8, shuttingDown: false, threads: [], git: async (cwd: string, ...args: string[]) => git(cwd, ...args),
+  const sandbox = createContext({ crypto, MAX_PANES: 8, shuttingDown: false, threads: [], git: async (cwd: string, ...args: string[]) => git(cwd, ...args),
     worktreeDir: async (_: string, slug: string) => join(dir, slug), openThread: (t: unknown) => t,
     invoke: async (cmd: string, args: { path: string }) => (cmd === "canonical_directory" ? realpathSync.native(args.path) : undefined) });
   runInContext(code, sandbox);
@@ -73,4 +73,27 @@ try {
   const auto = await racing("loom/auto")(local, "auto", "", "", 1);
   assert.deepEqual([auto.branch, adds], ["loom/auto-2", 2]);
   console.log("ok   a new branch made by someone else meanwhile stops the thread, and loom/<slug> takes the next number");
+
+  // origin/feature is v1 in a clone whose fetch refspec covers main only, and
+  // origin's feature moves on to v2: the fetch gets v2 but leaves origin/feature at v1.
+  const narrow = join(dir, "narrow");
+  real(dir, "clone", "-q", "-b", "main", origin, narrow);
+  real(narrow, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main");
+  writeFileSync(join(origin, "a.txt"), "feature v2\n");
+  real(origin, "commit", "-qam", "feature v2");
+  const v2 = real(origin, "rev-parse", "feature").trim();
+  const stale = await create(narrow, "stale-case", "", "feature", 1);
+  assert.equal(real(narrow, "rev-parse", "origin/feature").trim(), feature, "the fixture's origin/feature is v1");
+  assert.equal(real(stale.dir, "rev-parse", "HEAD").trim(), v2, "the thread started from a stale origin/feature");
+  // No origin/feature at all, and another fetch in the repository rewrites FETCH_HEAD right after this one.
+  const single = join(dir, "single");
+  real(dir, "clone", "-q", "--single-branch", "--branch", "main", origin, single);
+  const raced = await creator(join(dir, "single-threads"), (cwd, ...args) => {
+    const out = real(cwd, ...args);
+    if (args[0] === "fetch") real(cwd, "fetch", "-q", "origin", "main");
+    return out;
+  })(single, "raced-case", "", "feature", 1);
+  assert.equal(real(raced.dir, "rev-parse", "HEAD").trim(), v2, "the thread started from another fetch's FETCH_HEAD");
+  assert.equal(real(single, "for-each-ref", "refs/loom-fetch/") + real(narrow, "for-each-ref", "refs/loom-fetch/"), "", "a fetch's own ref stayed behind");
+  console.log("ok   a base fetched from origin is the commit this fetch got, not a stale origin/<base> or another fetch's FETCH_HEAD");
 } finally { rmSync(dir, { recursive: true, force: true }); }
