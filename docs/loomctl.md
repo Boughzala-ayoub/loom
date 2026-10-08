@@ -519,7 +519,7 @@ the panel's buttons do, and a change answers with the status after it.
 | `git <thread> push\|pull\|fetch\|force-push` | As the panel's menu does them: `push -u origin HEAD`, `pull --rebase --autostash`, `fetch --all --prune`, `push --force-with-lease` (which wants `--yes`). |
 | `git <thread> pr` | Push and print GitHub's compare page for the branch. |
 | `git <thread> branches` / `switch <name> [--create]` | The 40 latest branches, or move to one. |
-| `git <thread> stashes` / `stash` / `stash-apply <ref>` / `stash-drop <ref>` | List, stash every change, apply one, or drop one (`--yes`). |
+| `git <thread> stashes` / `stash` / `stash-apply <stash>` / `stash-drop <stash>` | List, stash every change, apply one, or drop one (`--yes`). Name a stash by the commit `stashes` lists for it: every worktree of a repository shares one stash list, so `stash@{0}` becomes another stash when any of them stashes. A drop that finds the list changed under it puts back what went and refuses. |
 | `git <thread> revert <sha>` / `reset <sha> --soft\|--hard` | Undo a commit with a new one, or move the branch back to it. A reset wants `--yes`. |
 | `git <thread> continue\|skip\|abort` | Finish, skip a commit of, or give up a half-done merge, revert or rebase. |
 | `git <thread> resolve ours\|theirs <path...>` | Take one side of a conflict and mark it resolved. |

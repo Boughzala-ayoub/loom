@@ -6,7 +6,7 @@ const claudeComposer = claudeCapture.lines.join("\n");
 // @ts-ignore Node-only test; the app intentionally has no Node typings.
 import assert from "node:assert/strict";
 // @ts-ignore Node-only test.
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 // @ts-ignore Node-only test.
 import { execFileSync } from "node:child_process";
 // @ts-ignore Node-only test.
@@ -21,6 +21,7 @@ import * as task from "./task.ts";
 import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 import * as gitparse from "./gitparse.ts";
+import * as stash from "./stash.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "gitStatus", "dictationData"]);
@@ -721,6 +722,50 @@ if (check(208)) {
     rmSync(repo, { recursive: true, force: true });
   }
   console.log("ok   loomctl git stages, unstages and deletes the named file only, and a rename as both names");
+}
+if (check(213)) {
+  // Every worktree of a repository shares one stash list. The stash listed as
+  // stash@{0} stays the one picked after another worktree stashes on top of it.
+  const base = mkdtempSync(join(tmpdir(), "loom-cli-stash-"));
+  const repo = join(base, "repo"), other = join(base, "other");
+  const real = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=check", "-c", "user.email=check@loom", "-c", "core.autocrlf=false", ...args], { encoding: "utf8" });
+  try {
+    mkdirSync(repo);
+    real(repo, "init", "-q", "-b", "main");
+    writeFileSync(join(repo, "f.txt"), "base\n");
+    real(repo, "add", "-A");
+    real(repo, "commit", "-qm", "start");
+    real(repo, "worktree", "add", "-q", "-b", "other", other);
+    const th = { id: "t", name: "t", dir: repo, branch: "main", changed: null, setStat() {} };
+    let beforeDrop = () => {};
+    const c = fixture({ ...gitparse, ...stash, cliThread: () => th, invoke: async () => "", changesOpen: false, save() {},
+      git: async (_: string, ...args: string[]) => ((args[0] === "stash" && args[1] === "drop" && beforeDrop()), real(repo, ...args)) });
+    const git = (...words: string[]) => c.git.run({ _: ["t", ...words], yes: true });
+    const stashOn = (dir: string, text: string, message: string) => (writeFileSync(join(dir, "f.txt"), text), real(dir, "stash", "push", "-q", "-m", message));
+    const listed = async () => (await git("stashes")).data.stashes as { ref: string; sha?: string; message: string }[];
+    const pick = async (message: string) => { const s = (await listed()).find((x) => x.message.endsWith(message))!; return s.sha ?? s.ref; };
+    stashOn(repo, "A\n", "A");
+    const a = await pick("A");
+    stashOn(other, "B\n", "B"); // another worktree's stash takes stash@{0}
+    await git("stash-apply", a);
+    assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "A\n", "applying the listed stash applied another worktree's");
+    real(repo, "checkout", "--", "f.txt");
+    await git("stash-drop", a);
+    assert.deepEqual((await listed()).map((x) => x.message.replace(/^On \w+: /, "")), ["B"], "dropping the listed stash dropped another");
+    // Another worktree stashes between Loom finding the place and dropping it:
+    // the stash that went instead goes back, and the drop refuses.
+    stashOn(repo, "C\n", "C");
+    const cId = await pick("C");
+    let raced = false;
+    beforeDrop = () => { if (!raced) (raced = true), stashOn(other, "D\n", "D"); };
+    await assert.rejects(git("stash-drop", cId), /changed/);
+    assert.deepEqual((await listed()).map((x) => x.message.replace(/^On \w+: /, "")).sort(), ["B", "C", "D"], "a stash was lost to a drop that raced");
+    beforeDrop = () => {};
+    await assert.rejects(git("stash-drop", "0123456789abcdef"), /No stash/, "a stash no longer listed is refused");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+  console.log("ok   loomctl git applies and drops the stash it listed, whatever another worktree stashes meanwhile");
 }
 if (check(209)) {
   // The phone's mic reads the PC's lists and picks: the same objects the mic menu shows.

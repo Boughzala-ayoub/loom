@@ -157,7 +157,8 @@ try {
           if (a[0] === 'diff' || a[0] === 'show') return (a.includes('-U999999') ? ' context line one\n context line two\n' : '') + 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old navigation\n+const description = "A long line of source code that should remain readable when reviewing changes inside a narrow workspace window.";\n';
           if (a[0] === 'log') return 'abc123 Improve workspace navigation\n';
           if (a[0] === 'branch') return 'main\nloom/search-polish\n';
-          if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\tOn main: workspace polish\n';
+          if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\t5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c\tOn main: workspace polish\n';
+          if (a[0] === 'stash' && a[1] === 'drop') return 'Dropped stash@{0} (5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c)\n';
           if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
           if (a.includes('--show-toplevel')) return args.dir;
           if (a[0] === 'rev-parse') return location.search.includes('long-location') ? '' : 'main';
@@ -333,7 +334,7 @@ try {
       await repoItem(/^Restore a stash/);
       await held();
       await to('review-keyboard-navigation');
-      await answer('stash@{0}\tOn loom/search-polish: from A\n');
+      await answer('stash@{0}\tafa0afa0afa0afa0afa0afa0afa0afa0afa0afa0\tOn loom/search-polish: from A\n');
       await page.waitForTimeout(200);
       assert.equal(await shown('from A'), 0, "A's stashes never show over another thread");
       // A list still open when the thread changes acts on the thread it lists.

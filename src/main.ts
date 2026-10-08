@@ -15,6 +15,7 @@ import { agentOf, codexRunning, codexTitle, launch, opencodeCommand, ownSession,
 import { icon } from "./icons";
 import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, literal, resolveArgs, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { renderRows } from "./rows";
+import { applyStash, dropStash, listStashes, stashCommit } from "./stash";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
@@ -6424,27 +6425,35 @@ async function showBranches(th: Thread) {
  * shared with every other worktree of this repo, so "the top one" is not
  * necessarily yours. */
 async function showStashes(th: Thread) {
-  const out = await git(th.dir, "stash", "list", "--format=%gd%x09%gs").catch(() => "");
-  const rows = out.trim() ? out.trim().split("\n").map((l) => l.split("\t")) : [];
+  const rows = await listStashes((...args) => git(th.dir, ...args)).catch(() => []);
   showGitMenu(th, {
     placeholder: "",
     rows: (list) => {
       if (!rows.length) return note(list, "no stashes");
-      for (const [ref, msg] of rows) {
+      // By commit: the menu may stand open while another worktree stashes onto stash@{0} (stash.ts).
+      for (const { ref, sha, message } of rows) {
         const d = document.createElement("div");
         d.className = "menu-item";
         const s = document.createElement("span");
-        s.textContent = `${ref}  ${msg ?? ""}`;
-        s.title = msg ?? ref;
+        s.textContent = `${ref}  ${message}`;
+        s.title = message || ref;
         d.append(
           s,
-          mini("✕", "Drop this stash", () => (hideMenu(), void gitDo(th, `Drop ${ref}?`, "stash", "drop", ref))),
+          mini("✕", "Drop this stash", () => (hideMenu(), void dropListed(th, ref, sha))),
         );
-        d.onclick = () => (hideMenu(), void gitDo(th, "", "stash", "apply", ref));
+        d.onclick = () => (hideMenu(), void gitDo(th, "", "stash", "apply", sha));
         list.append(d);
       }
     },
   });
+}
+
+/** The menu's drop, confirmed as gitDo asks: the stash it listed, by commit (stash.ts). */
+async function dropListed(th: Thread, ref: string, sha: string) {
+  if (!(await confirm(`Drop ${ref}?`, { title: "Loom", kind: "warning" }))) return;
+  await dropStash((...args) => git(th.dir, ...args), sha).catch((e) => toast(String(e)));
+  await refreshChanges();
+  void pollStats();
 }
 
 /** Amend with whatever is staged; the message box replaces the message when
@@ -8748,7 +8757,7 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   git: {
-    usage: "git <thread> [status | diff [path...] [--staged|--untracked] [--full] | show <sha> [--full] | files | file <path> | stage|unstage|discard [path...] [--unstaged|--staged|--untracked] | apply - [--cached] [--reverse] | commit <message...> [--staged] [--push] | amend [message...] | undo | push | pull | fetch | force-push | pr | branches | switch <name> [--create] | stashes | stash | stash-apply <ref> | stash-drop <ref> | revert <sha> | reset <sha> --soft|--hard | continue | skip | abort | resolve ours|theirs <path...>] [--yes]",
+    usage: "git <thread> [status | diff [path...] [--staged|--untracked] [--full] | show <sha> [--full] | files | file <path> | stage|unstage|discard [path...] [--unstaged|--staged|--untracked] | apply - [--cached] [--reverse] | commit <message...> [--staged] [--push] | amend [message...] | undo | push | pull | fetch | force-push | pr | branches | switch <name> [--create] | stashes | stash | stash-apply <stash> | stash-drop <stash> | revert <sha> | reset <sha> --soft|--hard | continue | skip | abort | resolve ours|theirs <path...>] [--yes]",
     help: "The Changes panel from the command line, with git's own commands as the panel runs them. Bare or status: the branch, its upstream and how far apart, a half-done merge, revert or rebase, the unstaged, staged and untracked files with their +/- counts, and the last 10 commits. diff and show print a diff (--full: whole files); files lists the thread's files and file prints one. stage, unstage and discard take paths, or a whole section. apply - takes a hunk's patch on standard input. commit commits everything, or with --staged only the index, and --push pushes after. pr pushes and gives GitHub's compare page. What can lose work wants --yes: discard, apply --reverse without --cached, amend, undo, force-push, stash-drop and reset. A change answers with the status after it.",
     options: { staged: "bool", unstaged: "bool", untracked: "bool", full: "bool", cached: "bool", reverse: "bool", push: "bool", create: "bool", soft: "bool", hard: "bool", yes: "bool" },
     run: async (a) => {
@@ -8868,20 +8877,21 @@ const CLI: Record<string, CliCommand> = {
         case "switch":
           await run("switch", ...(flag(a, "create") ? ["-c"] : []), word(0, "a branch"));
           return changed(`On ${rest[0]}`);
+        // A stash by its commit, as stashes lists it: another worktree's stash
+        // takes stash@{0} from it (stash.ts). A place is read once, now.
         case "stashes": {
-          const out = await run("stash", "list", "--format=%gd%x09%gs").catch(() => "");
-          const stashes = out.split("\n").filter(Boolean).map((l) => ({ ref: l.split("\t")[0], message: l.split("\t").slice(1).join("\t") }));
-          return { data: { stashes }, text: stashes.map((x) => `${x.ref}  ${x.message}`).join("\n") };
+          const stashes = await listStashes(run).catch(() => []);
+          return { data: { stashes }, text: stashes.map((x) => `${x.ref}  ${x.sha.slice(0, 10)}  ${x.message}`).join("\n") };
         }
         case "stash":
           await run("stash", "push", "-u", "-m", `loom ${th.name}`);
           return changed("Stashed");
         case "stash-apply":
-          await run("stash", "apply", word(0, "a stash"));
+          await applyStash(run, await stashCommit(run, word(0, "a stash")));
           return changed("Stash applied");
         case "stash-drop":
           sure(`Dropping ${rest[0] ?? "a stash"} deletes it.`);
-          await run("stash", "drop", word(0, "a stash"));
+          await dropStash(run, await stashCommit(run, word(0, "a stash")));
           return changed("Stash dropped");
         case "revert":
           await run("-c", "core.editor=true", "revert", "--no-edit", word(0, "a commit"));

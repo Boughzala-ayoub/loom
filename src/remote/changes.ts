@@ -311,13 +311,15 @@ async function branches(tid: string) {
 }
 
 async function stashes(tid: string) {
-  const got = await run<{ stashes: { ref: string; message: string }[] }>("git", [tid, "stashes"]).catch((e) => (toast(e.message, true), null));
+  const got = await run<{ stashes: { ref: string; sha?: string; message: string }[] }>("git", [tid, "stashes"]).catch((e) => (toast(e.message, true), null));
   if (!got) return;
   if (!got.stashes.length) return void sheet([el("p", "", "Stash all changes from the git actions to keep them here.")], "No stashes");
   void sheet(got.stashes.flatMap((x) => {
     const pair = el("div", "pair");
-    const apply = item(`${x.ref}: ${x.message}`, () => change(tid, ["stash-apply", x.ref], "Stash applied"), "", { icon: "stash" });
-    const drop = iconButton("trash", `Drop ${x.ref}`, () => { closeSheet(); void ask(tid, `Drop ${x.ref}?`, x.message, "Drop", ["stash-drop", x.ref], "Dropped"); });
+    // By its commit: another worktree's stash can take stash@{0} while the sheet is open.
+    const id = x.sha ?? x.ref;
+    const apply = item(`${x.ref}: ${x.message}`, () => change(tid, ["stash-apply", id], "Stash applied"), "", { icon: "stash" });
+    const drop = iconButton("trash", `Drop ${x.ref}`, () => { closeSheet(); void ask(tid, `Drop ${x.ref}?`, x.message, "Drop", ["stash-drop", id], "Dropped"); });
     pair.append(apply, drop);
     return [pair];
   }), "Restore a stash");

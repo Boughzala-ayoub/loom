@@ -259,7 +259,7 @@ async function context(width, token = true, push = false) {
         else if (action === 'files') data = { files: [`${own(id)}.txt`, 'src/deep/path.txt'] };
         else if (action === 'file') data = { text: c.argv[2] === 'big.txt' ? Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join('\n') : `${own(id)} one\ntwo\nthree\n` };
         else if (action === 'branches') data = { current: `loom/${id}`, branches: [`loom/${id}`, 'feature/next'] };
-        else if (action === 'stashes') data = { stashes: [{ ref: 'stash@{0}', message: `WIP on loom/${id}: abc1234 A saved change` }] };
+        else if (action === 'stashes') data = { stashes: [{ ref: 'stash@{0}', sha: '5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c', message: `WIP on loom/${id}: abc1234 A saved change` }] };
         else data = status(id);
         // gitChurn: an agent in the thread writes a new file before each read.
         if (action === 'status' && state.gitChurn) data.untracked.push(file(`made-${state.gitChurn++}.txt`, '?', '?'));
