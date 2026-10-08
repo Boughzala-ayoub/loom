@@ -2479,7 +2479,7 @@ try {
         bg: row.querySelector('.theme-preview').style.getPropertyValue('--bg'),
         accent: row.querySelector('.theme-preview').style.getPropertyValue('--accent'),
       })));
-      assert.equal(palettes.length, 45);
+      assert.equal(palettes.length, 55);
       assert.deepEqual(palettes.find(p => p.label === 'loom classic'), { label: 'loom classic', bg: '#0a0f1b', accent: '#d97757' }, 'The original navy and copper palette stays available');
       assert.deepEqual(palettes.find(p => p.label === 'loom indigo'), { label: 'loom indigo', bg: '#0c1120', accent: '#7ea6ef' }, 'The dye palette from before the grey stays available');
       await escape();
@@ -2495,7 +2495,7 @@ try {
         });
         assert.equal(colors['--bg'], palette.bg);
         assert.equal(colors['--accent'], palette.accent);
-        assert.equal(colors['color-scheme'], ['paper', 'porcelain', 'latte', 'solarized light', 'polar', 'sakura', 'chalk'].includes(palette.label) ? 'light' : 'dark');
+        assert.equal(colors['color-scheme'], ['paper', 'porcelain', 'latte', 'solarized light', 'polar', 'sakura', 'chalk', 'linen', 'celadon'].includes(palette.label) ? 'light' : 'dark');
         const lowContrast = await page.evaluate(classic => {
           const css = getComputedStyle(document.documentElement);
           const luminance = key => {

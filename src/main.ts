@@ -173,7 +173,7 @@ const findOpts = () => ({
 type Theme = { label: string; scheme?: "light"; vars: Record<string, string> };
 /** Capture the default before overrides, including colors used by previews. */
 const BASE = Object.fromEntries(
-  ["bg", "panel", "raise", "line", "line-strong", "text", "muted", "accent"].map(k => [`--${k}`, cssVar(`--${k}`)]),
+  ["bg", "panel", "raise", "line", "line-strong", "text", "muted", "faint", "accent", "ok", "err", "warn", "blue", "magenta", "cyan"].map(k => [`--${k}`, cssVar(`--${k}`)]),
 );
 const THEMES: Theme[] = [
   { label: "loom", vars: {} },
@@ -263,6 +263,69 @@ const THEMES: Theme[] = [
     },
   },
   {
+    label: "madder",
+    vars: {
+      "--bg": "#130d0d",
+      "--panel": "#1b1415",
+      "--raise": "#241c1c",
+      "--line": "#2b2222",
+      "--line-strong": "#3c2f30",
+      "--text": "#efebeb",
+      "--muted": "#ac9fa0",
+      "--faint": "#918282",
+      "--accent": "#e1aeb1",
+      "--accent-dim": "rgba(225, 174, 177, 0.12)",
+      "--ok": "#7fbf95",
+      "--err": "#e8796f",
+      "--warn": "#e6b450",
+      "--blue": "#93b3e0",
+      "--magenta": "#bfa6d9",
+      "--cyan": "#84c2c9",
+    },
+  },
+  {
+    label: "verdigris",
+    vars: {
+      "--bg": "#0a1010",
+      "--panel": "#111818",
+      "--raise": "#182020",
+      "--line": "#1c2726",
+      "--line-strong": "#283636",
+      "--text": "#e9eded",
+      "--muted": "#99a6a6",
+      "--faint": "#7a8a89",
+      "--accent": "#94c9c8",
+      "--accent-dim": "rgba(148, 201, 200, 0.12)",
+      "--ok": "#7fbf95",
+      "--err": "#e8796f",
+      "--warn": "#e6b450",
+      "--blue": "#93b3e0",
+      "--magenta": "#bfa6d9",
+      "--cyan": "#84c2c9",
+    },
+  },
+  {
+    label: "ink",
+    vars: {
+      "--bg": "#07080e",
+      "--panel": "#0e0f16",
+      "--raise": "#15171f",
+      "--line": "#1a1d26",
+      "--line-strong": "#282b37",
+      "--text": "#ebecf0",
+      "--muted": "#9fa2af",
+      "--faint": "#818595",
+      "--accent": "#b5bae7",
+      "--accent-dim": "rgba(181, 186, 231, 0.12)",
+      "--ok": "#7fbf95",
+      "--err": "#e8796f",
+      "--warn": "#e6b450",
+      "--blue": "#93b3e0",
+      "--magenta": "#bfa6d9",
+      "--cyan": "#84c2c9",
+    },
+  },
+  {
     // Undyed and light, with woad in its lines and accent.
     label: "chalk",
     scheme: "light",
@@ -277,6 +340,50 @@ const THEMES: Theme[] = [
       "--faint": "#5b646f",
       "--accent": "#335e89",
       "--accent-dim": "rgba(51, 94, 137, 0.1)",
+      "--ok": "#2f7650",
+      "--err": "#b0443b",
+      "--warn": "#875f12",
+      "--blue": "#3b62a0",
+      "--magenta": "#7a559f",
+      "--cyan": "#276d76",
+    },
+  },
+  {
+    label: "linen",
+    scheme: "light",
+    vars: {
+      "--bg": "#f6f4f2",
+      "--panel": "#fefdfb",
+      "--raise": "#eeeae6",
+      "--line": "#e3dfda",
+      "--line-strong": "#c0b9b1",
+      "--text": "#312a22",
+      "--muted": "#62594f",
+      "--faint": "#6b6157",
+      "--accent": "#76523a",
+      "--accent-dim": "rgba(118, 82, 58, 0.1)",
+      "--ok": "#2f7650",
+      "--err": "#b0443b",
+      "--warn": "#875f12",
+      "--blue": "#3b62a0",
+      "--magenta": "#7a559f",
+      "--cyan": "#276d76",
+    },
+  },
+  {
+    label: "celadon",
+    scheme: "light",
+    vars: {
+      "--bg": "#f2f5f4",
+      "--panel": "#fbfefc",
+      "--raise": "#e7ecea",
+      "--line": "#dbe1de",
+      "--line-strong": "#b3bdb8",
+      "--text": "#232e29",
+      "--muted": "#515f58",
+      "--faint": "#596760",
+      "--accent": "#356656",
+      "--accent-dim": "rgba(53, 102, 86, 0.1)",
       "--ok": "#2f7650",
       "--err": "#b0443b",
       "--warn": "#875f12",
@@ -979,6 +1086,112 @@ const THEMES: Theme[] = [
       "--blue": "#6fb1c4",
       "--magenta": "#df87a8",
       "--cyan": "#a1cdd8",
+    },
+  },
+  // Current editors' own palettes, set to the same rules as the rest.
+  {
+    label: "github dimmed",
+    vars: {
+      "--bg": "#1b2027",
+      "--panel": "#22272e",
+      "--raise": "#2a3037",
+      "--line": "#31363d",
+      "--line-strong": "#40464d",
+      "--text": "#cdd9e5",
+      "--muted": "#a5b3c0",
+      "--faint": "#8e9ba9",
+      "--accent": "#6f9cd7",
+      "--accent-dim": "rgba(111, 156, 215, 0.12)",
+      "--ok": "#66a767",
+      "--err": "#da7f75",
+      "--warn": "#c69028",
+      "--blue": "#679cdf",
+      "--magenta": "#ab8cda",
+      "--cyan": "#3ac5cf",
+    },
+  },
+  {
+    label: "vitesse",
+    vars: {
+      "--bg": "#0c0c0c",
+      "--panel": "#121212",
+      "--raise": "#1a1a1a",
+      "--line": "#202020",
+      "--line-strong": "#2e2e2e",
+      "--text": "#dbd7ca",
+      "--muted": "#949ca3",
+      "--faint": "#7e868d",
+      "--accent": "#4d9375",
+      "--accent-dim": "rgba(77, 147, 117, 0.12)",
+      "--ok": "#80a665",
+      "--err": "#cb7676",
+      "--warn": "#e6cc77",
+      "--blue": "#6394bf",
+      "--magenta": "#d07a9e",
+      "--cyan": "#5eaab5",
+    },
+  },
+  {
+    label: "tokyo storm",
+    vars: {
+      "--bg": "#1d2133",
+      "--panel": "#24283b",
+      "--raise": "#2d3144",
+      "--line": "#33374b",
+      "--line-strong": "#42475c",
+      "--text": "#c0caf5",
+      "--muted": "#adb4cf",
+      "--faint": "#969cb6",
+      "--accent": "#85a4e3",
+      "--accent-dim": "rgba(133, 164, 227, 0.12)",
+      "--ok": "#a4cb7b",
+      "--err": "#e38695",
+      "--warn": "#e0af68",
+      "--blue": "#80a3ed",
+      "--magenta": "#b99eed",
+      "--cyan": "#7dcfff",
+    },
+  },
+  {
+    label: "macchiato",
+    vars: {
+      "--bg": "#1d2032",
+      "--panel": "#24273a",
+      "--raise": "#2d3043",
+      "--line": "#33364a",
+      "--line-strong": "#42465b",
+      "--text": "#cad3f5",
+      "--muted": "#acb3ce",
+      "--faint": "#949bb5",
+      "--accent": "#c2a5e9",
+      "--accent-dim": "rgba(194, 165, 233, 0.12)",
+      "--ok": "#a6da95",
+      "--err": "#e88a98",
+      "--warn": "#eed49f",
+      "--blue": "#8aadf4",
+      "--magenta": "#f5bde6",
+      "--cyan": "#8bd5ca",
+    },
+  },
+  {
+    label: "material ocean",
+    vars: {
+      "--bg": "#090b13",
+      "--panel": "#0f111a",
+      "--raise": "#171922",
+      "--line": "#1c1f28",
+      "--line-strong": "#2b2d37",
+      "--text": "#babed8",
+      "--muted": "#959aa9",
+      "--faint": "#808492",
+      "--accent": "#80cbc4",
+      "--accent-dim": "rgba(128, 203, 196, 0.12)",
+      "--ok": "#c5e793",
+      "--err": "#dd8083",
+      "--warn": "#ffcb6b",
+      "--blue": "#87abf5",
+      "--magenta": "#c396e1",
+      "--cyan": "#89ddff",
     },
   },
   //deepseek
@@ -7480,35 +7693,35 @@ planMenus.both.rows = (list) => {
   planMenus.codex.rows(list);
 };
 
-/** The palette. Built in, so no add input — every row is one of THEMES. */
+/** The palette. Built in, so no add input — every row is one of THEMES, dark ones then light. */
 const themeMenu: Menu = {
   placeholder: "",
   rows: (list) => {
-    for (const t of THEMES) {
-      const row = document.createElement("div");
-      row.className = `menu-item theme-card${t === theme ? " on" : ""}`;
-      row.setAttribute("aria-label", `${t.label}, ${t.scheme ?? "dark"} theme`);
-      row.setAttribute("aria-pressed", String(t === theme));
-      const lbl = document.createElement("span");
-      lbl.className = "theme-caption";
-      lbl.textContent = t.label;
-      const scheme = document.createElement("small");
-      scheme.textContent = t.scheme ?? "dark";
-      lbl.append(scheme);
-      const preview = document.createElement("b");
-      preview.className = "theme-preview";
-      preview.setAttribute("aria-hidden", "true");
-      for (const [k, v] of Object.entries({ ...BASE, ...t.vars })) preview.style.setProperty(k, v);
-      preview.append(document.createElement("i"), document.createElement("i"));
-      row.onclick = () => {
-        applyTheme(t);
-        hideMenu();
-        save();
-        paintTheme();
-        anchor.focus();
-      };
-      row.append(preview, lbl);
-      list.append(row);
+    for (const scheme of ["dark", "light"]) {
+      list.append(Object.assign(document.createElement("div"), { className: "menu-note menu-head", textContent: scheme === "dark" ? "Dark" : "Light" }));
+      for (const t of THEMES.filter((x) => (x.scheme ?? "dark") === scheme)) {
+        const row = document.createElement("div");
+        row.className = `menu-item theme-card${t === theme ? " on" : ""}`;
+        row.setAttribute("aria-label", `${t.label}, ${scheme} theme`);
+        row.setAttribute("aria-pressed", String(t === theme));
+        const lbl = document.createElement("span");
+        lbl.className = "theme-caption";
+        lbl.textContent = t.label;
+        const preview = document.createElement("b");
+        preview.className = "theme-preview";
+        preview.setAttribute("aria-hidden", "true");
+        for (const [k, v] of Object.entries({ ...BASE, ...t.vars })) preview.style.setProperty(k, v);
+        preview.append(document.createElement("i"), document.createElement("i"));
+        row.onclick = () => {
+          applyTheme(t);
+          hideMenu();
+          save();
+          paintTheme();
+          anchor.focus();
+        };
+        row.append(preview, lbl);
+        list.append(row);
+      }
     }
   },
 };
