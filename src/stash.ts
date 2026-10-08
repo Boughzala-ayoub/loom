@@ -29,8 +29,11 @@ export async function stashCommit(git: Git, named: string): Promise<string> {
   const hit = /^[0-9a-f]{7,64}$/i.test(named)
     ? list.filter((s) => s.sha.startsWith(named.toLowerCase()))
     : list.filter((s) => s.ref === named);
-  if (hit.length === 1) return hit[0].sha;
-  throw new Error(hit.length ? `More than one stash starts with ${named}. Give more of its commit.` : `No stash ${named} in the list now. List them again: another worktree may have dropped it.`);
+  // A commit listed twice (git stash store of one already there) is one stash;
+  // which entry goes is the native drop's choice, made under git's lock.
+  const shas = [...new Set(hit.map((s) => s.sha))];
+  if (shas.length === 1) return shas[0];
+  throw new Error(shas.length ? `More than one stash starts with ${named}. Give more of its commit.` : `No stash ${named} in the list now. List them again: another worktree may have dropped it.`);
 }
 
 /** Applies the stash whose commit is `sha`. git takes a stash's commit here,

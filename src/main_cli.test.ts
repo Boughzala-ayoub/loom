@@ -792,6 +792,39 @@ if (check(217)) {
   }
   console.log("ok   loomctl git applies and drops a SHA-256 repository's stash by its full commit or a prefix of it");
 }
+if (check(218)) {
+  // git stash store of a commit already listed lists that one commit twice: one stash to name, not two.
+  const repo = mkdtempSync(join(tmpdir(), "loom-cli-stored-twice-"));
+  const real = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=check", "-c", "user.email=check@loom", "-c", "core.autocrlf=false", ...args], { encoding: "utf8" });
+  try {
+    real("init", "-q", "-b", "main");
+    writeFileSync(join(repo, "f.txt"), "base\n");
+    real("add", "-A");
+    real("commit", "-qm", "start");
+    for (const text of ["A", "B"]) writeFileSync(join(repo, "f.txt"), `${text}\n`), real("stash", "push", "-q", "-m", text);
+    const a = real("rev-parse", "stash@{1}").trim();
+    real("stash", "store", "-m", "second copy", a);
+    const th = { id: "t", name: "t", dir: repo, branch: "main", changed: null, setStat() {} };
+    const drops: unknown[] = [];
+    const c = fixture({ ...gitparse, ...stash, cliThread: () => th, changesOpen: false, save() {},
+      invoke: async (cmd: string, args: unknown) => (cmd === "stash_drop" && drops.push(args), ""),
+      git: async (_: string, ...args: string[]) => real(...args) });
+    const git = (...words: string[]) => c.git.run({ _: ["t", ...words], yes: true });
+    assert.deepEqual((await git("stashes")).data.stashes.map((s: { sha: string }) => s.sha === a), [true, false, true]);
+    await git("stash-apply", a);
+    assert.equal(readFileSync(join(repo, "f.txt"), "utf8"), "A\n", "a commit listed twice was called ambiguous");
+    await git("stash-drop", a);
+    assert.deepEqual(JSON.parse(JSON.stringify(drops)), [{ dir: repo, sha: a }]);
+    // Two different commits that share the prefix given are still two stashes.
+    const [x, y] = ["abc1234" + "a".repeat(33), "abc1234" + "b".repeat(33)];
+    const two = async () => `stash@{0}\t${x}\tOn main: x\nstash@{1}\t${y}\tOn main: y\n`;
+    await assert.rejects(stash.stashCommit(two, "abc1234"), /More than one stash starts with abc1234/);
+    assert.equal(await stash.stashCommit(two, "abc1234b"), y);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+  console.log("ok   a stash commit listed twice is one stash to apply or drop; two commits sharing a prefix still need more of it");
+}
 if (check(209)) {
   // The phone's mic reads the PC's lists and picks: the same objects the mic menu shows.
   const langs = [{ label: "English", code: "en" }, { label: "auto", code: "" }, { label: "French", code: "fr" }];
