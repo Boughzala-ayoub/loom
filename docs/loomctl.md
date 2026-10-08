@@ -65,7 +65,7 @@ loomctl [--json] [--profile FILE] [--timeout SECONDS] [--key NAME] <command> [wo
 | --- | --- |
 | `--json` | Answers as JSON, failures included. See [JSON and exit codes](#json-and-exit-codes). |
 | `--profile FILE` | Talk to the Loom started with that workspace file. |
-| `--timeout SECONDS` | How long to wait for the answer: 30 by default, an hour for `wait` and `wait-any`. |
+| `--timeout SECONDS` | How long to wait for the answer: 30 by default, an hour for `wait` and `wait-any`. Fractions are fine; more than a year (31536000) is a usage error. |
 | `--key NAME` | Run this request once, even if you retry it. See [Retrying safely](#retrying-safely). |
 | `--help`, `-h` | `loomctl --help` lists the commands; `loomctl send --help` shows one. |
 | `--version`, `-V` | The version of `loomctl`. |

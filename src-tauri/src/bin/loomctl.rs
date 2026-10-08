@@ -53,6 +53,9 @@ most, so a stuck Loom never holds loomctl past --timeout plus 20 seconds.";
 const LONG: [&str; 2] = ["wait", "wait-any"];
 /// Other commands' answers, unless --timeout says otherwise.
 const DEFAULT_TIMEOUT: f64 = 30.0;
+/// The longest --timeout: a year. Past it, seconds overflow a Duration, an
+/// Instant or the watchdog's milliseconds long before they mean anything.
+const MAX_TIMEOUT: f64 = 31_536_000.0;
 
 #[derive(Debug, PartialEq)]
 struct Parsed {
@@ -117,8 +120,8 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
             (_, "timeout") => {
                 let v = value("timeout", inline)?;
                 let secs: f64 = v.parse().map_err(|_| format!("--timeout needs seconds, not {v}"))?;
-                if !(secs > 0.0 && secs.is_finite()) {
-                    return Err(format!("--timeout needs seconds, not {v}"));
+                if !(secs > 0.0 && secs <= MAX_TIMEOUT) {
+                    return Err(format!("--timeout needs seconds, more than 0 and at most {MAX_TIMEOUT} (a year), not {v}"));
                 }
                 parsed.timeout = Some(secs);
             }
@@ -378,7 +381,8 @@ fn follow(parsed: &Parsed, name: &str, watch: &Watchdog, cwd: &str) -> i32 {
         return fail(json, "usage", 1, false, "--after takes the number of an event (0 for the first).", &Value::Null);
     };
     STREAM_NEXT.store(after, SeqCst);
-    let end = parsed.timeout.map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s));
+    // Checked: parse caps --timeout, and a deadline past what an Instant holds means none.
+    let end = parsed.timeout.and_then(|s| std::time::Duration::try_from_secs_f64(s).ok()).and_then(|d| std::time::Instant::now().checked_add(d));
     let mut lost = false;
     loop {
         let left = end.map_or(f64::INFINITY, |e| e.saturating_duration_since(std::time::Instant::now()).as_secs_f64());
@@ -484,14 +488,20 @@ impl Watchdog {
     fn arm(&self, secs: f64) {
         use std::sync::atomic::Ordering::SeqCst;
         self.sent.store(false, SeqCst);
-        self.deadline_ms.store(self.start.elapsed().as_millis() as u64 + (secs * 1000.0) as u64, SeqCst);
+        self.deadline_ms.store(self.after(secs), SeqCst);
     }
 
     /// The command is about to go out: from now on it may run, and Loom gets `secs` more.
     fn sent(&self, secs: f64) {
         use std::sync::atomic::Ordering::SeqCst;
         self.sent.store(true, SeqCst);
-        self.deadline_ms.store(self.start.elapsed().as_millis() as u64 + (secs * 1000.0) as u64, SeqCst);
+        self.deadline_ms.store(self.after(secs), SeqCst);
+    }
+
+    /// `secs` from now, in ms since start: saturating, so no `secs` overflows
+    /// (in a debug build) or wraps into a deadline already past (in release).
+    fn after(&self, secs: f64) -> u64 {
+        (self.start.elapsed().as_millis() as u64).saturating_add((secs.clamp(0.0, MAX_TIMEOUT + 3600.0) * 1000.0) as u64)
     }
 
     fn done(&self) {
@@ -542,6 +552,23 @@ mod tests {
         let x = p(&["--yes", "close", "alpha:2"]);
         assert_eq!(x.cmd, "close");
         assert_eq!(x.argv, v(&["--yes", "alpha:2"]));
+    }
+
+    #[test]
+    fn a_timeout_too_long_is_a_usage_error_and_none_panics() {
+        let t = |s: &str| parse(&v(&["--timeout", s, "watch"])).map(|p| p.timeout);
+        assert_eq!(t("0.25"), Ok(Some(0.25)), "fractional seconds");
+        assert_eq!(t("31536000"), Ok(Some(31_536_000.0)), "a year");
+        for bad in ["31536000.5", "1e19", "1e300", "inf", "NaN", "0", "-1"] {
+            assert!(t(bad).unwrap_err().contains("--timeout"), "{bad} was taken");
+        }
+        // Whatever reaches the deadlines saturates instead of overflowing or wrapping.
+        let watch = Watchdog::start(true);
+        watch.arm(f64::MAX);
+        watch.sent(1e300);
+        watch.done();
+        // From the command line: a usage failure (exit 1, loomctl's JSON shape), before any connection.
+        assert_eq!(run(&v(&["--profile", "loom-review-timeout-nonexistent", "--json", "--timeout", "1e300", "watch", "--follow"])), 1);
     }
 
     #[test]
