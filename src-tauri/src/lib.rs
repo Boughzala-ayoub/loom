@@ -1823,8 +1823,11 @@ pub fn run() {
     // portable-pty probes for conpty.dll. Allow deliberate app-local DLLs,
     // but never silently borrow another terminal's implementation from PATH.
     #[link(name = "kernel32")]
-    extern "system" { fn SetDefaultDllDirectories(flags: u32) -> i32; }
+    extern "system" { fn SetDefaultDllDirectories(flags: u32) -> i32; fn SetConsoleCtrlHandler(handler: usize, add: i32) -> i32; }
     unsafe { SetDefaultDllDirectories(0x1000); } // LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+    // A Loom started in a new process group (`relaunch` does that) ignores
+    // Ctrl+C, and every pane's shell inherits that: Ctrl+C would stop nothing.
+    unsafe { SetConsoleCtrlHandler(0, 0); }
     // `loom --help` from a terminal. Release is a GUI-subsystem exe whose
     // stdout only exists when redirected; AttachConsole grabs the launching
     // terminal's console for the direct case (and fails harmlessly when there
