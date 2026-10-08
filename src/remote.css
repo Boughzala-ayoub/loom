@@ -402,33 +402,8 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
 .dict-row .pick[aria-pressed="true"] .what b { font-weight: 600; }
 .dict-row .what span { color: var(--faint); font-size: 13px; }
 .dict-row .icon-btn[aria-pressed="true"] { background: var(--lit); color: var(--text); }
-/* The task manager (Settings, On the PC): its numbers stay put over a list that scrolls. */
+/* The task manager (src/procs.ts, procs.css) in a sheet: its numbers stay put over a list that scrolls. */
 #sheet.tasks-sheet { height: min(86dvh, 860px); grid-template-rows: auto auto minmax(0, 1fr) auto; overflow: hidden; }
-.tasks { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); gap: 10px; min-height: 0; }
-.tasks .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.tasks .tile { display: grid; align-content: space-between; gap: 4px; min-width: 0; padding: 12px 14px; border: 1px solid var(--edge); border-radius: 16px; background: var(--bg); }
-.tasks .label { color: var(--muted); font-size: 13px; font-weight: 600; }
-.tasks .value { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; }
-.tasks .value b { font: 600 24px/1.15 var(--ui); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; white-space: nowrap; }
-.tasks .value span { color: var(--faint); font-size: 13px; white-space: nowrap; }
-.tasks .spark { height: 30px; margin-top: 4px; }
-.tasks .meter { margin: 12px 0 4px; }
-.tasks .quiet { margin: 0 4px; color: var(--faint); font-size: 12px; }
-.tasks .quiet.error { color: var(--err); }
-.tasks .tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-.tasks .seg { background: var(--bg); }
-.tasks .seg button { padding: 0 12px; }
-.tasks .procs { min-height: 0; overflow-y: auto; overscroll-behavior: contain; border-top: 1px solid var(--edge); }
-.tasks .procs > .hint { padding: 16px 4px; }
-.tasks .proc, .tasks .pid { display: grid; grid-template-columns: minmax(0, 1fr) auto 58px 72px; align-items: center; gap: 8px; padding: 0 6px 0 10px; }
-.tasks .proc { width: 100%; min-height: 48px; border: 0; border-bottom: 1px solid var(--edge); border-radius: 0; background: none; text-align: left; }
-.tasks .proc:active, .tasks .proc[aria-expanded="true"], .tasks .pids { background: var(--press); }
-.tasks .pids { padding: 2px 0 6px; border-bottom: 1px solid var(--edge); }
-.tasks .pid { grid-template-columns: minmax(0, 1fr) 58px 72px; min-height: 32px; padding-left: 26px; color: var(--faint); font-size: 13px; }
-.tasks .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tasks .n { color: var(--faint); font-size: 13px; white-space: nowrap; }
-.tasks .num { color: var(--muted); font: 13px var(--mono); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.tasks[data-by="cpu"] .num.cpu, .tasks[data-by="memory"] .num.memory { color: var(--text); }
 @media (min-width: 900px) { #sheet.tasks-sheet { width: 560px; height: min(86dvh, 780px); } }
 @media (min-width: 900px) { #sheet { left: 50%; right: auto; bottom: 24px; width: 440px; border: 1px solid var(--edge-hi); border-radius: 22px; transform: translate(-50%, 24px); opacity: 0; transition: transform 0.2s, opacity 0.2s; } #sheet.on { transform: translate(-50%, 0); opacity: 1; } }
 /* Over the top bar, a tap goes through to Back and ⋯ under it. */

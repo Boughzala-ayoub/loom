@@ -24,6 +24,7 @@ import { settingValue, allows, changeFields, claimManual, codexAsks, contextReco
 import { TaskEventGate } from "./task_event_gate";
 import { newPushKey, pushRequest, type PushKey, type PushMessage, type PushSub } from "./push";
 import type { OverlayRow, OverlayState } from "./overlay";
+import { procsView, type Reading } from "./procs";
 import "@xterm/xterm/css/xterm.css";
 
 const MAX_PANES = 16;
@@ -9804,6 +9805,16 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
     togglePreferences(false);
     $<HTMLDialogElement>("#keys").showModal();
   };
+  // This PC's CPU, memory and processes, read every 2 s while the dialog is open (src/procs.ts, procs.rs).
+  $("#task-manager").onclick = () => {
+    togglePreferences(false);
+    const dialog = $<HTMLDialogElement>("#task-manager-dialog");
+    const view = procsView(() => invoke<Reading>("procs"));
+    $("#task-manager-body").replaceChildren(view.box);
+    dialog.showModal();
+    void view.poll(new Promise((closed) => dialog.addEventListener("close", closed, { once: true })));
+  };
+  $("#task-manager-close").onclick = () => $<HTMLDialogElement>("#task-manager-dialog").close();
   $("#side-toggle").onclick = () => toggleSide();
   const narrowWindow = matchMedia("(max-width: 760px)");
   toggleSide(saved.ui?.sideOpen ?? !narrowWindow.matches);

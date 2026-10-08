@@ -3,7 +3,7 @@
 import { $, act, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar } from "./core";
 import { b64u, unb64u } from "../push";
 import { dictationSheet, lists, pickLabel, readLists } from "./dictate";
-import { openTasks } from "./tasks";
+import { procsView, type Reading } from "../procs";
 
 type Theme = { name: string; scheme: string; current: boolean; vars: Record<string, string> };
 type Notify = { all: string; kinds: { finish: boolean; fail: boolean; blocked: boolean }; newPanes: string };
@@ -139,6 +139,14 @@ async function restartLoom() {
   app.restarting = false;
   banner.classList.remove("calm");
   banner.textContent = "Loom didn't come back. Start it on the PC.";
+}
+
+/** The task manager (src/procs.ts) in a sheet, read through remote.rs's /api/procs. */
+async function openTasks() {
+  const view = procsView(() => run<Reading>("procs", [], { path: "/api/procs", timeout: 10 }));
+  const closed = sheet([view.box], "Task manager", "Close");
+  $("#sheet").classList.add("tasks-sheet");
+  await view.poll(closed, () => app.restarting);
 }
 
 /** The phone wears the PC's theme: the same colour names, set on the page. */

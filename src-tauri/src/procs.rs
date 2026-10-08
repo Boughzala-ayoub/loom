@@ -63,6 +63,12 @@ pub fn read() -> Value {
     })
 }
 
+/// The PC's Preferences → Task manager: the reading the phone gets from /api/procs.
+#[tauri::command]
+pub async fn procs() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(read).await.map_err(|e| e.to_string())
+}
+
 /// `part` of `total` CPU time, in percent. `total` is the PC's own time summed
 /// over its cores, elapsed time × logical cores, so a process's share is its
 /// time ÷ elapsed ÷ cores, as Task Manager counts it: 100% is every core busy.

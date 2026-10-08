@@ -235,6 +235,7 @@ still get PowerShell with the OSC 133 integration below.
 | Jump to a thread | `Ctrl+1` … `Ctrl+9` |
 | Font size | `Ctrl+=` / `Ctrl+−` / `Ctrl+0`, or `Ctrl+wheel` over the panes |
 | Every shortcut | `F1` |
+| See the PC's CPU, memory and processes | Preferences → Task manager |
 | See what changed | `⎇` in the thread bar (the number is files touched) |
 | Close a thread / delete its worktree | `⋯` → Close, Delete worktree (keep branch), Delete worktree and branch |
 
@@ -298,7 +299,8 @@ The page is an app with four tabs, and it wears the PC's theme.
   doesn't need to be open. Processes with the same name share a row, as in
   Task Manager's Apps view, so Chrome is one row, chrome × 34, with its CPU
   and memory summed. Sort by CPU or memory, filter by name, and tap a row for
-  each process in it. It can't end a process.
+  each process in it. It can't end a process. The PC has the same view in
+  Preferences → Task manager.
 
 See [docs/loomctl.md](docs/loomctl.md#phone-remote).
 

@@ -2304,6 +2304,24 @@ dialog :is(input:not([type="radio"], [type="checkbox"]), select) {
 #keys {
   width: 620px;
 }
+
+/* Preferences → Task manager (src/procs.ts, procs.css): its numbers stay put over a list that scrolls. */
+#task-manager-dialog {
+  width: 640px;
+  height: min(760px, calc(100dvh - 24px));
+}
+#task-manager-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+#task-manager-body {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+}
+#task-manager-dialog .new-actions {
+  margin-top: 14px;
+}
 #keys table {
   width: 100%;
   margin-bottom: 14px;

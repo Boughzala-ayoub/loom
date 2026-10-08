@@ -600,7 +600,9 @@ and the PC's is the time passed times its logical cores, so 100% is every core
 busy. Its memory is its private working set, Task Manager's Memory column. The
 PC's CPU comes from `GetSystemTimes`, memory and commit from
 `GlobalMemoryStatusEx`, and the uptime from `GetTickCount64`. Nothing on it
-ends a process.
+ends a process. The PC's Preferences → Task manager shows the same view
+(src/procs.ts), which its window reads from the same place with the `procs`
+command.
 
 ## Answering questions
 

@@ -46,6 +46,15 @@ try {
       mockIPC((cmd, args = {}) => {
         qa.calls.push({ cmd, args });
         if (cmd === 'load_state') return JSON.stringify(location.search.includes('empty') ? {} : state);
+        // Preferences → Task manager: procs.rs's reading, with chrome × 34 and a name 60 characters long, its CPU moving each read.
+        if (cmd === 'procs') {
+          const MB = 2 ** 20, long = 'Contoso.Enterprise.Synchronization.BackgroundWorkersHost.x64';
+          qa.procsReads = (qa.procsReads ?? 0) + 1;
+          return { cpu: 20 + (qa.procsReads % 4) * 9.5, memory: { used: 13.3 * 1024 * MB, total: 15.6 * 1024 * MB, commit: 29.3 * 1024 * MB, limit: 47.6 * 1024 * MB }, uptime: 3 * 86400 + 4 * 3600,
+            procs: [...Array.from({ length: 34 }, (_, i) => ({ pid: 1000 + i, name: 'chrome.exe', cpu: 0.6, memory: (40 + i) * MB })),
+              { pid: 4, name: 'System', cpu: 0.4, memory: 12288 }, { pid: 7001, name: `${long}.exe`, cpu: 12.3, memory: 2.2 * 1024 * MB },
+              ...Array.from({ length: 60 }, (_, i) => ({ pid: 2000 + i * 4, name: 'svchost.exe', cpu: 0, memory: 3 * MB })), { pid: 9001, name: 'loom.exe', cpu: 2.2, memory: 310 * MB }] };
+        }
         if (cmd === 'set_keep_awake') {
           if (qa.failAwake || location.search.includes('awake-error')) throw new Error('Test power request failed');
           qa.keepAwake = args.enabled;
@@ -1415,6 +1424,42 @@ try {
     await page.waitForFunction(() => window.qa.saved);
     assert.equal(await page.locator('#keep-awake').getAttribute('aria-pressed'), 'false', 'A failed startup request must not claim to keep the PC awake');
     assert.equal(await page.evaluate(() => window.qa.saved.keepAwake), false);
+    // Preferences → Task manager (src/procs.ts): this PC's CPU, memory and processes in a dialog, in a dark and a light
+    // theme. It fits, a 60-character name is cut short with its numbers in the list, chrome × 34 sums and opens to its
+    // processes, and it reads every 2 s while it's open and never once it's closed.
+    {
+      const long = 'Contoso.Enterprise.Synchronization.BackgroundWorkersHost.x64';
+      const reads = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'procs').length);
+      for (const theme of ['woad', 'paper']) {
+        await cli('theme', theme);
+        await page.click('#preferences-btn');
+        await page.click('#task-manager');
+        await page.locator('#task-manager-dialog .proc').first().waitFor();
+        assert.equal(await page.locator('#preferences').isVisible(), false, 'Preferences closes under it');
+        await audit(`task-manager-${theme}`);
+        const fit = await page.evaluate(long => {
+          const row = [...document.querySelectorAll('#task-manager-dialog .proc')].find(r => r.querySelector('.name').textContent === long);
+          const name = row.querySelector('.name'), nums = [...row.querySelectorAll('.num')], list = document.querySelector('#task-manager-dialog .procs');
+          return { cut: name.scrollWidth > name.clientWidth, right: Math.max(...nums.map(n => n.getBoundingClientRect().right)), edge: list.getBoundingClientRect().right, scroll: list.scrollWidth, width: list.clientWidth, shown: nums.map(n => n.textContent) };
+        }, long);
+        assert.deepEqual(fit.shown, ['12.3%', '2.2 GB'], `task-manager@${width}: the long name's numbers`);
+        assert.ok(fit.right <= fit.edge && fit.scroll <= fit.width, `task-manager@${width}: the long name pushes its numbers out, or the list scrolls sideways: ${JSON.stringify(fit)}`);
+        if (width <= 375) assert.ok(fit.cut, `task-manager@${width}: the long name must be cut short`);
+        const chrome = page.locator('#task-manager-dialog .proc', { hasText: 'chrome' });
+        assert.deepEqual(await chrome.locator('.num').allInnerTexts(), ['20.4%', '1.9 GB'], 'chrome summed');
+        await chrome.click();
+        await page.waitForFunction(() => document.querySelectorAll('#task-manager-dialog .pid').length === 34);
+        await audit(`task-manager-open-${theme}`);
+        const before = await reads();
+        await page.waitForTimeout(2300);
+        assert.ok((await reads()) > before, 'it reads again while open');
+        await page.click('#task-manager-close');
+        const closed = await reads();
+        await page.waitForTimeout(2300);
+        assert.equal(await reads(), closed, 'no reads once it is closed');
+      }
+      await cli('theme', process.env.UI_THEME || 'loom');
+    }
     // Task notices: a pane's bell, its menu open, and the Preferences rows (finished / failed / blocked) all fit and stay tappable.
     {
       const bell = page.locator('.pane .pane-head button.notify').first();

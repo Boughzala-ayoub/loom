@@ -1,6 +1,7 @@
 /** Usage: the account limits the PC's plan chips show, each agent's context,
  * and one Claude session's context broken down. */
 import { age, agentIcon, el, findPane, go, iconButton, panes, run, threadOf, toast, topBar, type Pane } from "./core";
+import { meter, spark } from "../procs";
 
 type Limit = { label: string; group: string; percent: number; severity: string; resetsAt: string | null };
 type Plan = { tier?: string; limits: Limit[]; stale?: boolean; fetchedAt?: string; nextRefreshAt?: string; cached?: boolean; error?: string; note?: string; bankedResets?: number; bankedResetExpiries?: (string | null)[] };
@@ -33,20 +34,6 @@ function fmtReset(iso: string | null) {
   }
   const d = new Date(Math.round(at / 6e4) * 6e4);
   return `Resets ${d.toLocaleDateString(undefined, { weekday: "short" })} ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
-}
-
-/** A limit as a bar: white, amber once it nears, red at the end. */
-export function meter(percent: number, severity = "") {
-  const m = el("div", `meter ${severity}`);
-  const p = Math.max(0, Math.min(100, percent));
-  const runEl = el("span", "run");
-  runEl.style.width = `${p}%`;
-  m.append(runEl);
-  m.setAttribute("role", "meter");
-  m.setAttribute("aria-valuenow", String(Math.round(p)));
-  m.setAttribute("aria-valuemin", "0");
-  m.setAttribute("aria-valuemax", "100");
-  return m;
 }
 
 export const usageView = el("section", "screen primary alone");
@@ -178,28 +165,4 @@ export async function showContext(id: string) {
   open.onclick = () => go(`#/pane/${encodeURIComponent(id)}`);
   nodes.push(open);
   ctxBody.replaceChildren(...nodes);
-}
-
-/** A series against its most, as a line over a shaded area: a session's context
- * after each turn (compactions are the falls), or the PC's CPU (tasks.ts). */
-export function spark(series: number[], max: number, label: string) {
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("class", "spark");
-  svg.setAttribute("viewBox", "0 0 100 40");
-  svg.setAttribute("preserveAspectRatio", "none");
-  const pts = series.map((v, i) => `${(i / (series.length - 1)) * 100},${40 - (v / max) * 38}`);
-  const area = document.createElementNS(ns, "path");
-  area.setAttribute("d", `M0,40 L${pts.join(" L")} L100,40 Z`);
-  area.setAttribute("fill", "color-mix(in srgb, var(--accent) 18%, transparent)");
-  const line = document.createElementNS(ns, "polyline");
-  line.setAttribute("points", pts.join(" "));
-  line.setAttribute("fill", "none");
-  line.setAttribute("stroke", "var(--accent)");
-  line.setAttribute("stroke-width", "1.5");
-  line.setAttribute("vector-effect", "non-scaling-stroke");
-  svg.append(area, line);
-  svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", label);
-  return svg;
 }
