@@ -542,8 +542,15 @@ try {
   await sheetButton(page, 'Create PR').click();
   await page.locator('#toast.error', { hasText: 'not on GitHub' }).waitFor();
   rmSync(join(repo, 'stash-me.txt'));
-  git('stash', 'drop');
-  console.log('PASS git from the phone: discard after asking, a new branch, stash and restore, PR needs GitHub, loomctl refuses loss without --yes');
+  // Loom's own stash_drop, by the stash's commit under git's lock on the list, the last stash and refs/stash with it.
+  await page.click('#changes [aria-label="Git actions"]');
+  await sheetButton(page, 'Restore a stash').click();
+  await page.locator('#sheet.on [aria-label="Drop stash@{0}"]').click();
+  await sheetButton(page, 'Drop').click();
+  for (let i = 0; i < 40 && git('stash', 'list').stdout.trim(); i++) await pause(250);
+  assert.equal(git('stash', 'list').stdout.trim(), '', 'Dropping a stash from the phone drops it');
+  assert.equal(git('rev-parse', '-q', '--verify', 'refs/stash').stdout.trim(), '', 'refs/stash outlived the last stash');
+  console.log('PASS git from the phone: discard after asking, a new branch, stash, restore and drop, PR needs GitHub, loomctl refuses loss without --yes');
 
   // Settings change the PC: sound, the theme (which the phone wears), text size, the agents list.
   await page.goto(`${base}#/settings`);
