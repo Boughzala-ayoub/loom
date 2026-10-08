@@ -52,4 +52,30 @@ Failing scenario: `loomctl --json --timeout 1e300 watch --follow` panics with "c
 
 ## Status
 
-Open. Each finding gets its failing regression, fix and passing check here as it is done.
+All seven are fixed, and the npm advisories are resolved. Six of the fixes and the lockfile are their own commits on `loom/codex-review-2`, each holding only that fix's lines. Each commit's own tree, HEAD plus that fix alone, was type-checked or built and ran its regression: `git archive` of the staged tree, outside the working tree. Finding 4 stays uncommitted, for the reason below.
+
+| Finding | Commit | Failing regression (before the fix) | Fix | Passing check |
+| --- | --- | --- | --- | --- |
+| 1. Trash expiry erases a repaired live checkout | `5de46f1` | `purge_keeps_a_checkout_repaired_after_its_repository_moved`, real git: the checkout and its `unsaved.txt` were erased | `restored()` takes any repository whose record names the folder back, not only the saved one | that test and all 20 deletion tests; 18 on the commit's own tree |
+| 2. A stash action follows a position | `fae4c37` | `main_cli.test.ts` 213, real git with two worktrees: applying the listed A applied B | stashes listed with their commit (`src/stash.ts`); apply by commit; drop finds the commit's place, checks what git dropped, puts back a stash that went instead and refuses | 213 (A applied and dropped; a drop raced by another stash refuses and loses nothing), on the commit's tree too |
+| 3. A base only on origin becomes a new branch | `408744d` | `thread_create.test.ts`, real createThread and git: branch `feature` at local main | `resolveBase` returns the base, or after the fetch the commit `origin/<base>` or `FETCH_HEAD` has | that test, plus a missing base and an `origin/x` typo; on the commit's tree too |
+| 4. A branch switched in the terminal stays stale | uncommitted | `main_cli.test.ts` 214: status said main after `git switch topic` | `syncBranch()` reads the branch from git before status, the Changes panel, Create PR, the deletion inventory and `branches` | 214: status, `compare/main...topic`, `branches` and the inventory follow topic; detached and unborn handled |
+| 5. Creating a thread retries forever | `b6d2ea3` | `thread_create.test.ts`: four identical refusals until the test's stop | a branch git says exists stops the thread when the caller named it, takes the next number for `loom/<slug>`; 100 names at most | one try, an error naming the branch, and `loom/auto` becomes `loom/auto-2`; on the commit's tree too |
+| 6. The model download has no deadline | `7081815` | `a_model_download_that_stalls_ends_and_leaves_no_partial_file`, a local socket that sends one byte: still running at 20 s | curl gets `--connect-timeout`, `--speed-limit 1024 --speed-time`, `--max-time`; the error names the stall | ends in about 2 s, partial file gone; on the commit's tree too |
+| 7. A huge `--timeout` panics | `598b6a0` | `a_timeout_too_long_is_a_usage_error_and_none_panics` took 31536000.5; the review's command exited 101 with the panic | `--timeout` above a year is a usage error; checked follow deadline; saturating watchdog | the test, and the review's command prints `{"code":"usage",...}` and exits 1; on the commit's tree too |
+| npm audit | `dd21a10` | `npm audit`: nanoid 3.3.16, source-map-js 1.2.1, both through Vite's PostCSS | the two lockfile entries, inside PostCSS's ranges: nanoid 3.3.20, source-map-js 1.2.2 | `npm audit` finds none; `npm run build` passes |
+
+Finding 4 can't be committed apart from the earlier uncommitted work: `syncBranch()` builds on `headBranch()`, which that work added and HEAD lacks, and its test's lifted-names line is that work's too. It is in the working tree with that work.
+
+The rest of the working tree changed with these fixes only where a check needed it: `ui-check.mjs`'s git mock answers `symbolic-ref` with each folder's branch, including one a `worktree add -b` made during the run, and gives `stash drop` git's answer; `main_cli.test.ts`'s fixture has a default `save()`, and test 210 expects the branch git had.
+
+Checks on the final working tree (the fixes plus the earlier uncommitted work), one heavy step at a time:
+
+- `npm test`: 18 files pass. `tsc` passes.
+- `cargo test --offline --lib -- --test-threads=1`: 128 passed, 5 ignored. `cargo test --bin loomctl`: 16 passed.
+- `scripts/update-check.ps1`: passes.
+- `scripts/ui-check.mjs` on the served build (HTTP 200, the same bundle as `dist/`), one width at a time: 320, 375, 768, 1024 and 1280 px pass, 1437 rendered states.
+- `scripts/remote-ui-check.mjs`: 39 checks pass, 252 views fit their width. The desktop stash menu at 768 px and the phone's stash sheet at 901 px look right.
+- `TASK_REVIEW=untracked-approval scripts/task-check.mjs`: passes. The full task-check was stopped by the memory reaper after its first 40 cases, all passing, and was not run again.
+- `scripts/remote-check.mjs` against a debug build at 375 px: all 16 steps, the phone's stash and restore among them.
+- `npm run tauri build`: `src-tauri/target/release/bundle/nsis/Loom_3.0.0_x64-setup.exe`, 2,547,399 bytes, built 2026-10-08 17:09:57. A scratch makensis run shows it packs this build's `loom.exe` (7,039,488 bytes) and `loomctl.exe` (319,488 bytes). It was not run.
