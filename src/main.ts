@@ -6897,14 +6897,19 @@ const worktreeDir = async (repo: string, slug: string) => join(await homeDir(), 
  * fails any other way (unreachable, refused, misconfigured) throws: it says
  * nothing about the base, and a guess would start an agent on other code. */
 async function resolveBase(repo: string, ref: string, own: string): Promise<string | null> {
-  const commit = (r: string) => git(repo, "rev-parse", "--verify", "--quiet", r + "^{commit}").then((s) => s.trim() || null, () => null);
+  const commit = (r: string) => git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", r + "^{commit}").then((s) => s.trim() || null, () => null);
   if (await commit(ref)) return ref;
+  const invalid = () => new Error(`${ref} exists but does not resolve to a commit, so no thread was made.`);
+  if (await git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{object}").then((s) => s.trim(), () => "")) throw invalid();
   if (!(await git(repo, "remote")).split(/\r?\n/).includes("origin")) return null;
   const missing = await git(repo, "fetch", "origin", `+${ref}:${own}`).then(() => false, (e) => {
     if (String(e).split(/\r?\n/).includes(`fatal: couldn't find remote ref ${ref}`)) return true;
     throw new Error(`Couldn't fetch ${ref} from origin, so no thread was made: ${e instanceof Error ? e.message : String(e)}`);
   });
-  return missing ? null : await commit(own);
+  if (missing) return null;
+  const fetched = await commit(own);
+  if (!fetched) throw invalid();
+  return fetched;
 }
 
 /** Cut a thread from `repo`, or — no name given — open the checkout itself as

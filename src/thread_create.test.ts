@@ -47,6 +47,33 @@ try {
   assert.deepEqual([remote.branch, real(remote.dir, "rev-parse", "HEAD").trim()], ["loom/remote-case", feature], "a base only on origin became a new branch from local HEAD");
   console.log("ok   a base that exists only on origin is fetched and cut from");
 
+  const shaOnly = join(dir, "sha-only");
+  real(dir, "clone", "-q", "--no-local", "--single-branch", "--branch", "main", origin, shaOnly);
+  assert.throws(() => real(shaOnly, "cat-file", "-e", `${feature}^{commit}`));
+  const bySha = await create(shaOnly, "sha-case", "", feature, 1);
+  assert.equal(real(bySha.dir, "rev-parse", "HEAD").trim(), feature);
+  assert.equal(real(shaOnly, "for-each-ref", "refs/loom-fetch/"), "");
+
+  const noTags = join(dir, "no-tags");
+  real(dir, "clone", "-q", "--no-tags", "--single-branch", "--branch", "main", origin, noTags);
+  real(noTags, "config", "remote.origin.tagOpt", "--no-tags");
+  for (const where of ["fetched", "local"]) for (const type of ["blob", "tree"]) {
+    const repo = where === "fetched" ? origin : noTags, tag = `${where}-${type}-base`;
+    const object = real(repo, "rev-parse", type === "blob" ? "HEAD:a.txt" : "HEAD^{tree}").trim();
+    real(repo, "tag", tag, object);
+    await assert.rejects(create(noTags, `${where}-${type}`, "", tag, 1), new RegExp(`${tag}.*not.*commit`), `${where} ${type} tag was treated as a missing name`);
+    assert.equal(real(noTags, "for-each-ref", "--format=%(refname)", "refs/heads/").trim(), "refs/heads/main");
+    assert.equal(real(noTags, "for-each-ref", "refs/loom-fetch/"), "");
+  }
+  real(origin, "tag", "-a", "commit-release", "-m", "release", feature);
+  const release = await create(noTags, "release-case", "", "commit-release", 1);
+  assert.equal(real(release.dir, "rev-parse", "HEAD").trim(), feature);
+  const missing = await create(noTags, "missing-case", "", "missing-base", 1);
+  assert.equal(missing.branch, "missing-base");
+  assert.equal(real(missing.dir, "rev-parse", "HEAD").trim(), main);
+  assert.equal(real(noTags, "for-each-ref", "refs/loom-fetch/"), "");
+  console.log("ok   existing blob and tree tags reject locally and after fetch; an annotated commit tag and a missing name work");
+
   // A base found nowhere is still a new branch of that name, off HEAD; origin/x that isn't there is a typo.
   const fresh = await create(local, "", "", "brand-new", 1);
   assert.deepEqual([fresh.branch, real(fresh.dir, "rev-parse", "HEAD").trim()], ["brand-new", main]);
