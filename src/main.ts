@@ -6888,27 +6888,23 @@ async function pollStats(all = false) {
 const worktreeDir = async (repo: string, slug: string) => join(await homeDir(), "loom", basename(repo), slug);
 
 /** What to cut a thread from for `ref` in `repo`: `ref` itself when it names a
- * commit here, else the commit origin has for it, fetched now into a ref only
- * this call uses and read from there. Not origin/<ref>: a fetch updates it only
- * when origin's refspec covers it, so it can be a fetch behind. Not FETCH_HEAD:
+ * commit here, else the commit origin has for it, fetched now into `own`, a ref
+ * only this thread's creation uses, and read from there. createThread deletes
+ * it once git worktree add has used the commit. Not origin/<ref>: a fetch
+ * updates it only when origin's refspec covers it, so it can be a fetch behind. Not FETCH_HEAD:
  * every fetch in the repository rewrites it. null when neither here nor origin
  * has it: no origin, or origin answered that it has no such ref. A fetch that
  * fails any other way (unreachable, refused, misconfigured) throws: it says
  * nothing about the base, and a guess would start an agent on other code. */
-async function resolveBase(repo: string, ref: string): Promise<string | null> {
+async function resolveBase(repo: string, ref: string, own: string): Promise<string | null> {
   const commit = (r: string) => git(repo, "rev-parse", "--verify", "--quiet", r + "^{commit}").then((s) => s.trim() || null, () => null);
   if (await commit(ref)) return ref;
   if (!(await git(repo, "remote")).split(/\r?\n/).includes("origin")) return null;
-  const own = `refs/loom-fetch/${crypto.randomUUID()}`;
-  try {
-    const missing = await git(repo, "fetch", "origin", `+${ref}:${own}`).then(() => false, (e) => {
-      if (/couldn't find remote ref/i.test(String(e))) return true;
-      throw new Error(`Couldn't fetch ${ref} from origin, so no thread was made: ${e instanceof Error ? e.message : String(e)}`);
-    });
-    return missing ? null : await commit(own);
-  } finally {
-    await git(repo, "update-ref", "-d", own).catch(() => {});
-  }
+  const missing = await git(repo, "fetch", "origin", `+${ref}:${own}`).then(() => false, (e) => {
+    if (/couldn't find remote ref/i.test(String(e))) return true;
+    throw new Error(`Couldn't fetch ${ref} from origin, so no thread was made: ${e instanceof Error ? e.message : String(e)}`);
+  });
+  return missing ? null : await commit(own);
 }
 
 /** Cut a thread from `repo`, or — no name given — open the checkout itself as
@@ -6926,51 +6922,59 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
   // A base with no name still means "cut me a worktree" — the branch names it.
   name ||= base;
   if (name) {
-    // A missing base becomes the branch itself — unless it is spelled like a
-    // remote ref (origin/x) that just isn't there, which is a typo, not a wish.
-    let fresh = "";
-    const found = base && (await resolveBase(repo, base));
-    if (base && !found) {
-      const remotes = (await git(repo, "remote").catch(() => "")).split(/\r?\n/).filter(Boolean);
-      if (remotes.includes(base.split("/")[0])) throw new Error(`${base} is not a branch on that remote`);
-      fresh = base;
-      base = "";
-    } else if (found) base = found; // a branch only on origin: its commit, as fetched
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    if (!slug) throw new Error("name needs a letter or digit in it");
-    // A new thread is a new branch off `base`, the way Orca cuts one: a name
-    // already taken — by a branch or by a folder — gets a numeric suffix
-    // rather than silently reusing whatever was there, which would ignore the
-    // base you asked for. To continue an existing branch, name it as the base.
-    const taken = new Set(
-      (await git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/loom/"))
-        .split(/\r?\n/)
-        .filter(Boolean),
-    );
-    const dirs = new Set(threads.map((t) => t.dir.toLowerCase()));
-    for (let i = 1; ; i++) {
-      // ponytail: 100 names; a repository with more loom/<slug>-N than that gets an error, not a hang.
-      if (i > 100) throw new Error(`No free name for ${slug}: ${slug} to ${slug}-100 are all taken.`);
-      const cand = i === 1 ? slug : `${slug}-${i}`;
-      branch = fresh || `loom/${cand}`;
-      dir = await worktreeDir(repo, cand);
-      if (taken.has(branch) || dirs.has(dir.toLowerCase())) continue;
-      // Finish only Loom's pending deletion at this path. Other missing
-      // worktrees may be on a temporarily unavailable drive; never prune them.
-      await invoke("worktree_prepare", { repo, dir });
-      // git itself is the "does the folder exist" check: it refuses a
-      // non-empty one, and that is the one error worth trying the next name on.
-      // A branch made by someone else meanwhile is the other "already exists":
-      // loom/<slug> takes the next number, the new branch you named stops here.
-      try {
-        await git(repo, "worktree", "add", "-b", branch, dir, ...(base ? [base] : []));
-        break;
-      } catch (e) {
-        if (/a branch named .* already exists/i.test(String(e))) {
-          if (fresh) throw new Error(`A branch named ${fresh} appeared while the thread was being made. Use it as the base to continue it, or pick another name.`);
-          taken.add(branch);
-        } else if (!/already exists/.test(String(e))) throw e;
+    // A base fetched from origin waits under this ref, made for this one
+    // creation, until git worktree add has made a branch of it: referenced by
+    // nothing else, an old commit is git gc's to prune meanwhile.
+    const own = base && `refs/loom-fetch/${crypto.randomUUID()}`;
+    try {
+      // A missing base becomes the branch itself — unless it is spelled like a
+      // remote ref (origin/x) that just isn't there, which is a typo, not a wish.
+      let fresh = "";
+      const found = base && (await resolveBase(repo, base, own));
+      if (base && !found) {
+        const remotes = (await git(repo, "remote").catch(() => "")).split(/\r?\n/).filter(Boolean);
+        if (remotes.includes(base.split("/")[0])) throw new Error(`${base} is not a branch on that remote`);
+        fresh = base;
+        base = "";
+      } else if (found) base = found; // a branch only on origin: its commit, as fetched
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      if (!slug) throw new Error("name needs a letter or digit in it");
+      // A new thread is a new branch off `base`, the way Orca cuts one: a name
+      // already taken — by a branch or by a folder — gets a numeric suffix
+      // rather than silently reusing whatever was there, which would ignore the
+      // base you asked for. To continue an existing branch, name it as the base.
+      const taken = new Set(
+        (await git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/loom/"))
+          .split(/\r?\n/)
+          .filter(Boolean),
+      );
+      const dirs = new Set(threads.map((t) => t.dir.toLowerCase()));
+      for (let i = 1; ; i++) {
+        // ponytail: 100 names; a repository with more loom/<slug>-N than that gets an error, not a hang.
+        if (i > 100) throw new Error(`No free name for ${slug}: ${slug} to ${slug}-100 are all taken.`);
+        const cand = i === 1 ? slug : `${slug}-${i}`;
+        branch = fresh || `loom/${cand}`;
+        dir = await worktreeDir(repo, cand);
+        if (taken.has(branch) || dirs.has(dir.toLowerCase())) continue;
+        // Finish only Loom's pending deletion at this path. Other missing
+        // worktrees may be on a temporarily unavailable drive; never prune them.
+        await invoke("worktree_prepare", { repo, dir });
+        // git itself is the "does the folder exist" check: it refuses a
+        // non-empty one, and that is the one error worth trying the next name on.
+        // A branch made by someone else meanwhile is the other "already exists":
+        // loom/<slug> takes the next number, the new branch you named stops here.
+        try {
+          await git(repo, "worktree", "add", "-b", branch, dir, ...(base ? [base] : []));
+          break;
+        } catch (e) {
+          if (/a branch named .* already exists/i.test(String(e))) {
+            if (fresh) throw new Error(`A branch named ${fresh} appeared while the thread was being made. Use it as the base to continue it, or pick another name.`);
+            taken.add(branch);
+          } else if (!/already exists/.test(String(e))) throw e;
+        }
       }
+    } finally {
+      if (own) await git(repo, "update-ref", "-d", own).catch(() => {});
     }
   } else {
     const have = threads.find((t) => t.dir === dir);

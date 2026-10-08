@@ -2,7 +2,7 @@
 // @ts-ignore Node-only test.
 import assert from "node:assert/strict";
 // @ts-ignore Node-only test.
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, renameSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, realpathSync, renameSync, utimesSync } from "node:fs";
 // @ts-ignore Node-only test.
 import { tmpdir } from "node:os";
 // @ts-ignore Node-only test.
@@ -112,4 +112,25 @@ try {
   const solo = await create(lone, "", "", "solo", 1);
   assert.deepEqual([solo.branch, real(solo.dir, "rev-parse", "HEAD").trim()], ["solo", real(lone, "rev-parse", "HEAD").trim()]);
   console.log("ok   an origin that can't be reached stops the thread with git's error; with no origin a missing base is still a new branch");
+
+  // feature was fetched once and is referenced by nothing now, its objects 40 days old. This fetch
+  // finds them already here and leaves them old. Just before git worktree add, another fetch rewrites
+  // FETCH_HEAD and git gc runs with its default prune: only a ref still holding the commit keeps it.
+  const aged = join(dir, "aged");
+  real(dir, "clone", "-q", "--single-branch", "--branch", "main", origin, aged);
+  real(aged, "fetch", "-q", "origin", "feature");
+  real(aged, "fetch", "-q", "origin", "main");
+  const old = new Date(Date.now() - 40 * 86_400_000);
+  for (const object of real(aged, "rev-list", "--objects", v2, "--not", "main").split("\n").filter(Boolean)) {
+    const sha = object.split(" ")[0];
+    utimesSync(join(aged, ".git", "objects", sha.slice(0, 2), sha.slice(2)), old, old);
+  }
+  let collected = 0;
+  const kept = await creator(join(dir, "aged-threads"), (cwd, ...args) => {
+    if (args[0] === "worktree" && args[1] === "add") real(cwd, "fetch", "-q", "origin", "main"), real(cwd, "gc", "--quiet"), collected++;
+    return real(cwd, ...args);
+  })(aged, "aged-case", "", "feature", 1);
+  assert.deepEqual([collected, real(kept.dir, "rev-parse", "HEAD").trim()], [1, v2], "git gc pruned the base before git worktree add used it");
+  assert.equal(real(aged, "for-each-ref", "refs/loom-fetch/"), "", "the fetch's own ref stayed behind");
+  console.log("ok   a fetched base keeps its ref until git worktree add has used it, so git gc meanwhile can't prune it");
 } finally { rmSync(dir, { recursive: true, force: true }); }
