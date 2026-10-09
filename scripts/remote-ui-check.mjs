@@ -258,7 +258,7 @@ async function context(width, token = true, push = false) {
         else if (action === 'show') data = { diff: `commit abc1234\nAuthor: Tester <test@example.com>\nDate: Tue Oct 6 10:00:00 2026 +0100\n\n    A sample commit\n\n ${own(id)}.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n\n${patch(`${own(id)}.txt`)}` };
         else if (action === 'files') data = { files: [`${own(id)}.txt`, 'src/deep/path.txt'] };
         else if (action === 'file') data = { text: c.argv[2] === 'big.txt' ? Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join('\n') : `${own(id)} one\ntwo\nthree\n` };
-        else if (action === 'branches') data = { current: `loom/${id}`, branches: [`loom/${id}`, 'feature/next'] };
+        else if (action === 'branches') data = state.branchList ?? { current: `loom/${id}`, branches: [`loom/${id}`, 'feature/next'] };
         else if (action === 'stashes') data = { stashes: [{ ref: 'stash@{0}', sha: '5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c', message: `WIP on loom/${id}: abc1234 A saved change` }] };
         else data = status(id);
         // gitChurn: an agent in the thread writes a new file before each read.
@@ -320,6 +320,28 @@ try {
     await p.locator('#changes .file .icon-btn').first().click(); await fits(p, width, 'file-menu'); await sheetButton(p, 'Discard changes').click(); await fits(p, width, 'discard-confirm'); await close(p);
     await p.locator('#changes .file').filter({ hasText: 'conflict.txt' }).first().locator('.icon-btn').click(); await fits(p, width, 'conflict-menu'); await close(p);
     await p.locator('#changes [aria-label="Git actions"]').click(); await fits(p, width, 'git-menu'); await sheetButton(p, 'Switch branch').click(); await p.locator('#sheet .item').first().waitFor(); await fits(p, width, 'branches'); await sheetButton(p, 'New branch…').click(); await fits(p, width, 'branch-form'); await close(p);
+    for (const [i, name] of ['\u00a0approved', 'approved\u00a0', 'approved', 'heads/approved'].entries()) {
+      const names = ['approved', '\u00a0approved', 'approved\u00a0', 'heads/approved'];
+      state.branchList = { current: name, branches: names };
+      await p.locator('#changes [aria-label="Git actions"]').click(); await sheetButton(p, 'Switch branch').click();
+      const rows = p.locator('#sheet .item'); await rows.last().waitFor();
+      const labels = await rows.allTextContents();
+      for (const b of names) assert.ok(labels.includes(b === name ? `${b} (current)` : b), `exact phone label ${JSON.stringify(b)}`);
+      await fits(p, width, `branches-identity-${i}`);
+      await p.screenshot({ path: resolve(out, `${width}-branches-identity-${i}.png`), fullPage: true });
+      const before = git(state, 'switch').length;
+      await rows.nth(labels.indexOf(`${name} (current)`)).click();
+      assert.equal(git(state, 'switch').length, before, 'current branch is not switched');
+      await close(p);
+      state.branchList.current = 'other';
+      await p.locator('#changes [aria-label="Git actions"]').click(); await sheetButton(p, 'Switch branch').click();
+      await rows.last().waitFor(); const select = (await rows.allTextContents()).indexOf(name); assert.ok(select >= 0);
+      await rows.nth(select).click();
+      await until('exact branch switch', () => git(state, 'switch').length === before + 1);
+      assert.deepEqual(git(state, 'switch').at(-1).argv, ['a', 'switch', name]);
+      await close(p);
+    }
+    delete state.branchList;
     await p.locator('#changes [aria-label="Git actions"]').click(); await sheetButton(p, 'Restore a stash').click(); await p.locator('#sheet .pair').waitFor(); await fits(p, width, 'stashes'); await close(p);
     await p.locator('#changes .commit-row .icon-btn').first().click(); await fits(p, width, 'commit-menu'); await close(p);
     for (const sec of ['unstaged', 'staged', 'untracked']) { await goto(p, `#/diff/a/${sec}/alpha.txt`, '#diff .hunk'); await fits(p, width, `diff-${sec}`); }
