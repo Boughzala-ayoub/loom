@@ -6816,13 +6816,18 @@ async function createPR() {
 
 /** Pushes the thread's branch and gives GitHub's compare page for it. */
 async function prUrl(th: Thread) {
+  // A detached worktree's cached branch is not a PR source.
+  const ref = (await git(th.dir, "symbolic-ref", "HEAD")).replace(/\r?\n$/, "");
+  if (!ref.startsWith("refs/heads/")) throw new Error("Create PR requires an attached branch.");
+  const branch = ref.slice("refs/heads/".length);
+  if (branch !== th.branch) ((th.branch = branch), save());
   const url = (await git(th.dir, "remote", "get-url", "origin").catch(() => "")).trim(); // no origin at all reads as one off GitHub
   const m = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
   if (!m) throw new Error(`origin is not on GitHub: ${url || "(no origin)"}`);
   const head = (await git(th.dir, "symbolic-ref", "-q", "refs/remotes/origin/HEAD").catch(() => "")).replace(/\r?\n$/, "");
   const base = head.startsWith("refs/remotes/origin/") ? head.slice("refs/remotes/origin/".length) : "main";
-  await git(th.dir, "push", "-u", "origin", "HEAD");
-  return `https://github.com/${m[1]}/${m[2]}/compare/${encodeURIComponent(base)}...${encodeURIComponent(th.branch)}?expand=1`;
+  await git(th.dir, "push", "-u", "origin", `${ref}:${ref}`);
+  return `https://github.com/${m[1]}/${m[2]}/compare/${encodeURIComponent(base)}...${encodeURIComponent(branch)}?expand=1`;
 }
 
 /** The Changes panel as data, for loomctl git: the branch and its upstream, git's
