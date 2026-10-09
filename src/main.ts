@@ -5914,13 +5914,10 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask 
     }
     if (branch) {
       try {
-        const ref = `refs/heads/${named}`;
-        // update-ref checks the tip under Git's ref lock, but unlike branch -D it needs a worktree guard.
-        await invoke("branch_in_progress", { repo: th.repo, branch: named });
-        const used = (await git(th.repo, "for-each-ref", "--format=%(refname)%00%(worktreepath)", ref)).split("\n").find((line) => line.startsWith(ref + "\0"))?.slice(ref.length + 1).trim();
-        if (used) throw new Error(`Cannot delete branch '${named}': checked out in worktree '${used}'.`);
         const configured = (await git(th.repo, "config", "--local", "--name-only", "--list", "-z")).split("\0").some((key) => key.slice(0, key.lastIndexOf(".")) === `branch.${named}`);
-        await git(th.repo, "update-ref", "--no-deref", "-d", ref, expected);
+        // The approved tip only, and never while a worktree has the branch: one ref transaction checks
+        // both with the ref locked, and puts the branch back if a checkout lands anyway (deletion.rs).
+        await invoke("branch_delete", { repo: th.repo, branch: named, tip: expected });
         if (configured) {
           try { await git(th.repo, "config", "--local", "--remove-section", `branch.${named}`); }
           catch (e) {

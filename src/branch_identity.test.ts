@@ -17,6 +17,14 @@ import ts from "typescript";
 import * as cli from "./cli.ts";
 import * as gitparse from "./gitparse.ts";
 
+/** deletion.rs delete_branch (the branch_delete command) with real Git: refused while a worktree has the
+ * branch, and only the approved tip goes. Its real-Git race tests are in deletion.rs. */
+function branchDelete(repo: string, { branch, tip }: { branch: string; tip: string }) {
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (git("worktree", "list", "--porcelain").split("\n").includes(`branch refs/heads/${branch}`)) throw `Cannot delete branch '${branch}': checked out at another worktree.`;
+  git("update-ref", "--no-deref", "-d", `refs/heads/${branch}`, tip);
+}
+
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const names = ["headBranch", "syncBranch", "openThread", "createThread", "inventory", "hashedFiles", "inventoryDiff", "lossCounts", "riskText", "removeThread", "closingThreads", "closePlan", "cliDelete", "cliWord", "CliError"];
 const pieces: string[] = [];
@@ -54,7 +62,7 @@ for (const branch of ["\u00a0approved", "approved\u00a0", "approved"]) for (cons
       const sandbox = createContext({ ...cli, ...gitparse, console, crypto, TextEncoder, setTimeout, basename,
         MAX_PANES: 8, shuttingDown: false, threads: [th], cliThread: () => th, save() {}, toast() {}, renderSide() {}, show() {},
         git: async (cwd: string, ...args: string[]) => git(cwd, ...args),
-        invoke: async (cmd: string, args: any) => cmd === "worktree_fingerprint" ? "unchanged files" : cmd === "worktree_remove" ? (git(repo, "worktree", "remove", "--force", args.dir), "fixture trash") : undefined,
+        invoke: async (cmd: string, args: any) => cmd === "worktree_fingerprint" ? "unchanged files" : cmd === "worktree_remove" ? (git(repo, "worktree", "remove", "--force", args.dir), "fixture trash") : cmd === "branch_delete" ? branchDelete(repo, args) : undefined,
       });
       runInContext(code, sandbox);
       const f = sandbox.f;

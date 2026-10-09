@@ -275,6 +275,14 @@ Delete worktree buttons in the window work the same way: their dialog lists
 what would be lost, ignored files included, and nothing closes if that changed
 before you answered.
 
+The branch goes last, only at the commit the plan or dialog approved, and never
+while a worktree has it checked out or is rebasing or bisecting it, which `git
+branch -D` refuses too. Git takes no lock to check a branch out, so Loom reads
+the worktrees with the branch's ref locked and deletes it right after. `git
+worktree add` on that branch fails while the lock is held. A `git switch` that
+lands in between anyway is seen at once: Loom puts the branch back at the same
+commit, and `branch` is `failed`.
+
 Loom refuses a folder that holds another checkout, a link at the folder's own
 path, and a folder that Git records at another path. A parent folder moved or
 replaced by a junction can lead to another worktree; Loom leaves that one alone.

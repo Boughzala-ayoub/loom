@@ -142,6 +142,7 @@ try {
         if (cmd === 'worktree_remove' && qa.failRemove) throw new Error('Test: the worktree folder is in use');
         if (cmd === 'worktree_remove' && qa.failRemoveOnce === args.dir) { qa.failRemoveOnce = null; throw new Error('Test: a file in it is in use'); }
         if (cmd === 'worktree_remove') return `C:\\Users\\test\\AppData\\Local\\loom\\trash\\1-${args.dir.split('\\').pop()}`;
+        if (cmd === 'branch_delete' && qa.failBranch) throw new Error('Test: the branch is checked out elsewhere');
         if (cmd === 'git_run') {
           const a = args.args;
           // qa.holdGit = [verb, sub?]: that call waits in qa.heldGit for the test to answer it. qa.failGit: that verb fails.
@@ -152,7 +153,6 @@ try {
           if (a[0] === 'worktree' && a[1] === 'add' && a[2] === '-b') (qa.branchAt ??= {})[a[4]] = a[3];
           if (a[0] === 'status' && qa.statusFor?.[args.dir] !== undefined) return qa.statusFor[args.dir]; // one worktree's own status
           if (a[0] === 'status') return (a.includes('--branch') ? '## main...origin/main [ahead 2]\0' : '') + (qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0') + (a.includes('--ignored=matching') ? qa.ignored ?? '' : '');
-          if (a[0] === 'update-ref' && a.includes('--no-deref') && qa.failBranch) throw new Error('Test: the branch is checked out elsewhere');
           if (a.includes('--numstat')) return '18\t4\tsrc/main.ts\n7\t2\tsrc/styles.css\n';
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
           if ((a[0] === 'diff' || a[0] === 'show') && qa.longDiff) return 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1,601 @@\n context line one\n' + '+added line\n'.repeat(600);
@@ -1047,6 +1047,7 @@ try {
         const killed = ids => page.evaluate(ids => window.qa.calls.some(c => c.cmd === 'pty_kill' && ids.includes(c.args.id)), ids);
         const gitCalls = (verb, dir) => page.evaluate(([verb, dir]) => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args.slice(0, 2).join(' ') === verb && (!dir || c.args.args.includes(dir))).length, [verb, dir]);
         const removals = dir => page.evaluate(dir => window.qa.calls.filter(c => c.cmd === 'worktree_remove' && (!dir || c.args.dir === dir)).length, dir);
+        const deletes = branch => page.evaluate(branch => window.qa.calls.filter(c => c.cmd === 'branch_delete' && (!branch || c.args.branch === branch)).length, branch);
         const a = await worktree('cleanup-a');
         const paneIds = a.panes.map(p => p.id);
         await statusOf(a.dir, '!! .env\0!! node_modules/\0');
@@ -1074,7 +1075,7 @@ try {
         assert.equal(morePanes.ok, false, JSON.stringify(morePanes));
         assert.match(morePanes.error, /changed since plan/);
         assert.ok(await open(a.id) && !(await killed([...paneIds, extra.data.id])), 'Still open, every pane still running');
-        assert.equal(await removals() + await gitCalls('update-ref --no-deref'), 0);
+        assert.equal(await removals() + await deletes(), 0);
         // With the plan as it now is and the ignored files allowed, it goes, step by step.
         const plan2 = (await cli('close-plan', a.id, '--delete', 'branch')).data;
         const done = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan2.rev, '--discard', 'ignored');
@@ -1090,7 +1091,7 @@ try {
         assert.equal(stuck.ok, false, JSON.stringify(stuck));
         assert.deepEqual([stuck.closed, stuck.steps], [b.id, { panes: 'closed', worktree: 'failed', branch: 'kept' }], JSON.stringify(stuck));
         assert.match(stuck.error, /stopped its panes, but couldn't move its worktree folder to Loom's trash, so its branch was kept/);
-        assert.equal(await gitCalls('update-ref --no-deref', `refs/heads/${b.branch}`), 0, 'No branch deleted after the folder failed');
+        assert.equal(await deletes(b.branch), 0, 'No branch deleted after the folder failed');
         // The folder goes and the branch won't: said apart. --force still deletes without looking.
         const c = await worktree('cleanup-c');
         await page.evaluate(() => { window.qa.failRemove = false; window.qa.failBranch = true; });

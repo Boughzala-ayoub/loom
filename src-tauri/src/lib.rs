@@ -1907,8 +1907,8 @@ mod commands {
         blocking(move || stash::drop(&dir, &sha)).await
     }
     #[tauri::command]
-    pub async fn branch_in_progress(repo: String, branch: String) -> Result<(), String> {
-        blocking(move || deletion::branch_in_progress(&repo, &branch)).await
+    pub async fn branch_delete(repo: String, branch: String, tip: String) -> Result<(), String> {
+        blocking(move || deletion::delete_branch(&repo, &branch, &tip)).await
     }
     #[tauri::command]
     pub async fn git_midway(dir: String) -> String {
@@ -2198,7 +2198,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
-            commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::stash_drop, commands::branch_in_progress, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
+            commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::stash_drop, commands::branch_delete, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, relaunch_cancel, exe_updated,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,

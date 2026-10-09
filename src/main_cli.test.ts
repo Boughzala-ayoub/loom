@@ -45,6 +45,14 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+/** deletion.rs delete_branch (the branch_delete command) with real Git: refused while a worktree has the
+ * branch, and only the approved tip goes. Its real-Git race tests are in deletion.rs. */
+function branchDelete(repo: string, { branch, tip }: { branch: string; tip: string }) {
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  if (git("worktree", "list", "--porcelain").split("\n").includes(`branch refs/heads/${branch}`)) throw `Cannot delete branch '${branch}': checked out at another worktree.`;
+  git("update-ref", "--no-deref", "-d", `refs/heads/${branch}`, tip);
+}
+
 if (check(219)) {
   const base = mkdtempSync(join(tmpdir(), "loom-delete-tip-"));
   const real = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -76,11 +84,14 @@ if (check(219)) {
       const threads = [th];
       const c = fixture({ ...gitparse, threads, cliThread: () => th, toast() {}, renderSide() {}, show() {}, save() {},
         confirm: async () => { if (when === "dialog") move(); return true; },
-        invoke: async (cmd: string, args: any) => cmd === "worktree_fingerprint" ? "unchanged detached files and index" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "fixture trash") : "",
-        git: async (dir: string, ...args: string[]) => {
-          if (when === "delete" && args[0] === "update-ref" && args.includes("refs/heads/approved")) move();
-          return real(dir, ...args);
-        } });
+        invoke: async (cmd: string, args: any) => {
+          if (cmd === "worktree_fingerprint") return "unchanged detached files and index";
+          if (cmd === "worktree_remove") return (real(repo, "worktree", "remove", "--force", args.dir), "fixture trash");
+          if (cmd !== "branch_delete") return "";
+          if (when === "delete") move();
+          branchDelete(repo, args);
+        },
+        git: async (dir: string, ...args: string[]) => real(dir, ...args) });
       if (when === "cli") {
         const plan = await c["close-plan"].run({ _: ["t"], delete: "branch" });
         move();
@@ -1076,7 +1087,7 @@ if (check(215)) {
     fixture({ ...gitparse, threads, toast() {}, renderSide() {}, show() {}, save() {},
       confirm: async (what: string) => (asked.push(what), answering(), true),
       // The native fingerprint of the files and index: the same on either branch.
-      invoke: async (cmd: string, args: any) => (cmd === "worktree_fingerprint" ? "same contents" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "trash") : ""),
+      invoke: async (cmd: string, args: any) => (cmd === "worktree_fingerprint" ? "same contents" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "trash") : cmd === "branch_delete" ? branchDelete(repo, args) : ""),
       git: async (dir: string, ...args: string[]) => real(dir, ...args) });
     const remove = lastFixture.removeThread;
     const branches = () => real(repo, "branch", "--format=%(refname:short)").split("\n").filter(Boolean).sort();
@@ -1115,7 +1126,7 @@ if (check(216)) {
     const th = { id: "t", name: "t", dir: wt, repo, branch: "approved", isWorktree: true, panes: [], dispose: async () => {} };
     fixture({ ...gitparse, threads: [th], cliThread: () => th, toast() {}, renderSide() {}, show() {}, save() {},
       sha256: async (text: string) => { const h = await cli.sha256(text); hashed(); return h; },
-      invoke: async (cmd: string, args: any) => (cmd === "worktree_fingerprint" ? "same contents" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "trash") : ""),
+      invoke: async (cmd: string, args: any) => (cmd === "worktree_fingerprint" ? "same contents" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "trash") : cmd === "branch_delete" ? branchDelete(repo, args) : ""),
       git: async (dir: string, ...args: string[]) => real(dir, ...args) });
     const f = lastFixture;
     return { repo, wt, th, f, close: (a: object) => f.CLI["close-thread"].run({ _: ["t"], yes: true, delete: "branch", ...a }),

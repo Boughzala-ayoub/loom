@@ -83,32 +83,106 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
     Ok(format!("{:x}", hash.finalize()))
 }
 
-/// A detached worktree can still own a branch through rebase or bisect.
-/// Git's worktreepath ref atom omits these, but branch -D refuses them.
-pub fn branch_in_progress(repo: &str, branch: &str) -> Result<(), String> {
-    let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
-    let common = Path::new(repo).join(common.trim());
-    let mut dirs = vec![common.clone()];
+/// Why a worktree of the repository at `common` holds `branch`, as `git branch -D`
+/// would refuse it: checked out there, or rebased or bisected there while its HEAD
+/// is detached (Git's worktreepath ref atom misses those). None: none holds it.
+fn held_by(common: &Path, branch: &str) -> Result<Option<String>, String> {
+    let mut dirs = vec![common.to_path_buf()];
     match fs::read_dir(common.join("worktrees")) {
         Ok(entries) => for entry in entries { dirs.push(entry.map_err(|e| e.to_string())?.path()); },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
         Err(e) => return Err(e.to_string()),
     }
     let reference = format!("refs/heads/{branch}");
+    let read = |path: &Path| match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    };
     for dir in dirs {
+        // Only the line ending goes: a branch name may end in a space Unicode has.
+        let head = read(&dir.join("HEAD"))?.unwrap_or_default();
+        if head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n')).unwrap_or(&head) == format!("ref: {reference}") {
+            // A linked worktree's gitdir names its .git file; the main one is the repository's.
+            let at = read(&dir.join("gitdir"))?.map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
+                .unwrap_or_else(|| dir.parent().unwrap_or(&dir).display().to_string());
+            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{at}'.")));
+        }
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START", "rebase-merge/update-refs"] {
-            let path = dir.join(marker);
-            let text = match fs::read_to_string(&path) {
-                Ok(text) => text,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(format!("{}: {e}", path.display())),
-            };
+            let Some(text) = read(&dir.join(marker))? else { continue };
             if text.lines().any(|line| line == reference || (marker == "BISECT_START" && line == branch)) {
-                return Err(format!("Cannot delete branch '{branch}': used by worktree operation at {}.", dir.display()));
+                return Ok(Some(format!("Cannot delete branch '{branch}': used by worktree operation at {}.", dir.display())));
             }
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Deletes `branch` of `repo` only while its tip is still `tip` and no worktree
+/// holds it (held_by). Git takes no lock to check a branch out, so neither this
+/// nor `git branch -D` can make the look and the delete one step. This comes
+/// closest: one update-ref transaction locks the ref and checks the tip, the
+/// worktrees are read with that lock held, and the commit follows at once. A
+/// checkout that still lands in between is seen right after, and the same
+/// process puts the branch back at `tip`, so that worktree's HEAD names it again.
+pub fn delete_branch(repo: &str, branch: &str, tip: &str) -> Result<(), String> {
+    delete_branch_with(repo, branch, tip, || {})
+}
+
+/// `between` runs after the worktrees were read and before the commit: a test's
+/// checkout lands in the gap a real one could.
+fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce()) -> Result<(), String> {
+    use std::io::BufRead;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
+    let common = Path::new(repo).join(common.trim());
+    let reference = format!("refs/heads/{branch}");
+    let mut child = Command::new("git").arg("-C").arg(repo).args(["update-ref", "--no-deref", "--stdin", "-z"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn().map_err(|e| format!("git: {e}"))?;
+    let mut input = child.stdin.take().expect("piped");
+    let mut output = std::io::BufReader::new(child.stdout.take().expect("piped"));
+    // Each verb answers "<verb>: ok"; a refused one ends git, and its stderr says why.
+    let mut say = |words: &[&str]| -> Result<(), ()> {
+        let verb = words.iter().rev().find(|w| ["start", "prepare", "commit", "abort"].contains(w)).copied();
+        input.write_all(words.iter().map(|w| format!("{w}\0")).collect::<String>().as_bytes()).and_then(|_| input.flush()).map_err(drop)?;
+        let Some(verb) = verb else { return Ok(()) };
+        let mut line = String::new();
+        output.read_line(&mut line).map_err(drop)?;
+        (line.trim_end() == format!("{verb}: ok")).then_some(()).ok_or(())
+    };
+    let deleted = (|| {
+        say(&["start"]).and_then(|_| say(&[&format!("delete {reference}"), tip, "prepare"])).map_err(|_| None)?;
+        if let Some(why) = held_by(&common, branch).map_err(Some)? {
+            let _ = say(&["abort"]);
+            return Err(Some(why));
+        }
+        between();
+        say(&["commit"]).map_err(|_| None)?;
+        match held_by(&common, branch) {
+            Ok(None) => Ok(()),
+            Ok(Some(why)) => {
+                let back = say(&["start"]).and_then(|_| say(&[&format!("create {reference}"), tip, "prepare"])).and_then(|_| say(&["commit"]));
+                Err(Some(match back {
+                    Ok(()) => format!("{why} It was checked out there while Loom deleted it, so Loom put it back at {tip}."),
+                    Err(()) => format!("{why} It was checked out there while Loom deleted it, and Loom couldn't put it back at {tip}."),
+                }))
+            }
+            Err(e) => Err(Some(e)),
+        }
+    })();
+    drop(say);
+    drop(input);
+    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    match deleted {
+        Ok(()) => Ok(()),
+        Err(Some(why)) => Err(if stderr.is_empty() { why } else { format!("{why} {stderr}") }),
+        Err(None) => Err(if stderr.is_empty() { format!("git update-ref exited {:?}", out.status.code()) } else { stderr }),
+    }
 }
 
 /// How long a deleted worktree waits in Loom's trash before [`purge`] erases it.
@@ -539,17 +613,68 @@ mod tests {
         let rebasing = Command::new("git").arg("-C").arg(&wt).args(["rebase", "--update-refs", "main"]).output().unwrap();
         assert!(!rebasing.status.success());
         assert!(git(&repo, &["for-each-ref", "--format=%(worktreepath)", "refs/heads/topic"]).trim().is_empty());
+        let tip = |branch: &str| git(&repo, &["rev-parse", &format!("refs/heads/{branch}")]).trim().to_owned();
         for branch in ["topic", "topic-mid"] {
-            assert!(branch_in_progress(repo.to_str().unwrap(), branch).unwrap_err().contains("used by worktree"));
+            assert!(delete_branch(repo.to_str().unwrap(), branch, &tip(branch)).unwrap_err().contains("used by worktree"));
             let refused = Command::new("git").arg("-C").arg(&repo).args(["branch", "-D", branch]).output().unwrap();
             assert!(!refused.status.success());
         }
-        branch_in_progress(repo.to_str().unwrap(), "unrelated").unwrap();
         git(&wt, &["rebase", "--abort"]);
         git(&wt, &["bisect", "start", "topic", base.trim()]);
-        assert!(branch_in_progress(repo.to_str().unwrap(), "topic").unwrap_err().contains("used by worktree"));
+        assert!(delete_branch(repo.to_str().unwrap(), "topic", &tip("topic")).unwrap_err().contains("used by worktree"));
         git(&wt, &["bisect", "reset"]);
-        branch_in_progress(repo.to_str().unwrap(), "topic").unwrap();
+        // Back on topic: checked out, as branch -D says too.
+        assert!(delete_branch(repo.to_str().unwrap(), "topic", &tip("topic")).unwrap_err().contains("checked out at"));
+        git(&wt, &["switch", "-q", "--detach"]);
+        let gone = tip("topic");
+        delete_branch(repo.to_str().unwrap(), "topic", &gone).unwrap();
+        assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_branch_checked_out_while_it_is_deleted_comes_back_at_its_tip() {
+        let dir = std::env::temp_dir().join(format!("loom-branch-race-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (repo, first) = (dir.join("repo"), dir.join("first"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("base.txt"), "base").unwrap();
+        git(&repo, &["add", "-A"]); git(&repo, &["commit", "-qm", "base"]);
+        // The thread's worktree, its own commit on topic, then the worktree gone as Loom's close leaves it.
+        git(&repo, &["worktree", "add", "-q", "-b", "topic", first.to_str().unwrap()]);
+        fs::write(first.join("only.txt"), "topic only").unwrap();
+        git(&first, &["add", "-A"]); git(&first, &["commit", "-qm", "topic-only"]);
+        let approved = git(&first, &["rev-parse", "HEAD"]).trim().to_owned();
+        git(&repo, &["worktree", "remove", "--force", first.to_str().unwrap()]);
+        let (r, at) = (repo.to_str().unwrap(), |name: &str| dir.join(name).to_str().unwrap().to_owned());
+        let tip = || Command::new("git").arg("-C").arg(&repo).args(["rev-parse", "-q", "--verify", "refs/heads/topic"]).output().unwrap();
+        // Checked out elsewhere before the delete: refused, as branch -D refuses.
+        git(&repo, &["worktree", "add", "-q", &at("early"), "topic"]);
+        assert!(delete_branch(r, "topic", &approved).unwrap_err().contains("checked out at"));
+        git(&repo, &["worktree", "remove", &at("early")]);
+        // A tip other than the approved one: refused, the new tip kept.
+        git(&repo, &["branch", "-f", "topic", "main"]);
+        assert!(delete_branch(r, "topic", &approved).is_err());
+        assert_ne!(String::from_utf8_lossy(&tip().stdout).trim(), approved);
+        git(&repo, &["branch", "-f", "topic", &approved]);
+        // Another agent switches a worktree to the unchanged branch after the worktrees were read.
+        // switch takes no lock, so it lands: the branch comes back at its tip, that worktree's HEAD
+        // resolves, and the delete reports it didn't happen.
+        let late = at("late");
+        git(&repo, &["worktree", "add", "-q", "--detach", &late, "main"]);
+        let error = delete_branch_with(r, "topic", &approved, || { git(Path::new(&late), &["switch", "-q", "topic"]); }).unwrap_err();
+        assert!(error.contains("checked out at") && error.contains("put it back"), "{error}");
+        assert_eq!(String::from_utf8_lossy(&tip().stdout).trim(), approved);
+        assert_eq!(git(Path::new(&late), &["symbolic-ref", "HEAD"]).trim(), "refs/heads/topic");
+        assert_eq!(git(Path::new(&late), &["rev-parse", "--verify", "HEAD"]).trim(), approved);
+        // A new worktree on it in the same gap: worktree add locks the branch to write its HEAD, which the
+        // transaction holds, so Git refuses it, and the branch goes at its approved tip.
+        git(Path::new(&late), &["switch", "-q", "--detach"]);
+        let added = std::cell::Cell::new(None);
+        delete_branch_with(r, "topic", &approved, || added.set(Some(Command::new("git").arg("-C").arg(&repo).args(["worktree", "add", "-q", &at("added"), "topic"]).output().unwrap()))).unwrap();
+        let added = added.take().unwrap();
+        assert!(!added.status.success() && String::from_utf8_lossy(&added.stderr).contains("topic.lock"), "{}", String::from_utf8_lossy(&added.stderr));
+        assert!(!tip().status.success(), "topic stayed");
         fs::remove_dir_all(dir).unwrap();
     }
 
