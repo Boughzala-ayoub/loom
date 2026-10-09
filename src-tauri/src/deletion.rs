@@ -85,7 +85,10 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
 
 /// Why a worktree of the repository at `common` holds `branch`, as `git branch -D`
 /// would refuse it: checked out there, or rebased or bisected there while its HEAD
-/// is detached (Git's worktreepath ref atom misses those). None: none holds it.
+/// is detached (Git's worktreepath ref atom misses those). Or why it may be about
+/// to: a checkout holds the worktree's index.lock while it writes the files, then
+/// HEAD.lock to name the branch, so a worktree with either lock might be checking
+/// `branch` out, and Loom can't tell which branch. None: none holds it.
 fn held_by(common: &Path, branch: &str) -> Result<Option<String>, String> {
     let mut dirs = vec![common.to_path_buf()];
     match fs::read_dir(common.join("worktrees")) {
@@ -100,13 +103,20 @@ fn held_by(common: &Path, branch: &str) -> Result<Option<String>, String> {
         Err(e) => Err(format!("{}: {e}", path.display())),
     };
     for dir in dirs {
+        // A linked worktree's gitdir names its .git file; the main one is the repository's.
+        let at = || -> Result<String, String> {
+            Ok(read(&dir.join("gitdir"))?.map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
+                .unwrap_or_else(|| dir.parent().unwrap_or(&dir).display().to_string()))
+        };
         // Only the line ending goes: a branch name may end in a space Unicode has.
         let head = read(&dir.join("HEAD"))?.unwrap_or_default();
         if head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n')).unwrap_or(&head) == format!("ref: {reference}") {
-            // A linked worktree's gitdir names its .git file; the main one is the repository's.
-            let at = read(&dir.join("gitdir"))?.map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
-                .unwrap_or_else(|| dir.parent().unwrap_or(&dir).display().to_string());
-            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{at}'.")));
+            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{}'.", at()?)));
+        }
+        for lock in ["index.lock", "HEAD.lock"] {
+            if dir.join(lock).try_exists().map_err(|e| e.to_string())? {
+                return Ok(Some(format!("Cannot delete branch '{branch}' now: Git is busy in the worktree at '{}' ({lock}) and may be checking it out. Try again once it finishes.", at()?)));
+            }
         }
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START", "rebase-merge/update-refs"] {
             let Some(text) = read(&dir.join(marker))? else { continue };
@@ -167,8 +177,8 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
             Ok(Some(why)) => {
                 let back = say(&["start"]).and_then(|_| say(&[&format!("create {reference}"), tip, "prepare"])).and_then(|_| say(&["commit"]));
                 Err(Some(match back {
-                    Ok(()) => format!("{why} It was checked out there while Loom deleted it, so Loom put it back at {tip}."),
-                    Err(()) => format!("{why} It was checked out there while Loom deleted it, and Loom couldn't put it back at {tip}."),
+                    Ok(()) => format!("{why} That began while Loom deleted it, so Loom put it back at {tip}."),
+                    Err(()) => format!("{why} That began while Loom deleted it, and Loom couldn't put it back at {tip}."),
                 }))
             }
             Err(e) => Err(Some(e)),
@@ -628,6 +638,66 @@ mod tests {
         git(&wt, &["switch", "-q", "--detach"]);
         let gone = tip("topic");
         delete_branch(repo.to_str().unwrap(), "topic", &gone).unwrap();
+        assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Writes its file when dropped, so a checkout a failed test left paused still finishes.
+    struct Release(PathBuf);
+    impl Drop for Release {
+        fn drop(&mut self) { let _ = fs::write(&self.0, "go"); }
+    }
+
+    #[test]
+    fn a_checkout_still_writing_files_keeps_the_branch() {
+        let dir = std::env::temp_dir().join(format!("loom-branch-slow-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (repo, other) = (dir.join("repo"), dir.join("other"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join(".gitattributes"), "slow.txt filter=slow\n").unwrap();
+        fs::write(repo.join("slow.txt"), "main\n").unwrap();
+        git(&repo, &["add", "-A"]); git(&repo, &["commit", "-qm", "main"]);
+        git(&repo, &["switch", "-qc", "topic"]);
+        fs::write(repo.join("slow.txt"), "topic\n").unwrap();
+        git(&repo, &["commit", "-qam", "topic"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["worktree", "add", "-q", "--detach", other.to_str().unwrap(), "main"]);
+        git(&repo, &["config", "filter.slow.clean", "cat"]);
+        git(&repo, &["config", "filter.slow.required", "true"]);
+        let r = repo.to_str().unwrap();
+        // `git switch topic` in the other worktree, paused in a smudge filter (as LFS or a big file
+        // keeps one) with its files half written and HEAD still detached. Returns once it is.
+        let slow_switch = |run: &str| {
+            let (started, release) = (dir.join(format!("{run}-started")), dir.join(format!("{run}-release")));
+            let unix = |p: &Path| p.to_str().unwrap().replace('\\', "/");
+            git(&repo, &["config", "filter.slow.smudge", &format!("sh -c 'touch \"{}\"; while [ ! -f \"{}\" ]; do sleep 0.05; done; cat'", unix(&started), unix(&release))]);
+            let child = Command::new("git").arg("-C").arg(&other).args(["switch", "-q", "topic"]).spawn().unwrap();
+            let release = Release(release);
+            for _ in 0..400 { if started.exists() { break; } std::thread::sleep(Duration::from_millis(50)); }
+            assert!(started.exists(), "the checkout never reached its filter");
+            assert!(Command::new("git").arg("-C").arg(&other).args(["symbolic-ref", "-q", "HEAD"]).output().unwrap().stdout.is_empty(), "HEAD changed before the files were written");
+            (child, release)
+        };
+        let finished = |(mut child, release): (std::process::Child, Release)| {
+            drop(release);
+            assert!(child.wait().unwrap().success(), "the checkout failed");
+            assert_eq!(git(&other, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/topic");
+            assert_eq!(git(&other, &["rev-parse", "--verify", "HEAD"]).trim(), tip, "HEAD names a branch that's gone");
+            git(&other, &["switch", "-q", "--detach", "main"]);
+        };
+        // Already writing files when the delete looks: kept, and the checkout ends on a branch that's there.
+        let running = slow_switch("before");
+        let error = delete_branch(r, "topic", &tip).unwrap_err();
+        assert!(error.contains("busy") && error.contains("index.lock"), "{error}");
+        finished(running);
+        // It starts between the look and the commit: the look after the commit sees it, and the branch comes back.
+        let mut running = None;
+        let error = delete_branch_with(r, "topic", &tip, || running = Some(slow_switch("between"))).unwrap_err();
+        assert!(error.contains("busy") && error.contains("put it back"), "{error}");
+        finished(running.unwrap());
+        // Nothing running: deleted.
+        delete_branch(r, "topic", &tip).unwrap();
         assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
         fs::remove_dir_all(dir).unwrap();
     }

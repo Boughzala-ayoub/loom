@@ -277,11 +277,15 @@ before you answered.
 
 The branch goes last, only at the commit the plan or dialog approved, and never
 while a worktree has it checked out or is rebasing or bisecting it, which `git
-branch -D` refuses too. Git takes no lock to check a branch out, so Loom reads
-the worktrees with the branch's ref locked and deletes it right after. `git
-worktree add` on that branch fails while the lock is held. A `git switch` that
-lands in between anyway is seen at once: Loom puts the branch back at the same
-commit, and `branch` is `failed`.
+branch -D` refuses too. Nor while Git is busy in any worktree, its `index.lock`
+or `HEAD.lock` there: a checkout holds the first while it writes the files and
+the second while it names the branch, and Loom can't tell which branch it's
+checking out. Loom then keeps the branch, `branch` is `failed`, and deleting it
+again once Git is done works. Git takes no lock on the branch itself to check it out,
+so Loom reads the worktrees with the branch's ref locked and deletes it right
+after. `git worktree add` on that branch fails while the lock is held. A `git
+switch` that starts in between anyway is seen at once: Loom puts the branch
+back at the same commit, and `branch` is `failed`.
 
 Loom refuses a folder that holds another checkout, a link at the folder's own
 path, and a folder that Git records at another path. A parent folder moved or
