@@ -277,15 +277,25 @@ before you answered.
 
 The branch goes last, only at the commit the plan or dialog approved, and never
 while a worktree has it checked out or is rebasing or bisecting it, which `git
-branch -D` refuses too. Nor while Git is busy in any worktree, its `index.lock`
-or `HEAD.lock` there: a checkout holds the first while it writes the files and
-the second while it names the branch, and Loom can't tell which branch it's
-checking out. Loom then keeps the branch, `branch` is `failed`, and deleting it
-again once Git is done works. Git takes no lock on the branch itself to check it out,
-so Loom reads the worktrees with the branch's ref locked and deletes it right
-after. `git worktree add` on that branch fails while the lock is held. A `git
-switch` that starts in between anyway is seen at once: Loom puts the branch
-back at the same commit, and `branch` is `failed`.
+branch -D` refuses too. A checkout reads the branch first and names it in HEAD
+last, with stretches in between that hold no lock, so Loom waits on Git in the
+repository too. With the branch's ref locked, it gives any git.exe running in
+one of the repository's worktrees 3 seconds to finish. It then takes every
+worktree's `HEAD.lock`, which a checkout needs to name a branch, reads the
+worktrees again and deletes the branch. A git.exe there that started before the
+delete and still runs may have read the branch, so Loom puts it back at the same
+commit before any HEAD can name it. In each case Loom keeps the branch, `branch`
+is `failed`, and the message names the busy worktree: Git still running there,
+or its `index.lock` or `HEAD.lock`. Delete it again once Git is done.
+
+For those few milliseconds the `HEAD.lock` files are Loom's: a commit or switch
+in another worktree fails on `HEAD.lock` as Git says, and can be run again, and
+`git worktree add` on the branch fails on its lock. Loom finds git.exe processes
+by the folder they run in. Git working on the repository from another folder
+(`--git-dir`, `GIT_DIR`), Git that isn't git.exe (WSL's, tools built on
+libgit2) and a 32-bit git.exe go unseen. Any git.exe in a worktree counts, `git
+status` included, and so does one whose folder Loom can't read. A Loom killed in
+those milliseconds leaves its `HEAD.lock` files behind, and Git names them.
 
 Loom refuses a folder that holds another checkout, a link at the folder's own
 path, and a folder that Git records at another path. A parent folder moved or

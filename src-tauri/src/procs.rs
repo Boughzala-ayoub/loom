@@ -101,13 +101,18 @@ fn sample() -> (Times, Vec<Proc>) {
 /// (System, csrss) or another user's (svchost, Defender) has its numbers too.
 /// OpenProcess refuses about two in five of them to a Loom that isn't elevated.
 fn list() -> Vec<Proc> {
+    read_list().unwrap_or_default()
+}
+
+/// list, or None when Windows wouldn't give it.
+fn read_list() -> Option<Vec<Proc>> {
     // u64s, so each entry's 8-byte fields are aligned.
     let mut buf: Vec<u64> = Vec::new();
     for _ in 0..5 {
         let mut needed = 0u32;
         let status = unsafe { NtQuerySystemInformation(SystemProcessInformation, buf.as_mut_ptr().cast(), (buf.len() * 8) as u32, &mut needed) };
         if status.is_ok() && !buf.is_empty() {
-            return entries(&buf);
+            return Some(entries(&buf));
         }
         if status != STATUS_INFO_LENGTH_MISMATCH {
             break;
@@ -115,7 +120,68 @@ fn list() -> Vec<Proc> {
         // Room for the processes that start before the next try.
         buf = vec![0; needed as usize / 8 + 8192];
     }
-    Vec::new()
+    None
+}
+
+/// Each git.exe still running but `ours` and what it started, created before
+/// `before` (100 ns ticks since 1601): its pid and its current folder, None when
+/// Loom can't read it. One that has ended since the list was read isn't. None
+/// when Windows wouldn't list the processes.
+pub(crate) fn gits(ours: u32, before: u64) -> Option<Vec<(u32, Option<std::path::PathBuf>)>> {
+    let all = read_list()?;
+    let tree: HashMap<u32, (u32, u64)> = all.iter().map(|p| (p.pid, (p.parent, p.created))).collect();
+    let started_by_ours = |mut pid: u32| {
+        for _ in 0..64 {
+            if pid == ours { return true; }
+            match tree.get(&pid) {
+                Some(&(parent, created)) if tree.get(&parent).is_some_and(|&(_, older)| older < created) => pid = parent,
+                _ => return false,
+            }
+        }
+        false
+    };
+    Some(all.iter().filter(|p| p.name.eq_ignore_ascii_case("git.exe") && p.created < before && !started_by_ours(p.pid))
+        .filter_map(|p| current_dir(p.pid).map(|dir| (p.pid, dir))).collect())
+}
+
+/// Process `pid`'s current folder, from its process parameters (x64 layout):
+/// the PEB's ProcessParameters at 0x20, and their CurrentDirectory, a
+/// UNICODE_STRING, at 0x38. Some(None) when Loom may not read it, None when the
+/// process has ended (gone, or only its handles left).
+fn current_dir(pid: u32) -> Option<Option<std::path::PathBuf>> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
+    use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ};
+    unsafe {
+        let process = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, false, pid) {
+            Ok(process) => process,
+            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => return None,
+            Err(_) => return Some(None),
+        };
+        let mut code = 0u32;
+        if GetExitCodeProcess(process, &mut code).is_ok() && code != 259 { // STILL_ACTIVE
+            let _ = CloseHandle(process);
+            return None;
+        }
+        let read = |at: usize, buf: &mut [u8]| ReadProcessMemory(process, at as *const _, buf.as_mut_ptr().cast(), buf.len(), None).ok();
+        let dir = (|| {
+            // PROCESS_BASIC_INFORMATION, whose second field is the PEB's address.
+            let (mut basic, mut got) = ([0usize; 6], 0u32);
+            NtQueryInformationProcess(process, ProcessBasicInformation, basic.as_mut_ptr().cast(), std::mem::size_of_val(&basic) as u32, &mut got).ok().ok()?;
+            let mut word = [0u8; 8];
+            read(basic[1] + 0x20, &mut word)?;
+            let mut path = [0u8; 16];
+            read(usize::from_le_bytes(word) + 0x38, &mut path)?;
+            let mut units = vec![0u8; u16::from_le_bytes([path[0], path[1]]) as usize];
+            read(usize::from_le_bytes(path[8..16].try_into().ok()?), &mut units)?;
+            let wide: Vec<u16> = units.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            Some(std::path::PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+        })();
+        let _ = CloseHandle(process);
+        Some(dir)
+    }
 }
 
 /// Each process's parent and creation time, by pid. A parent pid that isn't

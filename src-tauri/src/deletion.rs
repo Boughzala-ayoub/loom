@@ -83,19 +83,13 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
     Ok(format!("{:x}", hash.finalize()))
 }
 
-/// Why a worktree of the repository at `common` holds `branch`, as `git branch -D`
-/// would refuse it: checked out there, or rebased or bisected there while its HEAD
-/// is detached (Git's worktreepath ref atom misses those). Or why it may be about
-/// to: a checkout holds the worktree's index.lock while it writes the files, then
-/// HEAD.lock to name the branch, so a worktree with either lock might be checking
-/// `branch` out, and Loom can't tell which branch. None: none holds it.
-fn held_by(common: &Path, branch: &str) -> Result<Option<String>, String> {
-    let mut dirs = vec![common.to_path_buf()];
-    match fs::read_dir(common.join("worktrees")) {
-        Ok(entries) => for entry in entries { dirs.push(entry.map_err(|e| e.to_string())?.path()); },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
-        Err(e) => return Err(e.to_string()),
-    }
+/// Why a worktree of the repository whose administration folders are `dirs`
+/// (admin_dirs) holds `branch`, as `git branch -D` would refuse it: checked out
+/// there, or rebased or bisected there while its HEAD is detached (Git's
+/// worktreepath ref atom misses those). Or why it may be about to: a checkout
+/// holds the worktree's index.lock while it writes the files, and Loom can't
+/// tell which branch. None: none holds it.
+fn held_by(dirs: &[PathBuf], branch: &str) -> Result<Option<String>, String> {
     let reference = format!("refs/heads/{branch}");
     let read = |path: &Path| match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
@@ -103,20 +97,13 @@ fn held_by(common: &Path, branch: &str) -> Result<Option<String>, String> {
         Err(e) => Err(format!("{}: {e}", path.display())),
     };
     for dir in dirs {
-        // A linked worktree's gitdir names its .git file; the main one is the repository's.
-        let at = || -> Result<String, String> {
-            Ok(read(&dir.join("gitdir"))?.map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
-                .unwrap_or_else(|| dir.parent().unwrap_or(&dir).display().to_string()))
-        };
         // Only the line ending goes: a branch name may end in a space Unicode has.
         let head = read(&dir.join("HEAD"))?.unwrap_or_default();
         if head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n')).unwrap_or(&head) == format!("ref: {reference}") {
-            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{}'.", at()?)));
+            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{}'.", worktree_of(dir))));
         }
-        for lock in ["index.lock", "HEAD.lock"] {
-            if dir.join(lock).try_exists().map_err(|e| e.to_string())? {
-                return Ok(Some(format!("Cannot delete branch '{branch}' now: Git is busy in the worktree at '{}' ({lock}) and may be checking it out. Try again once it finishes.", at()?)));
-            }
+        if dir.join("index.lock").try_exists().map_err(|e| e.to_string())? {
+            return Ok(Some(busy(branch, &worktree_of(dir), "index.lock")));
         }
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START", "rebase-merge/update-refs"] {
             let Some(text) = read(&dir.join(marker))? else { continue };
@@ -128,25 +115,103 @@ fn held_by(common: &Path, branch: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// The administration folders of the repository at `common`: its own, then each linked worktree's.
+fn admin_dirs(common: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut dirs = vec![common.to_path_buf()];
+    match fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => for entry in entries { dirs.push(entry.map_err(|e| e.to_string())?.path()); },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e.to_string()),
+    }
+    Ok(dirs)
+}
+
+/// The worktree folder of administration folder `dir`: a linked one's gitdir
+/// names its .git file, and the main one is the repository's.
+fn worktree_of(dir: &Path) -> String {
+    fs::read_to_string(dir.join("gitdir")).map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
+        .unwrap_or_else(|_| dir.parent().unwrap_or(dir).display().to_string())
+}
+
+fn busy(branch: &str, at: &str, what: &str) -> String {
+    format!("Cannot delete branch '{branch}' now: Git is busy in the worktree at '{at}' ({what}) and may be checking it out. Try again once it finishes.")
+}
+
+/// Loom's HEAD.lock in each worktree. Git takes it to change that worktree's HEAD,
+/// a checkout naming its branch included, so none can while these are held, and
+/// one that tries fails with Git's own "HEAD.lock: File exists". Dropped, they go.
+struct HeadLocks(Vec<PathBuf>);
+impl Drop for HeadLocks {
+    fn drop(&mut self) {
+        for lock in &self.0 { let _ = fs::remove_file(lock); }
+    }
+}
+
+/// All of them, or none: one there already is Git's own, busy in that worktree.
+fn lock_heads(dirs: &[PathBuf], branch: &str) -> Result<HeadLocks, String> {
+    let mut held = HeadLocks(Vec::new());
+    for dir in dirs {
+        let lock = dir.join("HEAD.lock");
+        match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(_) => held.0.push(lock),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(busy(branch, &worktree_of(dir), "HEAD.lock")),
+            Err(e) => return Err(format!("{}: {e}", lock.display())),
+        }
+    }
+    Ok(held)
+}
+
+/// A git.exe running in one of the worktrees in `dirs` (or the repository's own
+/// folder), started before `before` (100 ns ticks since 1601), other than `ours`
+/// and what it started: it may have read the branch already and still be on its
+/// way to naming it in that worktree's HEAD. A checkout holds no lock between
+/// writing the index and HEAD (Git's post-index-change hook runs there). One whose
+/// folder Loom can't read counts too, as does a process list Loom can't read.
+fn git_running(dirs: &[PathBuf], ours: u32, before: u64, branch: &str) -> Option<String> {
+    let key = |path: &str| format!("{}\\", path.replace('/', "\\").trim_end_matches('\\').to_lowercase());
+    let folders: Vec<(String, String)> = dirs.iter().map(|d| worktree_of(d)).chain(dirs.first().map(|c| c.display().to_string()))
+        .map(|at| (key(&at), at)).collect();
+    let Some(gits) = crate::procs::gits(ours, before) else {
+        return Some(format!("Cannot delete branch '{branch}' now: Loom couldn't list the running Git processes, so it can't tell whether one is checking it out. Try again."));
+    };
+    gits.into_iter().find_map(|(pid, cwd)| match cwd {
+        None => Some(format!("Cannot delete branch '{branch}' now: git.exe {pid} is running in a folder Loom can't read, and may be checking it out. Try again once it finishes.")),
+        Some(cwd) => {
+            let cwd = key(&cwd.to_string_lossy());
+            folders.iter().find(|(folder, _)| cwd.starts_with(folder.as_str())).map(|(_, at)| busy(branch, at, &format!("git.exe {pid}")))
+        }
+    })
+}
+
+/// Now, in the 100 ns ticks since 1601 Windows times processes in.
+fn now_ticks() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| (d.as_nanos() / 100) as u64) + 116_444_736_000_000_000
+}
+
 /// Deletes `branch` of `repo` only while its tip is still `tip` and no worktree
-/// holds it (held_by). Git takes no lock to check a branch out, so neither this
-/// nor `git branch -D` can make the look and the delete one step. This comes
-/// closest: one update-ref transaction locks the ref and checks the tip, the
-/// worktrees are read with that lock held, and the commit follows at once. A
-/// checkout that still lands in between is seen right after, and the same
-/// process puts the branch back at `tip`, so that worktree's HEAD names it again.
+/// holds it (held_by), nor may be about to. Git takes no lock to check a branch
+/// out until it names it in HEAD, so Loom coordinates through the locks it does
+/// take, and through the Git processes still running:
+/// 1. One update-ref transaction locks the branch's ref and checks the tip.
+/// 2. Git running in the repository's worktrees gets 3 s to finish.
+/// 3. Loom takes every worktree's HEAD.lock: from here no HEAD can change.
+/// 4. The worktrees are read again, and the delete commits.
+/// 5. A git.exe still running there that started before the commit may have
+///    read the branch: the same process puts it back at `tip`, still before any
+///    HEAD can name it, and Loom says it kept the branch.
 pub fn delete_branch(repo: &str, branch: &str, tip: &str) -> Result<(), String> {
     delete_branch_with(repo, branch, tip, || {})
 }
 
-/// `between` runs after the worktrees were read and before the commit: a test's
-/// checkout lands in the gap a real one could.
+/// `between` runs after the worktrees were read and before the commit, with
+/// every HEAD.lock held: a test's checkout lands in the gap a real one could.
 fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce()) -> Result<(), String> {
     use std::io::{BufRead, Read};
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
     let common = Path::new(repo).join(common.trim());
+    let dirs = admin_dirs(&common)?;
     let reference = format!("refs/heads/{branch}");
     let mut child = Command::new("git").arg("-C").arg(repo).args(["update-ref", "--no-deref", "--stdin", "-z"])
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -177,25 +242,40 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
         output.read_line(&mut line).map_err(drop)?;
         (line.trim_end() == format!("{verb}: ok")).then_some(()).ok_or(())
     };
+    let ours = child.id();
     let deleted = (|| {
         say(&["start"]).and_then(|_| say(&[&format!("delete {reference}"), tip, "prepare"])).map_err(|_| None)?;
-        if let Some(why) = held_by(&common, branch).map_err(Some)? {
+        if let Some(why) = held_by(&dirs, branch).map_err(Some)? {
             let _ = say(&["abort"]);
+            return Err(Some(why));
+        }
+        // Only the branch is locked meanwhile: the other worktrees work on.
+        let waited = Instant::now() + Duration::from_secs(3);
+        while let Some(why) = git_running(&dirs, ours, u64::MAX, branch) {
+            if Instant::now() >= waited {
+                let _ = say(&["abort"]);
+                return Err(Some(why));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // An abort on an early return is git reaching the end of its input.
+        let _heads = lock_heads(&dirs, branch).map_err(Some)?;
+        if let Some(why) = held_by(&dirs, branch).map_err(Some)? {
             return Err(Some(why));
         }
         between();
         say(&["commit"]).map_err(|_| None)?;
-        match held_by(&common, branch) {
-            Ok(None) => Ok(()),
-            Ok(Some(why)) => {
-                let back = say(&["start"]).and_then(|_| say(&[&format!("create {reference}"), tip, "prepare"])).and_then(|_| say(&["commit"]));
-                Err(Some(match back {
-                    Ok(()) => format!("{why} That began while Loom deleted it, so Loom put it back at {tip}."),
-                    Err(()) => format!("{why} That began while Loom deleted it, and Loom couldn't put it back at {tip}."),
-                }))
-            }
-            Err(e) => Err(Some(e)),
-        }
+        let committed = now_ticks();
+        let dirs = admin_dirs(&common).map_err(Some)?;
+        let why = match git_running(&dirs, ours, committed, branch) {
+            Some(why) => why,
+            None => match held_by(&dirs, branch).map_err(Some)? { Some(why) => why, None => return Ok(()) },
+        };
+        let back = say(&["start"]).and_then(|_| say(&[&format!("create {reference}"), tip, "prepare"])).and_then(|_| say(&["commit"]));
+        Err(Some(match back {
+            Ok(()) => format!("{why} Loom had deleted it, and put it back at {tip}."),
+            Err(()) => format!("{why} Loom had deleted it, and couldn't put it back at {tip}."),
+        }))
     })();
     // Whatever went wrong, git gets the end of its input: a transaction it never
     // committed is dropped, its lock with it, and git exits.
@@ -691,6 +771,65 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn a_checkout_paused_after_writing_its_index_keeps_the_branch() {
+        let dir = std::env::temp_dir().join(format!("loom-branch-index-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (repo, other, hooks) = (dir.join("repo"), dir.join("other"), dir.join("hooks"));
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&hooks).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "main\n").unwrap();
+        git(&repo, &["add", "-A"]); git(&repo, &["commit", "-qm", "main"]);
+        git(&repo, &["switch", "-qc", "topic"]);
+        fs::write(repo.join("file.txt"), "topic\n").unwrap();
+        git(&repo, &["commit", "-qam", "topic"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["worktree", "add", "-q", "--detach", other.to_str().unwrap(), "main"]);
+        git(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        let (r, admin) = (repo.to_str().unwrap(), repo.join(".git/worktrees/other"));
+        // `git switch topic` in the other worktree, paused in post-index-change: the files and index
+        // are topic's, index.lock is gone, HEAD.lock not yet taken, and HEAD still detached.
+        let paused_switch = |run: &str| {
+            let (started, release) = (dir.join(format!("{run}-started")), dir.join(format!("{run}-release")));
+            let unix = |p: &Path| p.to_str().unwrap().replace('\\', "/");
+            fs::write(hooks.join("post-index-change"), format!("#!/bin/sh\ntouch \"{}\"\nwhile [ ! -f \"{}\" ]; do sleep 0.05; done\n", unix(&started), unix(&release))).unwrap();
+            let child = Command::new("git").arg("-C").arg(&other).args(["switch", "-q", "topic"]).spawn().unwrap();
+            let release = Release(release);
+            for _ in 0..400 { if started.exists() { break; } std::thread::sleep(Duration::from_millis(50)); }
+            assert!(started.exists(), "the checkout never reached post-index-change");
+            // Before the delete, both locks are gone; between, HEAD.lock is Loom's own.
+            assert!(!admin.join("index.lock").exists() && (run != "before" || !admin.join("HEAD.lock").exists()), "a lock shows the checkout");
+            assert!(Command::new("git").arg("-C").arg(&other).args(["symbolic-ref", "-q", "HEAD"]).output().unwrap().stdout.is_empty(), "HEAD changed before the hook");
+            (child, release)
+        };
+        let finished = |(mut child, release): (std::process::Child, Release)| {
+            drop(release);
+            assert!(child.wait().unwrap().success(), "the checkout failed");
+            assert_eq!(git(&other, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/topic");
+            assert_eq!(git(&other, &["rev-parse", "--verify", "HEAD"]).trim(), tip, "HEAD names a branch that's gone");
+            git(&other, &["switch", "-q", "--detach", "main"]);
+        };
+        let kept = || assert_eq!(git(&repo, &["rev-parse", "--verify", "refs/heads/topic"]).trim(), tip, "topic went");
+        // Paused there when the delete looks: its git.exe still runs in the worktree, so the branch stays.
+        let running = paused_switch("before");
+        let error = delete_branch(r, "topic", &tip).unwrap_err();
+        assert!(error.contains("busy") && error.contains("git.exe"), "{error}");
+        kept();
+        finished(running);
+        // It starts between the look and the commit, under Loom's HEAD.lock: still running after the
+        // commit, so the branch is put back before that HEAD can name it.
+        let mut running = None;
+        let error = delete_branch_with(r, "topic", &tip, || running = Some(paused_switch("between"))).unwrap_err();
+        assert!(error.contains("busy") && error.contains("git.exe") && error.contains("put it back"), "{error}");
+        kept();
+        finished(running.unwrap());
+        // Nothing running: deleted.
+        delete_branch(r, "topic", &tip).unwrap();
+        assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// Writes its file when dropped, so a checkout a failed test left paused still finishes.
     struct Release(PathBuf);
     impl Drop for Release {
@@ -777,18 +916,19 @@ mod tests {
         assert_ne!(String::from_utf8_lossy(&tip().stdout).trim(), approved);
         git(&repo, &["branch", "-f", "topic", &approved]);
         // Another agent switches a worktree to the unchanged branch after the worktrees were read.
-        // switch takes no lock, so it lands: the branch comes back at its tip, that worktree's HEAD
-        // resolves, and the delete reports it didn't happen.
+        // Naming it in HEAD needs that worktree's HEAD.lock, which Loom holds: Git refuses the switch,
+        // its HEAD still resolves, and the branch goes at its approved tip.
         let late = at("late");
         git(&repo, &["worktree", "add", "-q", "--detach", &late, "main"]);
-        let error = delete_branch_with(r, "topic", &approved, || { git(Path::new(&late), &["switch", "-q", "topic"]); }).unwrap_err();
-        assert!(error.contains("checked out at") && error.contains("put it back"), "{error}");
-        assert_eq!(String::from_utf8_lossy(&tip().stdout).trim(), approved);
-        assert_eq!(git(Path::new(&late), &["symbolic-ref", "HEAD"]).trim(), "refs/heads/topic");
-        assert_eq!(git(Path::new(&late), &["rev-parse", "--verify", "HEAD"]).trim(), approved);
+        let switched = std::cell::Cell::new(None);
+        delete_branch_with(r, "topic", &approved, || switched.set(Some(Command::new("git").arg("-C").arg(&late).args(["switch", "-q", "topic"]).output().unwrap()))).unwrap();
+        let switched = switched.take().unwrap();
+        assert!(!switched.status.success() && String::from_utf8_lossy(&switched.stderr).contains("HEAD.lock"), "{}", String::from_utf8_lossy(&switched.stderr));
+        assert!(!tip().status.success(), "topic stayed");
+        assert_eq!(git(Path::new(&late), &["rev-parse", "--verify", "HEAD"]).trim(), git(&repo, &["rev-parse", "main"]).trim());
         // A new worktree on it in the same gap: worktree add locks the branch to write its HEAD, which the
         // transaction holds, so Git refuses it, and the branch goes at its approved tip.
-        git(Path::new(&late), &["switch", "-q", "--detach"]);
+        git(&repo, &["branch", "topic", &approved]);
         let added = std::cell::Cell::new(None);
         delete_branch_with(r, "topic", &approved, || added.set(Some(Command::new("git").arg("-C").arg(&repo).args(["worktree", "add", "-q", &at("added"), "topic"]).output().unwrap()))).unwrap();
         let added = added.take().unwrap();
