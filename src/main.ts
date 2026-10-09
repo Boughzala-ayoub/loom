@@ -6819,10 +6819,10 @@ async function prUrl(th: Thread) {
   const url = (await git(th.dir, "remote", "get-url", "origin").catch(() => "")).trim(); // no origin at all reads as one off GitHub
   const m = /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/.exec(url);
   if (!m) throw new Error(`origin is not on GitHub: ${url || "(no origin)"}`);
-  const head = (await git(th.dir, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").catch(() => "")).trim();
-  const base = head.replace(/^origin\//, "") || "main";
+  const head = (await git(th.dir, "symbolic-ref", "-q", "refs/remotes/origin/HEAD").catch(() => "")).replace(/\r?\n$/, "");
+  const base = head.startsWith("refs/remotes/origin/") ? head.slice("refs/remotes/origin/".length) : "main";
   await git(th.dir, "push", "-u", "origin", "HEAD");
-  return `https://github.com/${m[1]}/${m[2]}/compare/${base}...${encodeURIComponent(th.branch)}?expand=1`;
+  return `https://github.com/${m[1]}/${m[2]}/compare/${encodeURIComponent(base)}...${encodeURIComponent(th.branch)}?expand=1`;
 }
 
 /** The Changes panel as data, for loomctl git: the branch and its upstream, git's

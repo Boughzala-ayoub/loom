@@ -161,6 +161,7 @@ try {
           if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
           if (a.includes('--show-toplevel')) return args.dir;
           if (a[0] === 'rev-parse') return location.search.includes('long-location') ? '' : 'main';
+          if (a[0] === 'symbolic-ref' && a.at(-1) === 'refs/remotes/origin/HEAD') return 'refs/remotes/origin/main\n';
           return '';
         }
       }, { shouldMockEvents: true });
