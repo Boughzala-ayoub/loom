@@ -424,7 +424,15 @@ fn pty_spawn(
         // ConPTY quotes argv MSVC-style; cmd.exe does not understand \" inside
         // its command string. Expand the whole command after that quoting step.
         cmd.args(["/d", "/s", "/c", "%LOOM_COMMAND%"]);
-        cmd.env("LOOM_COMMAND", with_program(&line, on_path)?);
+        // The pane's PATH, which portable-pty reads from the registry, so a
+        // codex installed since Loom started is found too.
+        let line = with_program(&line, |name| find_on(cmd.get_env("PATH")?, name))?;
+        cmd.env("LOOM_COMMAND", line);
+        // cmd searches the folder first for what the program runs too, such as
+        // the `node` npm's codex.cmd calls. The pane's own programs inherit this,
+        // so a cmd there runs a program in its folder only as `.\name`, as
+        // PowerShell and Git Bash already do.
+        cmd.env("NoDefaultCurrentDirectoryInExePath", "1");
     } else {
         cmd.args(argv[1..].iter().map(|a| if a == "$LOOM_HOOKS" { &hooks_arg } else { a }));
     }
@@ -2917,17 +2925,26 @@ mod tests {
         let (bin, repo) = (dir.join("bin with space"), dir.join("repo"));
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&repo).unwrap();
-        std::fs::write(bin.join("codex.cmd"), "@echo off\r\necho ran [%1] [%2] [%3] [%4]\r\n").unwrap();
+        // npm's shim: the node beside it, else whichever `node` cmd finds.
+        std::fs::write(bin.join("codex.cmd"), "@echo off\r\nset \"_prog=node\"\r\n\"%_prog%\" %*\r\n").unwrap();
+        std::fs::write(bin.join("node.cmd"), "@echo off\r\necho ran [%1] [%2] [%3] [%4]\r\n").unwrap();
         // What an agent or a branch could leave in the checkout.
-        std::fs::write(repo.join("codex.cmd"), "@echo PLANTED\r\n").unwrap();
-        std::fs::write(repo.join("codex.bat"), "@echo PLANTED\r\n").unwrap();
+        for name in ["codex.cmd", "codex.bat", "node.cmd", "node.bat"] {
+            std::fs::write(repo.join(name), "@echo PLANTED\r\n").unwrap();
+        }
         let path = std::env::join_paths([&bin]).unwrap();
         let line = super::with_program(r#"codex resume --no-daemon -c "notify=['C:\x y\loom.exe','--codex-notify']""#, |n| super::find_on(&path, n)).unwrap();
         assert!(line.to_lowercase().starts_with(&format!("\"{}\" resume", bin.join("codex.cmd").display()).to_lowercase()), "{line}");
         // As the pane runs it: the line comes through %LOOM_COMMAND%, after /d /s /c, in the checkout.
-        let out = std::process::Command::new("cmd").args(["/d", "/s", "/c", "%LOOM_COMMAND%"]).env("LOOM_COMMAND", &line).current_dir(&repo).output().unwrap();
-        let out = String::from_utf8_lossy(&out.stdout);
-        assert_eq!(out.trim(), r#"ran [resume] [--no-daemon] [-c] ["notify=['C:\x y\loom.exe','--codex-notify']"]"#);
+        // A short PATH of its own: cmd ignores one past ~16 KB, which cargo test's is.
+        let run = |search_folder: bool| {
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/d", "/s", "/c", "%LOOM_COMMAND%"]).env("LOOM_COMMAND", &line).env("PATH", &path).current_dir(&repo);
+            if search_folder { cmd.env_remove("NoDefaultCurrentDirectoryInExePath"); } else { cmd.env("NoDefaultCurrentDirectoryInExePath", "1"); }
+            String::from_utf8_lossy(&cmd.output().unwrap().stdout).trim().to_owned()
+        };
+        assert_eq!(run(true), "PLANTED", "the shim never looked in the folder, so this tests nothing");
+        assert_eq!(run(false), r#"ran [resume] [--no-daemon] [-c] ["notify=['C:\x y\loom.exe','--codex-notify']"]"#);
         assert_eq!(super::with_program("codex", |n| super::find_on(std::ffi::OsStr::new(""), n)).unwrap_err(), "codex isn't on PATH");
         assert_eq!(super::find_on(&path, r"..\codex"), None);
         std::fs::remove_dir_all(dir).unwrap();

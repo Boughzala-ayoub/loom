@@ -14,6 +14,8 @@ fn cli(name: &str, dir: &str, args: &str) -> Result<Command, String> {
     let mut cmd = Command::new("cmd.exe");
     cmd.raw_arg(format!("/d /s /c \"{line}\""))
         .current_dir(dir).creation_flags(0x0800_0000)
+        // For what `name` runs, such as an npm shim's `node` (lib.rs pty_spawn).
+        .env("NoDefaultCurrentDirectoryInExePath", "1")
         // Read-only helper processes must not masquerade as the live pane.
         .env_remove("LOOM_PANE").env_remove("LOOM_SESSION_FILE");
     Ok(cmd)

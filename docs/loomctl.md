@@ -1357,7 +1357,12 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
 - Loom runs `codex`, `opencode`, `opencode1` and `opencode2` from PATH by their
   full path, never from the pane's folder, where cmd would look first: a
   `codex.cmd` in a checkout doesn't run. One that isn't on PATH fails to start,
-  saying so ("codex isn't on PATH").
+  saying so ("codex isn't on PATH"). A codex pane reads PATH as a new window
+  would, so one installed while Loom runs is found. cmd runs with
+  `NoDefaultCurrentDirectoryInExePath` set, so the `node` an npm shim calls
+  comes from PATH too, and a cmd in the pane runs a program in its folder only
+  as `.
+ame`.
 - Closing a pane, restarting Loom, or the pane's shell exiting ends every
   console program the pane started, detached ones included. GUI apps it opened
   stay open: VS Code from `code .`, a browser from `start`. If Loom itself
