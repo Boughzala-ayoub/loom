@@ -242,8 +242,9 @@ fn remove_worktree_at(repo: &str, dir: &str, trash: &Path, stamp: u128) -> Resul
         entry
     };
     let head = fs::read_to_string(entry.join("HEAD")).map_err(|e| e.to_string())?;
-    let branch = head.trim().strip_prefix("ref: ").map(str::to_owned);
-    let commit = crate::git_run(repo.into(), vec!["rev-parse".into(), "--verify".into(), branch.as_deref().unwrap_or(head.trim()).into()], None, false)?.trim().to_owned();
+    let head = head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n')).unwrap_or(&head);
+    let branch = head.strip_prefix("ref: ").map(str::to_owned);
+    let commit = crate::git_run(repo.into(), vec!["rev-parse".into(), "--verify".into(), branch.as_deref().unwrap_or(head).into()], None, false)?.trim().to_owned();
     fs::create_dir_all(trash).map_err(|e| e.to_string())?;
     let mut suffix = 0u64;
     let (id, file, mut held) = loop {
@@ -428,6 +429,37 @@ mod tests {
     }
     fn junction(link: &Path, target: &Path) {
         assert!(Command::new("cmd").arg("/c").arg("mklink").arg("/J").arg(link).arg(target).output().unwrap().status.success());
+    }
+
+    #[test]
+    fn trash_preserves_exact_unicode_branch_and_commit() {
+        let dir = std::env::temp_dir().join(format!("loom-trash-identity-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        for (n, branch) in ["approved\u{a0}", "\u{a0}approved", "approved"].iter().enumerate() {
+            let (repo, wt, trash) = (dir.join(n.to_string()).join("repo"), dir.join(n.to_string()).join("wt"), dir.join(n.to_string()).join("trash"));
+            fs::create_dir_all(&repo).unwrap();
+            git(&repo, &["init", "-q", "-b", "main"]);
+            fs::write(repo.join("f"), "main").unwrap();
+            git(&repo, &["add", "f"]); git(&repo, &["commit", "-qm", "main"]);
+            git(&repo, &["worktree", "add", "-q", "-b", branch, wt.to_str().unwrap()]);
+            fs::write(wt.join("f"), "A").unwrap(); git(&wt, &["commit", "-qam", "A"]);
+            let a = git(&wt, &["rev-parse", "HEAD"]).trim().to_owned();
+            let b = git(&repo, &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "B"]).trim().to_owned();
+            git(&repo, &[if *branch == "approved" { "tag" } else { "branch" }, "approved", &b]);
+            // Git's HEAD file may use CRLF; only the line ending may be removed.
+            let entry = repo.join(".git/worktrees/wt");
+            fs::write(entry.join("HEAD"), format!("ref: refs/heads/{branch}\r\n")).unwrap();
+            let moved = remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).unwrap();
+            let id = Path::new(&moved).file_name().unwrap().to_str().unwrap();
+            let (_, record) = open_record(&trash.join(format!("{id}.json"))).unwrap();
+            assert_eq!(record.branch.as_deref(), Some(format!("refs/heads/{branch}").as_str()));
+            assert_eq!(record.commit.as_deref(), Some(a.as_str()));
+            assert_eq!(git(&repo, &["rev-parse", &keep_ref(id)]).trim(), a);
+            git(&repo, &["update-ref", "--no-deref", "-d", &format!("refs/heads/{branch}"), &a]);
+            git(&repo, &["gc", "--prune=now", "--quiet"]);
+            git(&repo, &["cat-file", "-e", &format!("{a}^{{commit}}")]);
+            assert_eq!(git(&repo, &["rev-parse", if *branch == "approved" { "refs/tags/approved" } else { "refs/heads/approved" }]).trim(), b);
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
