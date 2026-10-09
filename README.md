@@ -271,7 +271,10 @@ The page is an app with four tabs, and it wears the PC's theme.
   what it last heard and said, its question's options as buttons and a reply
   box. Open an agent to read its screen, send a prompt or answer a question.
   The mic beside its message box dictates through the PC's whisper, with the
-  PC's language and prefix, which its `⋯` and Settings change.
+  PC's language and prefix, which its `⋯` and Settings change. The image
+  button pastes an image from the phone's clipboard or picks a photo or file.
+  Each waits as a thumbnail until the message goes, and the agent gets its
+  path on the PC, which Claude Code and Codex open.
   Long lines wrap to the phone, and scrolling up past the top reads the
   agent's history. The keyboard button opens a PC keyboard: Esc, Tab, Ctrl,
   Alt and Shift held for the next key, arrows, Home, End, PgUp, PgDn, F1 to

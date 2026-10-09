@@ -7,6 +7,7 @@ import {
 } from "./core";
 import { keyboard, type Typed } from "./keyboard";
 import { dictationSheet, lists, pickLabel, readLists, bar as recBar, record, repaint, transcribing } from "./dictate";
+import { drop as dropShots, imageButton, onPaste, retray, shots, tray, upload, withPaths } from "./images";
 
 type Run = { x: number; text: string; bold?: boolean; dim?: boolean; italic?: boolean; underline?: boolean; inverse?: boolean; fg?: number | string; bg?: number | string };
 type Screen = { text: string; cols: number; alt?: boolean; rows: { runs: Run[] }[] };
@@ -246,23 +247,27 @@ const replying = new Set<string>(); // panes whose reply is on its way: a second
 const replyInput = (pane?: string) => [...rows.querySelectorAll<HTMLInputElement>(".reply input")].find((i) => i.dataset.pane === pane);
 
 function replyBox(p: Pane) {
+  const key = `reply:${p.id}`; // its images (images.ts)
   const form = el("form", "reply");
   const input = el("input");
   Object.assign(input, { placeholder: `Reply to ${p.agent}`, enterKeyHint: "send", value: drafts.get(p.id) ?? "" });
   input.dataset.pane = p.id;
   input.setAttribute("aria-label", `Reply to ${p.ref}`);
   input.oninput = () => drafts.set(p.id, input.value);
+  onPaste(input, () => key);
   const send = el("button", "primary", "Send");
   send.disabled = replying.has(p.id);
-  form.append(input, send);
+  // An image goes to an agent: in a shell's line, its path is only a word.
+  form.append(input, ...(p.agent === "shell" ? [] : [imageButton(() => key)]), send);
   form.onsubmit = (e) => {
     e.preventDefault();
-    const text = input.value.trim();
-    if (!text || replying.has(p.id)) return;
+    const text = input.value.trim(), pics = shots(key);
+    if ((!text && !pics.length) || replying.has(p.id)) return;
     replying.add(p.id);
     send.disabled = true;
     void act(async () => {
-      await run(p.agent === "shell" ? "send" : "submit", [p.id, "-"], { stdin: text, change: true, timeout: 60 });
+      await run(p.agent === "shell" ? "send" : "submit", [p.id, "-"], { stdin: withPaths(text, await upload(pics)), change: true, timeout: 60 });
+      dropShots(key, pics);
       // Only the reply that went: one typed while it was on its way stays a draft.
       if ((drafts.get(p.id) ?? "").trim() !== text) return;
       drafts.delete(p.id);
@@ -270,10 +275,12 @@ function replyBox(p: Pane) {
       if (shown) shown.value = "";
     }, "Sent").finally(() => {
       replying.delete(p.id);
-      for (const b of [send, replyInput(p.id)?.form?.querySelector("button")]) if (b) b.disabled = false;
+      for (const b of [send, replyInput(p.id)?.form?.querySelector<HTMLButtonElement>("button.primary")]) if (b) b.disabled = false;
     });
   };
-  return form;
+  const box = el("div", "reply-box");
+  box.append(tray(key), form);
+  return box;
 }
 
 // --- Thread actions ------------------------------------------------------------
@@ -376,11 +383,17 @@ sendBtn.append(ui("send"));
 sendBtn.setAttribute("aria-label", "Send");
 const micBtn = iconButton("mic", "Dictate", () => dictate());
 micBtn.id = "mic";
-promptForm.append(keysBtn, promptText, micBtn, sendBtn);
+/** The open agent's images, kept with its draft. */
+const shotKey = () => { const k = draftKey(); return k === null ? null : `prompt:${k}`; };
+const imageBtn = imageButton(shotKey);
+imageBtn.id = "image-btn";
+const promptShots = tray("");
+onPaste(promptText, shotKey);
+promptForm.append(keysBtn, imageBtn, promptText, micBtn, sendBtn);
 {
   const dock = el("div");
   dock.id = "dock";
-  dock.append(questionBox, keysBox, promptForm, recBar);
+  dock.append(questionBox, keysBox, promptShots, promptForm, recBar);
   const more = iconButton("more", "Actions", () => paneActions());
   more.id = "more";
   paneView.append(topBar(who, [stateChip, more], "#/"), noticeBar, screenBox, dock);
@@ -421,6 +434,7 @@ export function showPane(id: string | null, stableId = "") {
     promptText.style.height = "";
     if (promptText.value) promptText.style.height = `${promptText.scrollHeight + 2}px`;
   }
+  retray(promptShots, shotKey() ?? "");
   paintSend();
   drawHead();
   drawKeys();
@@ -477,8 +491,8 @@ screenBox.addEventListener("click", seen);
 
 export function drawHead() {
   const p = findPane(open);
-  // As the PC's Speak button: an agent's pane only. A prefix typed into PowerShell is an error.
-  micBtn.hidden = !p || p.agent === "shell";
+  // As the PC's Speak button: an agent's pane only. A prefix typed into PowerShell is an error, and an image's path only a word.
+  micBtn.hidden = imageBtn.hidden = !p || p.agent === "shell";
   if (!p) {
     whoName.textContent = open ? "This agent is gone" : "Opening the agent";
     whoTitle.textContent = open ? "Loom restarted, or it was closed. Go back to the list." : "Reading Loom's agents.";
@@ -711,13 +725,15 @@ promptForm.onsubmit = (e) => {
 };
 /** Sends what the box holds, and settles once Loom has answered: a dictated ⏎ waits on it. One at a time per agent. */
 function sendPrompt() {
-  const text = promptText.value.trim(), id = open, key = draftKey();
-  if (!text || !id || key === null || outgoing.has(key)) return;
+  const text = promptText.value.trim(), id = open, key = draftKey(), pics = shots(shotKey());
+  if ((!text && !pics.length) || !id || key === null || outgoing.has(key)) return;
   // An agent gets a task Loom follows to its end. A shell gets the line typed:
   // submit needs Loom's PowerShell prompt and would add a PowerShell comment.
   const cmd = findPane(id)?.agent === "shell" ? "send" : "submit";
   const sent = act(async () => {
-    await run(cmd, [id, "-"], { stdin: text, change: true, timeout: 60 });
+    // The images first: the message carries their paths on the PC.
+    await run(cmd, [id, "-"], { stdin: withPaths(text, await upload(pics)), change: true, timeout: 60 });
+    dropShots(`prompt:${key}`, pics);
     // Only the message that went: one typed while it was on its way, here or for another agent, stays.
     if (typed.get(key)?.trim() === text) typed.delete(key); // left for another agent while it went
     if (draftKey() !== key || promptText.value.trim() !== text) return;

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +32,11 @@ const FRAME: Duration = Duration::from_secs(10);
 const CLIP: usize = 6 << 20;
 const CLIP_IDLE: Duration = Duration::from_secs(15);
 const CLIP_TOTAL: Duration = Duration::from_secs(600);
+/// An image from the phone: a screenshot is a few MiB, a camera photo up to
+/// ten or so. It may take as long as a clip.
+const IMAGE: usize = 20 << 20;
+/// How long a phone's image stays on the PC: an agent may look at it again later in its session.
+const IMAGE_KEEP: Duration = Duration::from_secs(7 * 24 * 3600);
 /// A pairing code lasts this long, or until this many wrong guesses.
 const PAIRING: Duration = Duration::from_secs(600);
 const GUESSES: u8 = 5;
@@ -45,7 +50,7 @@ static STRANGERS: Strangers = Strangers(Mutex::new((0, VecDeque::new())));
 const EXPIRY_MS: u64 = 90 * 24 * 3600 * 1000;
 /// How often a phone's last-seen time is written to remote.json.
 const SEEN_SAVE_MS: u64 = 3600 * 1000;
-const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const CSP: &str = "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 const MANIFEST: &str = r##"{"name":"Loom","short_name":"Loom","start_url":"/","display":"standalone","background_color":"#111111","theme_color":"#111111","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"},{"src":"/icon.png","sizes":"512x512","type":"image/png"}]}"##;
 const ICON: &[u8] = include_bytes!("../../src/logo.svg");
 /// Android draws notification icons from PNGs only, and the status bar's
@@ -382,9 +387,13 @@ impl Request {
 
 /// The most a request's body may hold, how long its client may go without
 /// sending a byte of it, and how long from its first byte it may take in all:
-/// a clip for /api/dictate, a prompt otherwise.
+/// a clip for /api/dictate, an image for /api/image, a prompt otherwise.
 fn limits(path: &str) -> (usize, Duration, Duration) {
-    if path.split('?').next() == Some("/api/dictate") { (CLIP, CLIP_IDLE, CLIP_TOTAL) } else { (BODY, FRAME, FRAME) }
+    match path.split('?').next() {
+        Some("/api/dictate") => (CLIP, CLIP_IDLE, CLIP_TOTAL),
+        Some("/api/image") => (IMAGE, CLIP_IDLE, CLIP_TOTAL),
+        _ => (BODY, FRAME, FRAME),
+    }
 }
 
 /// More of the request, unless its deadline passes first.
@@ -450,6 +459,7 @@ async fn route(app: &AppHandle, request: &Request, port: u16) -> Reply {
         },
         ("POST", "/api/cli") => cli(app, request).await,
         ("POST", "/api/dictate") => dictate(app, request).await,
+        ("POST", "/api/image") => image(app, request).await,
         ("POST", "/api/push") => push(app, request),
         ("POST", "/api/procs") => procs(app, request).await,
         _ => Reply::error(404, "Not found."),
@@ -742,6 +752,53 @@ async fn dictate(app: &AppHandle, request: &Request) -> Reply {
     }
 }
 
+/// An image for an agent: PNG, JPEG, WebP or GIF, as the body. Loom saves it in
+/// its data folder's phone-images under a name of its own and answers the path,
+/// which the phone puts in the agent's prompt.
+async fn image(app: &AppHandle, request: &Request) -> Reply {
+    if phone(app, request).is_none() {
+        return unpaired();
+    }
+    let (dir, bytes) = (crate::data_dir(app).join("phone-images"), request.body.clone());
+    match tauri::async_runtime::spawn_blocking(move || keep_image(&dir, &bytes, std::time::SystemTime::now())).await {
+        Ok(Ok(path)) => Reply::json(200, json!({ "ok": true, "path": path })),
+        Ok(Err((status, error))) => Reply::error(status, &error),
+        Err(error) => Reply::error(500, &error.to_string()),
+    }
+}
+
+/// What kind of image `bytes` are, by their first bytes alone: its extension.
+fn image_kind(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => Some("png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("jpg"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => Some("gif"),
+        _ => None,
+    }
+}
+
+/// Saves an image in `dir`, which holds nothing else, as `<unix ms>-<random>.<kind>`,
+/// and drops the ones there older than IMAGE_KEEP. Its path, or the status and why not.
+fn keep_image(dir: &Path, bytes: &[u8], now: std::time::SystemTime) -> Result<String, (u16, String)> {
+    use std::io::Write;
+    let Some(kind) = image_kind(bytes) else { return Err((415, "Loom takes PNG, JPEG, WebP and GIF images.".into())) };
+    std::fs::create_dir_all(dir).map_err(|e| (500, format!("Loom couldn't make {}: {e}", dir.display())))?;
+    for file in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let aged = file.metadata().ok().filter(|m| m.is_file()).and_then(|m| m.modified().ok())
+            .is_some_and(|at| now.duration_since(at).is_ok_and(|age| age > IMAGE_KEEP));
+        if aged { let _ = std::fs::remove_file(file.path()); }
+    }
+    let ms = now.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    let path = dir.join(format!("{ms}-{}.{kind}", random::<4>().iter().map(|b| format!("{b:02x}")).collect::<String>()));
+    let saved = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| f.write_all(bytes));
+    if let Err(e) = saved {
+        let _ = std::fs::remove_file(&path);
+        return Err((500, format!("Loom couldn't save the image in {}: {e}", dir.display())));
+    }
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// The phone's task manager: the PC's CPU, memory and processes (procs.rs).
 /// Read here, not through loomctl: the window would only hand Rust's answer
 /// back to Rust, every 2 s while the phone shows it.
@@ -842,6 +899,39 @@ mod tests {
         raw.extend([1, 0, 255, 127]);
         let r = parse(&raw).unwrap().ok().unwrap();
         assert_eq!(r.body, [1, 0, 255, 127]);
+    }
+
+    #[test]
+    fn an_image_is_kept_by_its_bytes_under_a_name_loom_picks() {
+        let dir = std::env::temp_dir().join(format!("loom-phone-images-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = std::time::SystemTime::now();
+        let png = [&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..], b"rest of it"].concat();
+        let kinds = [(png.clone(), "png"), (b"\xFF\xD8\xFF\xE0jfif".to_vec(), "jpg"), (b"RIFF\x10\0\0\0WEBPVP8 ".to_vec(), "webp"), (b"GIF89a..".to_vec(), "gif")];
+        for (bytes, kind) in &kinds {
+            let path = keep_image(&dir, bytes, now).unwrap();
+            assert!(path.ends_with(&format!(".{kind}")) && Path::new(&path).parent() == Some(dir.as_path()), "{path}");
+            assert_eq!(&std::fs::read(&path).unwrap(), bytes);
+        }
+        // Kept by what its bytes are, whatever it claims: an SVG, HTML, an EXE, a cut-off PNG, or nothing.
+        for junk in [&b"<svg xmlns='http://www.w3.org/2000/svg'/>"[..], b"<html><script>", b"MZ\x90\0", b"", b"\x89PNG"] {
+            assert_eq!(keep_image(&dir, junk, now).unwrap_err().0, 415);
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 4, "a refused body left a file");
+        // A week on, the next one takes the old ones with it; one six days old stays.
+        let six_days = keep_image(&dir, &png, now).unwrap();
+        std::fs::File::options().write(true).open(&six_days).unwrap().set_modified(now - Duration::from_secs(6 * 24 * 3600)).unwrap();
+        for f in std::fs::read_dir(&dir).unwrap().flatten().filter(|f| f.path() != Path::new(&six_days)) {
+            std::fs::File::options().write(true).open(f.path()).unwrap().set_modified(now - IMAGE_KEEP - Duration::from_secs(60)).unwrap();
+        }
+        let fresh = keep_image(&dir, &png, now).unwrap();
+        let mut left: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|f| f.path()).collect();
+        left.sort();
+        let mut want = vec![PathBuf::from(&six_days), PathBuf::from(&fresh)];
+        want.sort();
+        assert_eq!(left, want);
+        assert_eq!(limits("/api/image"), (IMAGE, CLIP_IDLE, CLIP_TOTAL));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

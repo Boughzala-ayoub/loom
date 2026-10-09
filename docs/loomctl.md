@@ -647,6 +647,23 @@ the PC's mic menu has them. Tap a row to pick it, `⏎` to have a prefix send
 what was said, `✕` to drop one, or add one under its list. Each is a
 `dictation` command, so the PC's menu and `F4` change with it.
 
+The image button beside an agent's message box, and beside an Activity
+reply, adds images to the message. **Paste image** reads the phone's
+clipboard itself (`navigator.clipboard.read()`): Chrome on Android offers no
+Paste in a text box while the clipboard holds only an image, such as a snip.
+The first time, Chrome asks to let the page see the clipboard. **Photo or
+file** opens the phone's chooser: the gallery, files or the camera. A paste
+into the box that carries an image takes it too. Each image waits over the
+box as a thumbnail with its `✕` until the message goes, kept per agent as its
+draft is. Send posts each one to `POST /api/image` with the phone's token,
+then sends the message as a `submit` task: what you typed, then each image's
+path on the PC, on one line. An image alone is its path alone. Loom keeps PNG,
+JPEG, WebP and GIF, judged by their first bytes, up to 20 MiB each from a
+paired phone, in `phone-images` in its data folder
+(`%APPDATA%\dev.ayoub.loom`), under a name it picks: `<unix ms>-<8 hex>.png`.
+Each upload deletes the ones there more than 7 days old. Claude Code attaches
+an image from its path and Codex opens it (see Limits).
+
 **Notifications on this phone**, in the phone's Settings, sends it the task
 notices as phone notifications: an agent finished, asks something, or failed.
 The `notify` policy decides which, as it does for `watch`, and they come even

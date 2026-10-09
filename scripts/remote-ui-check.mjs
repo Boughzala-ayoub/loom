@@ -38,6 +38,24 @@ console.log('HTTP 200, bundle', readFileSync(resolve(dist, 'remote.html'), 'utf8
 const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
+// Two pictures as a phone hands them over, drawn by Chrome: a PNG screenshot and a JPEG photo.
+const [PNG, JPG] = await (async () => {
+  const page = await browser.newPage();
+  const urls = await page.evaluate(() => ['image/png', 'image/jpeg'].map((type, i) => {
+    const c = document.createElement('canvas');
+    Object.assign(c, { width: 360, height: 240 });
+    const g = c.getContext('2d');
+    g.fillStyle = i ? '#3a6ea5' : '#d97757';
+    g.fillRect(0, 0, 360, 240);
+    g.fillStyle = '#fff';
+    g.font = 'bold 72px sans-serif';
+    g.fillText(i ? 'JPEG' : 'PNG', 40, 150);
+    return c.toDataURL(type, 0.9);
+  }));
+  await page.close();
+  return urls.map(url => ({ url, buffer: Buffer.from(url.split(',')[1], 'base64') }));
+})();
+const files = (...pics) => pics.map((pic, i) => ({ name: `shot-${i}.${pic === JPG ? 'jpg' : 'png'}`, mimeType: pic === JPG ? 'image/jpeg' : 'image/png', buffer: pic.buffer }));
 async function until(what, f, ms = 8000) {
   for (const end = Date.now() + ms; Date.now() < end; await pause(25)) if (await f()) return;
   assert.fail(`timed out: ${what}`);
@@ -98,7 +116,9 @@ async function context(width, token = true, push = false) {
   const state = { calls: [], changedTitle: false, startups: [{ label: 'Claude', cmd: 'claude' }, { label: 'Codex', cmd: 'codex' }], hold: new Set(), held: {}, corruptSend: false, refuseSend: false, errors: [], push: { on: false, sub: null }, booted: 1, updated: false, restarts: 0, zoomed: new Set(),
     // The PC's mic menu (main.ts langs, prefixes), and what the mocked whisper hears in each clip posted to /api/dictate.
     dictation: { langs: [{ label: 'English', code: 'en', on: true }, { label: 'auto', code: '', on: false }, { label: 'French', code: 'fr', on: false }], prefixes: [{ text: '/prompt ', enter: false, on: true }, { text: '', enter: false, on: false }] },
-    heard: 'run the tests', clips: [] };
+    heard: 'run the tests', clips: [],
+    // What reached /api/image, and failImage: Loom refuses the next one.
+    images: [] };
   const ctx = await browser.newContext({ viewport: { width, height: 800 }, permissions: ['microphone'] });
   if (token) await ctx.addInitScript(() => localStorage.setItem('loom-token', 'fixture-token'));
   // The microphone, watched: how long MediaRecorder ran (window.recorded), the stream the page got (window.opened),
@@ -164,6 +184,13 @@ async function context(width, token = true, push = false) {
       // heard: the text, or a function of the clip's size that ties each text to its recording.
       await route.fulfill({ json: { ok: true, text: body.length ? (typeof state.heard === 'function' ? state.heard(body.length) : state.heard) : '' } });
       return void (clip.answered = true);
+    }
+    // An image: its bytes as the body, its path on the PC as the answer (remote.rs image).
+    if (new URL(req.url()).pathname === '/api/image') {
+      const n = state.images.push({ bytes: req.postDataBuffer() ?? Buffer.alloc(0), type: req.headers()['content-type'], auth: req.headers().authorization });
+      if (state.hold.delete('image')) await new Promise(r => (state.held.image = r));
+      if (state.failImage) { state.failImage = false; return route.fulfill({ status: 415, json: { ok: false, error: 'Loom takes PNG, JPEG, WebP and GIF images.' } }); }
+      return route.fulfill({ json: { ok: true, path: `C:\\Users\\test\\AppData\\Roaming\\dev.ayoub.loom\\phone-images\\${n}-ab12cd34.png` } });
     }
     const c = req.postDataJSON();
     state.calls.push(c);
@@ -306,6 +333,12 @@ async function context(width, token = true, push = false) {
   return { ctx, page, state };
 }
 const sheetButton = (page, text) => page.locator('#sheet').getByRole('button', { name: text, exact: true });
+/** Picks images from the phone with the image button under `scope`, as its chooser would hand them over. */
+async function attach(page, scope, ...pics) {
+  await page.locator(scope).getByRole('button', { name: 'Add an image', exact: true }).click();
+  const [chooser] = await Promise.all([page.waitForEvent('filechooser'), sheetButton(page, 'Photo or file').click()]);
+  await chooser.setFiles(Array.isArray(pics[0]) ? pics[0] : files(...pics));
+}
 async function close(page) { if (await page.locator('#sheet').isVisible()) await sheetButton(page, 'Cancel').click(); }
 async function goto(page, hash, ready) { await page.goto(base + '/' + hash); await page.locator(ready).first().waitFor(); }
 const git = (state, action) => state.calls.filter(c => c.cmd === 'git' && c.argv[1] === action);
@@ -339,11 +372,15 @@ try {
     await p.locator('#list .thread-top .icon-btn').first().click(); await fits(p, width, 'thread-menu');
     await sheetButton(p, 'Rename').click(); await fits(p, width, 'rename'); await close(p);
     await p.locator('#list .seg button').filter({ hasText: 'Activity' }).click(); await p.locator('#list .card').first().waitFor(); await fits(p, width, 'activity');
+    await attach(p, '#list .card >> nth=0', PNG); await p.locator('#list .card .shot').first().waitFor(); await fits(p, width, 'activity-image'); await taps(p, width, '#list .reply-box');
     await goto(p, '#/pane/a1', '#screen .line'); await fits(p, width, 'pane-question'); await p.click('#keys-btn'); await fits(p, width, 'keyboard');
     await p.locator('#keys [data-key=fn]').click(); await fits(p, width, 'function-keys'); await p.click('#more'); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'pane-menu'); await close(p);
     // Dictating: the recording bar in the box's place, then the Dictation sheet from ⋯.
     await p.click('#mic'); await p.locator('#rec .info b', { hasText: '0:01' }).waitFor(); await fits(p, width, 'recording'); await taps(p, width, '#rec'); await p.getByRole('button', { name: 'Cancel dictation' }).click();
     await p.click('#more'); await p.locator('#sheet button', { hasText: 'Dictation · English · /prompt' }).click(); await p.locator('#sheet.on .dict-row').first().waitFor(); await fits(p, width, 'dictation-sheet'); await taps(p, width, '#sheet'); await sheetButton(p, 'Done').click();
+    // Images: the sheet that adds one, then two waiting over the box, each with its remove.
+    await p.click('#image-btn'); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'image-menu'); await taps(p, width, '#sheet'); await close(p);
+    await attach(p, '#prompt', PNG, JPG); await p.locator('#dock .shot').nth(1).waitFor(); await fits(p, width, 'images-waiting'); await taps(p, width, '#dock');
     await goto(p, '#/pane/zz1/Alpha%3A1', '#pane .who b:has-text("This agent is gone")'); await fits(p, width, 'pane-gone');
     await goto(p, '#/new', '#new form'); await fits(p, width, 'new-thread'); await p.locator('#new [data-kind=checkout]').click(); await fits(p, width, 'new-folder');
     await goto(p, '#/changes/a', '#changes .file'); await fits(p, width, 'changes'); await p.locator('#changes .picker').click(); await fits(p, width, 'thread-picker'); await close(p);
@@ -1945,19 +1982,19 @@ try {
     const card = page.locator('#list .card[data-pane=a1]');
     await card.locator('.reply input').fill('looks good');
     state.hold.add('submit');
-    await card.locator('.reply button').click();
+    await card.locator('.reply button.primary').click();
     await until('the reply is on its way', () => state.held.submit);
-    assert.equal(await card.locator('.reply button').isDisabled(), true, 'Send waits for it');
+    assert.equal(await card.locator('.reply button.primary').isDisabled(), true, 'Send waits for it');
     await card.locator('.reply input').press('Enter');
     await page.locator('#list .find input').focus(); // out of the box, so its card is redrawn
     state.changedTitle = true;
     await page.locator('#list .card').filter({ hasText: 'Another agent has changed its title' }).waitFor({ timeout: 5000 });
-    assert.equal(await card.locator('.reply button').isDisabled(), true, "the redrawn card's Send waits too");
+    assert.equal(await card.locator('.reply button.primary').isDisabled(), true, "the redrawn card's Send waits too");
     await card.locator('form').evaluate(f => f.requestSubmit());
     await page.waitForTimeout(300);
     state.held.submit();
     await page.locator('#toast', { hasText: 'Sent' }).waitFor();
-    await until('Send is back', async () => !(await card.locator('.reply button').isDisabled()));
+    await until('Send is back', async () => !(await card.locator('.reply button.primary').isDisabled()));
     assert.deepEqual(submitted(state), ['looks good'], 'one reply');
     assert.deepEqual(state.errors, []);
     await ctx.close();
@@ -2087,6 +2124,94 @@ try {
     await ctx.close();
   }
   console.log('PASS R28: with Plan usage off, Usage asks no account, says it is off with each agent\'s context still shown, and turns it on');
+
+  // --- Images from the phone -------------------------------------------------------------
+  {
+    const { ctx, page, state } = await context(375);
+    await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+    await goto(page, '#/pane/a1', '#screen .line');
+    const shots = () => page.locator('#dock .shot').count();
+    const clipboard = what => page.evaluate(async ([url, text]) => {
+      const item = url ? { 'image/png': await (await fetch(url)).blob() } : { 'text/plain': new Blob([text], { type: 'text/plain' }) };
+      await navigator.clipboard.write([new ClipboardItem(item)]);
+    }, what);
+    // Paste image reads the clipboard itself: Chrome on Android offers no Paste in a text box for an image alone.
+    await clipboard([PNG.url]);
+    await page.click('#image-btn'); await sheetButton(page, 'Paste image').click();
+    await until('the pasted image waits over the box', async () => (await shots()) === 1);
+    await clipboard([null, 'just words']);
+    await page.click('#image-btn'); await sheetButton(page, 'Paste image').click();
+    await page.locator('#toast.error', { hasText: 'The clipboard holds no image.' }).waitFor();
+    // The system's Paste, where it does fire with an image (a desktop browser, a keyboard's clipboard).
+    await page.evaluate(async url => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([await (await fetch(url)).blob()], 'pasted.png', { type: 'image/png' }));
+      document.querySelector('#prompt textarea').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    }, PNG.url);
+    await until('the pasted file joins it', async () => (await shots()) === 2);
+    // Picked from the phone: a photo joins them, a HEIC Loom can't take is refused at once.
+    await attach(page, '#prompt', JPG);
+    await until('the photo joins them', async () => (await shots()) === 3);
+    await attach(page, '#prompt', [{ name: 'IMG_0001.heic', mimeType: 'image/heic', buffer: Buffer.from('....ftypheic') }]);
+    await page.locator('#toast.error', { hasText: 'Loom takes PNG, JPEG, WebP and GIF images.' }).waitFor();
+    assert.equal(await shots(), 3);
+    // Its remove takes one off: the file pasted second.
+    await page.getByRole('button', { name: 'Remove image 2', exact: true }).click();
+    assert.equal(await shots(), 2);
+    await page.screenshot({ path: resolve(out, '375-images-pasted.png') });
+    // Each agent keeps its own, as its draft.
+    await page.evaluate(() => (location.hash = '#/pane/b1')); await page.locator('#pane .who b', { hasText: 'Beta:1' }).waitFor();
+    assert.equal(await shots(), 0, "Alpha's images aren't Beta's");
+    await page.evaluate(() => (location.hash = '#/pane/a1')); await page.locator('#pane .who b', { hasText: 'Alpha:1' }).waitFor();
+    assert.equal(await shots(), 2, "Alpha's come back with it");
+    // An image Loom refuses keeps the message and its images, and sends nothing.
+    await page.fill('#prompt textarea', 'what is wrong here?');
+    state.failImage = true;
+    await page.click('#prompt button.primary');
+    await page.locator('#toast.error', { hasText: 'Loom takes PNG' }).waitFor();
+    assert.deepEqual(submitted(state), []);
+    assert.equal(await shots(), 2);
+    assert.equal(await box(page), 'what is wrong here?');
+    // Sent: each image as it was, then one message, the text and then their paths.
+    state.images.length = 0;
+    state.hold.add('image');
+    await page.click('#prompt button.primary');
+    await until('the first image is on its way', () => state.held.image);
+    // One added while they go stays for the next message.
+    await attach(page, '#prompt', PNG);
+    state.held.image();
+    await until('the message went', () => submitted(state).length === 1);
+    const path = n => `C:\\Users\\test\\AppData\\Roaming\\dev.ayoub.loom\\phone-images\\${n}-ab12cd34.png`;
+    assert.equal(state.images.length, 2);
+    assert.deepEqual(state.images.map(i => [i.type, i.auth]), [['image/png', 'Bearer fixture-token'], ['image/jpeg', 'Bearer fixture-token']]);
+    assert.ok(state.images[0].bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), 'the clipboard image is a PNG');
+    assert.ok(state.images[1].bytes.equals(JPG.buffer), 'the photo goes byte for byte');
+    assert.equal(submitted(state)[0], `what is wrong here? ${path(1)} ${path(2)}`);
+    await until('the box is empty but for the image added meanwhile', async () => (await box(page)) === '' && (await shots()) === 1);
+    // An image alone: its path is the message.
+    await page.click('#prompt button.primary');
+    await until('the image went alone', () => submitted(state).length === 2);
+    assert.equal(submitted(state)[1], path(3));
+    await until('none left', async () => (await shots()) === 0);
+    // An Activity reply carries its image the same way.
+    await goto(page, '#/', '#list .agent');
+    await page.locator('#list .seg button').filter({ hasText: 'Activity' }).click();
+    const card = page.locator('#list .card', { has: page.locator('input[aria-label="Reply to Alpha:1"]') });
+    await attach(page, '#list .card:has(input[aria-label="Reply to Alpha:1"])', JPG);
+    await card.locator('.shot').waitFor();
+    await card.locator('.reply input').fill('and this one');
+    await card.locator('.reply button.primary').click();
+    await until('the reply went', () => submitted(state).length === 3);
+    assert.equal(submitted(state)[2], `and this one ${path(4)}`);
+    await until("the card's image went with it", async () => (await card.locator('.shot').count()) === 0);
+    // A shell's line has no image button: a path there is only a word.
+    state.shell = true;
+    await goto(page, '#/pane/b1', '#screen .line');
+    await until('Beta is a shell', async () => !(await page.locator('#image-btn').isVisible()));
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS images: Paste image reads the clipboard, a paste or a pick adds one, a HEIC is refused, a remove takes one off, each agent keeps its own, a refused upload keeps the message, a send carries the paths after the text (or alone) and keeps one added meanwhile, an Activity reply too, and a shell has none');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));

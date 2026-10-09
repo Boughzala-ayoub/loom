@@ -4,7 +4,8 @@
 // commit, a branch, a stash), Usage, Settings and its task manager, creating and closing threads,
 // and a phone's notifications through a stand-in push service on 127.0.0.1,
 // and dictation: a sentence Windows' speech synthesizer says into Chrome's
-// fake microphone, through the phone's mic and the real whisper.
+// fake microphone, through the phone's mic and the real whisper, and an image
+// the phone attaches to a message, saved on the PC with its path in the message.
 // REMOTE_WIDTHS=375 runs one width. Needs a
 // build with --features tauri/custom-protocol (loom.exe and loomctl.exe
 // beside it, or LOOM_TEST_EXE; a debug one keeps its own data folder) and a
@@ -16,12 +17,13 @@
 // loom.exe's copy, to try a page change without rebuilding loom.exe. Run the
 // final check without it.
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, copyFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve, dirname, basename } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, connect } from 'node:net';
 import { createServer as httpServer } from 'node:http';
+import { crc32, deflateSync } from 'node:zlib';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const exe = resolve(process.env.LOOM_TEST_EXE || 'src-tauri/target/release/loom.exe');
@@ -48,10 +50,10 @@ const plain = join(dir, 'plain');
 mkdirSync(plain);
 const profile = join(dir, 'workspace.json');
 writeFileSync(profile, JSON.stringify({ silent: true, ui: { thread: 0 }, threads: [{ repo, dir: repo, branch: '', name: 'alpha', panes: [{ cmd: 'cmd' }] }] }));
-// The phone's mic shows on agents only: an OpenCode 1 that only waits stands in for one (Loom runs it through cmd).
+// The phone's mic and images show on agents only: an OpenCode 1 that says each line it gets stands in for one (Loom runs it through cmd).
 const bin = join(dir, 'bin');
 mkdirSync(bin);
-writeFileSync(join(bin, 'opencode.cmd'), '@echo off\r\nif "%~1"=="--version" (echo opencode v1.0.0& exit /b 0)\r\nif not "%~1"=="" exit /b 1\r\necho Stand-in agent ready.\r\npowershell -NoProfile -Command Start-Sleep 3600\r\n');
+writeFileSync(join(bin, 'opencode.cmd'), '@echo off\r\nif "%~1"=="--version" (echo opencode v1.0.0& exit /b 0)\r\nif not "%~1"=="" exit /b 1\r\necho Stand-in agent ready.\r\npowershell -NoProfile -Command "while ($true) { $l = Read-Host; Write-Host (\'got: \' + $l) }"\r\n');
 // The sentence the phone dictates, said by Windows' own speech synthesizer: 16-bit, 16 kHz, mono.
 const SENTENCE = 'Please run the tests and fix the login bug.';
 const speech = join(dir, 'said.wav');
@@ -62,6 +64,20 @@ const at = wav.indexOf('data') + 8;
 const pcm = wav.subarray(at, at + (wav.readUInt32LE(at - 4) & ~1));
 /** The sentence's words, give or take what base fumbles: whisper heard it if these four are there. */
 const heardIt = text => ['please', 'run', 'fix', 'login'].every(w => text.toLowerCase().replace(/[^a-z]+/g, ' ').split(' ').includes(w));
+/** A snip as the phone sends it: a 96 x 48 PNG, red then blue. */
+const PNG = (() => {
+  const [w, h] = [96, 48], raw = Buffer.alloc((w * 3 + 1) * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) raw.set(x < 48 ? [220, 20, 20] : [20, 40, 220], y * (w * 3 + 1) + 1 + x * 3);
+  const chunk = (type, data) => {
+    const td = Buffer.concat([Buffer.from(type), data]), n = Buffer.alloc(8);
+    n.writeUInt32BE(data.length, 0);
+    n.writeUInt32BE(crc32(td), 4);
+    return Buffer.concat([n.subarray(0, 4), td, n.subarray(4)]);
+  };
+  const head = Buffer.alloc(13);
+  head.writeUInt32BE(w, 0); head.writeUInt32BE(h, 4); head[8] = 8; head[9] = 2;
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', head), chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+})();
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
 const freePort = async () => {
@@ -298,16 +314,16 @@ try {
 
   // Dictation: /api/dictate's refusals, the sentence's samples through the real whisper, then the
   // phone's mic recording it from Chrome's fake microphone, and the Dictation sheet changing the PC.
+  // A request's head alone, as a socket sends it: refused before any of its body is read.
+  const refused = head => new Promise((resolve, reject) => {
+    const s = connect(port, '127.0.0.1', () => s.write(head));
+    let got = '';
+    s.on('data', d => (got += d));
+    s.on('end', () => resolve(Number(got.split(' ')[1])));
+    s.on('error', reject);
+  });
   {
     const dictate = (body, query = '', headers = auth) => fetch(`${base}/api/dictate${query}`, { method: 'POST', headers, body });
-    // A request's head alone, as a socket sends it: refused before any of its body is read.
-    const refused = head => new Promise((resolve, reject) => {
-      const s = connect(port, '127.0.0.1', () => s.write(head));
-      let got = '';
-      s.on('data', d => (got += d));
-      s.on('end', () => resolve(Number(got.split(' ')[1])));
-      s.on('error', reject);
-    });
     assert.equal((await dictate(new Uint8Array(4), '', {})).status, 401, 'No token, no transcription');
     assert.equal((await dictate(new Uint8Array(4), '?lang=EN')).status, 400, 'A language is a whisper code');
     assert.equal((await dictate(new Uint8Array(3))).status, 400, 'Whole 16-bit samples');
@@ -351,6 +367,44 @@ try {
     await page.context().close();
     ok('close', agent.id, '--yes');
     console.log(`PASS the phone's mic: the recording bar, "/prompt" and what whisper heard in the box (${JSON.stringify(box)}), and the sheet picking French on the PC`);
+  }
+
+  // Images: /api/image's refusals, a PNG kept in the data folder's phone-images, then the phone attaching
+  // one to a message, its thumbnail drawn under Loom's own CSP, and the agent getting the text and its path.
+  {
+    const image = (body, headers = auth) => fetch(`${base}/api/image`, { method: 'POST', headers: { ...headers, 'Content-Type': 'image/png' }, body });
+    const folder = join(data, 'phone-images');
+    assert.equal((await image(PNG, {})).status, 401, 'No token, no image');
+    assert.equal((await image(new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>'))).status, 415, 'An image by its bytes, whatever it says it is');
+    assert.equal(await refused(`POST /api/image HTTP/1.1\r\nAuthorization: Bearer ${token}\r\nContent-Length: ${(20 << 20) + 2}\r\n\r\n`), 413, 'An image is 20 MiB at most');
+    assert.equal(await refused(`POST /api/image HTTP/1.1\r\nContent-Length: ${(1 << 20) + 2}\r\n\r\n`), 413, "A stranger's body stays a prompt's 1 MiB");
+    const kept = await (await image(PNG)).json();
+    assert.ok(kept.ok && dirname(kept.path) === folder && /^\d+-[0-9a-f]{8}\.png$/.test(basename(kept.path)) && readFileSync(kept.path).equals(PNG), JSON.stringify(kept));
+    console.log(`PASS /api/image: refusals, and a PNG kept as ${kept.path}`);
+
+    const tid = ok('--json', 'threads').json[0].id;
+    const agent = ok('--json', 'add', tid, '--cmd', 'opencode').json;
+    for (let i = 0; i < 100 && !ok('read', agent.id).out.includes('Stand-in agent ready.'); i++) await pause(200);
+    page = await context(375, phoneToken);
+    await page.goto(`${base}/#/pane/${encodeURIComponent(agent.id)}`);
+    await page.locator('#pane .who b', { hasText: 'opencode' }).waitFor();
+    await page.click('#image-btn');
+    const [chooser] = await Promise.all([page.waitForEvent('filechooser'), sheetButton(page, 'Photo or file').click()]);
+    await chooser.setFiles([{ name: 'snip.png', mimeType: 'image/png', buffer: PNG }]);
+    await page.waitForFunction(() => document.querySelector('#dock .shot img')?.naturalWidth === 96, null, { timeout: 10000 });
+    await fits(page, '375 image waiting');
+    await page.fill('#prompt textarea', 'what is in this snip');
+    await page.click('#prompt button.primary');
+    await page.locator('#dock .shot').waitFor({ state: 'detached', timeout: 60000 });
+    // The newest file in phone-images is the one the phone sent, and the agent got the text, then its path.
+    let said = '';
+    for (let i = 0; i < 100 && !said.includes('got: what is in this snip'); i++) { await pause(200); said = ok('read', agent.id).out; }
+    const sent = readdirSync(folder).map(f => join(folder, f)).filter(f => f !== kept.path).sort().at(-1);
+    assert.ok(sent && readFileSync(sent).equals(PNG), 'the phone\'s image is on the PC byte for byte');
+    assert.ok(said.replace(/\s+/g, '').includes(`got:whatisinthissnip${sent}`.replace(/\s+/g, '')), `the agent got the text and the path ${sent}:\n${said}`);
+    await page.context().close();
+    ok('close', agent.id, '--yes');
+    console.log(`PASS the phone's image: a thumbnail under Loom's CSP, then the agent got "what is in this snip ${sent}"`);
   }
 
   // A file the Changes tab can stage, diff, commit and discard.
