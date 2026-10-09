@@ -127,14 +127,20 @@ fn admin_dirs(common: &Path) -> Result<Vec<PathBuf>, String> {
 }
 
 /// The worktree folder of administration folder `dir`: the main one (admin_dirs'
-/// first) is the repository's, and a linked one's gitdir names its .git file.
+/// first) is the repository's, and a linked one's gitdir names its .git file,
+/// relative to `dir` when Git keeps relative paths (worktree.useRelativePaths).
 /// A linked one whose gitdir can't be read (another program holding it open,
-/// say) is unknown, and no other folder stands in for it.
+/// say) or names no .git is unknown, and no other folder stands in for it.
 fn worktree_of(dir: &Path, main: bool) -> Result<String, String> {
     if main { return Ok(dir.parent().unwrap_or(dir).display().to_string()); }
     let gitdir = dir.join("gitdir");
-    fs::read_to_string(&gitdir).map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
-        .map_err(|e| format!("{}: {e}", gitdir.display()))
+    let named = fs::read_to_string(&gitdir).map_err(|e| format!("{}: {e}", gitdir.display()))?;
+    // An absolute path replaces `dir` in the join, and `..` resolves as text, as in spelled.
+    let kept = std::path::absolute(dir.join(named.trim_end_matches(['\r', '\n']))).map_err(|e| format!("{}: {e}", gitdir.display()))?;
+    match kept.parent() {
+        Some(folder) if kept.file_name().is_some_and(|n| n.eq_ignore_ascii_case(".git")) => Ok(folder.display().to_string()),
+        _ => Err(format!("{} names no worktree's .git", gitdir.display())),
+    }
 }
 
 /// Where to say a refusal happened: the worktree folder, or else its administration folder.
@@ -854,6 +860,23 @@ mod tests {
         assert!(error.contains("gitdir") && error.contains("git.exe") && error.contains("put it back"), "{error}");
         kept();
         drop(held);
+        finished(running.unwrap());
+        // Git's two records naming each other by relative path, as `git worktree add --relative-paths`
+        // (Git 2.48+) writes them, written by hand so an older Git runs this too: Loom finds the folder
+        // from the administration folder, sees the paused git.exe there, and both looks keep the branch.
+        fs::write(admin.join("gitdir"), "../../../../other/.git\n").unwrap();
+        fs::write(other.join(".git"), "gitdir: ../repo/.git/worktrees/other\n").unwrap();
+        assert_eq!(worktree_of(&admin, false).unwrap(), other.display().to_string());
+        let named = format!("'{}'", other.display());
+        let running = paused_switch("relative");
+        let error = delete_branch(r, "topic", &tip).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("git.exe"), "{error}");
+        kept();
+        finished(running);
+        let mut running = None;
+        let error = delete_branch_with(r, "topic", &tip, || running = Some(paused_switch("relative-between"))).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("put it back"), "{error}");
+        kept();
         finished(running.unwrap());
         // Nothing running: deleted.
         delete_branch(r, "topic", &tip).unwrap();
