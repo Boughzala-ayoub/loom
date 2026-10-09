@@ -228,6 +228,10 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
     use std::process::{Command, Stdio};
     let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
     let common = Path::new(repo).join(common.trim());
+    // Where it physically is, links resolved, once for both looks: Git writes a worktree's
+    // relative gitdir from there, and runs in physical folders. `repo` may be a saved path
+    // that's a junction now, at another depth. Only read here, and HEAD.lock is the same file.
+    let common = PathBuf::from(crate::canonical_directory(common.to_string_lossy().into_owned()).map_err(|e| format!("{}: {e}", common.display()))?);
     let dirs = admin_dirs(&common)?;
     let reference = format!("refs/heads/{branch}");
     let mut child = Command::new("git").arg("-C").arg(repo).args(["update-ref", "--no-deref", "--stdin", "-z"])
@@ -867,7 +871,7 @@ mod tests {
         fs::write(admin.join("gitdir"), "../../../../other/.git\n").unwrap();
         fs::write(other.join(".git"), "gitdir: ../repo/.git/worktrees/other\n").unwrap();
         assert_eq!(worktree_of(&admin, false).unwrap(), other.display().to_string());
-        let named = format!("'{}'", other.display());
+        let named = format!("'{}'", crate::canonical_directory(other.to_string_lossy().into_owned()).unwrap());
         let running = paused_switch("relative");
         let error = delete_branch(r, "topic", &tip).unwrap_err();
         assert!(error.contains("busy") && error.contains(&named) && error.contains("git.exe"), "{error}");
@@ -878,8 +882,25 @@ mod tests {
         assert!(error.contains("busy") && error.contains(&named) && error.contains("put it back"), "{error}");
         kept();
         finished(running.unwrap());
-        // Nothing running: deleted.
-        delete_branch(r, "topic", &tip).unwrap();
+        // The same repository through a junction one folder deeper, as a saved path can be once the
+        // repository moved: the relative gitdir counts from where the administration folder physically
+        // is, so Loom resolves the junction first, and both looks keep the branch.
+        fs::create_dir(dir.join("deeper")).unwrap();
+        let link = dir.join("deeper").join("repo");
+        junction(&link, &repo);
+        let l = link.to_str().unwrap();
+        let running = paused_switch("junction");
+        let error = delete_branch(l, "topic", &tip).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("git.exe"), "{error}");
+        kept();
+        finished(running);
+        let mut running = None;
+        let error = delete_branch_with(l, "topic", &tip, || running = Some(paused_switch("junction-between"))).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("put it back"), "{error}");
+        kept();
+        finished(running.unwrap());
+        // Nothing running: deleted, through the junction too.
+        delete_branch(l, "topic", &tip).unwrap();
         assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
         fs::remove_dir_all(dir).unwrap();
     }

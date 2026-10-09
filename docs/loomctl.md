@@ -296,8 +296,10 @@ by the folder they run in. Git working on the repository from another folder
 libgit2) and a 32-bit git.exe go unseen. Any git.exe in a worktree counts, `git
 status` included, and so does one whose folder Loom can't read. Loom reads
 where each worktree is from its `gitdir` file under `.git/worktrees`, absolute
-or relative to that folder (`worktree.useRelativePaths`). While it can't read
-that file (another program holding it open), every running git.exe counts. A
+or relative to that folder (`worktree.useRelativePaths`). Git counts a relative
+path from where that folder physically is, so Loom first resolves any junction
+in the repository's path, a saved one included. While it can't read that file
+(another program holding it open), every running git.exe counts. A
 Loom killed in those milliseconds leaves its `HEAD.lock` files behind, and Git
 names them.
 
