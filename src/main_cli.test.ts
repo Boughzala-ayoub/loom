@@ -24,14 +24,14 @@ import * as gitparse from "./gitparse.ts";
 import * as stash from "./stash.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts", "sweepTasks", "watched"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`${node.declarationList.flags & ts.NodeFlags.Const ? "const" : "let"} ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice, headBranch, syncBranch, removeThread };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice, headBranch, syncBranch, removeThread, sweepTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
@@ -1147,4 +1147,35 @@ if (check(216)) {
     rmSync(base, { recursive: true, force: true });
   }
   console.log("ok   loomctl close-thread --delete branch deletes its plan's branch, or the one checked out when there's no plan");
+}
+if (check(311)) {
+  // An approval moves on unseen only once Loom saw its question as a menu and then saw it gone 2 s.
+  const menu = `Would you like to run the following command?
+
+  $ npm test
+
+› 1. Yes, proceed (y)
+  2. No, and tell Codex what to do differently (esc)
+`;
+  let screen = `Question: which branch should I use?
+› `, clock = 0;
+  const moves: string[] = [];
+  const p = { id: "p", generation: 1, agent: "codex", dead: false, interruptAt: 0, screen: () => "" };
+  const t: any = { id: "t", pane: "p", gen: 1, state: "approval", events: [{ seq: 1, state: "approval" }] };
+  fixture({ tasks: new Map([["t", t]]), shuttingDown: false, enterHeld: new Set(), paneById: () => p, interruptHint: () => false, sweepTimer: 0,
+    liveScreen: () => screen, Date: { now: () => clock }, moveTask: (_: unknown, c: any) => { moves.push(`${c.state}:${c.signal}`); t.state = c.state; } });
+  const sweep = (at: number) => ((clock = at), lastFixture.sweepTasks());
+  sweep(0); sweep(5000);
+  assert.deepEqual(moves, [], "a free-text question Loom can't read moved on by itself");
+  screen = menu; sweep(6000);
+  screen = ""; sweep(7000); sweep(8000);
+  assert.deepEqual(moves, [], "gone for 1 s is still asking");
+  sweep(9100);
+  assert.deepEqual(moves, ["working:answered"], "a menu answered where Loom can't see stayed asking");
+  // The next question, which Loom can't read, starts unseen.
+  t.state = "approval"; t.events.push({ seq: 2, state: "approval" });
+  screen = `Question: and which remote?
+› `; sweep(9200); sweep(20000);
+  assert.deepEqual(moves, ["working:answered"], "the last question's menu moved the next one on");
+  console.log("ok   an approval moves on unseen only after its own menu was seen and then gone 2 s");
 }

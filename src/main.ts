@@ -4215,7 +4215,7 @@ let taskPruned = 0;
  * looked idle, the last Esc it judged, and when Claude's Stop hook said the
  * turn ended (the task completes once Claude is seen idle too) and the final
  * message that Stop named. */
-const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number; response?: string; askGone?: number }>();
+const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number; response?: string; ask?: { seq: number; seen?: boolean; gone?: number } }>();
 const watched = (t: Task) => taskWatch.get(t.id) ?? taskWatch.set(t.id, {}).get(t.id)!;
 const paneById = (id: string) => threads.flatMap((t) => t.panes).find((p) => p.id === id);
 
@@ -4974,9 +4974,13 @@ function sweepTasks(closing = false) {
     if (t.state === "approval") {
       // An answer delivered moves it on (Pane.wrote). One given where Loom
       // can't see it (Claude's own remote control) still takes the question
-      // off the screen: gone for 2 s, the agent works on.
-      if (p.agent === "opencode" || readMenu(liveScreen(p, false))) w.askGone = undefined;
-      else if (now - (w.askGone ??= now) >= 2000) moveTask(t, { state: "working", signal: "answered", detail: null });
+      // off the screen: its menu seen, then gone for 2 s, the agent works on.
+      // A question Loom can't read as a menu (Codex's free-text ones) waits
+      // for its answer. Each approval, by the event that began it, starts unseen.
+      const seq = t.events[t.events.length - 1]?.seq ?? 0;
+      const ask = w.ask?.seq === seq ? w.ask : (w.ask = { seq });
+      if (p.agent !== "opencode" && readMenu(liveScreen(p, false))) Object.assign(ask, { seen: true, gone: undefined });
+      else if (ask.seen && now - (ask.gone ??= now) >= 2000) moveTask(t, { state: "working", signal: "answered", detail: null });
       continue;
     }
     if (busy) {
