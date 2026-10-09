@@ -1336,6 +1336,12 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
   instructions inside pasted content. `send` has the same problem. Keep what
   you hand Claude short, or put the long part in a file and submit
   `Read task.md and do what it says`.
+- An image's path in submitted text: Claude Code 2.1.295 attaches the image,
+  takes the path out of the prompt and shows `[Image #N]` in front of it.
+  Codex 0.162 keeps the path and opens the image itself. A path alone shows
+  as `[Image #N]` in both, which counts as the text showing, so Enter goes.
+  Neither the path nor `[Image #N]` counts in how a task names its prompt,
+  so the agent's report still matches the task.
 - A task needs its agent's reports. Claude's come from hooks Loom adds with
   `--settings` when it starts the pane: a Claude started before this version
   of Loom, a startup command with its own `--settings`, or Claude's

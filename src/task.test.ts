@@ -41,6 +41,17 @@ const hook41 = `\n\n<pasted_content id="8e95">\n${sent41.replace(/\r\n/g, "\n").
 eq("a collapsed paste, as Claude reports it, still matches", promptMatch(hook41), promptMatch(sent41));
 eq("the value helper.rs must give for it", promptMatch(sent41), "99f2aa029a84bdb5");
 check("only Claude's own tag shape is dropped", promptMatch('<pasted_content id="zz">x') !== promptMatch("x"));
+// An image's path in a prompt: Claude Code 2.1.295 attaches the image, reports the prompt without the path and
+// with [Image #N] in front; Codex 0.162 reports it as typed. A path alone shows as [Image #N] in both (seen live).
+const shot = (n: string) => `C:\\Users\\ayoub\\AppData\\Roaming\\dev.ayoub.loom\\phone-images\\1791556702685-${n}.png`;
+eq("Claude's report of one image matches what Loom typed", promptMatch("[Image #1]What two colours does this image show? Answer in five words or fewer."),
+  promptMatch(`What two colours does this image show? Answer in five words or fewer. ${shot("b598b3d2")}`));
+eq("of two images too", promptMatch(`Name the colours in each image, in order. ${shot("a")} ${shot("b")}`), promptMatch("[Image #3] [Image #4]Name the colours in each image, in order."));
+eq("the value helper.rs must give for it", promptMatch("[Image #3] [Image #4]Name the colours in each image, in order."), "5ee4fa25a64b0488");
+eq("a path alone is its [Image #N]", promptMatch(shot("a")), promptMatch("[Image #2]"));
+eq("a quoted path with a space goes too", promptMatch('look "C:\\Users\\Jo Doe\\x.PNG" here'), promptMatch("[Image #1]look here"));
+check("a path to anything else stays", promptMatch("open C:\\a\\b.txt") !== promptMatch("open"));
+check("so does a relative one", promptMatch("open shot.png") !== promptMatch("open"));
 
 // Claude: its UserPromptSubmit names the prompt. Its Stop only says the turn
 // stopped: another Stop hook may send Claude on working, so main.ts completes

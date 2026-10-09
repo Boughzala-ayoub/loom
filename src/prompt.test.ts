@@ -159,6 +159,11 @@ check("Claude's collapsed paste echoes", echoed(echoes("> ", task), echoes("> [P
 check("Codex's collapsed paste echoes", echoed(echoes("› ", task), echoes("│ › [Pasted Content 1024 │\n│ chars]", task)), true);
 check("A second collapsed paste still counts", echoed(echoes("[Pasted text #1 +50 lines]", task), echoes("[Pasted text #1 +50 lines][Pasted text #2 +50 lines]", task)), true);
 check("A menu that ignored the paste doesn't", echoed(echoes("❯ 1. Yes\n  2. No", task), echoes("❯ 1. Yes\n  2. No", task)), false);
+// An image's path pasted alone: Claude Code 2.1.295 and Codex 0.162 both attach the image and show [Image #N] (seen live).
+const imagePath = "C:\\Users\\ayoub\\AppData\\Roaming\\dev.ayoub.loom\\phone-images\\1791556702685-b598b3d2.png";
+check("A path alone echoes as its image", echoed(echoes("› ", imagePath), echoes("› [Image #1]", imagePath)), true);
+check("as the next image after earlier ones", echoed(echoes("❯ [Image #1]What colours?\n  ⎿  [Image #1]\n❯ ", imagePath), echoes("❯ [Image #1]What colours?\n  ⎿  [Image #1]\n❯ [Image #2]", imagePath)), true);
+check("A short text before it too", echoed(echoes("❯ ", `hi ${imagePath}`), echoes("❯ [Image #1]hi", `hi ${imagePath}`)), true);
 
 const readme = readMenu("Read README.md?\n❯ 1. Yes\n  2. No")!;
 const wipe = readMenu("Delete the project?\n❯ 1. Yes\n  2. No")!;

@@ -301,7 +301,7 @@ export function interruptHint(screen: string, agent: string, cells?: () => Cell[
 }
 
 // Long pastes show as one of these instead of the text: Claude's and Codex's.
-const PASTED = /\[Pastedtext#\d+(?:\+\d+lines)?\]|\[PastedContent\d+chars\]/g;
+const PASTED = /\[Pastedtext#\d+(?:\+\d+lines)?\]|\[PastedContent\d+chars\]|\[Image#\d+\]/g;
 
 /** Where a paste can show on screen: how many times the start of `text`, its
  * end and a collapsed-paste placeholder appear. Before and after a paste, they

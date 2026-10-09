@@ -233,6 +233,10 @@ export function changeFields(t: Task, c: Change): Partial<Task> {
   return fields;
 }
 
+/** An agent's mark for an attached image, or an image's path in quotes: either counts as spacing (promptMatch). */
+const IMAGE_MARK = /\[Image #[0-9]+\]|"[A-Za-z]:[\\/][^"\r\n]*\.(?:png|jpe?g|gif|webp)"/gi;
+/** A word that is an image's path. */
+const IMAGE_PATH = /^[A-Za-z]:[\\/]\S*\.(?:png|jpe?g|gif|webp)$/i;
 /** How Claude's and Codex's reports name a prompt, computed the same way in
  * helper.rs: FNV-1a 64 of the text's UTF-8, with every run of ASCII
  * whitespace made one space and the ends trimmed. Claude turns CRLF into LF
@@ -240,11 +244,14 @@ export function changeFields(t: Task, c: Change): Partial<Task> {
  * but where it falls does: "edit foo bar" isn't "edit foobar". A paste Claude
  * collapsed comes back wrapped in `<pasted_content id="8e95">` and
  * `</pasted_content id="8e95">` (four hex digits, Claude Code 2.1.287), so
- * those tags count as spacing. Not a digest to trust: texts that differ only
- * in spacing share it. */
+ * those tags count as spacing. An image's path doesn't count, nor `[Image #N]`:
+ * Claude Code 2.1.295 takes the path out of the prompt it reports and puts
+ * `[Image #N]` in front, and it and Codex show a path pasted alone as one.
+ * Not a digest to trust: texts that differ only in spacing share it. */
 export function promptMatch(text: string): string {
   let h = 0xcbf29ce484222325n;
-  const bare = text.replace(/<\/?pasted_content id="[0-9a-f]{4}">/g, " ").replace(/[\t\n\v\f\r ]+/g, " ").replace(/^ | $/g, "");
+  const bare = text.replace(/<\/?pasted_content id="[0-9a-f]{4}">/g, " ").replace(IMAGE_MARK, " ")
+    .split(/[\t\n\v\f\r ]+/).filter((w) => w && !IMAGE_PATH.test(w)).join(" ");
   for (const b of new TextEncoder().encode(bare)) h = ((h ^ BigInt(b)) * 0x100000001b3n) & 0xffffffffffffffffn;
   return h.toString(16).padStart(16, "0");
 }

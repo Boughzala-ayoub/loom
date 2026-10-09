@@ -209,10 +209,13 @@ fn claude_event(p: &serde_json::Value) -> Option<serde_json::Value> {
 /// FNV-1a 64 of the UTF-8 with each run of ASCII whitespace made one space
 /// and the ends trimmed (Claude turns CRLF into LF and tabs into spaces, but
 /// "edit foo bar" isn't "edit foobar"), and the tags Claude wraps a collapsed
-/// paste in counted as spacing, in hex.
+/// paste in counted as spacing, in hex. An image's path doesn't count, nor
+/// `[Image #N]`, which Claude puts in its place (task.ts IMAGE_MARK, IMAGE_PATH).
 pub fn prompt_match(text: &str) -> String {
-    let bare = without_paste_tags(text);
-    let words: Vec<&str> = bare.split(|c| matches!(c, '\t' | '\n' | '\x0b' | '\x0c' | '\r' | ' ')).filter(|w| !w.is_empty()).collect();
+    static MARK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r#"(?i)\[Image #[0-9]+\]|"[a-z]:[\\/][^"\r\n]*\.(?:png|jpe?g|gif|webp)""#).unwrap());
+    static PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)^[a-z]:[\\/]\S*\.(?:png|jpe?g|gif|webp)$").unwrap());
+    let bare = MARK.replace_all(&without_paste_tags(text), " ").into_owned();
+    let words: Vec<&str> = bare.split(|c| matches!(c, '\t' | '\n' | '\x0b' | '\x0c' | '\r' | ' ')).filter(|w| !w.is_empty() && !PATH.is_match(w)).collect();
     let h = words.join(" ").bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
     format!("{h:016x}")
 }
@@ -454,6 +457,13 @@ mod tests {
         let hook = format!("\n\n<pasted_content id=\"8e95\">\nReply with exactly the word LINES.\n{}\n</pasted_content id=\"8e95\">\n", lines.join("\n"));
         assert_eq!(prompt_match(&hook), "99f2aa029a84bdb5");
         assert_ne!(prompt_match("<pasted_content id=\"zz\">x"), prompt_match("x"), "only Claude's own tag shape");
+        // An image's path, and Claude Code 2.1.295's [Image #N] in its place (src/task.test.ts has the same).
+        assert_eq!(prompt_match("[Image #3] [Image #4]Name the colours in each image, in order."), "5ee4fa25a64b0488");
+        assert_eq!(prompt_match(r"Name the colours in each image, in order. C:\Users\a\phone-images\1-a.png c:/x/2-b.JPG"), "5ee4fa25a64b0488");
+        assert_eq!(prompt_match(r#"look "C:\Users\Jo Doe\x.PNG" here"#), prompt_match("[Image #1]look here"));
+        assert_eq!(prompt_match(r"C:\a\b.webp"), prompt_match("[Image #2]"));
+        assert_ne!(prompt_match(r"open C:\a\b.txt"), prompt_match("open"));
+        assert_ne!(prompt_match("open shot.png"), prompt_match("open"));
         assert_eq!(without_paste_tags("é<pasted_content id=\"0a1f\">ü</pasted_content id=\"0a1f\">"), "é ü ");
     }
 
