@@ -156,7 +156,7 @@ try {
           if ((a[0] === 'diff' || a[0] === 'show') && qa.longDiff) return 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1,601 @@\n context line one\n' + '+added line\n'.repeat(600);
           if (a[0] === 'diff' || a[0] === 'show') return (a.includes('-U999999') ? ' context line one\n context line two\n' : '') + 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old navigation\n+const description = "A long line of source code that should remain readable when reviewing changes inside a narrow workspace window.";\n';
           if (a[0] === 'log') return 'abc123 Improve workspace navigation\n';
-          if (a[0] === 'branch') return 'main\nloom/search-polish\n';
+          if (a[0] === 'branch') return (qa.branchNames ?? ['main', 'loom/search-polish']).map(b => 'refs/heads/' + b).join('\n') + '\n';
           if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\t5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c\tOn main: workspace polish\n';
           if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
           if (a.includes('--show-toplevel')) return args.dir;
@@ -325,7 +325,7 @@ try {
       await repoItem(/^Switch branch/);
       await held();
       await to('review-keyboard-navigation');
-      await answer('branch-from-A\n');
+      await answer('refs/heads/branch-from-A\n');
       await page.waitForTimeout(200);
       assert.equal(await shown('branch-from-A'), 0, "A's branches never show over another thread");
       answer = await hold('stash', 'list');

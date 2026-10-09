@@ -6408,8 +6408,8 @@ const showGitMenu = (th: Thread, m: Menu) => void (th === current && showMenu($(
  * the tree is dirty or the branch is checked out in another worktree — git's
  * complaint goes to the toast, which is the answer either way. */
 async function showBranches(th: Thread) {
-  const out = await git(th.dir, "branch", "--format=%(refname:short)", "--sort=-committerdate").catch(() => "");
-  const names = out.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 40);
+  const out = await git(th.dir, "branch", "--format=%(refname)", "--sort=-committerdate").catch(() => "");
+  const names = out.split(/\r?\n/).filter((s) => s.startsWith("refs/heads/")).map((s) => s.slice("refs/heads/".length)).slice(0, 40);
   showGitMenu(th, {
     placeholder: "new branch…",
     add: (v) => void gitDo(th, "", "switch", "-c", v),
@@ -8923,8 +8923,8 @@ const CLI: Record<string, CliCommand> = {
           return { data: { url, ...(await gitStatus(th)) }, text: url };
         }
         case "branches": {
-          const out = await run("branch", "--format=%(refname:short)", "--sort=-committerdate").catch(() => "");
-          const branches = out.split("\n").map((b) => b.trim()).filter(Boolean).slice(0, 40);
+          const out = await run("branch", "--format=%(refname)", "--sort=-committerdate").catch(() => "");
+          const branches = out.split(/\r?\n/).filter((b) => b.startsWith("refs/heads/")).map((b) => b.slice("refs/heads/".length)).slice(0, 40);
           return { data: { current: th.branch, branches }, text: branches.map((b) => (b === th.branch ? `* ${b}` : `  ${b}`)).join("\n") };
         }
         case "switch":
