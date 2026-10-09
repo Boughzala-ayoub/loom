@@ -384,6 +384,11 @@ try {
     await goto(p, '#/pane/zz1/Alpha%3A1', '#pane .who b:has-text("This agent is gone")'); await fits(p, width, 'pane-gone');
     await goto(p, '#/new', '#new form'); await fits(p, width, 'new-thread'); await p.locator('#new [data-kind=checkout]').click(); await fits(p, width, 'new-folder');
     await goto(p, '#/changes/a', '#changes .file'); await fits(p, width, 'changes'); await p.locator('#changes .picker').click(); await fits(p, width, 'thread-picker'); await close(p);
+    // Every section folded, each title still a finger tall with its Stage all, then open again.
+    for (const name of ['Staged', 'Changes', 'New files', 'Recent commits']) await p.locator('#changes .fold-head', { hasText: name }).click();
+    await until(`${width}: all folded`, async () => (await p.locator('#changes .files').count()) === 0); await fits(p, width, 'changes-folded'); await taps(p, width, '#changes .section-title');
+    for (const name of ['Staged', 'Changes', 'New files', 'Recent commits']) await p.locator('#changes .fold-head', { hasText: name }).click();
+    await until(`${width}: all open`, async () => (await p.locator('#changes .files').count()) === 4);
     await p.locator('#changes .file .icon-btn').first().click(); await fits(p, width, 'file-menu'); await sheetButton(p, 'Discard changes').click(); await fits(p, width, 'discard-confirm'); await close(p);
     await p.locator('#changes .file').filter({ hasText: 'conflict.txt' }).first().locator('.icon-btn').click(); await fits(p, width, 'conflict-menu'); await close(p);
     await p.locator('#changes .midway button', { hasText: 'Skip' }).click(); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'skip-confirm'); await close(p);
@@ -2124,6 +2129,35 @@ try {
     await ctx.close();
   }
   console.log('PASS R28: with Plan usage off, Usage asks no account, says it is off with each agent\'s context still shown, and turns it on');
+
+  // --- Changes sections fold ------------------------------------------------------------
+  {
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/changes/a', '#changes .file');
+    const head = name => page.locator('#changes .fold-head', { hasText: name });
+    const rows = () => page.locator('#changes .file').allInnerTexts();
+    assert.equal(await head('New files').getAttribute('aria-expanded'), 'true');
+    await head('New files').click();
+    await until('New files folds', async () => !(await rows()).some(r => r.includes('new.txt')));
+    assert.equal(await head('New files').getAttribute('aria-expanded'), 'false');
+    assert.ok((await rows()).some(r => r.includes('staged.txt')) && (await rows()).some(r => r.includes('alpha.txt')), 'the other sections stay open');
+    // Folded, its Stage all still stages what it holds.
+    await page.locator('#changes .section-title', { hasText: 'New files' }).getByRole('button', { name: 'Stage all', exact: true }).click();
+    await until('Stage all ran', () => git(state, 'stage').some(c => c.argv.includes('--untracked')));
+    // Kept on this phone: still folded after a reload, and on another thread.
+    await page.reload();
+    await page.locator('#changes .file').first().waitFor();
+    assert.equal(await head('New files').getAttribute('aria-expanded'), 'false');
+    assert.ok(!(await rows()).some(r => r.includes('new.txt')));
+    await goto(page, '#/changes/b', '#changes .file');
+    assert.equal(await head('New files').getAttribute('aria-expanded'), 'false', "a fold is the phone's, not the thread's");
+    await head('New files').click();
+    await until('New files opens', async () => (await rows()).some(r => r.includes('new.txt')));
+    await page.screenshot({ path: resolve(out, '375-changes-fold.png') });
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log("PASS Changes: each section folds from its title and opens again, its Stage all still works folded, and the folds stay on this phone across a reload and threads");
 
   // --- Images from the phone -------------------------------------------------------------
   {

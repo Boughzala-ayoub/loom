@@ -90,6 +90,28 @@ function empty(title: string, text: string) {
   return box;
 }
 
+/** The sections folded on this phone (staged, unstaged, untracked, commits), as the PC's panel folds its own. */
+const folded = new Set(pref("loom-changes-folded", "").split("\n").filter(Boolean));
+/** A section's title: tap it to fold or open the section. Its action stays either way. */
+function sectionHead(key: string, title: string, count: number, action?: Node) {
+  const head = el("div", "section-title");
+  const fold = button("", () => {
+    if (!folded.delete(key)) folded.add(key);
+    setPref("loom-changes-folded", [...folded].join("\n"));
+    tick();
+    statusKey = "";
+    if (thread && status) draw(thread, status);
+  }, "fold-head");
+  fold.setAttribute("aria-expanded", String(!folded.has(key)));
+  const chevron = el("span", "fold");
+  chevron.append(ui("fold"));
+  const name = el("span", "grow", title);
+  name.append(el("span", "n", String(count)));
+  fold.append(chevron, name);
+  head.append(fold, ...(action ? [action] : []));
+  return head;
+}
+
 let held = false; // the commit box kept as it was while a message is typed: redrawn once you leave it
 function draw(tid: string, s: Status) {
   status = s;
@@ -109,17 +131,16 @@ function draw(tid: string, s: Status) {
   for (const [sec, title] of SECTIONS) {
     const files = s[sec];
     if (!files.length) continue;
-    const head = el("div", "section-title");
-    const name = el("span", "grow", title);
-    name.append(el("span", "n", String(files.length)));
-    head.append(name);
-    if (sec === "staged") head.append(button("Unstage all", () => void change(tid, ["unstage", "--staged"], "Unstaged"), "ghost"));
-    else head.append(button("Stage all", () => void change(tid, ["stage", `--${sec}`], "Staged"), "ghost"));
+    nodes.push(sectionHead(sec, title, files.length, sec === "staged"
+      ? button("Unstage all", () => void change(tid, ["unstage", "--staged"], "Unstaged"), "ghost")
+      : button("Stage all", () => void change(tid, ["stage", `--${sec}`], "Staged"), "ghost")));
+    if (folded.has(sec)) continue;
     const box = el("div", "files");
     box.append(...files.map((f) => fileRow(tid, sec, f)));
-    nodes.push(head, box);
+    nodes.push(box);
   }
-  if (s.commits.length) {
+  if (s.commits.length) nodes.push(sectionHead("commits", "Recent commits", s.commits.length));
+  if (s.commits.length && !folded.has("commits")) {
     const box = el("div", "files");
     box.append(...s.commits.map((c) => {
       const row = el("div", "commit-row");
@@ -128,7 +149,7 @@ function draw(tid: string, s: Status) {
       row.append(open, iconButton("more", `Commit ${c.sha}`, () => commitActions(tid, c)));
       return row;
     }));
-    nodes.push(el("div", "section-title", "Recent commits"), box);
+    nodes.push(box);
   }
   // A message being typed keeps its box, never rebuilt: the caret stays, and so does a word the phone's keyboard is composing.
   const at = typing ? nodes.findIndex((n) => n instanceof HTMLElement && n.matches(".composer")) : -1;

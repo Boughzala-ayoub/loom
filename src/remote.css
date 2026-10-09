@@ -92,6 +92,10 @@ code, .mono { font-family: var(--mono); }
 .section-title:first-child { margin-top: 4px; }
 .section-title .grow { flex: 1; }
 .section-title .n { margin-left: 6px; color: var(--faint); font-weight: 400; }
+/* A Changes section's title folds it, its chevron as a project's in the list. */
+.section-title:has(.fold-head) { align-items: center; margin: 10px 0 2px; }
+.fold-head { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 4px; border: 0; border-radius: 12px; background: none; color: inherit; font: inherit; text-align: left; }
+.fold-head:active { background: var(--press); }
 .empty { padding: 40px 20px; color: var(--muted); text-align: center; }
 .empty b { display: block; margin-bottom: 6px; color: var(--text); font-size: 17px; }
 
@@ -139,9 +143,9 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
 .project-head { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 0 6px; border: 0; border-radius: 12px; background: none; color: var(--text); font-size: 15px; font-weight: 600; text-align: left; }
 .project-head .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-head .n { color: var(--faint); font-size: 13px; font-weight: 400; }
-.project-head .fold { display: inline-grid; place-items: center; width: 18px; color: var(--faint); transition: transform 0.15s; }
-.project-head .fold svg { width: 16px; height: 16px; }
-.project-head[aria-expanded="false"] .fold { transform: rotate(-90deg); }
+:is(.project-head, .fold-head) .fold { display: inline-grid; place-items: center; width: 18px; color: var(--faint); transition: transform 0.15s; }
+:is(.project-head, .fold-head) .fold svg { width: 16px; height: 16px; }
+:is(.project-head, .fold-head)[aria-expanded="false"] .fold { transform: rotate(-90deg); }
 .thread-top { display: flex; align-items: center; gap: 4px; }
 .thread-head { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: 2px; min-height: 58px; padding: 6px 6px 6px 12px; border: 0; border-radius: 12px; background: none; text-align: left; }
 .thread-head:active { background: var(--press); }

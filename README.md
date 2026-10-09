@@ -286,7 +286,8 @@ The page is an app with four tabs, and it wears the PC's theme.
   saying what that loses. `+` starts a thread.
 - **Changes** is the PC's Changes panel: the branch and how far it is from its
   upstream, a half-done merge or rebase with its buttons, the staged, changed
-  and new files, and the last commits. A file opens its diff, with Stage,
+  and new files, and the last commits, each section folding from its title.
+  A file opens its diff, with Stage,
   Unstage or Discard on each hunk. Commit, or Commit & push, takes everything
   or only what's staged. Its `⋯` fetches, pulls, pushes, creates a PR,
   switches or creates branches, stashes and restores, amends or undoes the

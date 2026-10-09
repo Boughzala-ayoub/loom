@@ -625,8 +625,8 @@ it twice. **Fit Loom to phone** in a pane's actions shows that pane on the PC,
 turns on the phone window size and zooms the pane, so the agent redraws at
 about the phone's width. Turn it off again from the same menu. Without it, a
 screen too wide for the phone wraps its lines at 12 px, unless that menu turns
-wrapping off. The phone's browser keeps its folded threads, the list view, the
-keys row, wrapping, commit message drafts and the PC's last theme; Loom keeps
+wrapping off. The phone's browser keeps its folded threads and Changes sections, the list
+view, the keys row, wrapping, commit message drafts and the PC's last theme; Loom keeps
 none of them. What can lose work asks first on the phone, and loomctl wants
 `--yes` for it.
 
