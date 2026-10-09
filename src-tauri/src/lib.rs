@@ -80,8 +80,9 @@ impl Session {
 }
 
 /// A Job Object holding a pane's processes. Dropping it ends the console ones
-/// (`end`) and leaves the GUI apps the pane opened, which joined it without
-/// asking: VS Code from `code .`, a browser from `start`. ponytail: no
+/// (`end`) and leaves the GUI apps the pane opened, with what they started,
+/// which joined it without asking: VS Code from `code .` and its terminals, a
+/// browser from `start`. ponytail: no
 /// kill-on-close, which can't tell them apart, so a Loom that crashes leaves
 /// the pane's detached console processes running.
 struct Job(windows::Win32::Foundation::HANDLE);
@@ -96,8 +97,9 @@ impl Drop for Job {
 }
 
 impl Job {
-    /// Terminates every process in the job but GUI apps. One being stopped can
-    /// start another meanwhile, so it goes again until a pass stops none.
+    /// Terminates every process in the job but GUI apps and what they started.
+    /// One being stopped can start another meanwhile, so it goes again until a
+    /// pass stops none.
     fn end(&self) {
         for _ in 0..4 {
             if !self.end_pass() { break; }
@@ -121,17 +123,37 @@ impl Job {
         use windows::{core::BOOL, Win32::Foundation::CloseHandle};
         use windows::Win32::System::JobObjects::IsProcessInJob;
         use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE};
-        let mut ended = false;
+        // Every member is held open before any is judged, so no id goes to another process meanwhile.
+        let mut members = Vec::new();
         for pid in self.pids() {
             let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, false, pid) }) else { continue };
             // Still this job's: the id may have gone to another process since the list.
             let mut inside = BOOL(0);
-            let ours = unsafe { IsProcessInJob(process, Some(self.0), &mut inside) }.is_ok() && inside.as_bool();
-            if ours && image_of(process).and_then(|image| subsystem(&image)) != Some(2) {
-                ended |= unsafe { TerminateProcess(process, 1) }.is_ok();
+            if unsafe { IsProcessInJob(process, Some(self.0), &mut inside) }.is_ok() && inside.as_bool() {
+                members.push((pid, process, image_of(process).and_then(|image| subsystem(&image)) == Some(2)));
+            } else {
+                unsafe { let _ = CloseHandle(process); }
             }
-            unsafe { let _ = CloseHandle(process); }
         }
+        // What a GUI app started joined the job with it and is that app's:
+        // VS Code's terminals and language servers are console programs.
+        let tree = procs::parents();
+        let spared = |mut pid: u32| loop {
+            match members.iter().find(|m| m.0 == pid) {
+                Some(&(_, _, gui)) if gui => return true,
+                Some(_) => {}
+                None => return false,
+            }
+            match tree.get(&pid) {
+                Some(&(parent, created)) if tree.get(&parent).is_some_and(|&(_, older)| older < created) => pid = parent,
+                _ => return false,
+            }
+        };
+        let mut ended = false;
+        for &(pid, process, _) in &members {
+            if !spared(pid) { ended |= unsafe { TerminateProcess(process, 1) }.is_ok(); }
+        }
+        for &(_, process, _) in &members { unsafe { let _ = CloseHandle(process); } }
         ended
     }
 }
@@ -2871,10 +2893,12 @@ mod tests {
         use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
         let dir = std::env::temp_dir().join(format!("loom-job-gui-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        // wscript is a GUI app that shows no window: a stand-in for `code .`.
-        let script = dir.join("sleep.js");
-        std::fs::write(&script, "WScript.Sleep(60000);").unwrap();
         let system = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap()).join("System32");
+        // wscript is a GUI app that shows no window: a stand-in for `code .`,
+        // and the console program it starts, for VS Code's terminal.
+        let script = dir.join("sleep.js");
+        let waitfor = format!("\"{}\" /t 60 LoomJobTest{}", system.join("waitfor.exe").display(), std::process::id());
+        std::fs::write(&script, format!("new ActiveXObject('WScript.Shell').Run({}, 0, false); WScript.Sleep(60000);", serde_json::to_string(&waitfor).unwrap())).unwrap();
         let (ping, wscript) = (system.join("PING.EXE"), system.join("wscript.exe"));
         // The first ping waits out the job's assignment, which comes just after the spawn.
         let line = format!("\"{ping}\" -n 2 127.0.0.1 >nul & start \"\" \"{wscript}\" //B //Nologo \"{js}\" & \"{ping}\" -n 60 127.0.0.1 >nul",
@@ -2899,23 +2923,31 @@ mod tests {
         let members = loop {
             let pids = super::Job::pids(&job);
             let named: Vec<(u32, String)> = pids.iter().filter_map(|&p| image(p).map(|n| (p, n))).collect();
-            if named.iter().filter(|(_, n)| n == "ping.exe").count() == 1 && named.iter().any(|(_, n)| n == "wscript.exe") && started.elapsed().as_secs() >= 2 { break named; }
+            if named.iter().filter(|(_, n)| n == "ping.exe").count() == 1 && named.iter().any(|(_, n)| n == "wscript.exe")
+                && named.iter().any(|(_, n)| n == "waitfor.exe") && started.elapsed().as_secs() >= 2 { break named; }
             assert!(started.elapsed().as_secs() < 15, "the pane never started both: {named:?}");
             std::thread::sleep(std::time::Duration::from_millis(100));
         };
         let gui = members.iter().find(|(_, n)| n == "wscript.exe").unwrap().0;
+        let child = members.iter().find(|(_, n)| n == "waitfor.exe").unwrap().0;
+        // The console window waitfor got, which is its own.
+        let tree = super::procs::parents();
+        let host: Vec<u32> = members.iter().filter(|(p, n)| n == "conhost.exe" && tree.get(p).is_some_and(|&(parent, _)| parent == child)).map(|m| m.0).collect();
         drop(job);
         std::thread::sleep(std::time::Duration::from_millis(500));
-        let survived = alive(gui);
-        let consoles: Vec<_> = members.iter().filter(|(p, n)| n != "wscript.exe" && alive(*p)).cloned().collect();
+        let (survived, child_survived) = (alive(gui), alive(child));
+        let consoles: Vec<_> = members.iter().filter(|(p, _)| *p != gui && *p != child && !host.contains(p) && alive(*p)).cloned().collect();
         // Only what this test started, by its id.
-        if let Ok(h) = unsafe { OpenProcess(windows::Win32::System::Threading::PROCESS_TERMINATE, false, gui) } {
-            unsafe { let _ = windows::Win32::System::Threading::TerminateProcess(h, 1); let _ = windows::Win32::Foundation::CloseHandle(h); }
+        for pid in [gui, child].into_iter().chain(host) {
+            if let Ok(h) = unsafe { OpenProcess(windows::Win32::System::Threading::PROCESS_TERMINATE, false, pid) } {
+                unsafe { let _ = windows::Win32::System::Threading::TerminateProcess(h, 1); let _ = windows::Win32::Foundation::CloseHandle(h); }
+            }
         }
         let _ = root.kill();
         let _ = root.wait();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(survived, "closing the pane's job ended the GUI app it opened");
+        assert!(child_survived, "closing the pane's job ended a console program the GUI app started");
         assert!(consoles.is_empty(), "console processes outlived the pane's job: {consoles:?}");
     }
 

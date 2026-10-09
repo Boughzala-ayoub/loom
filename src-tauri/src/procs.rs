@@ -24,6 +24,8 @@ struct Times {
 
 struct Proc {
     pid: u32,
+    /// The process that started it, which may have ended since.
+    parent: u32,
     name: String,
     created: u64,
     time: u64,
@@ -116,6 +118,12 @@ fn list() -> Vec<Proc> {
     Vec::new()
 }
 
+/// Each process's parent and creation time, by pid. A parent pid that isn't
+/// older than its child went to another process after the parent ended.
+pub(crate) fn parents() -> HashMap<u32, (u32, u64)> {
+    list().into_iter().map(|p| (p.pid, (p.parent, p.created))).collect()
+}
+
 fn entries(buf: &[u64]) -> Vec<Proc> {
     let mut procs = Vec::new();
     let mut at = 0;
@@ -129,7 +137,8 @@ fn entries(buf: &[u64]) -> Vec<Proc> {
             let name = &p.ImageName;
             // SAFETY: the name points into `buf`, Length bytes long.
             let name = if name.Buffer.is_null() { String::new() } else { String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(name.Buffer.0, name.Length as usize / 2) }) };
-            procs.push(Proc { pid, name, created: field(24), time: field(32) + field(40), memory: field(0) });
+            // Reserved2 is InheritedFromUniqueProcessId.
+            procs.push(Proc { pid, parent: p.Reserved2 as usize as u32, name, created: field(24), time: field(32) + field(40), memory: field(0) });
         }
         if p.NextEntryOffset == 0 {
             return procs;
