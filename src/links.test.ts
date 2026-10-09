@@ -22,7 +22,11 @@ for (const path of ['node_modules\\.cache\\ui-check\\theme-0-768.png', 'C:\\My P
   eq(link.range.start.x, path.startsWith('"') ? 4 : 3);
 }
 // Opening a network path connects to its host with your Windows sign-in: no link, nor any part of one.
-for (const path of ['\\\\attacker.example\\share\\chart.png', '"\\\\host\\my share\\a.png"', '//host/share/a.png']) eq(fileLinks(buffer('  ' + path), 1), []);
+for (const path of ['\\\\attacker.example\\share\\chart.png', '"\\\\host\\my share\\a.png"', '\\\\host\\my share\\a.png', '//host/share/a.png']) eq(fileLinks(buffer('  ' + path), 1), []);
+// A code comment's // names no host: the path after it still links.
+for (const [line, path] of [['const a = 1; // from config.json', 'config.json'], ['  // see src/main.ts:12 for details', 'src/main.ts:12'], ['//TODO read C:\\x\\y.ts', 'C:\\x\\y.ts']]) {
+  eq(fileLinks(buffer(line), 1).map(link => link.text), [path]);
+}
 const path = 'node_modules/.cache/ui-check/theme-picker-0-768.png';
 for (const path of ['~\\AppData\\Local\\Temp\\opencode\\g375.png', '~/AppData/Local/Temp/opencode/g375b.png', '~\\My Pictures\\screen shot.png', '~/src/main.ts:12:3']) {
   for (const cols of [200, 20]) {
