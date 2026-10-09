@@ -19,17 +19,61 @@ const PREFIX: &str = if cfg!(debug_assertions) { "loom-dev" } else { "loom" };
 /// running a retried mutation twice.
 pub const PROTOCOL: u64 = 3;
 
+/// This account, as a hash of its SID. Not USERNAME with its odd characters
+/// dropped: "a.b" and "ab", or two non-ASCII names, came out the same, and
+/// the account that made the name first held it. The owner check (owner_is)
+/// still guards every connection.
 fn user() -> String {
+    static USER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    USER.get_or_init(|| match sid() {
+        Some(sid) => format!("{:016x}", fnv1a(&sid)),
+        // ponytail: an account whose token can't be read keeps the old name.
+        None => legacy_user(),
+    }).clone()
+}
+
+/// What Loom called this account before the SID names: USERNAME with all but
+/// ASCII letters and digits dropped.
+fn legacy_user() -> String {
     std::env::var("USERNAME").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric()).collect()
 }
 
-/// `\\.\pipe\loom-<user>` for the default workspace, `-<hash>` after it for a
-/// profile file.
-pub fn pipe_name(profile: Option<&str>) -> String {
-    match profile {
-        None => format!(r"\\.\pipe\{PREFIX}-{}", user()),
-        Some(file) => format!(r"\\.\pipe\{PREFIX}-{}-{:016x}", user(), fnv1a(&normalize(file))),
+/// This account's SID as text, S-1-5-21-....
+fn sid() -> Option<String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::{Authorization::ConvertSidToStringSidW, TOKEN_USER};
+    let user = current_user().ok()?;
+    unsafe {
+        let mut raw = windows::core::PWSTR::null();
+        ConvertSidToStringSidW((*(user.as_ptr() as *const TOKEN_USER)).User.Sid, &mut raw).ok()?;
+        let text = raw.to_string().ok();
+        let _ = LocalFree(Some(HLOCAL(raw.0.cast())));
+        text
     }
+}
+
+/// `\\.\pipe\loom-<user>` for the default workspace, `-<hash>` after it for a
+/// profile file. `<user>` is 16 hex digits (user).
+pub fn pipe_name(profile: Option<&str>) -> String {
+    name_for(&user(), profile)
+}
+
+fn name_for(user: &str, profile: Option<&str>) -> String {
+    match profile {
+        None => format!(r"\\.\pipe\{PREFIX}-{user}"),
+        Some(file) => format!(r"\\.\pipe\{PREFIX}-{user}-{:016x}", fnv1a(&normalize(file))),
+    }
+}
+
+/// The names loomctl tries for `profile`'s workspace, in order: Loom's own
+/// (pipe_name), then the one a Loom from before the SID names serves.
+/// update.ps1 replaces loomctl.exe while that Loom keeps running until it
+/// restarts, and protocol 3 hasn't changed, so the new loomctl must still
+/// reach it. Each name goes through the same owner check and hello.
+#[allow(dead_code)] // loom.exe serves pipe_name only
+pub fn pipe_names(profile: Option<&str>) -> Vec<String> {
+    let (own, before) = (pipe_name(profile), name_for(&legacy_user(), profile));
+    if before == own { vec![own] } else { vec![own, before] }
 }
 
 /// This process's own pipe: what its panes get as LOOM_PIPE.
@@ -55,7 +99,6 @@ fn fnv1a(s: &str) -> u64 {
 }
 
 /// This account's SID, as the bytes of its TOKEN_USER (the SID points inside).
-#[allow(dead_code)] // Loom checks its own pipes only in tests
 pub fn current_user() -> Result<Vec<u8>, String> {
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY};
@@ -107,6 +150,15 @@ mod tests {
         assert_eq!(a, pipe_name(Some("c:/work/client.json")));
         assert_ne!(a, plain);
         assert_ne!(a, pipe_name(Some(r"C:\Work\other.json")));
+    }
+
+    #[test]
+    fn the_name_is_this_accounts_sid_not_its_user_name() {
+        let sid = sid().expect("this account's SID");
+        assert!(sid.starts_with("S-1-"), "{sid}");
+        let id = format!("{:016x}", fnv1a(&sid));
+        assert_eq!(pipe_name(None), format!(r"\\.\pipe\{PREFIX}-{id}"));
+        assert!(instance_pipe().starts_with(&format!(r"\\.\pipe\{PREFIX}-{id}-pid")));
     }
 
     #[test]

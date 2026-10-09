@@ -142,12 +142,39 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
     Ok(parsed)
 }
 
-/// Opens the pipe, or the failure code and why not.
-fn connect(name: &str) -> Result<std::fs::File, (&'static str, String)> {
+/// Opens the first of `names` that exists (targets), and says which, or the
+/// failure code and why not. Only a name that doesn't exist passes to the
+/// next: one that another account owns, or that stays busy, ends it there.
+fn connect(names: &[String]) -> Result<(std::fs::File, String), (&'static str, String)> {
+    connect_as(names, &pipe::current_user().map_err(|e| ("unreachable", e))?)
+}
+
+fn connect_as(names: &[String], user: &[u8]) -> Result<(std::fs::File, String), (&'static str, String)> {
+    for name in names {
+        match open(name, user) {
+            Err(("not-running", _)) => continue,
+            got => return got.map(|f| (f, name.clone())),
+        }
+    }
+    Err(("not-running", format!("Loom isn't running, or not for this workspace ({}).", names.first().map_or("", |n| n.as_str()))))
+}
+
+/// The targets for this call, in order. Inside a pane LOOM_PIPE names the Loom
+/// that owns it, exactly; --profile picks another workspace. Otherwise the
+/// workspace's names (pipe::pipe_names): Loom's own, then a pre-SID Loom's.
+fn targets(profile: Option<&str>, env_pipe: Option<String>) -> Vec<String> {
+    match (profile, env_pipe) {
+        (None, Some(pipe)) if !pipe.is_empty() => vec![pipe],
+        (profile, _) => pipe::pipe_names(profile),
+    }
+}
+
+/// Opens the pipe if `user` owns it, or the failure code and why not.
+fn open(name: &str, user: &[u8]) -> Result<std::fs::File, (&'static str, String)> {
     for _ in 0..100 {
         match std::fs::OpenOptions::new().read(true).write(true).open(name) {
             Ok(f) => {
-                let owner = pipe::owner_is(&f, &pipe::current_user().map_err(|e| ("unreachable", e))?).map_err(|e| format!("can't tell who serves {name}: {e}"));
+                let owner = pipe::owner_is(&f, user).map_err(|e| format!("can't tell who serves {name}: {e}"));
                 return match owner {
                     Ok(true) => Ok(f),
                     Ok(false) => Err(("unreachable", format!("{name} belongs to another Windows account, not this Loom, so nothing was sent."))),
@@ -173,10 +200,24 @@ fn fail(json: bool, code: &str, exit: i32, sent: bool, error: &str, from_loom: &
     use std::sync::atomic::Ordering::SeqCst;
     if json {
         let stream = STREAM.load(SeqCst).then(|| STREAM_NEXT.load(SeqCst));
-        println!("{}", failure_text(code, sent, error, from_loom, stream));
+        say(&failure_text(code, sent, error, from_loom, stream), exit);
     }
-    eprintln!("loomctl: {error}");
+    note(error);
     exit
+}
+
+/// One line to stdout. When its reader has gone (`| head -1`, a closed pipe,
+/// ERROR_NO_DATA) there's no one left to tell: loomctl ends quietly with
+/// `exit`, what it would have ended with anyway, instead of panicking.
+fn say(text: &str, exit: i32) {
+    if writeln!(std::io::stdout().lock(), "{text}").is_err() {
+        std::process::exit(exit);
+    }
+}
+
+/// A message to stderr, which may be closed too.
+fn note(text: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "loomctl: {text}");
 }
 
 /// Set while `watch --follow --json` prints one JSON line per event, with the
@@ -253,9 +294,9 @@ impl Failure {
 /// One connection to Loom: the hello, then `request` and Loom's answer to it
 /// (or, with no request, the hello itself). The watchdog covers the hello,
 /// then the answer, then stands down.
-fn exchange(name: &str, watch: &Watchdog, request: Option<&Value>, timeout: f64) -> Result<Value, Failure> {
+fn exchange(names: &[String], watch: &Watchdog, request: Option<&Value>, timeout: f64) -> Result<(Value, String), Failure> {
     watch.arm(timeout.min(HELLO_SECS));
-    let file = connect(name).map_err(|(code, error)| Failure::new(code, 2, false, error))?;
+    let (file, name) = connect(names).map_err(|(code, error)| Failure::new(code, 2, false, error))?;
     let mut reader = BufReader::new(&file);
     let mut read = || -> Result<Value, String> {
         let mut line = String::new();
@@ -270,7 +311,7 @@ fn exchange(name: &str, watch: &Watchdog, request: Option<&Value>, timeout: f64)
     greeted(&hello).map_err(|e| Failure::new("version", 2, false, e))?;
     let Some(request) = request else {
         watch.done();
-        return Ok(hello);
+        return Ok((hello, name));
     };
     // Loom answers a timed-out request itself, 5 s after its limit. This is for
     // a Loom that stopped answering altogether.
@@ -283,7 +324,7 @@ fn exchange(name: &str, watch: &Watchdog, request: Option<&Value>, timeout: f64)
     })?;
     let reply = read().map_err(|e| Failure::new("connection", 2, true, format!("{e}. The command may have run: check before trying again.")))?;
     watch.done();
-    Ok(reply)
+    Ok((reply, name))
 }
 
 fn run(args: &[String]) -> i32 {
@@ -296,18 +337,14 @@ fn run(args: &[String]) -> i32 {
     };
     let json = parsed.json;
     if parsed.version {
-        println!("loomctl {}", env!("CARGO_PKG_VERSION"));
+        say(&format!("loomctl {}", env!("CARGO_PKG_VERSION")), 0);
         return 0;
     }
     if parsed.cmd.is_empty() {
-        println!("{USAGE}");
+        say(USAGE, 0);
         return 0;
     }
-    // Inside a pane LOOM_PIPE names the Loom that owns it; --profile picks another.
-    let name = match (&parsed.profile, std::env::var("LOOM_PIPE")) {
-        (None, Ok(pipe)) if !pipe.is_empty() => pipe,
-        (profile, _) => pipe::pipe_name(profile.as_deref()),
-    };
+    let names = targets(parsed.profile.as_deref(), std::env::var("LOOM_PIPE").ok());
     // Before connecting, so a slow pipe into loomctl doesn't hold Loom's.
     let stdin = parsed.stdin.then(|| {
         let mut s = String::new();
@@ -317,40 +354,50 @@ fn run(args: &[String]) -> i32 {
     let timeout = parsed.timeout.unwrap_or(if LONG.contains(&parsed.cmd.as_str()) { 3600.0 } else { DEFAULT_TIMEOUT });
     let watch = Watchdog::start(json);
     if parsed.cmd == "info" {
-        let hello = match exchange(&name, &watch, None, timeout) {
-            Ok(hello) => hello,
+        let (hello, via) = match exchange(&names, &watch, None, timeout) {
+            Ok(got) => got,
             Err(f) => return f.print(json),
         };
-        let info = json!({ "version": hello["version"], "protocol": hello["protocol"], "pid": hello["pid"], "pipe": hello["pipe"], "via": name });
+        let info = json!({ "version": hello["version"], "protocol": hello["protocol"], "pid": hello["pid"], "pipe": hello["pipe"], "via": via });
         match json {
-            true => println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default()),
-            false => println!("Loom {} (protocol {}), process {}\nits own pipe: {}", hello["version"].as_str().unwrap_or("?"), hello["protocol"], hello["pid"], hello["pipe"].as_str().unwrap_or("?")),
+            true => say(&serde_json::to_string_pretty(&info).unwrap_or_default(), 0),
+            false => say(&format!("Loom {} (protocol {}), process {}\nits own pipe: {}", hello["version"].as_str().unwrap_or("?"), hello["protocol"], hello["pid"], hello["pipe"].as_str().unwrap_or("?")), 0),
         }
         return 0;
     }
     let cwd = std::env::current_dir().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
     if parsed.cmd == "watch" && parsed.argv.iter().take_while(|a| a.as_str() != "--").any(|a| a == "--follow") {
-        return follow(&parsed, &name, &watch, &cwd);
+        return follow(&parsed, &names, &watch, &cwd);
     }
     let request = json!({ "cmd": parsed.cmd, "argv": parsed.argv, "stdin": stdin, "cwd": cwd, "timeout": timeout, "key": parsed.key });
-    let reply = match exchange(&name, &watch, Some(&request), timeout) {
-        Ok(reply) => reply,
+    let reply = match exchange(&names, &watch, Some(&request), timeout) {
+        Ok((reply, _)) => reply,
         Err(f) => return f.print(json),
     };
     if reply["replayed"] == json!(true) {
-        eprintln!("loomctl: the answer to the earlier request with this --key; the command didn't run again.");
+        note("the answer to the earlier request with this --key; the command didn't run again.");
     }
     if reply["ok"] != json!(true) {
         let error = reply["error"].as_str().unwrap_or("the command failed");
-        return match reply["timeout"] == json!(true) {
-            true => fail(json, "timeout", 3, true, error, &reply),
-            false => fail(json, "failed", 1, true, error, &reply),
-        };
+        let (code, exit, sent) = failed_as(&reply);
+        return fail(json, code, exit, sent, error, &reply);
     }
     if let Some(out) = render(&reply, json) {
-        println!("{out}");
+        say(&out, 0);
     }
     0
+}
+
+/// A failure Loom answered, as `code`, exit status and whether the command
+/// reached its window. `starting`: Loom hadn't passed it on yet, so nothing ran.
+fn failed_as(reply: &Value) -> (&'static str, i32, bool) {
+    if reply["starting"] == json!(true) {
+        ("busy", 2, false)
+    } else if reply["timeout"] == json!(true) {
+        ("timeout", 3, true)
+    } else {
+        ("failed", 1, true)
+    }
 }
 
 /// How long one `watch` asks Loom to hold an empty answer while following.
@@ -363,7 +410,7 @@ const FOLLOW_POLL: f64 = 25.0;
 /// its journal, so they hold across its restarts. Stops when the task it
 /// follows has finished (exit 0), after --timeout seconds (exit 3), or on a
 /// failure that retrying can't fix.
-fn follow(parsed: &Parsed, name: &str, watch: &Watchdog, cwd: &str) -> i32 {
+fn follow(parsed: &Parsed, names: &[String], watch: &Watchdog, cwd: &str) -> i32 {
     use std::sync::atomic::Ordering::SeqCst;
     let json = parsed.json;
     STREAM.store(json, SeqCst);
@@ -394,20 +441,20 @@ fn follow(parsed: &Parsed, name: &str, watch: &Watchdog, cwd: &str) -> i32 {
         words.extend(["--after".to_string(), after.to_string()]);
         let poll = left.min(FOLLOW_POLL).max(1.0);
         let request = json!({ "cmd": "watch", "argv": words, "stdin": null, "cwd": cwd, "timeout": poll, "key": null });
-        match exchange(name, watch, Some(&request), poll) {
+        match exchange(names, watch, Some(&request), poll).map(|(reply, _)| reply) {
             Ok(reply) if reply["ok"] == json!(true) => {
                 if lost {
-                    eprintln!("loomctl: reached Loom again; going on after event {after}.");
+                    note(&format!("reached Loom again; going on after event {after}."));
                     lost = false;
                 }
                 let data = &reply["data"];
                 if data["gap"] == json!(true) {
-                    eprintln!("loomctl: Loom no longer has every event after {after} (it keeps the last 500 finished tasks), or its journal started over.");
+                    note(&format!("Loom no longer has every event after {after} (it keeps the last 500 finished tasks), or its journal started over."));
                 }
                 for e in data["events"].as_array().into_iter().flatten() {
                     match json {
-                        true => println!("{e}"),
-                        false => println!("{}", event_line(e)),
+                        true => say(&e.to_string(), 0),
+                        false => say(&event_line(e), 0),
                     }
                 }
                 if let Some(next) = data["next"].as_u64() {
@@ -418,10 +465,12 @@ fn follow(parsed: &Parsed, name: &str, watch: &Watchdog, cwd: &str) -> i32 {
                     return 0;
                 }
             }
-            // Loom went away, restarted, or is still starting: try again from the same number.
-            Ok(reply) if reply["starting"] == json!(true) => {
+            // Loom went away, restarted, is still starting, or its window missed
+            // the watch (a reload): try again from the same number.
+            Ok(reply) if reply["starting"] == json!(true) || reply["timeout"] == json!(true) => {
                 if !lost {
-                    eprintln!("loomctl: Loom is still starting. Trying again every second, after event {after}.");
+                    let why = if reply["starting"] == json!(true) { "Loom is still starting." } else { "Loom's window didn't answer." };
+                    note(&format!("{why} Trying again every second, after event {after}."));
                     lost = true;
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -432,7 +481,7 @@ fn follow(parsed: &Parsed, name: &str, watch: &Watchdog, cwd: &str) -> i32 {
             }
             Err(f) if matches!(f.code, "connection" | "not-running" | "busy" | "unreachable") => {
                 if !lost {
-                    eprintln!("loomctl: {} Trying again every second, after event {after}.", f.error);
+                    note(&format!("{} Trying again every second, after event {after}.", f.error));
                     lost = true;
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
@@ -535,6 +584,49 @@ mod tests {
         assert!(!pipe::owner_is(&client, other).unwrap(), "an owner that isn't this account is refused");
     }
 
+    #[test]
+    fn a_loom_from_before_the_sid_names_is_found_after_an_update() {
+        use windows::Win32::Security::{Authorization::ConvertStringSidToSidW, PSID, SID_AND_ATTRIBUTES, TOKEN_USER};
+        let id = std::process::id();
+        let name = |what: &str| format!(r"\\.\pipe\loomctl-legacy-test-{what}-{id}");
+        let serve = |n: &str| tauri::async_runtime::block_on(async { tokio::net::windows::named_pipe::ServerOptions::new().first_pipe_instance(true).create(n) }).unwrap();
+        let me = pipe::current_user().unwrap();
+        // Loom's own name first, the pre-SID one after it; LOOM_PIPE alone, unless --profile picks a workspace.
+        let own = pipe::pipe_names(None);
+        let user: String = std::env::var("USERNAME").unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        assert_eq!(own[0], pipe::pipe_name(None));
+        assert_eq!(own.last().unwrap(), &format!(r"\\.\pipe\{}-{user}", if cfg!(debug_assertions) { "loom-dev" } else { "loom" }));
+        let work = pipe::pipe_names(Some(r"C:\Work\Client.json"));
+        assert_eq!(work[0], pipe::pipe_name(Some(r"C:\Work\Client.json")));
+        assert_eq!(work.last().unwrap().rsplit('-').next(), work[0].rsplit('-').next(), "both name the profile alike");
+        assert_eq!(targets(None, Some(r"\\.\pipe\x".into())), [r"\\.\pipe\x"], "LOOM_PIPE is the one to use, with no fallback");
+        assert_eq!(targets(Some(r"C:\Work\Client.json"), Some(r"\\.\pipe\x".into())), work, "--profile beats LOOM_PIPE");
+        assert_eq!(targets(None, Some(String::new())), own);
+        assert_eq!(targets(None, None), own);
+        // Only the old name is served: found there.
+        let (gone, old) = (name("new-a"), name("old-a"));
+        let _old = serve(&old);
+        assert_eq!(connect_as(&[gone.clone(), old.clone()], &me).unwrap().1, old);
+        // Both served: Loom's own name wins.
+        let (new, old2) = (name("new-b"), name("old-b"));
+        let (_new, _old2) = (serve(&new), serve(&old2));
+        assert_eq!(connect_as(&[new.clone(), old2], &me).unwrap().1, new);
+        // The old name served by another account: refused, nothing sent, and nothing after it tried.
+        let mut system = PSID::default();
+        unsafe { ConvertStringSidToSidW(windows::core::w!("S-1-5-18"), &mut system).unwrap() };
+        let other = TOKEN_USER { User: SID_AND_ATTRIBUTES { Sid: system, Attributes: 0 } };
+        let other = unsafe { std::slice::from_raw_parts(&other as *const TOKEN_USER as *const u8, std::mem::size_of::<TOKEN_USER>()) };
+        let (gone2, theirs, after) = (name("new-c"), name("old-c"), name("after-c"));
+        let (_theirs, _after) = (serve(&theirs), serve(&after));
+        let refused = connect_as(&[gone2.clone(), theirs.clone(), after], other).unwrap_err();
+        assert_eq!(refused.0, "unreachable");
+        assert!(refused.1.contains(&theirs) && refused.1.contains("another Windows account"), "{}", refused.1);
+        // Neither served: not running, named by Loom's own name.
+        let none = connect_as(&[gone2.clone(), name("old-d")], &me).unwrap_err();
+        assert_eq!(none.0, "not-running");
+        assert!(none.1.contains(&gone2), "{}", none.1);
+    }
+
     fn p(words: &[&str]) -> Parsed {
         let args: Vec<String> = words.iter().map(|s| s.to_string()).collect();
         parse(&args).unwrap()
@@ -633,6 +725,14 @@ mod tests {
             json!({ "ok": false, "code": "failed", "sent": true, "error": "Loom's words", "timeout": false, "typed": true })
         );
         assert_eq!(failure("usage", false, "bad", &Value::Null), json!({ "ok": false, "code": "usage", "sent": false, "error": "bad" }));
+    }
+
+    #[test]
+    fn a_command_loom_never_passed_on_is_not_sent() {
+        let starting = json!({ "ok": false, "starting": true, "error": "Loom is still starting. Try again in a moment." });
+        assert_eq!(failed_as(&starting), ("busy", 2, false), "nothing reached the window, so nothing ran");
+        assert_eq!(failed_as(&json!({ "ok": false, "timeout": true, "error": "x" })), ("timeout", 3, true));
+        assert_eq!(failed_as(&json!({ "ok": false, "error": "x" })), ("failed", 1, true));
     }
 
     #[test]

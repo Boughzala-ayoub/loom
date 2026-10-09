@@ -9,9 +9,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Manager};
@@ -25,16 +26,25 @@ const HEAD: usize = 16 << 10;
 const BODY: usize = 1 << 20;
 /// How long a client may take to send its request, or to take the answer.
 const FRAME: Duration = Duration::from_secs(10);
-/// A dictated clip: the phone stops at 3 minutes, 5.5 MiB of samples, and a
-/// minute's upload on mobile data takes seconds, not one.
+/// A dictated clip: the phone stops at 3 minutes, 5.5 MiB of samples. On a
+/// slow uplink that takes minutes, so it may go on as long as bytes keep
+/// coming, up to CLIP_TOTAL, and stops when none come for CLIP_IDLE.
 const CLIP: usize = 6 << 20;
-const CLIP_FRAME: Duration = Duration::from_secs(60);
+const CLIP_IDLE: Duration = Duration::from_secs(15);
+const CLIP_TOTAL: Duration = Duration::from_secs(600);
 /// A pairing code lasts this long, or until this many wrong guesses.
 const PAIRING: Duration = Duration::from_secs(600);
 const GUESSES: u8 = 5;
 /// Connections served at once; past it a new one is closed unanswered.
 const MAX_ACTIVE: usize = 32;
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Of those, the ones that haven't shown a paired phone's token (Strangers).
+const MAX_STRANGERS: usize = 8;
+static STRANGERS: Strangers = Strangers(Mutex::new((0, VecDeque::new())));
+/// A phone not seen for this long is unpaired, with its notifications.
+const EXPIRY_MS: u64 = 90 * 24 * 3600 * 1000;
+/// How often a phone's last-seen time is written to remote.json.
+const SEEN_SAVE_MS: u64 = 3600 * 1000;
 const CSP: &str = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 const MANIFEST: &str = r##"{"name":"Loom","short_name":"Loom","start_url":"/","display":"standalone","background_color":"#111111","theme_color":"#111111","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml"},{"src":"/icon.png","sizes":"512x512","type":"image/png"}]}"##;
 const ICON: &[u8] = include_bytes!("../../src/logo.svg");
@@ -59,6 +69,20 @@ struct Config {
     /// Each phone's push subscription, by its token's hash: unpairing drops it.
     #[serde(default)]
     pushes: Vec<Push>,
+    /// What Loom knows of each phone, by its token's hash. One paired before
+    /// Loom kept this has none until it's next seen.
+    #[serde(default)]
+    devices: HashMap<String, Device>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct Device {
+    /// From its browser's User-Agent: "Chrome on Android".
+    name: String,
+    /// Unix ms; None for a phone paired before Loom kept this.
+    paired: Option<u64>,
+    /// Unix ms of its last request, as saved: at most hourly (Remote::seen has it exact).
+    seen: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -82,10 +106,16 @@ pub struct Remote {
     pairing: Mutex<Option<Pairing>>,
     /// Why the server isn't listening although it is on.
     error: Mutex<Option<String>>,
+    /// Each phone's last request, unix ms, by its token's hash.
+    seen: Mutex<HashMap<String, u64>>,
 }
 
 fn config_path(app: &AppHandle) -> PathBuf {
     crate::state_file(app).with_extension("remote.json")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// Loads the settings and, if the remote is on, starts listening.
@@ -93,15 +123,17 @@ pub fn start(app: &AppHandle) {
     let config: Config = std::fs::read(config_path(app)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let (on, port) = (config.on, config.port.unwrap_or(PORT));
     *app.state::<Remote>().config.lock().unwrap() = config;
+    forget_stale(app);
     if on {
         let app = app.clone();
         tauri::async_runtime::spawn(async move { let _ = listen(&app, port).await; });
     }
 }
 
-/// `loomctl remote`: status, on, off, pair and revoke.
+/// `loomctl remote`: status, on, off, pair and revoke. `phone` with revoke
+/// unpairs only that phone: its id in status's `devices`.
 #[tauri::command]
-pub async fn remote(app: AppHandle, action: String, port: Option<u16>) -> Result<Value, String> {
+pub async fn remote(app: AppHandle, action: String, port: Option<u16>, phone: Option<String>) -> Result<Value, String> {
     let remote = app.state::<Remote>();
     match action.as_str() {
         "status" => {}
@@ -123,25 +155,90 @@ pub async fn remote(app: AppHandle, action: String, port: Option<u16>) -> Result
             *remote.pairing.lock().unwrap() = Some(Pairing { code, until: Instant::now() + PAIRING, wrong: 0 });
         }
         "revoke" => {
-            *remote.pairing.lock().unwrap() = None;
-            update(&app, |c| { c.phones.clear(); c.pushes.clear(); })?;
+            if phone.is_none() { *remote.pairing.lock().unwrap() = None; }
+            // Checked on a copy first: a refusal saves nothing.
+            revoke(&mut remote.config.lock().unwrap().clone(), phone.as_deref())?;
+            update(&app, |c| { let _ = revoke(c, phone.as_deref()); })?;
         }
         _ => return Err(format!("remote takes on, off, pair or revoke, not {action}.")),
     }
     Ok(status(&app).await)
 }
 
-async fn status(app: &AppHandle) -> Value {
+/// Unpairs the phone whose id (status's `devices`) is `id`, or every phone,
+/// with their notifications. An id that names no phone or several is refused.
+fn revoke(c: &mut Config, id: Option<&str>) -> Result<(), String> {
+    let Some(id) = id else {
+        c.phones.clear();
+        c.pushes.clear();
+        c.devices.clear();
+        return Ok(());
+    };
+    let id = id.trim().to_ascii_lowercase();
+    let hits: Vec<String> = c.phones.iter().filter(|h| !id.is_empty() && h.starts_with(&id)).cloned().collect();
+    match &hits[..] {
+        [one] => {
+            c.phones.retain(|h| h != one);
+            c.pushes.retain(|p| &p.phone != one);
+            c.devices.remove(one);
+            Ok(())
+        }
+        [] => Err(format!("No paired phone has the id {id}. loomctl remote lists them.")),
+        _ => Err(format!("More than one phone's id starts with {id}. Give all 12 characters.")),
+    }
+}
+
+/// Drops the phones not seen for EXPIRY_MS, by the later of what's saved and
+/// `seen`, with their notifications. A phone never seen (paired before Loom
+/// kept this) stays until it is. Whether any went.
+fn expire(c: &mut Config, now: u64, seen: &HashMap<String, u64>) -> bool {
+    let stale: Vec<String> = c.phones.iter().filter(|h| {
+        let last = c.devices.get(*h).and_then(|d| d.seen).max(seen.get(*h).copied());
+        last.is_some_and(|t| now.saturating_sub(t) > EXPIRY_MS)
+    }).cloned().collect();
+    for h in &stale {
+        c.phones.retain(|p| p != h);
+        c.pushes.retain(|p| &p.phone != h);
+        c.devices.remove(h);
+    }
+    !stale.is_empty()
+}
+
+/// expire, saved, when there's anything to drop.
+fn forget_stale(app: &AppHandle) {
     let remote = app.state::<Remote>();
-    let (on, port, phones, pushes) = {
+    let (now, seen) = (now_ms(), remote.seen.lock().unwrap().clone());
+    let stale = expire(&mut remote.config.lock().unwrap().clone(), now, &seen);
+    if stale { let _ = update(app, |c| { expire(c, now, &seen); }); }
+}
+
+/// Each paired phone: `id`, the first 12 hex digits of its token's hash, which
+/// revoke takes; its name; when it paired and was last seen (unix ms, null when
+/// unknown); and whether it gets notifications. Last seen first.
+fn devices(c: &Config, seen: &HashMap<String, u64>) -> Vec<Value> {
+    let mut rows: Vec<(Option<u64>, Value)> = c.phones.iter().map(|h| {
+        let d = c.devices.get(h);
+        let last = d.and_then(|d| d.seen).max(seen.get(h).copied());
+        (last, json!({ "id": &h[..h.len().min(12)], "name": d.map_or("Phone", |d| &d.name), "paired": d.and_then(|d| d.paired),
+            "seen": last, "push": c.pushes.iter().any(|p| &p.phone == h) }))
+    }).collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
+async fn status(app: &AppHandle) -> Value {
+    forget_stale(app);
+    let remote = app.state::<Remote>();
+    let (on, port, phones, pushes, devices) = {
+        let seen = remote.seen.lock().unwrap().clone();
         let c = remote.config.lock().unwrap();
-        (c.on, c.port.unwrap_or(PORT), c.phones.len(), c.pushes.len())
+        (c.on, c.port.unwrap_or(PORT), c.phones.len(), c.pushes.len(), devices(&c, &seen))
     };
     let listening = remote.server.lock().unwrap().is_some();
     let pairing = remote.pairing.lock().unwrap().as_ref().filter(|p| p.until > Instant::now()).map(|p| p.code.clone());
     let error = remote.error.lock().unwrap().clone();
     let name = tauri::async_runtime::spawn_blocking(tailnet_name).await.ok().flatten();
-    json!({ "on": on, "listening": listening, "port": port, "phones": phones, "pushes": pushes, "pairing": pairing, "error": error, "address": name.map(|n| format!("https://{n}")) })
+    json!({ "on": on, "listening": listening, "port": port, "phones": phones, "pushes": pushes, "devices": devices, "pairing": pairing, "error": error, "address": name.map(|n| format!("https://{n}")) })
 }
 
 /// This PC's name on your tailnet, if Tailscale is installed and signed in.
@@ -193,6 +290,7 @@ async fn stop(app: &AppHandle) {
 }
 
 async fn accept(app: AppHandle, listener: TcpListener) {
+    let port = listener.local_addr().map_or(PORT, |a| a.port());
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -208,18 +306,56 @@ async fn accept(app: AppHandle, listener: TcpListener) {
         }
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = serve(&app, stream).await;
+            use std::future::Future;
+            let (id, evicted) = STRANGERS.enter();
+            // Whichever comes first: served, or made room for a newer stranger.
+            let (mut served, mut ended) = (std::pin::pin!(serve(&app, stream, port, id)), std::pin::pin!(evicted.notified()));
+            std::future::poll_fn(|cx| match served.as_mut().poll(cx).is_ready() || ended.as_mut().poll(cx).is_ready() {
+                true => std::task::Poll::Ready(()),
+                false => std::task::Poll::Pending,
+            }).await;
+            STRANGERS.leave(id);
             ACTIVE.fetch_sub(1, Ordering::AcqRel);
         });
     }
 }
 
+/// Connections that haven't shown a paired phone's token: still sending their
+/// head, or asking for the page or pairing. At most MAX_STRANGERS at once; a
+/// new one past that ends the one that has waited longest. So idle connections
+/// can't hold every slot and keep a phone out: a phone's head arrives at once,
+/// and with its token it leaves this list.
+struct Strangers(Mutex<(u64, VecDeque<(u64, Arc<tokio::sync::Notify>)>)>);
+
+impl Strangers {
+    fn enter(&self) -> (u64, Arc<tokio::sync::Notify>) {
+        let mut s = self.0.lock().unwrap();
+        s.0 += 1;
+        let id = s.0;
+        if s.1.len() >= MAX_STRANGERS {
+            // A permit: it ends even if it isn't waiting yet.
+            if let Some((_, oldest)) = s.1.pop_front() { oldest.notify_one(); }
+        }
+        let evicted = Arc::new(tokio::sync::Notify::new());
+        s.1.push_back((id, evicted.clone()));
+        (id, evicted)
+    }
+
+    fn leave(&self, id: u64) {
+        self.0.lock().unwrap().1.retain(|(i, _)| *i != id);
+    }
+}
+
 /// One request per connection, then the connection closes.
-async fn serve(app: &AppHandle, mut stream: TcpStream) -> std::io::Result<()> {
-    let request = read(&mut stream, |r| phone(app, r).is_some()).await?;
+async fn serve(app: &AppHandle, mut stream: TcpStream, port: u16, stranger: u64) -> std::io::Result<()> {
+    let request = read(&mut stream, |r| {
+        let paired = phone(app, r).is_some();
+        if paired { STRANGERS.leave(stranger); }
+        paired
+    }).await?;
     let gzip = request.as_ref().is_ok_and(|r| r.header("accept-encoding").is_some_and(|v| v.contains("gzip")));
     let reply = match request {
-        Ok(request) => match crate::control::unless_gone(&mut stream, route(app, &request)).await {
+        Ok(request) => match crate::control::unless_gone(&mut stream, route(app, &request, port)).await {
             Some(reply) => reply,
             None => return Ok(()),
         },
@@ -244,10 +380,11 @@ impl Request {
     }
 }
 
-/// The most a request's body may hold, and how long from its first byte its
-/// client may take to send it all: a clip for /api/dictate, a prompt otherwise.
-fn limits(path: &str) -> (usize, Duration) {
-    if path.split('?').next() == Some("/api/dictate") { (CLIP, CLIP_FRAME) } else { (BODY, FRAME) }
+/// The most a request's body may hold, how long its client may go without
+/// sending a byte of it, and how long from its first byte it may take in all:
+/// a clip for /api/dictate, a prompt otherwise.
+fn limits(path: &str) -> (usize, Duration, Duration) {
+    if path.split('?').next() == Some("/api/dictate") { (CLIP, CLIP_IDLE, CLIP_TOTAL) } else { (BODY, FRAME, FRAME) }
 }
 
 /// More of the request, unless its deadline passes first.
@@ -286,18 +423,18 @@ async fn read(stream: &mut (impl AsyncRead + Unpin), paired: impl Fn(&Request) -
     }
     let Ok(length) = request.header("content-length").unwrap_or("0").parse::<usize>() else { return Ok(Err(Reply::error(400, "Bad Content-Length."))) };
     // Only a paired phone may take a clip's size and time: a stranger keeps a prompt's.
-    let (most, frame) = if paired(&request) { limits(&request.path) } else { (BODY, FRAME) };
+    let (most, idle, total) = if paired(&request) { limits(&request.path) } else { (BODY, FRAME, FRAME) };
     if length > most {
         return Ok(Err(Reply::error(413, "The request is too large.")));
     }
     while request.body.len() < length {
-        more(stream, &mut request.body, begun + frame).await?;
+        more(stream, &mut request.body, (tokio::time::Instant::now() + idle).min(begun + total)).await?;
     }
     request.body.truncate(length);
     Ok(Ok(request))
 }
 
-async fn route(app: &AppHandle, request: &Request) -> Reply {
+async fn route(app: &AppHandle, request: &Request, port: u16) -> Reply {
     let path = request.path.split('?').next().unwrap_or("");
     match (request.method.as_str(), path) {
         ("GET", "/") => asset(app, "remote.html"),
@@ -307,7 +444,10 @@ async fn route(app: &AppHandle, request: &Request) -> Reply {
         ("GET", "/badge.png") => Reply::new(200, "image/png", BADGE_PNG.into()),
         ("GET", "/sw.js") => Reply::new(200, "text/javascript", WORKER.into()),
         ("GET", p) if p.starts_with("/assets/") => asset(app, &p[1..]).cached(),
-        ("POST", "/api/pair") => pair(app, request),
+        ("POST", "/api/pair") => match pairable(request, port) {
+            Some(refused) => refused,
+            None => pair(app, request),
+        },
         ("POST", "/api/cli") => cli(app, request).await,
         ("POST", "/api/dictate") => dictate(app, request).await,
         ("POST", "/api/push") => push(app, request),
@@ -325,7 +465,8 @@ fn asset(app: &AppHandle, path: &str) -> Reply {
         return Reply::error(404, "Not found.");
     }
     if let Some(a) = app.asset_resolver().get(path.into()) {
-        if path.ends_with(".html") || a.mime_type() != "text/html" {
+        // Any other page is Tauri's index.html fallback, the desktop page.
+        if path == "remote.html" || a.mime_type() != "text/html" {
             return Reply::new(200, a.mime_type(), a.bytes().to_vec());
         }
         return Reply::error(404, "Not found.");
@@ -347,15 +488,49 @@ fn asset(app: &AppHandle, path: &str) -> Reply {
     Reply::error(404, "Not found. Build the frontend: npm run build")
 }
 
+/// Pairing is the one route a token doesn't guard, so a web page open on this
+/// PC could post guesses to it, or, rebinding its own name to 127.0.0.1, read
+/// a token back. Refused unless the body is JSON, which a page can only send
+/// after a preflight Loom never answers, and the Host is this PC or a tailnet
+/// name, which a rebound name isn't. None: go on.
+fn pairable(request: &Request, port: u16) -> Option<Reply> {
+    let kind = request.header("content-type").unwrap_or("").split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    if kind != "application/json" {
+        return Some(Reply::error(415, "Send the pairing code as application/json."));
+    }
+    let host = request.header("host").unwrap_or("").to_ascii_lowercase();
+    let local = [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")].contains(&host);
+    let tailnet = host.split(':').next().unwrap_or("").trim_end_matches('.').ends_with(".ts.net");
+    (!local && !tailnet).then(|| Reply::error(403, "Pair from this PC or your tailnet's address."))
+}
+
 fn pair(app: &AppHandle, request: &Request) -> Reply {
     let code = serde_json::from_slice::<Value>(&request.body).ok().and_then(|v| v["code"].as_str().map(|c| c.trim().to_string())).unwrap_or_default();
     if let Err(error) = guess(&mut app.state::<Remote>().pairing.lock().unwrap(), &code, Instant::now()) {
         return Reply::error(403, error);
     }
     let token: String = random::<32>().iter().map(|b| format!("{b:02x}")).collect();
-    match update(app, |c| c.phones.push(hash(&token))) {
+    let (id, now) = (hash(&token), now_ms());
+    let device = Device { name: device_name(request.header("user-agent").unwrap_or("")), paired: Some(now), seen: Some(now) };
+    match update(app, |c| { c.phones.push(id.clone()); c.devices.insert(id, device); }) {
         Ok(()) => Reply::json(200, json!({ "ok": true, "token": token })),
         Err(error) => Reply::error(500, &error),
+    }
+}
+
+/// What to call a phone, from its browser's User-Agent: "Chrome on Android",
+/// "Safari on iPhone", or just "Phone".
+fn device_name(ua: &str) -> String {
+    // First match wins: Edge and Samsung's say Chrome too, and every one says Safari.
+    let browser = [("EdgA/", "Edge"), ("EdgiOS/", "Edge"), ("Edg/", "Edge"), ("SamsungBrowser/", "Samsung Internet"), ("OPR/", "Opera"),
+        ("Firefox/", "Firefox"), ("FxiOS/", "Firefox"), ("CriOS/", "Chrome"), ("Chrome/", "Chrome"), ("Safari/", "Safari")]
+        .iter().find(|(k, _)| ua.contains(k)).map(|(_, v)| *v);
+    let system = [("iPhone", "iPhone"), ("iPad", "iPad"), ("Android", "Android"), ("Windows", "Windows"), ("Mac OS X", "Mac"), ("CrOS", "ChromeOS"), ("Linux", "Linux")]
+        .iter().find(|(k, _)| ua.contains(k)).map(|(_, v)| *v);
+    match (browser, system) {
+        (Some(b), Some(s)) => format!("{b} on {s}"),
+        (Some(x), None) | (None, Some(x)) => x.into(),
+        (None, None) => "Phone".into(),
     }
 }
 
@@ -377,11 +552,46 @@ fn guess(pairing: &mut Option<Pairing>, code: &str, now: Instant) -> Result<(), 
     Err("Wrong code.")
 }
 
-/// The paired phone a request comes from: its token's hash.
+/// The paired phone a request comes from: its token's hash. It counts as seen.
 fn phone(app: &AppHandle, request: &Request) -> Option<String> {
     let token = request.header("authorization").and_then(|v| v.strip_prefix("Bearer ")).unwrap_or("").trim();
     let id = hash(token);
-    (!token.is_empty() && app.state::<Remote>().config.lock().unwrap().phones.contains(&id)).then_some(id)
+    let remote = app.state::<Remote>();
+    if token.is_empty() { return None; }
+    let now = now_ms();
+    let (paired, admitted) = {
+        let c = remote.config.lock().unwrap();
+        (c.phones.contains(&id), admit(&c, &mut remote.seen.lock().unwrap(), &id, now))
+    };
+    let Some(stale) = admitted else {
+        // Paired but unseen too long: unpaired now, with its notifications, as status does.
+        if paired { forget_stale(app); }
+        return None;
+    };
+    if stale {
+        let name = device_name(request.header("user-agent").unwrap_or(""));
+        let _ = update(app, |c| {
+            if !c.phones.contains(&id) { return; }
+            c.devices.entry(id.clone()).or_insert(Device { name, paired: None, seen: None }).seen = Some(now);
+        });
+    }
+    Some(id)
+}
+
+/// Lets phone `id` in at `now`, and counts the request as a sighting. Some(save):
+/// in, and whether its saved last-seen time is due to be written (hourly; one
+/// paired before Loom kept this gets its record now). None: refused, and
+/// nothing changes. A phone unseen for EXPIRY_MS, by the later of its saved and
+/// in-memory times, is refused before its request counts as seen: expire runs
+/// only at startup and on status, and a sighting first would make it fresh.
+/// One never seen (paired before Loom kept this) comes in, as expire keeps it.
+fn admit(c: &Config, seen: &mut HashMap<String, u64>, id: &str, now: u64) -> Option<bool> {
+    if !c.phones.iter().any(|h| h == id) { return None; }
+    let saved = c.devices.get(id).map(|d| d.seen);
+    let last = saved.flatten().max(seen.get(id).copied());
+    if last.is_some_and(|t| now.saturating_sub(t) > EXPIRY_MS) { return None; }
+    seen.insert(id.to_owned(), now);
+    Some(saved.is_none_or(|seen| seen.is_none_or(|t| now.saturating_sub(t) >= SEEN_SAVE_MS)))
 }
 
 fn unpaired() -> Reply {
@@ -593,7 +803,7 @@ impl Reply {
         };
         let reason = match self.status {
             200 => "OK", 400 => "Bad Request", 401 => "Unauthorized", 403 => "Forbidden", 404 => "Not Found",
-            411 => "Length Required", 413 => "Payload Too Large", 431 => "Request Header Fields Too Large", _ => "Internal Server Error",
+            411 => "Length Required", 413 => "Payload Too Large", 415 => "Unsupported Media Type", 431 => "Request Header Fields Too Large", _ => "Internal Server Error",
         };
         let cache = if self.cached { "public, max-age=31536000, immutable" } else { "no-store" };
         let mut head = format!(
@@ -626,7 +836,7 @@ mod tests {
         assert_eq!(status(&head("/api/cli", BODY + 1), true).unwrap(), Some(413), "a prompt keeps 1 MiB");
         assert_eq!(status(&head("/api/cli", BODY), true).unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
         assert_eq!(status(&head("/api/dictate", BODY + 1), false).unwrap(), Some(413), "a stranger's clip is a prompt");
-        assert_eq!((limits("/api/dictate?lang=en"), limits("/api/cli"), limits("/api/dictatex")), ((CLIP, CLIP_FRAME), (BODY, FRAME), (BODY, FRAME)));
+        assert_eq!((limits("/api/dictate?lang=en"), limits("/api/cli"), limits("/api/dictatex")), ((CLIP, CLIP_IDLE, CLIP_TOTAL), (BODY, FRAME, FRAME), (BODY, FRAME, FRAME)));
         // A whole clip arrives whole.
         let mut raw = head("/api/dictate", 4);
         raw.extend([1, 0, 255, 127]);
@@ -645,6 +855,153 @@ mod tests {
         assert_eq!(parse(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap().err().unwrap().status, 411);
         let long = [b"GET / HTTP/1.1\r\nX: ".as_slice(), &[b'a'; HEAD + 10]].concat();
         assert_eq!(parse(&long).unwrap().err().unwrap().status, 431);
+    }
+
+    #[test]
+    fn a_clip_on_a_slow_uplink_arrives_while_bytes_keep_coming() {
+        use tokio::io::AsyncWriteExt;
+        // Paused clock: a body that trickles in for longer than CLIP_IDLE in all,
+        // never quiet for that long, arrives; one that stops goes.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().start_paused(true).build().unwrap();
+        let (status, stalled) = rt.block_on(async {
+            let send = |gap: Duration, chunks: usize| async move {
+                let (mut client, mut server) = tokio::io::duplex(1 << 16);
+                let writer = tokio::spawn(async move {
+                    let _ = client.write_all(format!("POST /api/dictate HTTP/1.1\r\nContent-Length: {chunks}\r\n\r\n").as_bytes()).await;
+                    for _ in 0..chunks {
+                        tokio::time::sleep(gap).await;
+                        if client.write_all(&[0]).await.is_err() { break; }
+                    }
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                    drop(client);
+                });
+                let got = read(&mut server, |_| true).await;
+                writer.abort();
+                got
+            };
+            (send(Duration::from_secs(10), 12).await.map(|r| r.map(|r| r.body.len()).ok()), send(CLIP_IDLE + Duration::from_secs(1), 2).await)
+        });
+        assert_eq!(status.unwrap(), Some(12), "two minutes of steady upload is a clip, not a timeout");
+        assert_eq!(stalled.err().unwrap().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn pairing_takes_json_from_this_pc_or_the_tailnet_only() {
+        let req = |kind: &str, host: &str| Request { method: "POST".into(), path: "/api/pair".into(), body: Vec::new(),
+            headers: vec![("Content-Type".into(), kind.into()), ("Host".into(), host.into())] };
+        let status = |kind: &str, host: &str| pairable(&req(kind, host), 7420).map(|r| r.status);
+        for host in ["127.0.0.1:7420", "localhost:7420", "LocalHost:7420", "[::1]:7420", "pc.tail1234.ts.net", "pc.tail1234.ts.net:443"] {
+            assert_eq!(status("application/json", host), None, "{host}");
+        }
+        assert_eq!(status("application/json; charset=utf-8", "127.0.0.1:7420"), None);
+        // A page's simple request needs no preflight: refused for its type.
+        for kind in ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data", ""] {
+            assert_eq!(status(kind, "127.0.0.1:7420"), Some(415), "{kind}");
+        }
+        // A rebound name, another port, or none.
+        for host in ["evil.example:7420", "127.0.0.1:7421", "127.0.0.1", "ts.net.evil.example", ""] {
+            assert_eq!(status("application/json", host), Some(403), "{host}");
+        }
+    }
+
+    #[test]
+    fn a_phone_is_named_after_its_browser() {
+        let name = |ua: &str| device_name(ua);
+        assert_eq!(name("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Mobile Safari/537.36"), "Chrome on Android");
+        assert_eq!(name("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"), "Safari on iPhone");
+        assert_eq!(name("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/129.0 Mobile/15E148 Safari/604.1"), "Chrome on iPhone");
+        assert_eq!(name("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0"), "Firefox on Windows");
+        assert_eq!(name("Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0 Mobile Safari/537.36"), "Samsung Internet on Android");
+        assert_eq!(name("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0 Safari/537.36 Edg/129.0"), "Edge on Windows");
+        assert_eq!(name("node"), "Phone");
+        assert_eq!(name(""), "Phone");
+    }
+
+    #[test]
+    fn phones_are_revoked_one_at_a_time_and_expire_unseen() {
+        let day = 24 * 3600 * 1000;
+        let now = 400 * day;
+        let (a, b, old) = ("a1".repeat(32), "b2".repeat(32), "c3".repeat(32));
+        let push = |phone: &str| Push { phone: phone.into(), endpoint: format!("https://push.example/{phone}"), p256dh: "k".into(), auth: "a".into() };
+        let device = |seen: Option<u64>| Device { name: "Chrome on Android".into(), paired: Some(day), seen };
+        let mut c = Config { phones: vec![a.clone(), b.clone(), old.clone()], pushes: vec![push(&a), push(&b), push(&old)], ..Config::default() };
+        c.devices.insert(a.clone(), device(Some(now - 91 * day)));
+        c.devices.insert(b.clone(), device(Some(now - 89 * day)));
+        // Listed by last seen; the phone paired before this has no record, and nulls.
+        let rows = devices(&c, &HashMap::from([(b.clone(), now - day)]));
+        assert_eq!(rows.iter().map(|r| r["id"].as_str().unwrap()).collect::<Vec<_>>(), [&b[..12], &a[..12], &old[..12]]);
+        assert_eq!(rows[1], json!({ "id": &a[..12], "name": "Chrome on Android", "paired": day, "seen": now - 91 * day, "push": true }));
+        assert_eq!(rows[2], json!({ "id": &old[..12], "name": "Phone", "paired": null, "seen": null, "push": true }));
+        // Seen this session (memory) keeps a phone the saved time would drop.
+        let mut kept = c.clone();
+        assert!(!expire(&mut kept, now, &HashMap::from([(a.clone(), now - day)])));
+        // 91 days unseen goes with its pushes; 89 stays; never seen stays until it is.
+        assert!(expire(&mut c, now, &HashMap::new()));
+        assert_eq!(c.phones, [b.clone(), old.clone()]);
+        assert!(!c.pushes.iter().any(|p| p.phone == a) && !c.devices.contains_key(&a));
+        assert!(!expire(&mut c, now, &HashMap::new()), "nothing more to drop");
+        // One by its id: the rest stay paired, with their notifications.
+        assert!(revoke(&mut c.clone(), Some("ffffffffffff")).unwrap_err().contains("No paired phone"));
+        let mut twins = Config { phones: vec!["abc1".repeat(16), "abc2".repeat(16)], ..Config::default() };
+        assert!(revoke(&mut twins, Some("abc")).unwrap_err().contains("More than one"));
+        assert!(revoke(&mut twins, Some("")).is_err());
+        revoke(&mut c, Some(&b[..12].to_uppercase())).unwrap();
+        assert_eq!((c.phones.clone(), c.pushes.len(), c.devices.len()), (vec![old.clone()], 1, 0));
+        revoke(&mut c, None).unwrap();
+        assert!(c.phones.is_empty() && c.pushes.is_empty() && c.devices.is_empty());
+    }
+
+    #[test]
+    fn a_phone_unseen_too_long_cant_come_back_by_asking() {
+        let day = 24 * 3600 * 1000;
+        let now = 400 * day;
+        let [stale, fresh, recent, timeless, older, stranger] = ["a1", "b2", "c3", "d4", "e5", "f6"].map(|s| s.repeat(32));
+        let device = |seen: Option<u64>| Device { name: "Chrome on Android".into(), paired: Some(day), seen };
+        let mut c = Config { phones: vec![stale.clone(), fresh.clone(), recent.clone(), timeless.clone(), older.clone()], ..Config::default() };
+        c.devices.insert(stale.clone(), device(Some(now - 91 * day)));
+        c.devices.insert(fresh.clone(), device(Some(now - 90 * day)));
+        c.devices.insert(recent.clone(), device(Some(now - 10 * 60 * 1000)));
+        c.devices.insert(timeless.clone(), device(None));
+        // `older` was paired before Loom kept records: it has none.
+        let mut seen = HashMap::new();
+        // 91 days unseen, with Loom open and no status since: refused, and the
+        // refusal isn't a sighting, so asking again can't make it fresh.
+        assert_eq!(admit(&c, &mut seen, &stale, now), None);
+        assert!(!seen.contains_key(&stale), "a refused request counts as seen");
+        assert_eq!(admit(&c, &mut seen, &stale, now + 1), None, "a stale phone's second request got in");
+        assert!(expire(&mut c.clone(), now + 1, &seen), "status still unpairs it");
+        // Seen this session within the 90 days keeps one whose saved time is older.
+        assert_eq!(admit(&c, &mut HashMap::from([(stale.clone(), now - day)]), &stale, now), Some(true));
+        // 90 days to the ms still gets in, and is written down, as is one with no time or no record.
+        assert_eq!(admit(&c, &mut seen, &fresh, now), Some(true));
+        assert_eq!(admit(&c, &mut seen, &timeless, now), Some(true));
+        assert_eq!(admit(&c, &mut seen, &older, now), Some(true));
+        // Seen 10 minutes ago: in, and not written again before the hour.
+        assert_eq!(admit(&c, &mut seen, &recent, now), Some(false));
+        assert_eq!(seen.get(&recent), Some(&now));
+        assert_eq!(admit(&c, &mut seen, &stranger, now), None);
+    }
+
+    #[test]
+    fn idle_strangers_make_room_for_new_ones() {
+        let strangers = Strangers(Mutex::new((0, VecDeque::new())));
+        let first: Vec<_> = (0..MAX_STRANGERS).map(|_| strangers.enter()).collect();
+        let (newest, _) = strangers.enter();
+        // The longest waiting is told to end; nobody else is.
+        let woke = |n: &Arc<tokio::sync::Notify>| tauri::async_runtime::block_on(async {
+            tokio::time::timeout(Duration::from_millis(50), n.notified()).await.is_ok()
+        });
+        assert!(woke(&first[0].1));
+        assert!(!woke(&first[1].1));
+        // One that showed a phone's token leaves the list and can't be ended.
+        strangers.leave(first[1].0);
+        strangers.enter(); // takes the slot it freed
+        assert!(!woke(&first[2].1));
+        strangers.enter(); // past the cap again: the longest waiting of those left
+        assert!(!woke(&first[1].1));
+        assert!(woke(&first[2].1));
+        assert_eq!(strangers.0.lock().unwrap().1.len(), MAX_STRANGERS);
+        assert!(strangers.0.lock().unwrap().1.iter().any(|(id, _)| *id == newest));
     }
 
     #[test]
@@ -677,9 +1034,11 @@ mod tests {
         ] {
             assert!(subscription("phone", &bad).is_none(), "{bad}");
         }
-        // A remote.json from before pushes loads, with none.
-        let old: Config = serde_json::from_str(r#"{"on":true,"port":7420,"phones":["x"]}"#).unwrap();
-        assert!(old.vapid.is_none() && old.pushes.is_empty());
+        // A remote.json from before pushes and phone records loads, with none,
+        // and its phone stays paired until it has been seen.
+        let mut old: Config = serde_json::from_str(r#"{"on":true,"port":7420,"phones":["x"]}"#).unwrap();
+        assert!(old.vapid.is_none() && old.pushes.is_empty() && old.devices.is_empty());
+        assert!(!expire(&mut old, u64::MAX, &HashMap::new()) && old.phones == ["x"]);
     }
 
     #[test]

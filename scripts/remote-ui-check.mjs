@@ -8,21 +8,24 @@
 // the subscription is made up) and a tap opens the agent.
 // Run `npm run build` first. Screenshots go to
 // node_modules/.cache/remote-ui-check. Set PLAYWRIGHT_MODULE to an installed
-// playwright module path if it isn't local.
+// playwright module path if it isn't local, and REMOTE_DIST to serve a build
+// other than dist/.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { resolve, extname } from 'node:path';
+import { createHash } from 'node:crypto';
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 
 const out = resolve('node_modules/.cache/remote-ui-check');
 mkdirSync(out, { recursive: true });
+const dist = resolve(process.env.REMOTE_DIST || 'dist');
 const server = createServer((req, res) => {
   try {
     const path = new URL(req.url, 'http://x').pathname;
     // remote.rs serves these two from outside dist/.
     const file = path === '/sw.js' ? resolve('src-tauri/src/remote-sw.js') : path === '/icon.png' || path === '/badge.png' ? resolve(`src-tauri/icons${path}`)
-      : resolve('dist', path === '/' ? 'remote.html' : path.slice(1));
+      : resolve(dist, path === '/' ? 'remote.html' : path.slice(1));
     res.setHeader('Content-Type', { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' }[extname(file)] || 'application/octet-stream');
     res.end(readFileSync(file));
   } catch { res.statusCode = 404; res.end('missing'); }
@@ -30,7 +33,7 @@ const server = createServer((req, res) => {
 await new Promise(r => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}`;
 assert.equal((await fetch(base)).status, 200, 'the page must be served');
-console.log('HTTP 200, bundle', readFileSync('dist/remote.html', 'utf8').match(/assets\/remote-[^" ]+\.js/)[0]);
+console.log('HTTP 200, bundle', readFileSync(resolve(dist, 'remote.html'), 'utf8').match(/assets\/remote-[^" ]+\.js/)[0]);
 // A fake microphone (a beep) that needs no prompt: the phone's dictation records from it.
 const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
 
@@ -68,6 +71,20 @@ function reading(state) {
       ...Array.from({ length: 60 }, (_, i) => ({ pid: 2000 + i * 4, name: 'svchost.exe', cpu: i % 7 ? 0 : 0.1, memory: (2 + (i % 9)) * MB })),
       { pid: 9001, name: 'loom.exe', cpu: 2.2, memory: 310 * MB },
     ] };
+}
+// The phones paired with Loom (loomctl remote's devices): this one, whose id is the start of its token's SHA-256
+// as remote.rs keeps it, one with a long name, and one paired before Loom kept names and times.
+const MINE = createHash('sha256').update('fixture-token').digest('hex').slice(0, 12);
+const PHONE = 'Samsung Galaxy S24 Ultra · Chrome 141 on Android 15 (work profile)';
+const DEVICES = () => [
+  { id: 'a1b2c3d4e5f6', name: PHONE, paired: Date.now() - 40 * 864e5, seen: Date.now() - 3 * 36e5, push: true },
+  { id: MINE, name: 'Pixel 8 · Chrome', paired: Date.now() - 3 * 864e5, seen: Date.now(), push: true },
+  { id: '0f9e8d7c6b5a', name: '', paired: null, seen: null, push: false },
+];
+/** What loomctl's parseArgs (src/cli.ts) reads from a git call: its words, and the --options before a bare --. */
+function parsed(argv) {
+  const at = argv.indexOf('--'), head = at < 0 ? argv : argv.slice(0, at);
+  return { words: [...head.filter(w => !w.startsWith('--')), ...(at < 0 ? [] : argv.slice(at + 1))], flags: head.filter(w => w.startsWith('--')) };
 }
 // Two of the PC's own themes (main.ts THEMES), dark and light, as loomctl theme hands them to the phone.
 const mainTs = readFileSync('src/main.ts', 'utf8');
@@ -198,7 +215,8 @@ async function context(width, token = true, push = false) {
     // A pane closed on the PC, or from before a restart, isn't Loom's (main.ts cliPane).
     if ((c.cmd === 'send' || c.cmd === 'submit') && !threads.some(t => t.panes.some(p => p.id === c.argv[0]))) return route.fulfill({ json: { ok: false, error: `No thread "${c.argv[0]}". loomctl threads lists them.` } });
     switch (c.cmd) {
-      case 'status': data = { phone: false, agents: state.startups.map(s => s.label), booted: state.booted, updated: state.updated }; break;
+      case 'status': data = { phone: !!state.phone, agents: state.startups.map(s => s.label), booted: state.booted, updated: state.updated }; break;
+      case 'window': if (c.argv[0] === 'phone') state.phone = !state.phone; data = { window: c.argv[0], phone: !!state.phone }; break;
       case 'relaunch': {
         // --booted names the Loom to restart (main.ts relaunch): the Loom that replaced it gets a retry
         // with none of the old one's keys, and restarts nothing.
@@ -221,12 +239,20 @@ async function context(width, token = true, push = false) {
       case 'theme': data = state.theme ? [{ ...state.theme, current: true }] : ['loom', 'nord', 'light'].map((name, i) => ({ name, scheme: i === 2 ? 'light' : 'dark', current: i === 0, vars: {} })); break;
       // The task manager's reading comes from remote.rs itself, not loomctl (core.ts run's path).
       case 'procs': if (!req.url().endsWith('/api/procs')) return route.fulfill({ status: 404, json: { ok: false, error: 'Not found.' } }); data = reading(state); break;
-      case 'set': data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': 'on', font: '13' }; break;
+      // planUsage: the PC's Plan usage, 'on' unless a test turns it off.
+      case 'set': if (c.argv[0] === 'plan-usage' && c.argv[1]) state.planUsage = c.argv[1]; data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': state.planUsage ?? 'on', font: '13' }; break;
       case 'notify': data = { all: 'on', kinds: { finish: true, fail: true, blocked: true }, newPanes: 'inherit' }; break;
-      case 'remote': data = { phones: 1, address: 'https://pc.tailnet.example', port: 7420 }; break;
+      // devices: the phones as a newer Loom lists them (an older one has none); revoke <id> removes one, bare all.
+      // refuseRevoke: Loom can't save the change.
+      case 'remote':
+        if (c.argv[0] === 'revoke') {
+          if (state.refuseRevoke) return route.fulfill({ json: { ok: false, error: "Loom couldn't save the paired phones." } });
+          state.devices = c.argv[1] ? state.devices?.filter(d => d.id !== c.argv[1]) : [];
+        }
+        data = { phones: state.devices?.length ?? 1, address: 'https://pc.tailnet.example', port: 7420, ...(state.devices ? { devices: state.devices } : {}) }; break;
       case 'trash': data = [{ at: 'C:/Users/test/loom/trash/old-project', branch: 'old-branch' }]; break;
       case 'usage': data = Object.fromEntries(['claude', 'codex'].map(k => [k, { tier: 'pro', fetchedAt: new Date().toISOString(), limits: [{ label: 'session', percent: 35, severity: '', resetsAt: new Date(Date.now() + 3600000).toISOString() }] }])); break;
-      case 'context': data = { ctx: 20000, est: 0, buckets: [{ label: 'Messages', tokens: 10000 }, { label: 'Tools', tokens: 10000 }], series: [10000, 15000, 20000], drops: [] }; break;
+      case 'context': data = { ctx: c.argv[0] === 'a1' ? 20000 : 55000, est: 0, buckets: [{ label: 'Messages', tokens: 10000 }, { label: 'Tools', tokens: 10000 }], series: [10000, 15000, 20000], drops: [] }; break;
       case 'startups':
         if (c.argv[0] === 'add') state.startups.push({ label: c.argv[1], cmd: c.argv.slice(2).join(' ') });
         if (c.argv[0] === 'remove') state.startups = state.startups.filter(s => s.label !== c.argv[1]);
@@ -257,12 +283,16 @@ async function context(width, token = true, push = false) {
         if (action === 'diff') data = { diff: patch(`${own(id)}.txt`) };
         else if (action === 'show') data = { diff: `commit abc1234\nAuthor: Tester <test@example.com>\nDate: Tue Oct 6 10:00:00 2026 +0100\n\n    A sample commit\n\n ${own(id)}.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n\n${patch(`${own(id)}.txt`)}` };
         else if (action === 'files') data = { files: [`${own(id)}.txt`, 'src/deep/path.txt'] };
-        else if (action === 'file') data = { text: c.argv[2] === 'big.txt' ? Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join('\n') : `${own(id)} one\ntwo\nthree\n` };
+        else if (action === 'file') data = { text: c.argv.at(-1) === 'big.txt' ? Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join('\n') : `${own(id)} one\ntwo\nthree\n` };
         else if (action === 'branches') data = state.branchList ?? { current: `loom/${id}`, branches: [`loom/${id}`, 'feature/next'] };
         else if (action === 'stashes') data = { stashes: [{ ref: 'stash@{0}', sha: '5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c', message: `WIP on loom/${id}: abc1234 A saved change` }] };
         else data = status(id);
         // gitChurn: an agent in the thread writes a new file before each read.
         if (action === 'status' && state.gitChurn) data.untracked.push(file(`made-${state.gitChurn++}.txt`, '?', '?'));
+        // flagFile: a new file named like one of git's options. committed: nothing is staged after a commit.
+        if (data.untracked && state.flagFile) data.untracked.push(file('--staged', '?', '?'));
+        if (action === 'commit') (state.committed ??= new Set()).add(id);
+        if (data.staged && state.committed?.has(id)) data.staged = [];
         break;
       }
       default: data = {};
@@ -319,6 +349,7 @@ try {
     await goto(p, '#/changes/a', '#changes .file'); await fits(p, width, 'changes'); await p.locator('#changes .picker').click(); await fits(p, width, 'thread-picker'); await close(p);
     await p.locator('#changes .file .icon-btn').first().click(); await fits(p, width, 'file-menu'); await sheetButton(p, 'Discard changes').click(); await fits(p, width, 'discard-confirm'); await close(p);
     await p.locator('#changes .file').filter({ hasText: 'conflict.txt' }).first().locator('.icon-btn').click(); await fits(p, width, 'conflict-menu'); await close(p);
+    await p.locator('#changes .midway button', { hasText: 'Skip' }).click(); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'skip-confirm'); await close(p);
     await p.locator('#changes [aria-label="Git actions"]').click(); await fits(p, width, 'git-menu'); await sheetButton(p, 'Switch branch').click(); await p.locator('#sheet .item').first().waitFor(); await fits(p, width, 'branches'); await sheetButton(p, 'New branch…').click(); await fits(p, width, 'branch-form'); await close(p);
     for (const [i, name] of ['\u00a0approved', 'approved\u00a0', 'approved', 'heads/approved'].entries()) {
       const names = ['approved', '\u00a0approved', 'approved\u00a0', 'heads/approved'];
@@ -348,9 +379,29 @@ try {
     await goto(p, '#/commit/a/abc1234', '#diff .commit-head'); await fits(p, width, 'commit');
     await goto(p, '#/files/a', '#files .list-row'); await fits(p, width, 'files'); await goto(p, '#/file/a/alpha.txt', '#diff .r'); await fits(p, width, 'file');
     await goto(p, '#/usage', '#usage .provider'); await fits(p, width, 'usage'); await goto(p, '#/context/a1', '#context .bars'); await fits(p, width, 'context');
+    state.planUsage = 'off'; await goto(p, '#/usage', '#usage .provider:has-text("Plan usage is off")'); await fits(p, width, 'usage-plan-off'); await taps(p, width, '#usage .provider'); state.planUsage = 'on';
     await goto(p, '#/settings', '#settings .group'); await fits(p, width, 'settings');
     await p.locator('#settings .setting', { hasText: 'Language and prefix' }).locator('button').click(); await p.locator('#sheet.on .dict-row').first().waitFor(); await fits(p, width, 'settings-dictation'); await sheetButton(p, 'Done').click(); await p.locator('#settings .setting').filter({ hasText: 'Theme' }).locator('button').click(); await fits(p, width, 'themes'); await close(p);
     await p.getByRole('button', { name: 'Unpair all', exact: true }).click(); await fits(p, width, 'unpair-confirm'); await close(p);
+    // The paired phones, each with its Remove: none, this one alone, then three with a long name, which is cut
+    // short with its bell and Remove still on screen.
+    for (const n of [0, 1, 3]) {
+      state.devices = n === 1 ? DEVICES().filter(d => d.id === MINE) : DEVICES().slice(0, n);
+      await p.evaluate(() => (location.hash = '#/')); // Settings opened again reads the phones
+      await goto(p, '#/settings', '#settings .group');
+      await until(`${width}: ${n} phones listed`, async () => (await p.locator('#settings .setting', { hasText: 'All phones' }).count()) === 1 && (await p.locator('#settings .setting.phone').count()) === n);
+      await fits(p, width, `settings-phones-${n}`);
+    }
+    await taps(p, width, '#settings .setting.phone');
+    const long = await p.evaluate(name => {
+      const row = [...document.querySelectorAll('#settings .setting.phone')].find(r => r.querySelector('b span').textContent === name);
+      const span = row.querySelector('b span'), bell = row.querySelector('b svg').getBoundingClientRect(), remove = row.querySelector('.icon-btn').getBoundingClientRect();
+      return { cut: span.scrollWidth > span.clientWidth, bell: bell.right <= remove.left, remove: remove.right <= innerWidth && remove.width >= 44 };
+    }, PHONE);
+    assert.ok(long.bell && long.remove, `${width}: the long name's bell and Remove stay on screen`);
+    if (width <= 375) assert.ok(long.cut, `${width}: the long name is cut short`);
+    await p.getByRole('button', { name: `Remove ${PHONE}`, exact: true }).click(); await fits(p, width, 'phone-remove-confirm'); await close(p);
+    delete state.devices;
     assert.deepEqual(state.errors, [], `${width}: errors in the page`);
     await c2.close();
   }
@@ -465,7 +516,7 @@ try {
     await page.locator('#changes .file').filter({ hasText: 'beta.txt' }).locator('.icon-btn').click();
     await sheetButton(page, 'Stage').click();
     await until('the stage', () => git(state, 'stage').length);
-    assert.deepEqual(git(state, 'stage')[0].argv, ['b', 'stage', '--unstaged', 'beta.txt']);
+    assert.deepEqual(git(state, 'stage')[0].argv, ['b', 'stage', '--unstaged', '--', 'beta.txt']);
 
     // A diff: Alpha's late patch must not take Beta's diff screen and its hunk buttons.
     state.hold.add('a diff');
@@ -1728,6 +1779,314 @@ try {
     await ctx.close();
   }
   console.log('PASS a clip recorded while the one before it is being sent goes too, after its prefix, once that send answers, and waits in the box when the answers to that send are lost');
+
+  // --- The full review's phone findings (docs/reviews/LOOM_FULL_REVIEW_CLAUDE_OPUS55_2026-10-08_113559.md) ---
+  const submitted = state => state.calls.filter(c => c.cmd === 'submit').map(c => c.stdin);
+  {
+    // R4: every path goes after a bare --, so loomctl reads a file named like an option as a file. Delete on a
+    // new file named --staged sent `discard --untracked --staged --yes`: every staged change and new file went.
+    const { ctx, page, state } = await context(375);
+    state.flagFile = true;
+    await goto(page, '#/changes/a', '#changes .file');
+    const viaSheet = async (name, action, label, confirm) => {
+      const n = git(state, action).length;
+      await page.locator('#changes .file', { has: page.locator('.open b', { hasText: name }) }).first().locator('.icon-btn').click();
+      await sheetButton(page, label).click();
+      if (confirm) await sheetButton(page, confirm).click();
+      await until(`git ${action}`, () => git(state, action).length === n + 1);
+      return git(state, action).at(-1).argv;
+    };
+    const deleted = await viaSheet('--staged', 'discard', 'Delete', 'Delete');
+    assert.deepEqual(parsed(deleted), { words: ['a', 'discard', '--staged'], flags: ['--untracked', '--yes'] }, 'Delete names the file --staged');
+    assert.deepEqual(deleted, ['a', 'discard', '--untracked', '--yes', '--', '--staged']);
+    assert.deepEqual(await viaSheet('--staged', 'stage', 'Stage'), ['a', 'stage', '--untracked', '--', '--staged']);
+    assert.deepEqual(await viaSheet('staged.txt', 'unstage', 'Unstage'), ['a', 'unstage', '--', 'staged.txt']);
+    assert.deepEqual(await viaSheet('alpha.txt', 'discard', 'Discard changes', 'Discard'), ['a', 'discard', '--unstaged', '--yes', '--', 'alpha.txt']);
+    assert.deepEqual(await viaSheet('conflict.txt', 'resolve', 'Keep ours'), ['a', 'resolve', 'ours', '--', 'conflict.txt']);
+    assert.deepEqual(await viaSheet('conflict.txt', 'resolve', 'Keep theirs'), ['a', 'resolve', 'theirs', '--', 'conflict.txt']);
+    assert.deepEqual(await viaSheet('conflict.txt', 'stage', 'Mark resolved'), ['a', 'stage', '--', 'conflict.txt']);
+    // The reads that name a file: its diff, the whole file, and the diff screen's Stage this file.
+    await page.evaluate(() => (location.hash = '#/diff/a/untracked/--staged'));
+    await page.locator('#diff button', { hasText: 'Stage this file' }).waitFor();
+    assert.deepEqual(git(state, 'diff').at(-1).argv, ['a', 'diff', '--untracked', '--', '--staged']);
+    await page.locator('#diff .top button', { hasText: 'Whole file' }).click();
+    await until('the whole file', () => git(state, 'diff').at(-1).argv.includes('--full'));
+    assert.deepEqual(git(state, 'diff').at(-1).argv, ['a', 'diff', '--untracked', '--full', '--', '--staged']);
+    await page.waitForTimeout(300); // drawn again, its Stage this file too
+    const stages = git(state, 'stage').length;
+    await page.locator('#diff button', { hasText: 'Stage this file' }).click();
+    await until('Stage this file', () => git(state, 'stage').length === stages + 1);
+    assert.deepEqual(git(state, 'stage').at(-1).argv, ['a', 'stage', '--untracked', '--', '--staged']);
+    await page.locator('#toast', { hasText: 'Staged' }).waitFor();
+    await page.waitForTimeout(300); // it goes Back to the summary
+    await page.evaluate(() => (location.hash = '#/file/a/--staged'));
+    await until('the file', () => git(state, 'file').length);
+    assert.deepEqual(git(state, 'file')[0].argv, ['a', 'file', '--', '--staged']);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS R4: stage, unstage, discard, resolve, diff, file and Stage this file put the path after --, so a file named --staged is that file');
+  {
+    // R5: a commit lets its message go, stored and on screen, before the summary redraws. Kept, a second tap ran
+    // `git add -A` and committed everything Only staged had left out, under the same message.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/changes/a', '#changes .composer textarea');
+    const box = page.locator('#changes .composer textarea');
+    const commit = page.locator('#changes .composer .row button', { hasText: /^Commit$/ });
+    const stored = () => page.evaluate(() => localStorage.getItem('loom-commit-a'));
+    await box.fill('Fix the login');
+    await page.locator('#changes .composer .seg button', { hasText: 'Only staged' }).click();
+    await commit.click();
+    await page.locator('#toast', { hasText: 'Committed' }).waitFor();
+    assert.equal(await box.inputValue(), '', 'the box is empty');
+    assert.equal(await stored(), null, 'so is the stored draft');
+    await commit.click();
+    await page.waitForTimeout(500);
+    assert.deepEqual(git(state, 'commit').map(c => [c.argv.slice(1), c.stdin]), [[['commit', '-', '--staged'], 'Fix the login']], 'a second tap commits nothing');
+    // A commit on its way while an agent writes a file, which redraws the box: the redrawn Commit waits too.
+    await box.fill('Second change');
+    state.hold.add('a commit');
+    await commit.click();
+    await until('the commit is on its way', () => state.held['a commit']);
+    state.gitChurn = 1;
+    await page.locator('#changes [aria-label=Refresh]').click();
+    await page.locator('#changes .file', { hasText: 'made-1' }).waitFor();
+    assert.equal(await commit.isDisabled(), true, 'the redrawn Commit waits for the one on its way');
+    state.held['a commit']();
+    await until('Commit is back', async () => !(await commit.isDisabled()));
+    assert.equal(git(state, 'commit').length, 2);
+    assert.equal(await box.inputValue(), '');
+    // Amend takes the box's message, and lets it go too.
+    await box.fill('Better message');
+    await page.locator('#changes [aria-label="Git actions"]').click();
+    await sheetButton(page, 'Amend last commit').click();
+    await sheetButton(page, 'Amend').click();
+    await page.locator('#toast', { hasText: 'Amended' }).waitFor();
+    assert.deepEqual(git(state, 'amend').map(c => [c.argv.slice(1), c.stdin]), [[['amend', '--yes', '-'], 'Better message']]);
+    assert.equal(await box.inputValue(), '', 'amended: the box is empty');
+    assert.equal(await stored(), null);
+    // One typed while the commit was on its way stays.
+    await box.fill('Third change');
+    state.hold.add('a commit');
+    await commit.click();
+    await until('the third commit is on its way', () => state.held['a commit']);
+    await box.fill('Next message, typed meanwhile');
+    state.held['a commit']();
+    await until('Commit is back', async () => !(await commit.isDisabled()));
+    assert.equal(await box.inputValue(), 'Next message, typed meanwhile');
+    assert.equal(await stored(), 'Next message, typed meanwhile');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS R5: a commit or amend empties the box before the redraw, a second tap commits nothing, a redrawn Commit waits for the one on its way, and a message typed meanwhile stays');
+  for (const width of [375, 1280]) {
+    // R6: New thread between two agents hands the first one's draft to neither the second nor the void.
+    const { ctx, page, state } = await context(width);
+    await goto(page, '#/pane/a1', '#screen .line');
+    await page.fill('#prompt textarea', 'for alpha only');
+    if (width < 900) await page.locator('#pane .back').click();
+    await page.locator('#list .fab').click();
+    await page.locator('#new form').waitFor();
+    if (width < 900) await page.locator('#new .back').click();
+    await page.locator('#list .agent[data-id=b1]').click();
+    await page.locator('#pane .who b', { hasText: 'Beta:1' }).waitFor();
+    assert.equal(await box(page), '', `${width}: Alpha's draft isn't Beta's`);
+    await page.click('#prompt button.primary');
+    await page.waitForTimeout(300);
+    assert.deepEqual(submitted(state), [], 'Send on the empty box sends nothing');
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await page.locator('#pane .who b', { hasText: 'Alpha:1' }).waitFor();
+    assert.equal(await box(page), 'for alpha only', `${width}: Alpha keeps it`);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log("PASS R6: visiting New thread keeps each agent's draft its own, at 375 and 1280 px");
+  {
+    // R7: a clip that lands while a typed send to the same agent is on its way waits for that send. Read before,
+    // it joined the text being sent, the box was never cleared, and the next Send gave the agent it again.
+    const { ctx, page, state } = await context(375);
+    state.dictation.prefixes[0].enter = true;
+    await goto(page, '#/pane/a1', '#screen .line');
+    await page.fill('#prompt textarea', 'typed message');
+    state.hold.add('submit');
+    await page.click('#prompt button.primary');
+    await until('the typed send is on its way', () => state.held.submit);
+    state.heard = 'next message';
+    await dictate(page, 500);
+    await until('the clip answered', () => clips(state)[0]?.answered);
+    await page.waitForTimeout(300);
+    assert.equal(await box(page), 'typed message', 'the clip waits for the send');
+    state.held.submit();
+    await until('the clip goes', () => submitted(state).length === 2);
+    assert.deepEqual(submitted(state), ['typed message', '/prompt next message'], 'each once, the clip after its prefix');
+    await until('the box empties', async () => (await box(page)) === '');
+    // Refused, the typed text stays, and the clip joins it and waits for Send.
+    await page.fill('#prompt textarea', 'refused message');
+    Object.assign(state, { refuseSend: true, held: {} });
+    state.hold.add('submit');
+    await page.click('#prompt button.primary');
+    await until('the refused send is on its way', () => state.held.submit);
+    state.heard = 'more';
+    await dictate(page, 500);
+    await until('the second clip answered', () => clips(state)[1]?.answered);
+    state.held.submit();
+    await until('the clip joins the kept text', async () => (await box(page)) === 'refused message more');
+    await page.waitForTimeout(300);
+    assert.deepEqual(submitted(state), ['typed message', '/prompt next message', 'refused message'], 'nothing more goes');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS R7: a clip landing during a typed send waits for it, then goes alone after its prefix, or joins the text a refusal kept');
+  {
+    // R8: an Activity reply goes once, however often Send or Enter is pressed while it is on its way, a redrawn card too.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '', '#list .agent');
+    await page.locator('#list .seg button').filter({ hasText: 'Activity' }).click();
+    const card = page.locator('#list .card[data-pane=a1]');
+    await card.locator('.reply input').fill('looks good');
+    state.hold.add('submit');
+    await card.locator('.reply button').click();
+    await until('the reply is on its way', () => state.held.submit);
+    assert.equal(await card.locator('.reply button').isDisabled(), true, 'Send waits for it');
+    await card.locator('.reply input').press('Enter');
+    await page.locator('#list .find input').focus(); // out of the box, so its card is redrawn
+    state.changedTitle = true;
+    await page.locator('#list .card').filter({ hasText: 'Another agent has changed its title' }).waitFor({ timeout: 5000 });
+    assert.equal(await card.locator('.reply button').isDisabled(), true, "the redrawn card's Send waits too");
+    await card.locator('form').evaluate(f => f.requestSubmit());
+    await page.waitForTimeout(300);
+    state.held.submit();
+    await page.locator('#toast', { hasText: 'Sent' }).waitFor();
+    await until('Send is back', async () => !(await card.locator('.reply button').isDisabled()));
+    assert.deepEqual(submitted(state), ['looks good'], 'one reply');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS R8: an Activity reply goes once while it is on its way, its Send waiting, on a redrawn card too');
+  {
+    // R21: the rebase's Skip asks first, as Abort does.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/changes/a', '#changes .midway');
+    const skip = page.locator('#changes .midway button', { hasText: 'Skip' });
+    await skip.click();
+    await page.locator('#sheet.on h2', { hasText: 'Skip this commit?' }).waitFor({ timeout: 2000 });
+    await close(page);
+    await page.waitForTimeout(300);
+    assert.deepEqual(git(state, 'skip'), [], 'Cancel skips nothing');
+    await skip.click();
+    await sheetButton(page, 'Skip').click();
+    await until('the skip', () => git(state, 'skip').length);
+    assert.deepEqual(git(state, 'skip').map(c => c.argv), [['a', 'skip', '--yes']]);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log("PASS R21: the rebase's Skip asks first, and Cancel skips nothing");
+  {
+    // R24: Unpair all, refused, unpairs nothing: this phone keeps its token and its screens (it showed the pairing form).
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/settings', '#settings .group');
+    state.refuseRevoke = true;
+    await page.getByRole('button', { name: 'Unpair all', exact: true }).click();
+    await sheetButton(page, 'Unpair all').click();
+    await page.locator('#toast.error', { hasText: "Loom couldn't save the paired phones." }).waitFor();
+    await page.waitForTimeout(500);
+    assert.equal(await page.locator('#pairing').isVisible(), false, 'no pairing form');
+    assert.equal(await page.evaluate(() => localStorage.getItem('loom-token')), 'fixture-token', 'the token is kept');
+    assert.ok(await page.locator('#settings').isVisible());
+    // Each phone listed, this one first, and removed one at a time: another goes from the list; this one goes back to pairing.
+    state.refuseRevoke = false;
+    state.devices = DEVICES();
+    await page.evaluate(() => (location.hash = '#/')); // Settings opened again reads the phones
+    await goto(page, '#/settings', '#settings .setting.phone');
+    const rows = page.locator('#settings .setting.phone');
+    const shown = await rows.evaluateAll(rs => rs.map(r => [r.querySelector('b span').textContent, r.querySelector('.what > span').textContent, r.querySelector('b svg')?.getAttribute('aria-label') ?? '']));
+    assert.equal(shown[0][0], 'Pixel 8 · Chrome');
+    assert.match(shown[0][1], /^This phone · Paired \S+ \S+$/);
+    assert.equal(shown[0][2], 'Notifications on');
+    assert.deepEqual([shown[1][0], shown[1][2]], [PHONE, 'Notifications on']);
+    assert.match(shown[1][1], /^Paired \S+ \S+ · Seen 3h ago$/);
+    assert.deepEqual(shown[2], ['A phone', 'Never seen', '']);
+    await page.getByRole('button', { name: `Remove ${PHONE}`, exact: true }).click();
+    await page.locator('#sheet.on h2', { hasText: `Remove ${PHONE}?` }).waitFor();
+    await sheetButton(page, 'Remove').click();
+    await until('two phones left', async () => (await rows.count()) === 2);
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'remote' && c.argv[0] === 'revoke').map(c => c.argv), [['revoke'], ['revoke', 'a1b2c3d4e5f6']]);
+    assert.equal(await page.locator('#pairing').isVisible(), false, 'another phone removed: this one stays');
+    await page.getByRole('button', { name: 'Remove Pixel 8 · Chrome', exact: true }).click();
+    await sheetButton(page, 'Remove').click();
+    await page.locator('#pairing').waitFor({ state: 'visible', timeout: 5000 });
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'remote' && c.argv[0] === 'revoke').at(-1).argv, ['revoke', MINE]);
+    assert.equal(await page.evaluate(() => localStorage.getItem('loom-token')), null, 'this phone forgot its token');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS R24: a refused Unpair all keeps this phone paired; each phone is listed, this one first with its bell, and Remove takes one, this one back to pairing');
+  {
+    // R26: a context reply that comes after you opened another agent's stays off its screen.
+    const { ctx, page, state } = await context(375);
+    await goto(page, '#/usage', '#usage .ctx-row');
+    state.hold.add('context');
+    await page.evaluate(() => (location.hash = '#/context/a1'));
+    await until("Alpha's context, held", () => state.held.context);
+    await page.evaluate(() => (location.hash = '#/context/b1'));
+    await page.locator('#context .limit .label', { hasText: '55k' }).waitFor();
+    state.held.context();
+    await page.waitForTimeout(600);
+    assert.match(await page.locator('#context .who b').innerText(), /^Beta:1/);
+    assert.match(await page.locator('#context .limit .label').innerText(), /^55k of/, "Alpha's late numbers stay off Beta's screen");
+    // Fit Loom to phone zooms by show's own reply: the list, which says nothing is zoomed, unzoomed the agent it meant to fill.
+    await goto(page, '#/pane/a1', '#screen .line');
+    await until('Alpha zoomed on the PC', () => state.zoomed.has('a1'));
+    await page.click('#more');
+    await sheetButton(page, 'Fit Loom to phone').click();
+    await page.locator('#toast', { hasText: 'Loom fits the phone now' }).waitFor();
+    assert.ok(state.zoomed.has('a1'), 'Alpha still fills its thread');
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'zoom').map(c => c.argv[0]), ['a1'], 'zoomed once, on opening it');
+    // Back to the desktop size: unzoomed.
+    await page.click('#more');
+    await sheetButton(page, 'Desktop size on the PC').click();
+    await page.locator('#toast', { hasText: 'Loom is back at its desktop size' }).waitFor();
+    assert.ok(!state.zoomed.has('a1'), 'unzoomed with the desktop size');
+    // One send on its way holds only its own agent's Send.
+    await page.fill('#prompt textarea', 'for Alpha');
+    state.hold.add('submit');
+    await page.click('#prompt button.primary');
+    await until("Alpha's send is on its way", () => state.held.submit);
+    await page.evaluate(() => (location.hash = '#/pane/b1'));
+    await page.locator('#pane .who b', { hasText: 'Beta:1' }).waitFor();
+    assert.equal(await page.locator('#prompt button.primary').isDisabled(), false, "Beta's Send doesn't wait for Alpha's");
+    await page.fill('#prompt textarea', 'for Beta');
+    await page.click('#prompt button.primary');
+    await until("Beta's send", () => submitted(state).includes('for Beta'));
+    await page.evaluate(() => (location.hash = '#/pane/a1'));
+    await page.locator('#pane .who b', { hasText: 'Alpha:1' }).waitFor();
+    assert.equal(await page.locator('#prompt button.primary').isDisabled(), true, "Alpha's waits for its own");
+    state.held.submit();
+    await until("Alpha's Send is back", async () => !(await page.locator('#prompt button.primary').isDisabled()));
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'submit').map(c => [c.argv[0], c.stdin]), [['a1', 'for Alpha'], ['b1', 'for Beta']]);
+    assert.equal(await box(page), '');
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log("PASS R26: a late context reply stays off another agent's screen, Fit Loom to phone zooms by show's reply, and one send on its way holds only its own agent's Send");
+  {
+    // R28: with Plan usage off on the PC, Usage asks no account (`usage` did, every 5 minutes), says so, and turns it on.
+    const { ctx, page, state } = await context(375);
+    state.planUsage = 'off';
+    await goto(page, '#/usage', '#usage .provider:has-text("Plan usage is off")');
+    assert.ok((await page.locator('#usage .ctx-row').count()) > 0, "each agent's context still shows");
+    assert.equal(await page.locator('#usage [aria-label=Refresh]').isVisible(), false, 'no refresh of what nobody reads');
+    await page.waitForTimeout(2500); // the threads' reads, which redraw Usage
+    assert.deepEqual(state.calls.filter(c => c.cmd === 'usage'), [], 'no account is asked');
+    await page.locator('#usage .provider').getByRole('button', { name: 'Turn on', exact: true }).click();
+    await until('Plan usage on, on the PC', () => state.planUsage === 'on');
+    await page.locator('#usage .provider .limit').first().waitFor();
+    assert.equal(state.calls.filter(c => c.cmd === 'usage').length, 1);
+    assert.equal(await page.locator('#usage .provider', { hasText: 'Plan usage is off' }).count(), 0);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS R28: with Plan usage off, Usage asks no account, says it is off with each agent\'s context still shown, and turns it on');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));

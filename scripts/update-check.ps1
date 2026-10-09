@@ -64,16 +64,45 @@ try {
     } finally { $held.Dispose() }
     if ((Get-FileHash -LiteralPath $installed).Hash -ne $newHash) { throw 'Failed update changed the installation' }
     if (@(Get-ChildItem -LiteralPath $install -Filter '*-update-*.exe' | Where-Object { $_.Name -notlike '*-before-update-*' }).Count) { throw 'Staged files leaked after failure' }
+    # loom.exe replaced while the installed one runs, then loomctl.exe fails: the
+    # rollback copies back from the backup, which that running process maps.
+    $third = Join-Path $fixture 'third'
+    New-Item -ItemType Directory -Path $third | Out-Null
+    Copy-Item -LiteralPath $source -Destination (Join-Path $third 'loom.exe')
+    $stream = [IO.File]::OpenWrite((Join-Path $third 'loom.exe'))
+    $stream.Position = $stream.Length
+    $stream.WriteByte(1)
+    $stream.Dispose()
+    Copy-Item -LiteralPath (Join-Path $third 'loom.exe') -Destination (Join-Path $third 'loomctl.exe')
+    $start.FileName = $installed
+    $running = [Diagnostics.Process]::Start($start)
+    $heldCtl = [IO.File]::Open((Join-Path $install 'loomctl.exe'), 'Open', 'Read', 'Read')
+    try {
+        $message = $null
+        try { & $update -InstallDir $install -Source (Join-Path $third 'loom.exe') } catch { $message = $_.Exception.Message }
+        if ($message -notmatch 'Restored the previous executables') { throw "A failed pair must roll back loom.exe while it runs: $message" }
+    } finally {
+        $heldCtl.Dispose()
+        # cmd reading a pipe ends at its end of input.
+        $running.StandardInput.Close()
+        $running.WaitForExit()
+        $running.Dispose()
+    }
+    if ((Get-FileHash -LiteralPath $installed).Hash -ne $newHash) { throw 'Rollback did not restore the running loom.exe' }
     if ($process.HasExited) { throw 'Failed update interrupted the process' }
     # Prove the original process still accepts input after replacement and failure.
+    # A blank line first: under a UTF-8 console code page the writer opens with a
+    # BOM, and cmd would read the first command as an unknown "﻿echo".
+    $process.StandardInput.WriteLine()
     $process.StandardInput.WriteLine('echo LOOM_UPDATE_ALIVE')
     $process.StandardInput.WriteLine('exit')
     $output = $process.StandardOutput.ReadToEnd()
     $process.WaitForExit()
     if ($output -notmatch 'LOOM_UPDATE_ALIVE') { throw 'Running process stopped responding' }
-    Write-Output 'PASS: no pair without loomctl, running executables updated together, backup verified, repeat skipped, build and replacement failures leave installation intact.'
+    Write-Output 'PASS: no pair without loomctl, running executables updated together, backup verified, repeat skipped, build and replacement failures leave installation intact, a running loom.exe rolled back.'
 } finally {
-    if (-not $process.HasExited) { $process.StandardInput.WriteLine('exit'); $process.WaitForExit() }
+    # End of input ends cmd, whatever a failure left unread.
+    if (-not $process.HasExited) { $process.StandardInput.Close(); $process.WaitForExit() }
     $process.Dispose()
     # Only what this check created, in its own temporary folder.
     Remove-Item -LiteralPath $fixture -Recurse -Force

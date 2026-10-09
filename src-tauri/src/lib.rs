@@ -43,9 +43,9 @@ struct Resizes {
 }
 
 struct Session {
-    /// The pane's process tree: closing it (the session dropped, or Loom gone)
-    /// ends whatever the pane started, detached or not. First to drop, so
-    /// nothing is left attached when master's Drop closes the console.
+    /// The pane's process tree: dropping it ends the console processes the
+    /// pane started, detached or not (Job). First to drop, so nothing is left
+    /// attached when master's Drop closes the console.
     _job: Option<Job>,
     // Close the input pipe before ClosePseudoConsole runs in master's Drop.
     // The writer thread holds it weakly, so only a write in progress keeps it open.
@@ -66,28 +66,106 @@ impl Session {
     /// Kill the shell AND everything it spawned. `killer` alone is a
     /// TerminateProcess on the shell; claude/node under it live on, and a
     /// process whose cwd is the worktree makes `git worktree remove` fail
-    /// with "Permission denied" on Windows.
+    /// with "Permission denied" on Windows. Without a job, `taskkill /T`,
+    /// which also takes GUI apps whose parent is still in the tree.
     fn kill(&mut self) {
         self.flow.close();
-        if let Some(pid) = self.pid {
-            taskkill(&[pid]);
+        match (&self._job, self.pid) {
+            (Some(job), _) => job.end(),
+            (None, Some(pid)) => taskkill(&[pid]),
+            (None, None) => {}
         }
         let _ = self.killer.kill();
     }
 }
 
-/// A Job Object that kills its processes when its last handle closes.
+/// A Job Object holding a pane's processes. Dropping it ends the console ones
+/// (`end`) and leaves the GUI apps the pane opened, which joined it without
+/// asking: VS Code from `code .`, a browser from `start`. ponytail: no
+/// kill-on-close, which can't tell them apart, so a Loom that crashes leaves
+/// the pane's detached console processes running.
 struct Job(windows::Win32::Foundation::HANDLE);
 // SAFETY: a job handle may be used and closed from any thread.
 unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
 impl Drop for Job {
     fn drop(&mut self) {
+        self.end();
         unsafe { let _ = windows::Win32::Foundation::CloseHandle(self.0); }
     }
 }
 
-/// Puts process `pid` in a new kill-on-close job. What it starts from then on
+impl Job {
+    /// Terminates every process in the job but GUI apps. One being stopped can
+    /// start another meanwhile, so it goes again until a pass stops none.
+    fn end(&self) {
+        for _ in 0..4 {
+            if !self.end_pass() { break; }
+        }
+    }
+
+    /// The processes in the job now. ponytail: room for 4,096, which no pane
+    /// comes near; past it the list holds what fit and `end` goes again.
+    fn pids(&self) -> Vec<u32> {
+        use windows::Win32::System::JobObjects::{JobObjectBasicProcessIdList, QueryInformationJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST};
+        let mut list = vec![0usize; 1 + 4096];
+        let size = (list.len() * std::mem::size_of::<usize>()) as u32;
+        // ERROR_MORE_DATA still fills the list as far as it goes.
+        let _ = unsafe { QueryInformationJobObject(Some(self.0), JobObjectBasicProcessIdList, list.as_mut_ptr().cast(), size, None) };
+        let head = unsafe { &*(list.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
+        let n = (head.NumberOfProcessIdsInList as usize).min(4096);
+        unsafe { std::slice::from_raw_parts(head.ProcessIdList.as_ptr(), n) }.iter().map(|&p| p as u32).collect()
+    }
+
+    fn end_pass(&self) -> bool {
+        use windows::{core::BOOL, Win32::Foundation::CloseHandle};
+        use windows::Win32::System::JobObjects::IsProcessInJob;
+        use windows::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE};
+        let mut ended = false;
+        for pid in self.pids() {
+            let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, false, pid) }) else { continue };
+            // Still this job's: the id may have gone to another process since the list.
+            let mut inside = BOOL(0);
+            let ours = unsafe { IsProcessInJob(process, Some(self.0), &mut inside) }.is_ok() && inside.as_bool();
+            if ours && image_of(process).and_then(|image| subsystem(&image)) != Some(2) {
+                ended |= unsafe { TerminateProcess(process, 1) }.is_ok();
+            }
+            unsafe { let _ = CloseHandle(process); }
+        }
+        ended
+    }
+}
+
+/// The file a process runs.
+fn image_of(process: windows::Win32::Foundation::HANDLE) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+    let mut name = vec![0u16; 32_768];
+    let mut len = name.len() as u32;
+    unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, windows::core::PWSTR(name.as_mut_ptr()), &mut len) }.ok()?;
+    Some(std::ffi::OsString::from_wide(&name[..len as usize]).into())
+}
+
+/// An executable's PE subsystem: 2 for a Windows GUI app, 3 for a console one.
+/// None when it isn't a PE file or can't be read.
+fn subsystem(image: &std::path::Path) -> Option<u16> {
+    let mut file = std::fs::File::open(image).ok()?;
+    let mut word = [0u8; 4];
+    file.seek(SeekFrom::Start(0x3c)).ok()?;
+    file.read_exact(&mut word).ok()?;
+    let pe = u32::from_le_bytes(word) as u64;
+    file.seek(SeekFrom::Start(pe)).ok()?;
+    file.read_exact(&mut word).ok()?;
+    if &word != b"PE\0\0" { return None; }
+    // The signature, the 20-byte file header, then the optional header, whose
+    // Subsystem is at 68 in PE32 and PE32+ alike.
+    let mut sub = [0u8; 2];
+    file.seek(SeekFrom::Start(pe + 4 + 20 + 68)).ok()?;
+    file.read_exact(&mut sub).ok()?;
+    Some(u16::from_le_bytes(sub))
+}
+
+/// Puts process `pid` in a new job (Job). What it starts from then on
 /// joins too, detached consoles included, unless it asks to break away. ponytail: assigned just after the
 /// spawn, so a child started in that instant stays out: portable-pty 0.9 fixes
 /// CreateProcessW's flags and attribute list and keeps the console handle
@@ -96,14 +174,14 @@ impl Drop for Job {
 fn contain(pid: u32) -> Result<Job, String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE};
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK};
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
     unsafe {
         let job = Job(CreateJobObjectW(None, windows::core::PCWSTR::null()).map_err(|e| e.to_string())?);
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         // Breakaway stays possible, for a program that asks for it on purpose:
         // without it, that program's CreateProcess fails outright.
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
             std::mem::size_of_val(&limits) as u32).map_err(|e| e.to_string())?;
         let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, false, pid).map_err(|e| e.to_string())?;
@@ -189,8 +267,13 @@ async fn overlay(app: AppHandle, show: Option<bool>) -> Result<(), String> {
 }
 
 /// Deleted worktrees wait here a day (deletion.rs). Local, not roaming: they can be gigabytes.
+/// A debug build has its own, as with data_dir, so it never purges the installed Loom's.
 pub(crate) fn trash_dir(app: &AppHandle) -> PathBuf {
-    app.path().app_local_data_dir().expect("no local data dir").join("trash")
+    let mut dir = app.path().app_local_data_dir().expect("no local data dir");
+    if cfg!(debug_assertions) {
+        dir.as_mut_os_string().push("-dev");
+    }
+    dir.join("trash")
 }
 
 pub(crate) fn data_dir(app: &AppHandle) -> PathBuf {
@@ -306,8 +389,7 @@ fn pty_spawn(
         *line = opencode::launch(line, cwd.as_deref().unwrap_or("."))?;
         opencode::install(&app.path().home_dir().map_err(|e| e.to_string())?)?;
     }
-    let pane_dir = cwd.as_deref().map(std::path::Path::new).filter(|d| d.is_dir());
-    let direct = cmd_line.as_deref().and_then(|line| helper::codex_direct(line, pane_dir));
+    let direct = cmd_line.as_deref().and_then(helper::codex_direct);
     let mut cmd = match &direct {
         Some((exe, args, env)) => {
             let mut cmd = CommandBuilder::new(exe);
@@ -342,7 +424,7 @@ fn pty_spawn(
         // ConPTY quotes argv MSVC-style; cmd.exe does not understand \" inside
         // its command string. Expand the whole command after that quoting step.
         cmd.args(["/d", "/s", "/c", "%LOOM_COMMAND%"]);
-        cmd.env("LOOM_COMMAND", line);
+        cmd.env("LOOM_COMMAND", with_program(&line, on_path)?);
     } else {
         cmd.args(argv[1..].iter().map(|a| if a == "$LOOM_HOOKS" { &hooks_arg } else { a }));
     }
@@ -352,8 +434,10 @@ fn pty_spawn(
     cmd.env("LOOM_PANE", &id);
     // Which launch of the pane this process is (Pane.generation): every task
     // report carries it, so a late one from a replaced process moves nothing.
-    if let Some(launch) = launch {
-        cmd.env("LOOM_LAUNCH", launch.to_string());
+    // None is none: never the value a Loom started from a pane inherited.
+    match launch {
+        Some(launch) => cmd.env("LOOM_LAUNCH", launch.to_string()),
+        None => cmd.env_remove("LOOM_LAUNCH"),
     }
     cmd.env("LOOM_SESSION_FILE", data_dir(&app).join("session-marks").join(&id));
     // loomctl from inside a pane reaches the Loom that owns it (control.rs),
@@ -420,8 +504,15 @@ fn pty_spawn(
     let pid = child.process_id();
     // First, before the process has long to start anything outside it.
     let job = pid.and_then(|pid| contain(pid).map_err(|e| eprintln!("pane {id}: no job object, so its detached processes outlive it: {e}")).ok());
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = Arc::new(Mutex::new(pair.master.take_writer().map_err(|e| e.to_string())?));
+    // Past here nothing would stop the child but its job, which may be missing.
+    let (mut reader, writer) = match pair.master.try_clone_reader().and_then(|r| Ok((r, pair.master.take_writer()?))) {
+        Ok(ends) => ends,
+        Err(e) => {
+            let _ = child.kill();
+            return Err(e.to_string());
+        }
+    };
+    let writer = Arc::new(Mutex::new(writer));
     // Keystrokes reach the pane through its own thread, in order. A child that
     // stops reading fills its input pipe, and that wait must hold neither an
     // async worker nor the map lock.
@@ -606,7 +697,8 @@ fn pty_shutdown(ptys: State<Ptys>, flows: State<output::Flows>, reports: State<R
     for (_, _, flow) in flows.0.lock().unwrap().values() { flow.close(); }
     let sessions = std::mem::take(&mut *ptys.0.lock().unwrap());
     ids.extend(sessions.keys().cloned());
-    taskkill(&sessions.values().filter_map(|s| s.pid).collect::<Vec<_>>());
+    // A pane with a job ends its console processes as its session drops (Job).
+    taskkill(&sessions.values().filter(|s| s._job.is_none()).filter_map(|s| s.pid).collect::<Vec<_>>());
     // Dropping a session runs ClosePseudoConsole, which can wait for its output
     // to drain, so drop them side by side. Returns once all are gone.
     std::thread::scope(|scope| {
@@ -830,9 +922,26 @@ fn read_file(dir: String, path: String) -> Result<String, String> {
     Ok(text)
 }
 
+/// A path that reaches no other machine or device: not `\\server\share`,
+/// `//server/share`, `\\?\` or `\\.\`. Opening a UNC path connects to that
+/// host and offers it this account's NTLM credentials.
+fn local_path(path: &std::path::Path) -> bool {
+    use std::path::{Component, Prefix};
+    let text = path.as_os_str().to_string_lossy();
+    let mut lead = text.chars().take(2);
+    let doubled = lead.next().is_some_and(|c| c == '\\' || c == '/') && lead.next().is_some_and(|c| c == '\\' || c == '/');
+    !doubled && match path.components().next() {
+        Some(Component::Prefix(p)) => matches!(p.kind(), Prefix::Disk(_)),
+        _ => true,
+    }
+}
+
 fn read_image(dir: String, path: String) -> Result<tauri::ipc::Response, serde_json::Value> {
     let requested = std::path::Path::new(&path);
     let mut path = std::path::Path::new(&dir).join(requested);
+    if !local_path(requested) || !local_path(&path) {
+        return Err("Loom previews images on this PC only, not on a network share or device path".into());
+    }
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "avif") {
         return Err("Unsupported image format".into());
@@ -936,6 +1045,33 @@ fn code_shim() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// Where cmd.exe would find program `name` on PATH, trying PATHEXT's
+/// extensions in each folder in turn, but never in the current folder, which
+/// cmd tries first. A pane's folder is a checkout: a `codex.cmd` an agent or a
+/// branch put there would run as you, before the agent asks whether to trust
+/// the folder. Relative PATH entries are skipped for the same reason.
+pub(crate) fn on_path(name: &str) -> Option<PathBuf> {
+    find_on(&std::env::var_os("PATH")?, name)
+}
+
+fn find_on(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains(['\\', '/', ':', '"', '.']) { return None; }
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| exts.split(';').filter(|e| !e.is_empty()).map(move |ext| dir.join(format!("{name}{ext}"))).collect::<Vec<_>>())
+        .find(|p| p.is_file())
+}
+
+/// A cmd.exe line with its program, the first word, swapped for where `find`
+/// puts it, quoted: `codex resume x` becomes `"C:\...\codex.cmd" resume x`.
+fn with_program(line: &str, find: impl FnOnce(&str) -> Option<PathBuf>) -> Result<String, String> {
+    let line = line.trim_start();
+    let name = line.split_whitespace().next().unwrap_or_default();
+    let exe = find(name).ok_or_else(|| format!("{name} isn't on PATH"))?;
+    Ok(format!("\"{}\"{}", exe.display(), &line[name.len()..]))
+}
+
 /// Like aa's F5. VS Code dedupes — an already-open window for the folder just
 /// gets focused.
 ///
@@ -959,6 +1095,9 @@ fn open_vscode(dir: String, goto: Option<String>) -> Result<(), String> {
     }
     let out = std::process::Command::new("cmd")
         .raw_arg(format!("/s /c \"{inner}\""))
+        // `-g` is relative to the thread's folder, and VS Code resolves it
+        // against its own working directory.
+        .current_dir(&dir)
         .stdin(Stdio::null())
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: no flashing console
         .output()
@@ -1543,12 +1682,31 @@ fn relaunch_args(args: &[String]) -> Vec<String> {
     profile_of(args).into_iter().collect()
 }
 
-/// Restarting (main.ts relaunch, after its safe close): starts this exe again,
-/// with the same arguments. An update replaces the file at this path, so the
-/// new version starts. The new Loom waits for this one to exit (LOOM_AFTER_PID)
-/// before taking its single-instance lock, its profile and its remote port.
+/// A restart asked for and not called off: `start_again` runs as Loom exits.
+static RELAUNCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Restarting (main.ts relaunch, after its safe close): this exe starts again
+/// once this Loom exits, so a window whose close fails isn't left open beside
+/// a new Loom waiting on it. Fails now if there's no exe to start.
 #[tauri::command]
 fn relaunch() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Loom can't find its own exe to start again: {e}"))?;
+    if !exe.is_file() { return Err(format!("Loom can't start itself again: {} is gone", exe.display())); }
+    RELAUNCH.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+/// The window didn't close after all: no restart when Loom later exits.
+#[tauri::command]
+fn relaunch_cancel() {
+    RELAUNCH.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Starts this exe again, with the same arguments. An update replaces the file
+/// at this path, so the new version starts. The new Loom waits for this one to
+/// exit (LOOM_AFTER_PID) before taking its single-instance lock, its profile
+/// and its remote port.
+fn start_again() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut cmd = std::process::Command::new(exe);
@@ -1716,6 +1874,10 @@ mod commands {
     #[tauri::command]
     pub async fn stash_drop(dir: String, sha: String) -> Result<(), String> {
         blocking(move || stash::drop(&dir, &sha)).await
+    }
+    #[tauri::command]
+    pub async fn branch_in_progress(repo: String, branch: String) -> Result<(), String> {
+        blocking(move || deletion::branch_in_progress(&repo, &branch)).await
     }
     #[tauri::command]
     pub async fn git_midway(dir: String) -> String {
@@ -2005,15 +2167,25 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
-            commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::stash_drop, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
-            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, exe_updated,
+            commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::stash_drop, commands::branch_in_progress, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
+            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, relaunch_cancel, exe_updated,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,
             commands::dictate_stop,
             dictate::dictate_level
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_, event| {
+            // Once, as the event loop ends: the window really closed.
+            if matches!(event, tauri::RunEvent::Exit) && RELAUNCH.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                if let Err(e) = start_again() {
+                    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK};
+                    let text: Vec<u16> = format!("{e}\n\nStart Loom again from the Start menu.").encode_utf16().chain([0]).collect();
+                    unsafe { MessageBoxW(None, windows::core::PCWSTR(text.as_ptr()), windows::core::w!("Loom didn't restart"), MB_OK | MB_ICONWARNING); }
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -2462,7 +2634,16 @@ mod tests {
         let large = std::fs::File::create(shots.join("large.png")).unwrap();
         large.set_len((32 << 20) + 1).unwrap();
         drop(large);
-        assert!(super::read_image(root, "large.png".into()).is_err());
+        assert!(super::read_image(root.clone(), "large.png".into()).is_err());
+        // Another machine or a device: refused by its spelling, before any open
+        // could connect to a host and offer it this account's credentials.
+        let refused = |dir: &str, path: &str| serde_json::to_value(super::read_image(dir.into(), path.into()).err().unwrap()).unwrap().as_str().unwrap_or("").contains("network share");
+        for path in [r"\\loom-test.invalid\share\chart.png", "//loom-test.invalid/share/chart.png", r"/\loom-test.invalid\share\chart.png",
+            r"\\?\C:\chart.png", r"\\?\UNC\loom-test.invalid\share\chart.png", r"\\.\pipe\chart.png"] {
+            assert!(refused(&root, path), "{path}");
+        }
+        assert!(refused(r"\\loom-test.invalid\share", "chart.png"), "a joined path on a share");
+        assert!(super::local_path(std::path::Path::new(r"C:\x\chart.png")) && super::local_path(std::path::Path::new(r"\x\chart.png")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2666,6 +2847,90 @@ mod tests {
             assert!(!running, "process {pid} outlived its pane's job");
         }
         let _ = root.wait();
+    }
+
+    #[test]
+    fn a_program_is_a_gui_app_or_a_console_one() {
+        let system = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap()).join("System32");
+        assert_eq!(super::subsystem(&system.join("notepad.exe")), Some(2));
+        assert_eq!(super::subsystem(&system.join("cmd.exe")), Some(3));
+        assert_eq!(super::subsystem(&system.join("drivers/etc/hosts")), None);
+    }
+
+    #[test]
+    fn a_pane_job_spares_the_gui_apps_it_opened() {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        let dir = std::env::temp_dir().join(format!("loom-job-gui-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // wscript is a GUI app that shows no window: a stand-in for `code .`.
+        let script = dir.join("sleep.js");
+        std::fs::write(&script, "WScript.Sleep(60000);").unwrap();
+        let system = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap()).join("System32");
+        let (ping, wscript) = (system.join("PING.EXE"), system.join("wscript.exe"));
+        // The first ping waits out the job's assignment, which comes just after the spawn.
+        let line = format!("\"{ping}\" -n 2 127.0.0.1 >nul & start \"\" \"{wscript}\" //B //Nologo \"{js}\" & \"{ping}\" -n 60 127.0.0.1 >nul",
+            ping = ping.display(), wscript = wscript.display(), js = script.display());
+        let mut root = std::process::Command::new("cmd").raw_arg(format!("/d /s /c \"{line}\""))
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .creation_flags(0x0800_0000).spawn().unwrap();
+        let job = super::contain(root.id()).unwrap();
+        let image = |pid: u32| unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok().and_then(|h| {
+            let name = super::image_of(h).and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+            unsafe { let _ = windows::Win32::Foundation::CloseHandle(h); }
+            name
+        });
+        let alive = |pid: u32| unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.is_ok_and(|h| {
+            let mut code = 0;
+            let alive = unsafe { windows::Win32::System::Threading::GetExitCodeProcess(h, &mut code) }.is_ok() && code == 259; // STILL_ACTIVE
+            unsafe { let _ = windows::Win32::Foundation::CloseHandle(h); }
+            alive
+        });
+        // Until the GUI app and the second ping are both in the job.
+        let started = std::time::Instant::now();
+        let members = loop {
+            let pids = super::Job::pids(&job);
+            let named: Vec<(u32, String)> = pids.iter().filter_map(|&p| image(p).map(|n| (p, n))).collect();
+            if named.iter().filter(|(_, n)| n == "ping.exe").count() == 1 && named.iter().any(|(_, n)| n == "wscript.exe") && started.elapsed().as_secs() >= 2 { break named; }
+            assert!(started.elapsed().as_secs() < 15, "the pane never started both: {named:?}");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        let gui = members.iter().find(|(_, n)| n == "wscript.exe").unwrap().0;
+        drop(job);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let survived = alive(gui);
+        let consoles: Vec<_> = members.iter().filter(|(p, n)| n != "wscript.exe" && alive(*p)).cloned().collect();
+        // Only what this test started, by its id.
+        if let Ok(h) = unsafe { OpenProcess(windows::Win32::System::Threading::PROCESS_TERMINATE, false, gui) } {
+            unsafe { let _ = windows::Win32::System::Threading::TerminateProcess(h, 1); let _ = windows::Win32::Foundation::CloseHandle(h); }
+        }
+        let _ = root.kill();
+        let _ = root.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(survived, "closing the pane's job ended the GUI app it opened");
+        assert!(consoles.is_empty(), "console processes outlived the pane's job: {consoles:?}");
+    }
+
+    #[test]
+    fn a_pane_command_runs_its_program_from_path_never_its_folder() {
+        let dir = std::env::temp_dir().join(format!("loom-on-path-{}", std::process::id()));
+        let (bin, repo) = (dir.join("bin with space"), dir.join("repo"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(bin.join("codex.cmd"), "@echo off\r\necho ran [%1] [%2] [%3] [%4]\r\n").unwrap();
+        // What an agent or a branch could leave in the checkout.
+        std::fs::write(repo.join("codex.cmd"), "@echo PLANTED\r\n").unwrap();
+        std::fs::write(repo.join("codex.bat"), "@echo PLANTED\r\n").unwrap();
+        let path = std::env::join_paths([&bin]).unwrap();
+        let line = super::with_program(r#"codex resume --no-daemon -c "notify=['C:\x y\loom.exe','--codex-notify']""#, |n| super::find_on(&path, n)).unwrap();
+        assert!(line.to_lowercase().starts_with(&format!("\"{}\" resume", bin.join("codex.cmd").display()).to_lowercase()), "{line}");
+        // As the pane runs it: the line comes through %LOOM_COMMAND%, after /d /s /c, in the checkout.
+        let out = std::process::Command::new("cmd").args(["/d", "/s", "/c", "%LOOM_COMMAND%"]).env("LOOM_COMMAND", &line).current_dir(&repo).output().unwrap();
+        let out = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.trim(), r#"ran [resume] [--no-daemon] [-c] ["notify=['C:\x y\loom.exe','--codex-notify']"]"#);
+        assert_eq!(super::with_program("codex", |n| super::find_on(std::ffi::OsStr::new(""), n)).unwrap_err(), "codex isn't on PATH");
+        assert_eq!(super::find_on(&path, r"..\codex"), None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn walks_through_a_link_loop_end() {

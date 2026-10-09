@@ -1759,13 +1759,21 @@ async function micStop() {
       toast(`${p.agent} ${why} while you dictated, so nothing was typed.${text ? " The dictation is on the clipboard." : ""}`);
     };
     if (changed(p, gen)) return offer(changed(p, gen));
-    if (text) {
-      p.term.paste(text); // not pty_write: paste honors bracketed-paste mode
-      if (pre.enter) {
+    if (text && !pre.enter) p.term.paste(text); // not pty_write: paste honors bracketed-paste mode
+    else if (text) {
+      // In the pane's input turn: a loomctl send waiting on its echo would
+      // otherwise take this Enter, and this text would go with its own. A
+      // question that came up while whisper ran ignores the paste, and Enter
+      // would answer it.
+      const asking = () => !!readMenu(liveScreen(p, false));
+      const entered = await inTurn(p, async (live) => {
+        if (asking()) return false;
+        p.term.paste(text);
         // Codex reads an Enter that lands right behind pasted text as part of
         // the paste (a newline in the composer), so let the input settle first.
         await p.settle(150, 1000);
-        if (changed(p, gen)) return offer(changed(p, gen));
+        live(true);
+        if (asking()) return false;
         const mark = manualEnter(p);
         p.typed = null;
         const release = holdForEnter(p, mark);
@@ -1775,6 +1783,15 @@ async function micStop() {
           release();
           toast(`Could not write to ${p.agent}: ${String(e)}`);
         });
+        return true;
+      }, gen).catch((e) => {
+        if (e instanceof NotSubmitted && changed(p, gen)) return void offer(changed(p, gen));
+        throw e;
+      });
+      if (entered === undefined) return; // gone meanwhile: offered
+      if (!entered) {
+        void navigator.clipboard.writeText(text).catch(() => {});
+        toast(`${p.agent} is asking a question, so Loom didn't press Enter. The dictation is on the clipboard.`);
       }
     } else if (pre.text && p.inputSeq === r.seq) {
       // A mis-tapped F4 with nothing said: take the prefix back out instead of
@@ -2156,6 +2173,10 @@ class Pane {
       // Focus reports (ConPTY turns them on) are the page losing or gaining
       // focus, not you answering: pass them on, leave the alert alone.
       if (d === "\x1b[I" || d === "\x1b[O") return void invoke("pty_write", { id: this.id, data: d }).catch(() => {});
+      // So are the pointer moving or the wheel turning over a program that
+      // tracks the mouse (OpenCode): a click is someone acting, these aren't.
+      const mouse = /^\x1b\[<(\d+);\d+;\d+[Mm]$/.exec(d)?.[1] ?? (/^\x1b\[M[\s\S]{3}$/.test(d) ? d.charCodeAt(3) - 32 : undefined);
+      if (mouse !== undefined && Number(mouse) & 96) return void invoke("pty_write", { id: this.id, data: d }).catch(() => {});
       this.lastIn = Date.now();
       // Read before the Enter goes in: the input still holds what it sends.
       const mark = d === "\r" ? manualEnter(this) : undefined;
@@ -2651,7 +2672,8 @@ class Pane {
     for (let y = 0; y < this.term.rows; y++) {
       const line = buf.getLine(start + y);
       if (joined && y && line?.isWrapped) s = s.slice(0, -1);
-      s += (line?.translateToString(!joined) ?? "") + "\n";
+      // To the terminal's width: the alternate screen keeps cells past it after a narrowing resize.
+      s += (line?.translateToString(!joined, 0, this.term.cols) ?? "") + "\n";
     }
     return s;
   }
@@ -2682,7 +2704,8 @@ class Pane {
     // (the live model and effort the config panel reads) still has to land, and
     // before the first turn ctx and turns sit at 0 for as long as you take to
     // type your first message.
-    const drawn = u?.ctx === this.usage?.ctx && u?.turns === this.usage?.turns;
+    // The window too: /model to a smaller one changes the share before any turn does.
+    const drawn = u?.ctx === this.usage?.ctx && u?.turns === this.usage?.turns && u?.window === this.usage?.window;
     this.usage = u;
     if (drawn) return;
     if (!u) return void (this.gauge.className = "ctx hidden");
@@ -2798,6 +2821,11 @@ class Pane {
   answers(d: string) {
     if (d.startsWith("\x1b[200~")) return false;
     if (d.includes("\r")) return true;
+    // Shift+Tab picks the option that names it ("allow all edits ... (shift+tab)").
+    if (d === "\x1b[Z") {
+      const asked = readMenu(liveScreen(this, false));
+      return !!asked && (asked.full ?? asked.options).some((o) => /shift\s*\+\s*tab/i.test(o));
+    }
     if (!/^[0-9a-z]$/i.test(d)) return false;
     const menu = readMenu(liveScreen(this, false)) ?? (this.agent === "claude" ? readSurvey(liveScreen(this, true, true)) : null);
     return !!menu && menuKeys(menu).includes(d.toLowerCase());
@@ -2849,6 +2877,9 @@ class Thread {
   tabs: DiffTab[] = [];
   tab: DiffTab | null = null;
   commitDraft = "";
+  /** Opened from the saved workspace, its panes still starting: they come back
+   * as they were. A thread loomctl makes meanwhile is new, panes and all. */
+  restoring = false;
   private label = document.createElement("button");
   private list = document.createElement("div");
   private pips = document.createElement("span");
@@ -2981,9 +3012,9 @@ class Thread {
     if (st.effort) p.effort = st.effort;
     p.startupSettings = st.startupSettings;
     // A restored pane keeps its own setting; a new one starts as notifyPolicy.newPanes says.
-    p.notify = st.notify === "on" || st.notify === "off" ? st.notify : restoring ? "inherit" : notifyPolicy.newPanes;
-    if (restoring && Array.isArray(st.notifyIds)) p.notifyIds = [...new Set([...st.notifyIds.filter((id) => typeof id === "string" && id), p.id])];
-    if (restoring && typeof st.stableId === "string" && st.stableId) p.stableId = st.stableId;
+    p.notify = st.notify === "on" || st.notify === "off" ? st.notify : this.restoring ? "inherit" : notifyPolicy.newPanes;
+    if (this.restoring && Array.isArray(st.notifyIds)) p.notifyIds = [...new Set([...st.notifyIds.filter((id) => typeof id === "string" && id), p.id])];
+    if (this.restoring && typeof st.stableId === "string" && st.stableId) p.stableId = st.stableId;
     if (startupTurns) for (const id of p.notifyIds) startupNotify.set(id, p.notify);
     p.paintBell();
     this.panes.push(p);
@@ -2995,7 +3026,7 @@ class Thread {
       this.reordered(p);
     });
     this.relayout();
-    if (!restoring && p.notify !== "inherit") void recordNotify().catch(notifyError); // before it can have a task
+    if (!this.restoring && p.notify !== "inherit") void recordNotify().catch(notifyError); // before it can have a task
     await p.start(st.cmd, st.sid);
     if (!this.panes.includes(p)) return;
     if (focus) this.focusPane(p);
@@ -3030,7 +3061,11 @@ class Thread {
     this.panes.splice(i, 1);
     const cleanup = p.dispose();
     this.relayout();
-    this.focusPane(this.panes[Math.min(i, this.panes.length - 1)] ?? null);
+    const next = this.panes[Math.min(i, this.panes.length - 1)] ?? null;
+    // Focusing counts as seeing a pane's alert: only in the thread in front.
+    // Closed from loomctl or the phone elsewhere, the next pane keeps its own.
+    if (this === current) this.focusPane(next);
+    else ((this.active = next), this.panes.forEach((q, k) => q.paint(k)));
     save(); // else the pane is back on the next launch
     await cleanup;
     return true;
@@ -3210,10 +3245,13 @@ let shuttingDown = false;
 /** This Loom's start, so a phone waiting on a restart sees the new one answer (status's `booted`). */
 const bootedAt = Date.now();
 let relaunching = false;
+/** A close is under way: its end decides whether Loom restarts, so nothing turns it into one now. */
+let windowClosing = false;
 /** Restarts Loom: the safe close that closing its window runs, then the exe
  * starts again (lib.rs relaunch), after an update the new version. Every pane
  * comes back, agents in their sessions; a turn under way stops. */
 function relaunch() {
+  if (windowClosing) return void toast("Loom is closing, so it won't restart. Start it again once it has closed.");
   relaunching = true;
   getCurrentWindow().close().catch((e) => {
     relaunching = false;
@@ -4177,7 +4215,7 @@ let taskPruned = 0;
  * looked idle, the last Esc it judged, and when Claude's Stop hook said the
  * turn ended (the task completes once Claude is seen idle too) and the final
  * message that Stop named. */
-const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number; response?: string }>();
+const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number; response?: string; askGone?: number }>();
 const watched = (t: Task) => taskWatch.get(t.id) ?? taskWatch.set(t.id, {}).get(t.id)!;
 const paneById = (id: string) => threads.flatMap((t) => t.panes).find((p) => p.id === id);
 
@@ -4933,7 +4971,14 @@ function sweepTasks(closing = false) {
       moveTask(t, { state: "unknown", signal: "stop", reason: "loom-closed", detail: `Claude reported the end of its turn as Loom closed, but its screen never showed it idle${w.response ? ` (final message ${w.response})` : ""}` });
       continue;
     }
-    if (t.state === "approval") continue; // an answer delivered moves it on (Pane.wrote)
+    if (t.state === "approval") {
+      // An answer delivered moves it on (Pane.wrote). One given where Loom
+      // can't see it (Claude's own remote control) still takes the question
+      // off the screen: gone for 2 s, the agent works on.
+      if (p.agent === "opencode" || readMenu(liveScreen(p, false))) w.askGone = undefined;
+      else if (now - (w.askGone ??= now) >= 2000) moveTask(t, { state: "working", signal: "answered", detail: null });
+      continue;
+    }
     if (busy) {
       w.quietSince = undefined;
       if (t.state === "submitted") moveTask(t, { state: "working", signal: "screen", correlation: "screen" });
@@ -5592,6 +5637,9 @@ function filterSide() {
 
 function show(th: Thread | null) {
   if (dashboardOpen) toggleDashboard(false);
+  // A Changes selection is the thread's it was made in: the same path in
+  // another worktree is other work, and Discard would throw that away.
+  if (th !== current) (sel.clear(), (selSec = null), (selAnchor = ""));
   current = th;
   if (matchMedia("(max-width: 760px)").matches) toggleSide(false);
   for (const t of threads) {
@@ -5641,29 +5689,30 @@ type ThreadState = {
   tabs?: Omit<DiffTab, "load">[]; tab?: number; commitDraft?: string;
 };
 
-async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMode = "cols") {
+async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMode = "cols", fromSave = false) {
   const th = new Thread(st.repo, st.dir, st.branch, st.name);
   th.layout = layout;
+  th.restoring = fromSave;
   th.open = st.open ?? (st.folded ? false : undefined);
   threads.push(th); // before any await, so restore order is saved order
   // A thread on the checkout itself follows whatever branch is checked out
   // there, so ask git rather than trust what was saved.
   if (st.dir === st.repo)
-    git(st.dir, "rev-parse", "--abbrev-ref", "HEAD")
-      .then((b) => ((th.branch = b.trim()), th.setStat(th.changed)))
+    headBranch(th)
+      .then((b) => ((th.branch = b), th.setStat(th.changed)))
       .catch(() => {});
   if (!repos.includes(st.repo)) repos.push(st.repo);
   $("#stage").append(th.grid);
   // Restoring N threads used to show() each in turn: N sidebar rebuilds, and
   // every pane got a WebGL context only to lose it when the next thread showed.
   // main() renders the sidebar and shows the saved thread once all are up.
-  if (restoring) th.grid.classList.add("hidden");
+  if (fromSave) th.grid.classList.add("hidden");
   else (renderSide(), show(th));
   // Parallel: a spawn is up to ~1s. addPane pushes its pane before the first
   // await, so mapping in order still lands them in order, and the saved layout
   // goes on now: main() shows this thread while its panes are still starting.
   // Restored panes don't take focus as they start, or it would jump around.
-  const started = Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st, !restoring)));
+  const started = Promise.all(panes.slice(0, MAX_PANES).map((st) => th.addPane(st, !fromSave)));
   th.colW = st.colW?.filter(w => Number.isFinite(w) && w > 0) ?? [];
   th.rowH = st.rowH?.filter(w => Number.isFinite(w) && w > 0) ?? [];
   th.active = th.panes[st.active ?? 0] ?? th.panes[0];
@@ -5673,6 +5722,7 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
   th.tab = th.tabs[st.tab ?? -1] ?? null;
   th.relayout();
   await started;
+  th.restoring = false;
   if (!threads.includes(th)) return th; // Closed while its processes were starting.
   if (!th.panes.length) await th.addPane();
   save();
@@ -5688,52 +5738,79 @@ const git = (dir: string, ...args: string[]) => invoke<string>("git_run", { dir,
 const gitPreview = (dir: string, ok: number[], ...args: string[]) =>
   invoke<string>("git_run", { dir, args, ok, preview: true });
 
+/** The branch checked out in a thread, after a git action may have moved it.
+ * Detached (a rebase stopped on a conflict), a worktree keeps its own
+ * branch's name: "HEAD" there would have deletion count and delete the main
+ * checkout's. The checkout itself says HEAD, which is what it has. */
+async function headBranch(th: Pick<Thread, "dir" | "repo" | "branch">) {
+  const ref = (await git(th.dir, "symbolic-ref", "-q", "HEAD").catch(() => "")).replace(/\r?\n$/, "");
+  return ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : th.dir === th.repo ? "HEAD" : th.branch;
+}
+
+/** The thread's branch as git has it now, kept: a git switch in its own
+ * terminal moves it under Loom. Read before status, Create PR, the deletion
+ * inventory (what it counts and deletes) and branches. */
+async function syncBranch(th: Thread) {
+  const b = await headBranch(th);
+  if (b !== th.branch) ((th.branch = b), save());
+  return b;
+}
+
 /** What deleting a worktree destroys that exists nowhere else: changed and
  * untracked files, ignored files (.env, node_modules/: a wholly ignored folder
  * is one entry), and with `branch` the commits no other branch or remote
- * holds. HEAD rides along, so a new commit is a change too. Throws when git
- * can't say: unknown is never "nothing to lose". */
-type Inventory = { fingerprint: string; head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number; discard: Loss[] };
+ * holds. HEAD rides along, so a new commit is a change too, and so does the
+ * branch and its tip, which deletion takes. Throws when git can't say: unknown is
+ * never "nothing to lose". */
+type Inventory = { fingerprint: string; branch: string; branchTip: string; head: string; tracked: string[]; untracked: string[]; ignored: string[]; commits: number; loose: number; discard: Loss[] };
 /** Contents count only for the files the approval names and doesn't discard;
  * the rest (ignored build output above all) count by name, size and time. */
 const hashedFiles = (status: { tracked: string[]; untracked: string[] }, discard: Loss[]) =>
   (["tracked", "untracked"] as const).flatMap((k) => (discard.includes(k) ? [] : status[k]));
 async function inventory(th: Thread, branch: boolean, discard: Loss[] = []): Promise<Inventory> {
+  const name = await syncBranch(th);
+  const branchTip = branch && name ? (await git(th.repo, "rev-parse", "--verify", `refs/heads/${name}^{commit}`)).trim() : "";
   const status = lossInventory(await git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--ignored=matching"));
   const hashed = hashedFiles(status, discard);
-  const [head, commits, fingerprint] = await Promise.all([
+  const count = (where: string) => (s: string) => {
+    const n = Number(s.trim());
+    if (!Number.isInteger(n) || n < 0) throw new Error(`git counted "${s.trim()}" commits on ${where}`);
+    return n;
+  };
+  const [head, commits, loose, fingerprint] = await Promise.all([
     git(th.dir, "rev-parse", "HEAD").then((s) => s.trim(), () => ""), // no commits yet
-    branch && th.branch
-      ? git(th.repo, "rev-list", "--count", th.branch, "--not", `--exclude=${th.branch}`, "--branches", "--remotes").then((s) => {
-          const n = Number(s.trim());
-          if (!Number.isInteger(n) || n < 0) throw new Error(`git counted "${s.trim()}" commits on ${th.branch}`);
-          return n;
-        })
+    branch && name
+      ? git(th.repo, "rev-list", "--count", branchTip, "--not", `--exclude=${name}`, "--branches", "--remotes").then(count(name))
       : 0,
+    // A detached HEAD's own commits (an agent checked one out and committed)
+    // are on no branch: the worktree's HEAD and reflog are all that keep them,
+    // whichever mode deletes it.
+    git(th.dir, "symbolic-ref", "-q", "HEAD").then(() => 0, () => git(th.dir, "rev-list", "--count", "HEAD", "--not", "--branches", "--remotes").then(count("a detached HEAD"))),
     invoke<string>("worktree_fingerprint", { dir: th.dir, hashed }),
   ]);
   if (!fingerprint) throw new Error("Could not fingerprint the worktree; nothing was deleted");
-  return { head, ...status, commits, fingerprint, discard };
+  return { branch: name, branchTip, head, ...status, commits, loose, fingerprint, discard };
 }
-const lossCounts = (inv: Inventory): Record<Loss, number> => ({ tracked: inv.tracked.length, untracked: inv.untracked.length, ignored: inv.ignored.length, commits: inv.commits });
+const lossCounts = (inv: Inventory): Record<Loss, number> => ({ tracked: inv.tracked.length, untracked: inv.untracked.length, ignored: inv.ignored.length, commits: inv.commits + inv.loose });
 
 /** An inventory as warning lines for the confirm's detail, or "" when deleting loses nothing. */
-function riskText(inv: Inventory | null, th: Thread): string {
+function riskText(inv: Inventory | null): string {
   const plural = (n: number, w: string, ws = `${w}s`) => `${n} ${n === 1 ? w : ws}`;
   if (!inv) return "\n⚠ Could not read the worktree's status or its branch.\n";
   const uncommitted = inv.tracked.length + inv.untracked.length, ignored = inv.ignored;
   const lines = [
     uncommitted ? `⚠ ${plural(uncommitted, "uncommitted file")} will be deleted.` : "",
     ignored.length ? `⚠ ${plural(ignored.length, "ignored file or folder", "ignored files or folders")} will be deleted: ${ignored.slice(0, 5).join(", ")}${ignored.length > 5 ? ", …" : ""}` : "",
-    inv.commits ? `⚠ ${plural(inv.commits, "commit")} ${inv.commits === 1 ? "exists" : "exist"} only on ${th.branch}.` : "",
+    inv.commits ? `⚠ ${plural(inv.commits, "commit")} ${inv.commits === 1 ? "exists" : "exist"} only on ${inv.branch}.` : "",
+    inv.loose ? `⚠ ${plural(inv.loose, "commit")} on its detached HEAD ${inv.loose === 1 ? "is" : "are"} on no branch.` : "",
   ].filter(Boolean);
   return lines.length ? `\n${lines.join("\n")}\n` : "";
 }
 
 /** Which of two inventories' parts differ, for the message that says why nothing was closed. */
 const inventoryDiff = (was: Inventory, now: Inventory) =>
-  (["head", "tracked", "untracked", "ignored", "commits", "fingerprint"] as const).filter((k) => JSON.stringify(was[k]) !== JSON.stringify(now[k]))
-    .map((k) => (k === "fingerprint" ? "file or index contents" : k === "head" ? "a new commit" : k === "commits" ? "the branch's own commits" : `its ${k} files`)).join(", ");
+  (["branch", "branchTip", "head", "tracked", "untracked", "ignored", "commits", "loose", "fingerprint"] as const).filter((k) => JSON.stringify(was[k]) !== JSON.stringify(now[k]))
+    .map((k) => (k === "branch" ? `the branch it's on (${now.branch}, not ${was.branch})` : k === "branchTip" ? "the branch's commit" : k === "fingerprint" ? "file or index contents" : k === "head" ? "a new commit" : k === "commits" ? "the branch's own commits" : k === "loose" ? "commits on no branch" : `its ${k} files`)).join(", ");
 
 /** Take a thread out of the list, and out of git as far as `mode` says:
  * "close" keeps the worktree on disk, "worktree" removes the folder and keeps
@@ -5747,18 +5824,23 @@ const closingThreads = new WeakSet<Thread>();
 /** `removed` once the thread is out of Loom. Then, for a worktree being
  * deleted, what became of its folder and branch: `removed` into Loom's
  * `trash`, or `failed`, with `error` saying which and why (the window shows it). */
-type Removal = { removed: boolean; error?: string; worktree?: "removed" | "failed"; branch?: "deleted" | "kept" | "failed"; trash?: string };
+type Removal = { removed: boolean; error?: string; worktree?: "removed" | "pending" | "failed"; branch?: "deleted" | "kept" | "failed"; trash?: string };
 
 /** `ask`: false when loomctl already checked what deleting loses, so there is
  * no dialog. Otherwise the dialog asks, showing what would be lost, and
  * nothing closes unless that still holds when you answer. The folder goes to
  * Loom's trash for a day (deletion.rs), with whatever its panes wrote as they
- * closed: what the dialog showed is a summary, not a lock on the folder. */
-async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask = true): Promise<Removal> {
+ * closed: what the dialog showed is a summary, not a lock on the folder.
+ * `approved` and `expected`: with `ask` false, the branch and tip loomctl approved deleting. */
+async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask = true, approved = th.branch, expected = ""): Promise<Removal> {
   if (closingThreads.has(th) || !threads.includes(th)) return { removed: false, error: `${th.name} is already closing or closed.` };
   closingThreads.add(th);
   try {
     const deleting = mode !== "close" && th.isWorktree;
+    // The branch deletion takes: the one the dialog names, or the one loomctl
+    // approved. Never th.branch after an await: a git switch in the worktree,
+    // read by any status poll, moves it.
+    let named = approved;
     if (ask) {
       let why = "";
       const seen = deleting ? await inventory(th, mode === "all").catch((e) => ((why = `: ${String(e)}`), null)) : null;
@@ -5767,13 +5849,14 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask 
         toast(error);
         return { removed: false, error };
       }
-      const risk = deleting ? riskText(seen, th) : "";
+      if (seen) { named = seen.branch; expected = seen.branchTip; }
+      const risk = deleting ? riskText(seen) : "";
       const what =
         mode === "close"
           ? `Close ${th.name}?`
           : mode === "worktree"
-            ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${th.branch} is kept. The folder waits in Loom's trash for a day.`
-            : `Delete the worktree AND the branch ${th.branch}?\n${th.dir}\n${risk}\nCommits only on that branch are lost. The folder waits in Loom's trash for a day.`;
+            ? `Delete the worktree folder for ${th.name}?\n${th.dir}\n${risk}\nThe branch ${named} is kept. The folder waits in Loom's trash for a day.`
+            : `Delete the worktree AND the branch ${named}?\n${th.dir}\n${risk}\nCommits only on that branch are lost. The folder waits in Loom's trash for a day.`;
       if (th.panes.length || mode !== "close") {
         if (!(await confirm(what, { title: "Loom", kind: mode === "close" ? "info" : "warning", action: mode === "close" ? "Close thread" : "Delete worktree" }))) return { removed: false };
       }
@@ -5785,6 +5868,8 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask 
         return { removed: false, error };
       }
     }
+    // Force skips the loss inventory, but still captures the tip before panes close.
+    if (deleting && mode === "all" && named && !expected) expected = (await git(th.repo, "rev-parse", "--verify", `refs/heads/${named}^{commit}`)).trim();
     const i = threads.indexOf(th);
     if (i === -1) return { removed: false, error: `${th.name} is already closed.` };
     threads.splice(i, 1);
@@ -5794,7 +5879,7 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask 
     save();
     await cleanup;
     if (!deleting) return { removed: true };
-    const branch = mode === "all" && th.branch ? "kept" : undefined;
+    const branch = mode === "all" && named ? "kept" : undefined;
     const partial = (r: Removal & { error: string }) => (toast(`Closed ${th.name}, but ${r.error}`), r);
     let trash = "";
     try {
@@ -5811,13 +5896,35 @@ async function removeThread(th: Thread, mode: "close" | "worktree" | "all", ask 
         }
       }
     } catch (e) {
+      // The folder went to the trash, but something held git's record of it:
+      // the hourly purge finishes that move (deletion.rs), and the branch stays
+      // checked out there until it has.
+      const held = /^retained (.+?), but git administration at /.exec(String(e));
+      if (held) {
+        trash = held[1];
+        if (branch) return partial({ removed: true, worktree: "pending", branch, trash, error: `moved its worktree folder to Loom's trash (${trash}), but git's record of it was in use, so the branch ${named} was kept. Loom finishes the move within the hour.` });
+        toast(`Deleted ${th.name}'s worktree folder. It waits in Loom's trash for a day: ${trash}. Git's record of it was in use; Loom finishes moving it within the hour.`);
+        return { removed: true, worktree: "pending", trash };
+      }
       return partial({ removed: true, worktree: "failed", branch, error: `couldn't move its worktree folder to Loom's trash${branch ? ", so its branch was kept" : ""}: ${String(e)}` });
     }
     if (branch) {
       try {
-        await git(th.repo, "branch", "-D", th.branch);
+        const ref = `refs/heads/${named}`;
+        // update-ref checks the tip under Git's ref lock, but unlike branch -D it needs a worktree guard.
+        await invoke("branch_in_progress", { repo: th.repo, branch: named });
+        const used = (await git(th.repo, "for-each-ref", "--format=%(refname)%00%(worktreepath)", ref)).split("\n").find((line) => line.startsWith(ref + "\0"))?.slice(ref.length + 1).trim();
+        if (used) throw new Error(`Cannot delete branch '${named}': checked out in worktree '${used}'.`);
+        const configured = (await git(th.repo, "config", "--local", "--name-only", "--list", "-z")).split("\0").some((key) => key.slice(0, key.lastIndexOf(".")) === `branch.${named}`);
+        await git(th.repo, "update-ref", "--no-deref", "-d", ref, expected);
+        if (configured) {
+          try { await git(th.repo, "config", "--local", "--remove-section", `branch.${named}`); }
+          catch (e) {
+            return partial({ removed: true, worktree: "removed", branch: "deleted", trash, error: `deleted the branch ${named}, but couldn't remove its local Git settings: ${String(e)}` });
+          }
+        }
       } catch (e) {
-        return partial({ removed: true, worktree: "removed", branch: "failed", trash, error: `moved its worktree folder to Loom's trash and couldn't delete the branch ${th.branch}: ${String(e)}` });
+        return partial({ removed: true, worktree: "removed", branch: "failed", trash, error: `moved its worktree folder to Loom's trash and couldn't delete the branch ${named}: ${String(e)}` });
       }
     }
     if (trash) toast(`Deleted ${th.name}'s worktree folder. It waits in Loom's trash for a day: ${trash}`);
@@ -6084,7 +6191,12 @@ async function showTab() {
     d.append(o, n, s);
     if (r.kind === "hunk")
       for (const [label, title, args] of moves)
-        d.append(mini(label, title, () => void applyHunk(th, hunkPatch(rows, i), args)));
+        d.append(mini(label, title, async () => {
+          // Discarding throws work away: it asks first, as the phone and loomctl do.
+          const patch = hunkPatch(rows, i), file = /^\+\+\+ b\/(.+)$/m.exec(patch)?.[1] ?? t.label;
+          if (label === "Discard" && !(await confirm("Discard this hunk?", { title: "Loom", kind: "warning", action: "Discard", detail: `Its changes to ${file} can't be brought back.` }))) return;
+          void applyHunk(th, patch, args);
+        }));
     return d;
   };
   disposeDiffRows = renderRows(body, body, end, 18, i => line(rows[i], i));
@@ -6355,7 +6467,7 @@ async function gitDo(th: Thread, ask: string, ...args: string[]) {
     toast(String(e));
   }
   b.disabled = false;
-  th.branch = (await git(th.dir, "rev-parse", "--abbrev-ref", "HEAD").catch(() => th.branch)).trim() || th.branch;
+  th.branch = await headBranch(th);
   th.setStat(th.changed);
   save();
   await refreshChanges();
@@ -6554,8 +6666,9 @@ async function readChanges() {
   try {
     let branch: string;
     [branch, unstaged, staged, log, midway, head] = await Promise.all([
-      // --branch: the upstream and how far apart, in the same process.
-      git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch"),
+      // --branch: the upstream and how far apart, in the same process. The
+      // branch's name from git too: it may have switched in the terminal.
+      syncBranch(th).then(() => git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch")),
       git(th.dir, "diff", "--numstat").then(parseNumstat),
       git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
       git(th.dir, "log", "--oneline", "-10").catch(() => ""),
@@ -6835,7 +6948,7 @@ async function prUrl(th: Thread) {
  * and the last 10 commits. Reading it refreshes the thread's sidebar numbers. */
 async function gitStatus(th: Thread) {
   const [z, unstaged, staged, log, midway, head] = await Promise.all([
-    git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch"),
+    syncBranch(th).then(() => git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch")),
     git(th.dir, "diff", "--numstat").then(parseNumstat),
     git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
     git(th.dir, "log", "--oneline", "-10").catch(() => ""),
@@ -6998,6 +7111,11 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
           } else if (!/already exists/.test(String(e))) throw e;
         }
       }
+      // Under a junction (~\loom on another drive), git records the folder's real
+      // path, and deletion takes a worktree only at the path git records. Resolved
+      // here, right after git made it, never later: by then a parent replaced by
+      // a link could lead to another worktree.
+      dir = await invoke<string>("canonical_directory", { path: dir }).catch(() => dir);
     } catch (e) {
       const stuck = await release();
       if (!stuck) throw e;
@@ -7010,7 +7128,7 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
       show(have);
       return have;
     }
-    branch = (await git(repo, "rev-parse", "--abbrev-ref", "HEAD").catch(() => "")).trim();
+    branch = await headBranch({ repo, dir, branch });
   }
   const th = await openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd, startupSettings }));
   // The thread is made and open: the error says so, and what's left to delete.
@@ -7271,7 +7389,7 @@ let cfgPaint: ((force?: boolean) => void) | null = null;
 /** Outcome of a slash command: echoed back, or submitted but not yet echoed —
  * a running turn queues the command and holds the echo until the turn ends.
  * "lost" only ever comes from the pane itself failing (killed mid-apply). */
-type Sent = "ok" | "sent" | "lost";
+type Sent = "ok" | "sent" | "lost" | "draft";
 
 /** Submit `cmd` to the pane's claude and watch for its echo.
  *
@@ -7288,13 +7406,17 @@ type Sent = "ok" | "sent" | "lost";
  * pick is already waiting behind this one). */
 async function slash(p: Pane, cmd: string, confirmed: () => boolean): Promise<Sent> {
   // The pane's input turn: a loomctl send waiting on its echo would otherwise go with this Enter.
-  await inTurn(p, async (live) => {
+  const typed = await inTurn(p, async (live) => {
+    // Loom never types over a draft: the command would go on its end, and Enter send both.
+    if (inputState(p).kind === "draft") return false;
     p.term.paste(cmd);
     await p.settle(150, 1000); // let the input take it before the Enter
     live(true);
     p.inputSeq++;
     await invoke("pty_write", { id: p.id, data: "\r" });
+    return true;
   });
+  if (!typed) return "draft";
   for (const t0 = Date.now(); ; ) {
     if (confirmed()) return "ok";
     if (Date.now() - t0 >= (cfgQueued ? 1000 : 8000)) return "sent";
@@ -7360,6 +7482,8 @@ async function applyOne(p: Pane, kind: "model" | "effort", value: string) {
   if (got === "lost") {
     // Only a pane failure lands here — the write itself threw.
     cfgNote = `couldn't write to the pane — is it still open?`;
+  } else if (got === "draft") {
+    cfgNote = "its input holds a draft: send or clear it first";
   } else {
     // In claude's hands either way — "sent" means a running turn holds it in
     // the queue and it lands when the turn ends, so both count as applied.
@@ -7405,7 +7529,7 @@ async function applyOne(p: Pane, kind: "model" | "effort", value: string) {
   // The panel stays open, so redraw it — forced on a loss, or the select that
   // was just picked (still focused) would keep claiming a value the pane never
   // took.
-  if (!menu.classList.contains("hidden")) cfgPaint?.(got === "lost");
+  if (!menu.classList.contains("hidden")) cfgPaint?.(got === "lost" || got === "draft");
 }
 
 const configMenu: Menu = {
@@ -7854,8 +7978,13 @@ const accountHolds: Partial<Record<PlanProvider, number>> = {};
 function accountPlan(provider: PlanProvider, force = false): Promise<AccountReading> {
   if (accountPolls[provider]) return accountPolls[provider]!;
   const previous = accountCache[provider];
-  const until = force ? accountHolds[provider] ?? 0 : Date.parse(previous?.nextRefreshAt ?? "");
-  if (previous && until > Date.now()) return Promise.resolve({ ...previous, cached: true });
+  const asked = Date.now();
+  // A provider's cooldown holds every caller, to the ms. Only the 5-minute
+  // floor, which --refresh skips, gets a few seconds' slack: the poll's next
+  // tick lands that close to it, and without it every other tick got the cache.
+  const held = (accountHolds[provider] ?? 0) > asked;
+  const floored = !force && Date.parse(previous?.nextRefreshAt ?? "") - 10_000 > asked;
+  if (previous && (held || floored)) return Promise.resolve({ ...previous, cached: true });
   return accountPolls[provider] = (async () => {
     // limit: the provider's own cooldown in seconds, 0 for none; the cache floor is 300 either way.
     let limit = 0, result: Plan | { error: string; stale: true }, fetchedAt = previous?.fetchedAt ?? null;
@@ -7868,9 +7997,12 @@ function accountPlan(provider: PlanProvider, force = false): Promise<AccountRead
       limit = Number(/retry after (\d+) seconds/.exec(error)?.[1] ?? 0);
       result = { ...(previous && "limits" in previous ? previous : {}), error, stale: true };
     }
-    const reading = { ...result, fetchedAt, nextRefreshAt: new Date(Date.now() + Math.min(Math.max(300, limit), 86400) * 1000).toISOString(), cached: false };
+    // The cooldown runs from the provider's answer; the floor from the ask.
+    const hold = limit > 0 ? Date.now() + Math.min(limit, 86400) * 1000 : 0;
+    const next = Math.max(asked + Math.min(Math.max(300, limit), 86400) * 1000, hold);
+    const reading = { ...result, fetchedAt, nextRefreshAt: new Date(next).toISOString(), cached: false };
     accountCache[provider] = reading;
-    accountHolds[provider] = limit > 0 ? Date.now() + Math.min(limit, 86400) * 1000 : 0;
+    accountHolds[provider] = hold;
     return reading;
   })().finally(() => { delete accountPolls[provider]; });
 }
@@ -7918,7 +8050,8 @@ async function fetchPlan(provider: PlanProvider, force = false) {
       ),
     };
     planErrors[provider] = "error" in got ? String(got.error) : "";
-    planFetchedAt[provider] = Date.now();
+    // When the numbers were read, not when this asked: a cached or held reading is older.
+    planFetchedAt[provider] = Date.parse(got.fetchedAt ?? "") || Date.now();
   } catch (e) {
     planErrors[provider] = String(e);
   }
@@ -8254,7 +8387,10 @@ const threadData = (th: Thread) => ({
 });
 const paneRows = (panes: Pane[]) => table(panes.map((p) => [paneName(p), p.id, p.agent, cliState(p), p.label]));
 
-function cliThread(sel: string | undefined): Thread {
+/** A thread by id or name. A name's start is enough only for a command that
+ * changes nothing (`loose`): `close-thread fix` must never reach fix-login
+ * once fix is gone. */
+function cliThread(sel: string | undefined, loose = false): Thread {
   if (!sel || sel === "current" || sel === ".") {
     if (current) return current;
     throw new Error("No thread is open. loomctl threads lists them.");
@@ -8264,13 +8400,14 @@ function cliThread(sel: string | undefined): Thread {
   const low = sel.toLowerCase();
   const exact = threads.filter((t) => t.name.toLowerCase() === low);
   const prefix = threads.filter((t) => t.name.toLowerCase().startsWith(low));
-  const found = exact.length ? exact : prefix;
+  const found = exact.length || !loose ? exact : prefix;
   if (found.length === 1) return found[0];
   if (found.length > 1) throw new Error(`"${sel}" matches ${found.map((t) => `${t.name} (${t.id})`).join(", ")}. Use an id.`);
+  if (prefix.length) throw new Error(`No thread is named "${sel}". This command needs a thread's whole name or its id: ${prefix.map((t) => `${t.name} (${t.id})`).join(", ")}?`);
   throw new Error(`No thread "${sel}". loomctl threads lists them.`);
 }
 
-function cliPane(sel: string | undefined): Pane {
+function cliPane(sel: string | undefined, loose = false): Pane {
   const ref = paneRef(sel);
   if ("current" in ref) {
     const p = current?.active ?? current?.panes[0];
@@ -8278,7 +8415,7 @@ function cliPane(sel: string | undefined): Pane {
     throw new Error("No pane is in front. Name one: loomctl panes lists them.");
   }
   if ("thread" in ref) {
-    const th = cliThread(ref.thread);
+    const th = cliThread(ref.thread, loose);
     const p = th.panes[ref.n - 1];
     if (p) return p;
     throw new Error(`${th.name} has ${th.panes.length} pane${th.panes.length === 1 ? "" : "s"}.`);
@@ -8286,7 +8423,7 @@ function cliPane(sel: string | undefined): Pane {
   const p = threads.flatMap((t) => t.panes).find((x) => x.id === ref.id);
   if (p) return p;
   // A thread on its own means the pane it has in front.
-  const th = cliThread(ref.id);
+  const th = cliThread(ref.id, loose);
   const front = th.active ?? th.panes[0];
   if (front) return front;
   throw new Error(`${th.name} has no panes.`);
@@ -8343,13 +8480,14 @@ function cliDelete(a: Args, th: Thread): "" | "worktree" | "branch" {
 async function closePlan(th: Thread, del: "" | "worktree" | "branch", discard: Loss[] = []) {
   const inv = del ? await inventory(th, del === "branch", discard) : null;
   const panes = th.panes.map((p) => ({ id: p.id, ref: paneName(p), agent: p.agent, generation: p.generation }));
-  const target = { thread: th.id, name: th.name, dir: th.dir, repo: th.repo, branch: th.branch || null, delete: del || null };
+  // The inventory's branch: th.branch can move during its awaits.
+  const target = { thread: th.id, name: th.name, dir: th.dir, repo: th.repo, branch: (inv ? inv.branch : th.branch) || null, delete: del || null };
   const rev = (await sha256(JSON.stringify([target, panes.map((p) => [p.id, p.generation]), inv]))).slice(0, 16);
   const lost = inv && lossCounts(inv);
   const data = {
     rev, ...target, panes,
     ...(inv && lost
-      ? { head: inv.head || null, lost, discard: LOSSES.filter((l) => lost[l]), tracked: inv.tracked.slice(0, 50), untracked: inv.untracked.slice(0, 50), ignored: inv.ignored.slice(0, 50) }
+      ? { head: inv.head || null, branchTip: inv.branchTip || null, lost, discard: LOSSES.filter((l) => lost[l]), tracked: inv.tracked.slice(0, 50), untracked: inv.untracked.slice(0, 50), ignored: inv.ignored.slice(0, 50) }
       : {}),
   };
   return { data, inv };
@@ -8675,6 +8813,7 @@ const CLI: Record<string, CliCommand> = {
     run: (a) => {
       // A retried request whose key died with the Loom it restarted: this one is its replacement.
       if (a.booted !== undefined && a.booted !== String(bootedAt)) return { data: { stopping: [], booted: bootedAt }, text: `The Loom that started at ${a.booted} has already restarted; this one keeps running.` };
+      if (windowClosing) throw new Error("Loom is closing, so it won't restart. Start it again once it has closed.");
       const busy = working().map(paneName);
       if (busy.length && !flag(a, "yes")) throw new Error(`${busy.join(", ")} ${busy.length === 1 ? "is" : "are"} working: a restart stops ${busy.length === 1 ? "it" : "them"}. Add --yes.`);
       // After this answer has gone out.
@@ -8717,7 +8856,7 @@ const CLI: Record<string, CliCommand> = {
     run: async (a) => {
       const want = a.state === undefined ? null : cliStates(str(a, "state"), "");
       const thread = str(a, "thread");
-      const panes = (thread === undefined ? threads : [cliThread(thread)])
+      const panes = (thread === undefined ? threads : [cliThread(thread, true)])
         .flatMap((t) => t.panes)
         .filter((p) => !want || want.includes(cliState(p)));
       await pollProviderUsage(panes);
@@ -8729,7 +8868,7 @@ const CLI: Record<string, CliCommand> = {
     help: "The pane's screen as text, or its last N lines including history. --json adds the cursor and what the input holds: a draft, a suggestion, empty or unknown, with a revision for send --input. --styles adds the rows with their styles: the screen's, or with --lines those N lines'. --menu adds menu, what menu answers for the pane, in the same read. JSON alt is true while a full-screen app such as OpenCode holds the screen.",
     options: { lines: "int", styles: "bool", menu: "bool" },
     run: (a) => {
-      const p = cliPane(a._[0]);
+      const p = cliPane(a._[0], true);
       let raw: string, from: number | undefined, to: number | undefined;
       if (a.lines === undefined) raw = liveScreen(p);
       else {
@@ -8754,7 +8893,7 @@ const CLI: Record<string, CliCommand> = {
     usage: "menu [pane]",
     help: "The numbered question on a pane's screen, including Claude's active session survey below the composer. Wrapped questions are supported. Quoted or dismissed surveys are not actionable. Survey keys are 1, 2, 3 and 0; selected is -1 because none is highlighted.",
     run: (a) => {
-      const p = cliPane(a._[0]);
+      const p = cliPane(a._[0], true);
       const m = paneMenu(p);
       if (!m) return { data: null, text: `${paneName(p)} isn't showing a numbered question.` };
       // The whole prompt, which the id covers, not just the summary above the options.
@@ -8770,11 +8909,11 @@ const CLI: Record<string, CliCommand> = {
       const ref = paneRef(sel);
       const isPane = "thread" in ref || threads.some((t) => t.panes.some((p) => p.id === sel));
       if (isPane) {
-        const p = cliPane(sel);
+        const p = cliPane(sel, true);
         revealPane(p);
         return { data: paneData(p), text: `In front: ${paneName(p)}` };
       }
-      const th = cliThread(sel);
+      const th = cliThread(sel, true);
       show(th);
       return { data: threadData(th), text: `In front: ${th.name}` };
     },
@@ -8816,7 +8955,7 @@ const CLI: Record<string, CliCommand> = {
   },
   git: {
     usage: "git <thread> [status | diff [path...] [--staged|--untracked] [--full] | show <sha> [--full] | files | file <path> | stage|unstage|discard [path...] [--unstaged|--staged|--untracked] | apply - [--cached] [--reverse] | commit <message...> [--staged] [--push] | amend [message...] | undo | push | pull | fetch | force-push | pr | branches | switch <name> [--create] | stashes | stash | stash-apply <stash> | stash-drop <stash> | revert <sha> | reset <sha> --soft|--hard | continue | skip | abort | resolve ours|theirs <path...>] [--yes]",
-    help: "The Changes panel from the command line, with git's own commands as the panel runs them. Bare or status: the branch, its upstream and how far apart, a half-done merge, revert or rebase, the unstaged, staged and untracked files with their +/- counts, and the last 10 commits. diff and show print a diff (--full: whole files); files lists the thread's files and file prints one. stage, unstage and discard take paths, or a whole section. apply - takes a hunk's patch on standard input. commit commits everything, or with --staged only the index, and --push pushes after. pr pushes and gives GitHub's compare page. What can lose work wants --yes: discard, apply --reverse without --cached, amend, undo, force-push, stash-drop and reset. A change answers with the status after it.",
+    help: "The Changes panel from the command line, with git's own commands as the panel runs them. Bare or status: the branch, its upstream and how far apart, a half-done merge, revert or rebase, the unstaged, staged and untracked files with their +/- counts, and the last 10 commits. diff and show print a diff (--full: whole files); files lists the thread's files and file prints one. stage, unstage and discard take paths, or a whole section. apply - takes a hunk's patch on standard input. commit commits everything, or with --staged only the index, and --push pushes after. pr pushes and gives GitHub's compare page. What can lose work wants --yes: discard, apply --reverse without --cached, amend, undo, force-push, stash-drop, reset, abort and skip. A change answers with the status after it.",
     options: { staged: "bool", unstaged: "bool", untracked: "bool", full: "bool", cached: "bool", reverse: "bool", push: "bool", create: "bool", soft: "bool", hard: "bool", yes: "bool" },
     run: async (a) => {
       const th = cliThread(cliWord(a, 0, "a thread"));
@@ -8835,7 +8974,7 @@ const CLI: Record<string, CliCommand> = {
       ].join("\n");
       // After a change: the branch may have moved, and the panel and sidebar show it.
       const changed = async (text: string) => {
-        th.branch = (await run("rev-parse", "--abbrev-ref", "HEAD").catch(() => th.branch)).trim() || th.branch;
+        th.branch = await headBranch(th);
         th.setStat(th.changed);
         save();
         if (th === current && changesOpen) void refreshChanges();
@@ -8895,8 +9034,8 @@ const CLI: Record<string, CliCommand> = {
           if (!message) throw new Error("Give the commit message.");
           if (!flag(a, "staged")) await run("add", "-A");
           await run("commit", "-m", message);
-          th.commitDraft = "";
-          if (current === th) $<HTMLTextAreaElement>("#commit-msg").value = "";
+          // The PC's box empties only if this was its message: one typed there for later stays.
+          if (th.commitDraft.trim() === message) usedDraft(th, th.commitDraft);
           if (flag(a, "push")) await run("push", "-u", "origin", "HEAD");
           return changed(flag(a, "push") ? "Committed and pushed" : "Committed");
         }
@@ -8928,6 +9067,7 @@ const CLI: Record<string, CliCommand> = {
           return { data: { url, ...(await gitStatus(th)) }, text: url };
         }
         case "branches": {
+          await syncBranch(th);
           const out = await run("branch", "--format=%(refname)", "--sort=-committerdate").catch(() => "");
           const branches = out.split(/\r?\n/).filter((b) => b.startsWith("refs/heads/")).map((b) => b.slice("refs/heads/".length)).slice(0, 40);
           return { data: { current: th.branch, branches }, text: branches.map((b) => (b === th.branch ? `* ${b}` : `  ${b}`)).join("\n") };
@@ -8966,6 +9106,8 @@ const CLI: Record<string, CliCommand> = {
         case "abort": {
           const midway = await invoke<string>("git_midway", { dir: th.dir }).catch(() => "");
           if (!midway) throw new Error("git isn't in the middle of a merge, revert or rebase.");
+          if (what === "abort") sure(`Aborting the ${midway} throws away the conflicts resolved so far.`);
+          if (what === "skip") sure("Skipping drops this commit from the rebase.");
           if (what === "abort") await run(midway, "--abort");
           else if (what === "skip") {
             if (midway !== "rebase") throw new Error("Only a rebase can skip a commit.");
@@ -8990,7 +9132,7 @@ const CLI: Record<string, CliCommand> = {
     usage: "messages [pane...]",
     help: "What each agent last heard and said, as the Overview shows it: the last prompt and the last answer from its session's transcript, each cut at 500 characters. Shells have none.",
     run: async (a) => {
-      const panes = (a._.length ? a._.map(cliPane) : threads.flatMap((t) => t.panes)).filter((p) => p.agent !== "shell" && dashboardSession(p));
+      const panes = (a._.length ? a._.map((sel) => cliPane(sel, true)) : threads.flatMap((t) => t.panes)).filter((p) => p.agent !== "shell" && dashboardSession(p));
       const got: Record<string, DashboardMessages> = {};
       // An opencode export takes seconds: each runs alone, the rest together.
       const batches = [panes.filter((p) => p.agent !== "opencode"), ...panes.filter((p) => p.agent === "opencode").map((p) => [p])];
@@ -9005,7 +9147,7 @@ const CLI: Record<string, CliCommand> = {
     usage: "context [pane]",
     help: "A Claude pane's context, as its gauge's panel shows it: tokens by kind, the size after each turn, and where it was compacted.",
     run: async (a) => {
-      const p = cliPane(a._[0]);
+      const p = cliPane(a._[0], true);
       if (p.agent !== "claude") throw new Error(`${paneName(p)} isn't a Claude pane: only Claude's transcript says this.`);
       const profile = await invoke<Profile | null>("context_profile", { pane: claudeMarker(p), dir: p.th.dir, sid: p.sid });
       if (!profile) throw new Error(`${paneName(p)} has no transcript to read yet.`);
@@ -9084,7 +9226,7 @@ const CLI: Record<string, CliCommand> = {
     usage: "vscode [thread]",
     help: "Open a thread's folder in VS Code on this PC.",
     run: async (a) => {
-      const th = cliThread(a._[0]);
+      const th = cliThread(a._[0], true);
       await invoke("open_vscode", { dir: th.dir });
       return { data: { thread: th.id }, text: `VS Code: ${th.dir}` };
     },
@@ -9096,7 +9238,7 @@ const CLI: Record<string, CliCommand> = {
     run: (a) => {
       const mode = cliWord(a, 0, "a layout: cols, rows or grid") as LayoutMode;
       if (!LAYOUTS.includes(mode)) throw new Error(`layout takes cols, rows or grid, not ${mode}.`);
-      const th = cliThread(str(a, "thread"));
+      const th = cliThread(str(a, "thread"), true);
       th.layout = mode;
       th.relayout();
       if (th === current) paintLayout(mode);
@@ -9108,7 +9250,7 @@ const CLI: Record<string, CliCommand> = {
     usage: "zoom [pane]",
     help: "Let a pane fill its thread, or put it back.",
     run: (a) => {
-      const p = cliPane(a._[0]);
+      const p = cliPane(a._[0], true);
       p.th.toggleZoom(p);
       const zoomed = p.th.zoomed === p;
       return { data: { pane: p.id, zoomed }, text: `${paneName(p)} ${zoomed ? "zoomed" : "back in the grid"}` };
@@ -9254,7 +9396,7 @@ const CLI: Record<string, CliCommand> = {
       if (a.until !== undefined) throw new Error("--until is for --task.");
       const token = str(a, "receipt");
       if (token !== undefined) return waitReceipt(token, ctx.seconds, ctx.signal);
-      const p = cliPane(a._[0]);
+      const p = cliPane(a._[0], true);
       if (a["turn-after"] !== undefined) {
         const after = num(a, "turn-after", 0, 0, Number.MAX_SAFE_INTEGER), gen = cliGen(a) ?? p.generation;
         if (p.agent === "shell") throw new Error("--turn-after is for agent panes. A shell counts commands (loomctl panes --json), and send --receipt waits for one.");
@@ -9372,7 +9514,7 @@ const CLI: Record<string, CliCommand> = {
       const want = a.state === undefined ? null : taskStates(str(a, "state")!, "--state");
       const sel = str(a, "pane");
       let id = sel;
-      if (sel !== undefined) try { id = cliPane(sel).id; } catch { /* a pane closed since: match its stable id */ }
+      if (sel !== undefined) try { id = cliPane(sel, true).id; } catch { /* a pane closed since: match its stable id */ }
       const list = [...tasks.values()].filter((t) => t.events.length && (!want || want.includes(t.state)) && (sel === undefined || t.pane === id));
       return { data: list.map(record), text: list.length ? list.map(taskText).join("\n") : "No tasks." };
     },
@@ -9432,7 +9574,7 @@ const CLI: Record<string, CliCommand> = {
     run: async (a, ctx) => {
       const want = cliStates(str(a, "state"), "waiting");
       const thread = str(a, "thread");
-      const scope = thread === undefined ? null : cliThread(thread);
+      const scope = thread === undefined ? null : cliThread(thread, true);
       const pool = () => (scope ? scope.panes : threads.flatMap((t) => t.panes));
       // --new: a pane counts once it has left the state and come back.
       const skip = new Set(flag(a, "new") ? pool().filter((p) => want.includes(cliState(p))) : []);
@@ -9503,7 +9645,7 @@ const CLI: Record<string, CliCommand> = {
     help: "What close-thread would do, changing nothing: the thread and the panes it stops, and with --delete what deleting loses that exists nowhere else (changed, untracked and ignored files, the branch's own commits). Its rev is what close-thread --plan takes.",
     options: { delete: "string" },
     run: async (a) => {
-      const th = cliThread(cliWord(a, 0, "a thread"));
+      const th = cliThread(cliWord(a, 0, "a thread"), true);
       const { data } = await closePlan(th, cliDelete(a, th));
       const lost = data.lost ? LOSSES.filter((l) => data.lost![l]).map((l) => `${data.lost![l]} ${l}`).join(", ") : "";
       const go = `loomctl close-thread ${th.id} --yes${data.delete ? ` --delete ${data.delete}` : ""} --plan ${data.rev}${data.discard?.length ? ` --discard ${data.discard.join(",")}` : ""}`;
@@ -9511,7 +9653,7 @@ const CLI: Record<string, CliCommand> = {
         data,
         text: [
           `Closes ${th.name} (${th.id}) and stops ${data.panes.length ? data.panes.map((p) => `${p.ref} ${p.agent}`).join(", ") : "no panes"}.`,
-          data.delete ? `Deletes ${th.dir}${data.delete === "branch" ? ` and the branch ${th.branch}` : ""}. ${lost ? `Loses ${lost}.` : "Loses nothing that exists only there."}` : "Deletes nothing.",
+          data.delete ? `Deletes ${th.dir}${data.delete === "branch" ? ` and the branch ${data.branch}` : ""}. ${lost ? `Loses ${lost}.` : "Loses nothing that exists only there."}` : "Deletes nothing.",
           ...(data.ignored?.length ? [`Ignored: ${data.ignored.join(", ")}${data.lost!.ignored > data.ignored.length ? ", …" : ""}`] : []),
           `To go ahead: ${go}`,
         ].join("\n"),
@@ -9541,11 +9683,14 @@ const CLI: Record<string, CliCommand> = {
         }
         const missing = plan.data.lost ? LOSSES.filter((l) => plan!.data.lost![l] && !allowed.has(l)) : [];
         if (missing.length) {
-          throw new CliError(`${riskText(plan.inv, th).trim()}\nSo nothing was closed. loomctl close-plan ${th.id} --delete ${del} lists what; pass --discard ${missing.join(",")} to delete it anyway.`, { lost: plan.data.lost, discard: missing });
+          throw new CliError(`${riskText(plan.inv).trim()}\nSo nothing was closed. loomctl close-plan ${th.id} --delete ${del} lists what; pass --discard ${missing.join(",")} to delete it anyway.`, { lost: plan.data.lost, discard: missing });
         }
       }
+      // The branch --delete branch takes: the plan's, which its rev covers, or
+      // with no plan the one Git has checked out now, not Loom's cached name.
+      const branch = plan ? plan.data.branch ?? "" : del === "branch" ? await syncBranch(th) : th.branch;
       const name = th.name;
-      const result = await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", false);
+      const result = await removeThread(th, del === "branch" ? "all" : del ? "worktree" : "close", false, branch, plan?.inv?.branchTip);
       if (!result.removed) throw new Error(result.error ?? `${name} wasn't closed.`);
       const steps = { panes: "closed", worktree: result.worktree ?? null, branch: result.branch ?? null };
       const trash = result.trash || null;
@@ -9625,8 +9770,8 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   remote: {
-    usage: "remote [on [--port N] | off | pair | revoke | push test]",
-    help: "The phone remote: a page for your phone that does what loomctl does. on starts it on 127.0.0.1 (port 7420 unless --port), and `tailscale serve --bg <port>` then puts it on your own devices. pair shows a code a phone enters once, for 10 minutes. revoke unpairs every phone. A phone that turns on notifications in its Settings gets the task notices; push test sends each such phone one that opens an agent. docs/loomctl.md has the setup.",
+    usage: "remote [on [--port N] | off | pair | revoke [phone] | push test]",
+    help: "The phone remote: a page for your phone that does what loomctl does. on starts it on 127.0.0.1 (port 7420 unless --port), and `tailscale serve --bg <port>` then puts it on your own devices. pair shows a code a phone enters once, for 10 minutes. The status lists the paired phones by id, and revoke <id> unpairs one, revoke alone every phone. A phone unseen for 90 days unpairs itself. A phone that turns on notifications in its Settings gets the task notices; push test sends each such phone one that opens an agent. docs/loomctl.md has the setup.",
     options: { port: "int" },
     run: async (a) => {
       const action = a._[0] ?? "status";
@@ -9639,9 +9784,14 @@ const CLI: Record<string, CliCommand> = {
         return { data: r, text: r.sent ? `Sent to ${r.sent} phone${r.sent === 1 ? "" : "s"}.${r.failed.length ? ` Failed: ${r.failed.join("; ")}` : ""}` : "No phone has notifications on. Turn them on in the phone's Settings." };
       }
       const port = a.port === undefined ? null : num(a, "port", 0, 1, 65535);
-      const s = await invoke<{ on: boolean; listening: boolean; port: number; phones: number; pushes: number; pairing: string | null; error: string | null; address: string | null }>("remote", { action, port });
+      const phone = action === "revoke" ? a._[1] ?? null : null;
+      if (a._.length > (action === "revoke" ? 2 : 1)) throw new Error(`remote ${action} takes ${action === "revoke" ? "one phone id at most" : "no more words"}.`);
+      type Device = { id: string; name: string; paired: number | null; seen: number | null; push: boolean };
+      const s = await invoke<{ on: boolean; listening: boolean; port: number; phones: number; pushes: number; pairing: string | null; error: string | null; address: string | null; devices?: Device[] }>("remote", { action, port, phone });
+      const when = (ms: number | null) => (ms ? new Date(ms).toLocaleString() : "unknown");
       const text = [
         s.listening ? `On, at 127.0.0.1:${s.port}. ${s.phones} phone${s.phones === 1 ? "" : "s"} paired, ${s.pushes ?? 0} with notifications on.${lastPush ? ` Last push ${lastPush}.` : ""}` : s.on ? `On, but not listening: ${s.error}` : "Off. loomctl remote on starts it.",
+        s.devices?.length && table(s.devices.map((d) => [d.id, d.name, `paired ${when(d.paired)}`, `seen ${when(d.seen)}`, d.push ? "notifications on" : ""])),
         s.listening && (s.address ? `Phone address: ${s.address} (once: tailscale serve --bg ${s.port})` : `Tailscale isn't installed or signed in. Install it, then run: tailscale serve --bg ${s.port}`),
         s.pairing && `Pairing code: ${s.pairing}. Open the address on the phone and enter it within 10 minutes.`,
       ].filter(Boolean).join("\n");
@@ -9814,12 +9964,13 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   diffFull = saved.ui?.diffFull ?? false;
   $("#diff-full").classList.toggle("on", diffFull);
   if (saved.ui?.panel === "files") setPanel("files");
-  let closing = false, expired = false;
+  let closing = false, expired = false, failed = false;
   let shut: { events: [string, unknown][]; emitted: number } | undefined;
   await getCurrentWindow().onCloseRequested(async e => {
     e.preventDefault();
     if (closing) return;
-    closing = true;
+    closing = windowClosing = true;
+    let armed = false;
     try {
       if (!shut) {
         await pollSessions();
@@ -9848,13 +9999,28 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       sweepTasks(true);
       await drainJournal();
 
-      if (relaunching) await invoke("relaunch");
+      // Armed, not started: the new Loom starts once this one has exited (lib.rs relaunch).
+      if (relaunching) (await invoke("relaunch"), (armed = true));
       await getCurrentWindow().destroy();
     } catch (e) {
+      // A window that stays open must not restart when it does close later.
+      if (armed) await invoke("relaunch_cancel").catch(() => {});
       relaunching = false;
+      // A failure that comes back on every try (a locked backup, a full disk)
+      // must not leave killing Loom as the only way out: the second time, it asks.
+      if (failed) {
+        document.body.inert = false; // the dialog lives in the page
+        const lost = shut ? "the workspace's latest changes and the reports the stopped panes left" : "the workspace's latest changes and task history";
+        if (await confirm("Close without saving?", { title: "Loom", kind: "warning", action: "Close anyway", detail: `Closing failed again: ${String(e)}\nClosing anyway loses ${lost}.` })) {
+          await getCurrentWindow().destroy();
+          return;
+        }
+        if (shut) document.body.inert = true;
+      }
+      failed = true;
       toast(`Could not close safely: ${String(e)}${shut ? ". Panes are stopped; retry closing the window to save the retained reports." : ""}`);
     } finally {
-      closing = false;
+      closing = windowClosing = false;
       if (!shut) { shuttingDown = false; document.body.inert = false; }
     }
   });
@@ -9961,7 +10127,8 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   const themeBtn = $("#theme");
   // keep pane focus
   for (const b of [dictate, speakMore, themeBtn, $("#notification-sound"), $("#notification-taskbar"), $("#plan-usage")]) b.onmousedown = (e) => e.preventDefault();
-  dictate.onclick = () => mic(recording ? micStop : micStart);
+  // Which step, decided when it runs: a second click while the mic opens is its stop.
+  dictate.onclick = () => mic(() => (recording ? micStop() : micStart()));
   speakMore.onclick = () => showMenu(speakMore, speakMenu);
   $("#speak-pref").onclick = () => ((speakShown = !speakShown), paintSpeak(), save());
   themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
@@ -10234,7 +10401,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
         : Array(Math.max(w.panes, 1)).fill({
             cmd: w.startup ?? saved.startup ?? startups[0]?.cmd ?? "",
           });
-      return openThread(w, panes, w.layout);
+      return openThread(w, panes, w.layout, true);
     }),
   );
   renderSide();

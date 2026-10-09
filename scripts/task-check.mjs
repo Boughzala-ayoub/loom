@@ -139,7 +139,11 @@ const setup = () => {
       const x = !a.input ? 2 : 2 + (/[\r\n]/.test(a.input) ? `[Pasted Content ${a.input.length} chars]` : a.input).length;
       return out(id).onmessage(`\x1b[2J\x1b[H• Ran the tests\r\n\r\n\x1b[1m›\x1b[0m ${body}\r\n\r\n  gpt-5 high · ~\\work\r\n  ${a.busy ? 'esc to interrupt' : '? for shortcuts'}\x1b[3;${x + 1}H\x1b[?25${a.hidden ? 'l' : 'h'}`);
     }
-    const top = a.menu ? ` ${a.menu}\r\n ❯ 1. Yes\r\n   2. No (esc)` : ` ${a.say ?? 'Agent'}`; // a.say: the transcript's last answer
+    const top = ` ${a.say ?? 'Agent'}`; // a.say: the transcript's last answer
+    // A question takes the input box's place, as Claude's permission prompt does
+    // (src/prompt.test.ts): a numbered row with the box still under it is a sent
+    // prompt in the transcript, not a question.
+    if (a.menu) return out(id).onmessage(`\x1b[2J\x1b[H${top}\r\n${rule}\r\n ${a.menu}\r\n ❯ 1. Yes\r\n   2. No (esc)\r\n`);
     // a.v288: Claude Code 2.1.288, whose working line replaced the footer's "esc to interrupt".
     const working = a.v288 ? (a.busy ? '\r\n✢ Topsy-turvying… (12s · ↓ 1.2k tokens)' : '\r\n✻ Worked for 12s') : '';
     out(id).onmessage(`\x1b[2J\x1b[H${top}${working}\r\n${rule}\r\n❯ ${a.input}\r\n${rule}\r\n  ${a.busy && !a.v288 ? 'esc to interrupt' : '? for shortcuts'}\r\n`);

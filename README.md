@@ -576,7 +576,8 @@ loomctl help                            # every command the running Loom knows
 ```
 
 A pane is `<thread>:<n>`, its id, or `.` for the pane in front. A thread is its
-name, a unique start of it, or its id. Anything a button would ask about first
+name or its id; commands that only read also take a unique start of the name.
+Anything a button would ask about first
 needs `--yes`: closing a pane whose agent is running, stopping or restarting a
 running process, and closing a thread. `close-thread --delete worktree|branch` also refuses to lose
 uncommitted files or unmerged commits unless you add `--force`. `send -`
@@ -687,11 +688,11 @@ Inside a Loom pane, `loomctl` is on the PATH and talks to the Loom that owns the
 pane, so an agent can read other panes, start agents and wait for them. For a
 profile launch (`loom.exe work.json`), pass `--profile work.json`.
 
-Loom listens on a named pipe, `\\.\pipe\loom-<user>`, that only your Windows
-account can open, and it refuses remote connections. A second Loom on the same
+Loom listens on a named pipe, `\\.\pipe\loom-<account>`, named after your
+Windows account's SID, that only your Windows account can open, and it refuses remote connections. A second Loom on the same
 workspace doesn't take over the pipe, and each Loom's panes talk to it on a
 pipe of its own (`...-pid<pid>`), so they never reach the other window. A
-`tauri dev` build uses `loom-dev-<user>` and leaves the installed Loom alone.
+`tauri dev` build uses `loom-dev-<account>` and leaves the installed Loom alone.
 `docs/loomctl.md` is the full usage guide, with recipes; `docs/cli-control.md`
 has the design.
 

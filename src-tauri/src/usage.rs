@@ -41,6 +41,9 @@ pub struct Usage {
     /// by hand the moment it runs. Empty until the tee has fired.
     live_model: String,
     live_effort: String,
+    /// The message the last counted record belonged to (`scan`).
+    #[serde(skip)]
+    last_id: String,
 }
 /// transcript path -> (bytes already folded in, totals so far). Keyed by path,
 /// not pane or session: a pane that moves to a new session gets a new entry and
@@ -65,6 +68,8 @@ struct Rec {
 #[derive(serde::Deserialize)]
 struct Msg {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     model: String,
     usage: Tok,
 }
@@ -80,12 +85,42 @@ struct Tok {
     cache_creation_input_tokens: u64,
 }
 
-/// Claude Code's folder name for a working directory: every character that isn't
-/// a letter or digit becomes `-` (`C:\Users\x\proj` → `C--Users-x-proj`).
+/// Claude Code's folder name for a working directory, as its `EI` makes it:
+/// every UTF-16 unit that isn't an ASCII letter or digit becomes `-`
+/// (`C:\Users\x\proj` → `C--Users-x-proj`, an emoji → `--`). Past 200
+/// characters it keeps the first 200, then `-` and the path's 32-bit string
+/// hash (Java's, over UTF-16 units) in base 36.
 fn slug(dir: &str) -> String {
-    dir.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    const MAX: usize = 200;
+    let units: Vec<u16> = dir.encode_utf16().collect();
+    let name: String = units.iter()
+        .map(|&u| char::from_u32(u as u32).filter(char::is_ascii_alphanumeric).unwrap_or('-'))
+        .collect();
+    if name.len() <= MAX { return name; }
+    let hash = units.iter().fold(0i32, |h, &u| h.wrapping_shl(5).wrapping_sub(h).wrapping_add(u as i32));
+    let (mut n, mut digits) = ((hash as i64).unsigned_abs(), Vec::new());
+    loop {
+        digits.push(char::from_digit((n % 36) as u32, 36).unwrap());
+        n /= 36;
+        if n == 0 { break; }
+    }
+    format!("{}-{}", &name[..MAX], digits.iter().rev().collect::<String>())
+}
+
+/// Where Claude Code keeps session `sid` of folder `dir`. A cut name whose file
+/// isn't under the hash Loom expects is looked for under any `<first 200>-*`,
+/// in case Claude Code hashes differently one day.
+fn session_file(home: &Path, dir: &str, sid: &str) -> PathBuf {
+    let projects = home.join(".claude/projects");
+    let name = slug(dir);
+    let file = projects.join(&name).join(format!("{sid}.jsonl"));
+    if file.is_file() || name.len() <= 200 { return file; }
+    let prefix = format!("{}-", &name[..200]);
+    std::fs::read_dir(&projects).into_iter().flatten().flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|e| e.path().join(format!("{sid}.jsonl")))
+        .find(|f| f.is_file())
+        .unwrap_or(file)
 }
 
 /// Whether claude ever wrote the session a pane is pinned to. Decides resume vs
@@ -96,10 +131,7 @@ pub fn has_session(dir: String, sid: String) -> bool {
     let home: PathBuf = std::env::var_os("USERPROFILE")
         .map(Into::into)
         .unwrap_or_default();
-    home.join(".claude/projects")
-        .join(slug(&dir))
-        .join(format!("{sid}.jsonl"))
-        .is_file()
+    session_file(&home, &dir, &sid).is_file()
 }
 
 /// Whether the pane's claude is up: its SessionStart hook has written the
@@ -136,11 +168,7 @@ pub(crate) fn transcript(marks: &Path, home: &Path, pane: &str, dir: &str, sid: 
         .map(|p| PathBuf::from(p.trim()))
         .ok()
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| {
-            home.join(".claude/projects")
-                .join(slug(dir))
-                .join(format!("{sid}.jsonl"))
-        })
+        .unwrap_or_else(|| session_file(home, dir, sid))
 }
 
 /// Fold the lines appended since `off` into `u`. Whole lines only: a record still
@@ -159,9 +187,9 @@ fn scan(path: &Path, off: &mut u64, u: &mut Usage) -> std::io::Result<()> {
     }
     f.seek(SeekFrom::Start(*off))?;
     // Streamed: a first scan reads a whole transcript, tens of MB. Folded into a
-    // copy, so bytes that aren't UTF-8, even in a line still being written,
-    // change nothing, as when the rest of the file was read into one string.
-    // Offsets always land after a newline.
+    // copy, so a read that fails changes nothing. Offsets always land after a
+    // newline: a line still being written waits, and a whole one that isn't
+    // UTF-8 (only corruption gets there) is passed over, not stopped at for good.
     let mut next = u.clone();
     let mut end = 0u64;
     let mut reader = std::io::BufReader::new(f);
@@ -169,9 +197,10 @@ fn scan(path: &Path, off: &mut u64, u: &mut Usage) -> std::io::Result<()> {
     loop {
         bytes.clear();
         let n = reader.read_until(b'\n', &mut bytes)?;
-        let text = std::str::from_utf8(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let Some(line) = text.strip_suffix('\n') else { break }; // the end, or a record still being written
+        if bytes.last() != Some(&b'\n') { break } // the end, or a record still being written
         end += n as u64;
+        let Ok(text) = std::str::from_utf8(&bytes) else { continue };
+        let line = text.strip_suffix('\n').unwrap_or(text);
         let line = line.strip_suffix('\r').unwrap_or(line);
         let u = &mut next;
         // Cheap gate first: most bytes in a transcript are tool output.
@@ -184,7 +213,7 @@ fn scan(path: &Path, off: &mut u64, u: &mut Usage) -> std::io::Result<()> {
         let Rec {
             sidechain,
             effort,
-            message: Msg { model, usage: t },
+            message: Msg { id, model, usage: t },
         } = r;
         // A "<synthetic>" record — what a slash command or an interrupt leaves
         // behind — reports an all-zero usage and no model. Folding one in zeroes
@@ -193,6 +222,12 @@ fn scan(path: &Path, off: &mut u64, u: &mut Usage) -> std::io::Result<()> {
         if model.starts_with('<') {
             continue;
         }
+        // Claude Code 2.1 writes a record per content block (thinking, text,
+        // tool_use), each repeating its message's id and usage: one message, one turn.
+        if !id.is_empty() && id == u.last_id {
+            continue;
+        }
+        u.last_id = id;
         u.turns += 1;
         u.input += t.input_tokens;
         u.output += t.output_tokens;
@@ -358,8 +393,13 @@ fn setting_value(value: &str, effort: bool) -> String {
 }
 
 /// Bounded discovery once per selected session; readers fold only appended bytes.
+/// The second map: when a session's discovery last came up empty.
 #[derive(Default)]
-pub struct CodexScanned(Mutex<HashMap<String, (PathBuf, CodexReader)>>);
+pub struct CodexScanned(Mutex<HashMap<String, (PathBuf, CodexReader)>>, Mutex<HashMap<String, std::time::Instant>>);
+
+/// How long a session no walk found waits before the next walk looks again,
+/// so a rollout Loom can't read doesn't cost a walk of the tree every poll.
+const CODEX_MISS: std::time::Duration = std::time::Duration::from_secs(300);
 
 struct ReadCheckpoint {
     offset: u64,
@@ -394,6 +434,9 @@ struct CodexReader {
     oversized: bool,
     /// The last read reached the end: `usage` is the session's now, not its start.
     caught_up: bool,
+    /// The last read found the file with its first line still being written:
+    /// this session's, very likely, but nothing to read yet. Not a miss.
+    incomplete: bool,
     usage: Usage,
     last_used: Option<std::time::Instant>,
     prefix: Option<ReadCheckpoint>,
@@ -419,6 +462,7 @@ pub(crate) fn file_identity(file: &std::fs::File) -> Option<(u64, u64)> {
 
 impl CodexReader {
     fn read(&mut self, path: &Path, sid: &str) -> Option<Usage> {
+        self.incomplete = false;
         let mut file = std::fs::File::open(path).ok()?;
         let meta = file.metadata().ok()?;
         let identity = file_identity(&file)?;
@@ -431,8 +475,13 @@ impl CodexReader {
         if self.identity.is_none() {
             file.seek(SeekFrom::Start(0)).ok()?;
             let mut first = String::new();
-            std::io::BufReader::new((&mut file).take(64 * 1024)).read_line(&mut first).ok()?;
-            if !first.ends_with('\n') { return None; }
+            // The header's dynamic_tools alone have reached 52 KB.
+            std::io::BufReader::new((&mut file).take(1024 * 1024)).read_line(&mut first).ok()?;
+            if !first.ends_with('\n') {
+                // Short of the cap, Codex is still writing it; at the cap, it's too long to read.
+                self.incomplete = first.len() < 1024 * 1024;
+                return None;
+            }
             let row: serde_json::Value = serde_json::from_str(&first).ok()?;
             if row["type"] != "session_meta" || row["payload"]["id"].as_str() != Some(sid)
                 || row["payload"]["source"].is_object() { return None; }
@@ -507,6 +556,8 @@ pub fn codex_session(path: &Path, sid: &str) -> Option<Usage> {
 
 pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String)>) -> HashMap<String, Usage> {
     let mut cache = state.0.lock().unwrap();
+    let mut misses = state.1.lock().unwrap();
+    misses.retain(|_, at| at.elapsed() < CODEX_MISS);
     let mut out = HashMap::new();
     let mut missing = Vec::new();
     for (id, sid) in panes {
@@ -518,11 +569,16 @@ pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String
                 if reader.caught_up { out.insert(id, u); }
                 continue;
             }
+            // Its first line still being written: read it again next poll, without a walk.
+            if reader.incomplete { continue; }
         }
         cache.remove(&sid);
-        missing.push((id, sid));
+        if !misses.contains_key(&sid) { missing.push((id, sid)); }
     }
     if missing.is_empty() { return out; }
+    // Whatever this walk doesn't find, it doesn't look for again for a while.
+    let now = std::time::Instant::now();
+    misses.extend(missing.iter().map(|(_, sid)| (sid.clone(), now)));
     let mut found = std::collections::HashSet::new();
     let mut dirs = vec![(home.join("sessions"), 0)];
     let mut visited = std::collections::HashSet::new();
@@ -539,17 +595,20 @@ pub fn codex_usage(state: &CodexScanned, home: &Path, panes: Vec<(String, String
             for (id, sid) in &missing {
                 if found.contains(id) || !super::rollout_is(&path, sid) { continue; }
                 let mut reader = CodexReader::default();
-                if let Some(u) = reader.read(&path, sid) {
-                    found.insert(id.clone());
-                    if reader.caught_up { out.insert(id.clone(), u); }
-                    // Scoped queries are not the live-session set. Keep progress
-                    // across them, with a fixed bound and least-recently-read eviction.
-                    if cache.len() >= 128 {
-                        let oldest = cache.iter().min_by_key(|(_, (_, r))| r.last_used).map(|(sid, _)| sid.clone());
-                        if let Some(oldest) = oldest { cache.remove(&oldest); }
-                    }
-                    cache.insert(sid.clone(), (path.clone(), reader));
+                let got = reader.read(&path, sid);
+                // Found with its first line unfinished, it is kept like one read:
+                // the next poll reads it there, with no walk and no miss to wait out.
+                if got.is_none() && !reader.incomplete { continue; }
+                found.insert(id.clone());
+                misses.remove(sid);
+                if let Some(u) = got { if reader.caught_up { out.insert(id.clone(), u); } }
+                // Scoped queries are not the live-session set. Keep progress
+                // across them, with a fixed bound and least-recently-read eviction.
+                if cache.len() >= 128 {
+                    let oldest = cache.iter().min_by_key(|(_, (_, r))| r.last_used).map(|(sid, _)| sid.clone());
+                    if let Some(oldest) = oldest { cache.remove(&oldest); }
                 }
+                cache.insert(sid.clone(), (path.clone(), reader));
             }
             if missing.iter().all(|(id, _)| found.contains(id)) { return out; }
         }
@@ -638,6 +697,8 @@ fn profile_of(path: &Path) -> std::io::Result<Profile> {
     let mut series: Vec<u64> = Vec::new();
     let mut drops: Vec<Drop> = Vec::new();
     let mut ctx = 0u64;
+    // One point per message, not per content block (`scan`).
+    let mut last_id = String::new();
     // Keep one record in memory instead of loading the whole transcript.
     loop {
         line.clear();
@@ -730,7 +791,11 @@ fn profile_of(path: &Path) -> std::io::Result<Profile> {
             ctx = u["input_tokens"].as_u64().unwrap_or(0)
                 + u["cache_read_input_tokens"].as_u64().unwrap_or(0)
                 + u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-            series.push(ctx);
+            let id = msg["id"].as_str().unwrap_or("");
+            if id.is_empty() || id != last_id {
+                series.push(ctx);
+                last_id = id.to_string();
+            }
         }
     }
     let total: u64 = by.values().sum();
@@ -1563,11 +1628,125 @@ mod tests {
         append(tail.as_bytes());
         scan(&path, &mut off, &mut u).unwrap();
         assert_eq!((u.turns, u.input, off), (3002, 3000 * 3001 / 2 + 1007, (text.len() + last.len()) as u64));
-        // Bytes that aren't UTF-8 change nothing, even in a line still being written.
+        // Bytes that aren't UTF-8 in a line still being written wait for its end.
         append(&[b'{', 0xE2, 0x82]);
-        assert!(scan(&path, &mut off, &mut u).is_err());
+        scan(&path, &mut off, &mut u).unwrap();
         assert_eq!((u.turns, off), (3002, (text.len() + last.len()) as u64));
+        // Whole, the line is passed over, and the scan goes on past it.
+        append(b"}\n");
+        append(turn(5).as_bytes());
+        scan(&path, &mut off, &mut u).unwrap();
+        assert_eq!((u.turns, off), (3003, std::fs::metadata(&path).unwrap().len()), "a corrupt line stopped the scan for good");
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// Claude Code 2.1.29x: thinking, text and tool_use of one message are three
+    /// records with the message's id and usage. One message is one turn.
+    #[test]
+    fn a_message_split_into_blocks_counts_once() {
+        let path = std::env::temp_dir().join(format!("loom-blocks-test-{}.jsonl", std::process::id()));
+        let block = |id: &str, kind: &str, ctx: u64| format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"id\":\"{id}\",\"model\":\"m\",\"usage\":{{\"input_tokens\":{ctx},\"cache_read_input_tokens\":0,\
+             \"cache_creation_input_tokens\":0,\"output_tokens\":40}},\"content\":[{{\"type\":\"{kind}\",\"{kind}\":\"x\"}}]}}}}\n");
+        let text = block("msg_a", "thinking", 900) + &block("msg_a", "text", 900) + &block("msg_a", "tool_use", 900)
+            + "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]}}\n"
+            + &block("msg_b", "text", 1000);
+        std::fs::write(&path, &text).unwrap();
+        let (mut off, mut u) = (0, Usage::default());
+        scan(&path, &mut off, &mut u).unwrap();
+        assert_eq!((u.turns, u.main_turns, u.input, u.output, u.ctx), (2, 2, 1900, 80, 1000));
+        // Read again from where it stopped, a message's next block still counts as that message.
+        append(&path, &block("msg_b", "tool_use", 1000));
+        scan(&path, &mut off, &mut u).unwrap();
+        assert_eq!((u.turns, u.output), (2, 80));
+        assert_eq!(profile_of(&path).unwrap().series, [900, 1000]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn long_and_astral_folders_are_named_as_claude_code_names_them() {
+        // Each UTF-16 unit: an emoji is two.
+        assert_eq!(slug("C:\\a\u{1F600}b"), "C--a--b");
+        assert_eq!(slug("C:\\é"), "C---");
+        // Past 200: the first 200, then the path's Java string hash in base 36.
+        // The values are claude.exe's own EI and zre, run in Node.
+        let long = format!("C:\\{}", "x".repeat(250));
+        let name = slug(&long);
+        assert_eq!(name, format!("C--{}-1tey79", "x".repeat(197)));
+        let astral = slug(&format!("C:\\Users\\ayoub\\\u{1F600}{}", "\u{e9}".repeat(220)));
+        assert_eq!((&astral[195..], astral.len()), ("------hzrclw", 207));
+        assert_eq!(slug("abc"), "abc");
+        // Found under its own name, and under another hash of the same first 200.
+        let home = std::env::temp_dir().join(format!("loom-slug-test-{}", std::process::id()));
+        let file = |folder: &str| home.join(".claude/projects").join(folder).join("s1.jsonl");
+        std::fs::create_dir_all(file(&name).parent().unwrap()).unwrap();
+        std::fs::write(file(&name), "").unwrap();
+        assert_eq!(super::session_file(&home, &long, "s1"), file(&name));
+        std::fs::remove_dir_all(file(&name).parent().unwrap()).unwrap();
+        let other = format!("{}-zz9", &name[..200]);
+        std::fs::create_dir_all(file(&other).parent().unwrap()).unwrap();
+        std::fs::write(file(&other), "").unwrap();
+        assert_eq!(super::session_file(&home, &long, "s1"), file(&other));
+        assert_eq!(super::session_file(&home, &long, "s2"), home.join(".claude/projects").join(&name).join("s2.jsonl"));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_rollout_with_a_long_header_reads_and_a_missing_one_waits() {
+        let home = std::env::temp_dir().join(format!("loom-codex-miss-{}", std::process::id()));
+        let day = home.join("sessions/2026/10/08");
+        std::fs::create_dir_all(&day).unwrap();
+        let sid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c";
+        let state = super::CodexScanned::default();
+        let read = || super::codex_usage(&state, &home, vec![("pane".into(), sid.into())]).get("pane").map(|u| u.model.clone());
+        assert_eq!(read(), None);
+        assert!(state.1.lock().unwrap().contains_key(sid), "a walk that found nothing is remembered");
+        // A header past the old 64 KiB, as dynamic_tools grow.
+        let rows = [
+            serde_json::json!({"type":"session_meta","payload":{"id":sid,"source":"cli","dynamic_tools":"x".repeat(200_000)}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-now","effort":"high"}}),
+        ];
+        std::fs::write(day.join(format!("rollout-2026-10-08T00-00-00-{sid}.jsonl")), rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        assert_eq!(read(), None, "no walk until the miss is old");
+        let old = std::time::Instant::now().checked_sub(super::CODEX_MISS).unwrap();
+        state.1.lock().unwrap().insert(sid.into(), old);
+        assert_eq!(read().as_deref(), Some("gpt-now"));
+        assert!(state.1.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_rollout_found_with_its_header_unfinished_reads_on_the_next_poll() {
+        use std::io::Write;
+        let home = std::env::temp_dir().join(format!("loom-codex-unfinished-{}", std::process::id()));
+        let day = home.join("sessions/2026/10/08");
+        std::fs::create_dir_all(&day).unwrap();
+        let sid = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5d";
+        let path = day.join(format!("rollout-2026-10-08T00-00-00-{sid}.jsonl"));
+        let header = serde_json::json!({"type":"session_meta","payload":{"id":sid,"source":"cli"}}).to_string();
+        // Codex is still writing its first line: found, but nothing to read yet.
+        std::fs::write(&path, &header[..header.len() / 2]).unwrap();
+        let state = super::CodexScanned::default();
+        let read = || super::codex_usage(&state, &home, vec![("pane".into(), sid.into())]).get("pane").map(|u| u.model.clone());
+        assert_eq!(read(), None);
+        assert!(!state.1.lock().unwrap().contains_key(sid), "a rollout the walk found isn't a miss");
+        // The line ends and a turn follows: the next ordinary poll reads it, with no walk and no 5-minute wait.
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{}\n{}\n", &header[header.len() / 2..], serde_json::json!({"type":"turn_context","payload":{"model":"gpt-now","effort":"high"}})).unwrap();
+        drop(file);
+        assert_eq!(read().as_deref(), Some("gpt-now"));
+        // Gone, it goes back to discovery, which remembers the miss.
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read(), None);
+        assert!(state.1.lock().unwrap().contains_key(sid));
+        assert!(state.0.lock().unwrap().is_empty());
+        // A file named for the session whose header is another session's isn't kept.
+        let other = serde_json::json!({"type":"session_meta","payload":{"id":"0199a1b2-c3d4-7e5f-8a9b-000000000000","source":"cli"}});
+        std::fs::write(&path, format!("{other}\n")).unwrap();
+        state.1.lock().unwrap().clear();
+        assert_eq!(read(), None);
+        assert!(state.0.lock().unwrap().is_empty(), "a rollout that isn't this session's is cached");
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

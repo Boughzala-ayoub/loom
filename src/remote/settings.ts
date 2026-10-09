@@ -1,6 +1,6 @@
 /** Settings: the PC's Preferences, the agents its + menu offers, the window,
  * and this phone's own choices. Each PC setting is a loomctl command. */
-import { $, act, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar } from "./core";
+import { $, act, age, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar, ui } from "./core";
 import { b64u, unb64u } from "../push";
 import { dictationSheet, lists, pickLabel, readLists } from "./dictate";
 import { procsView, type Reading } from "../procs";
@@ -9,7 +9,9 @@ type Theme = { name: string; scheme: string; current: boolean; vars: Record<stri
 type Notify = { all: string; kinds: { finish: boolean; fail: boolean; blocked: boolean }; newPanes: string };
 type Settings = { sound: string; taskbar: string; overlay: string; awake: string; "plan-usage": string; font: string };
 type Startup = { label: string; cmd: string };
-type Remote = { phones: number; address: string | null; port: number };
+/** A paired phone: its id is the start of its token's SHA-256 (remote.rs), its times unix ms. */
+type Device = { id: string; name: string; paired: number | null; seen: number | null; push: boolean };
+type Remote = { phones: number; address: string | null; port: number; devices?: Device[] };
 type Trashed = { folder?: string; at: string; branch?: string; commit?: string; when?: string };
 /** When this Loom started, and whether an update waits for a restart. */
 type Status = { booted?: number; updated?: boolean };
@@ -26,9 +28,16 @@ let startups: Startup[] = [];
 let remote: Remote | null = null;
 let trash: Trashed[] = [];
 let loom: Status = {};
+let mine = ""; // this phone's id in the PC's list of phones
+
+/** This phone's id as remote.rs keeps it: the first 12 hex digits of its token's SHA-256. */
+async function myId() {
+  const sum = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(app.token)));
+  return [...sum].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 12);
+}
 
 export async function read() {
-  const [t, n, s, st, r, tr, , ls] = await Promise.all([
+  const [t, n, s, st, r, tr, , ls, , id] = await Promise.all([
     run<Theme[]>("theme").catch(() => themes),
     run<Notify>("notify").catch(() => notify),
     run<Settings>("set").catch(() => settings),
@@ -38,8 +47,10 @@ export async function read() {
     pushState().catch(() => {}),
     run<Status>("status").catch(() => loom),
     readLists().catch(() => {}),
+    myId().catch(() => ""), // no crypto.subtle on plain http: no phone is marked as this one
   ]);
   loom = ls;
+  mine = id;
   // An older Loom answers a command it lacks with an error: each reading keeps its shape.
   const list = <T>(v: unknown, was: T[]) => (Array.isArray(v) ? (v as T[]) : was);
   [themes, startups, trash] = [list(t, themes), list(st, startups), list(tr, trash)];
@@ -297,18 +308,52 @@ const current = themes.find((t) => t.current);
     s.onchange = () => setPref(key, s.checked ? yes : no);
     return setting(title, detail, s);
   };
+  // Each paired phone, this one first, with its own Remove: a phone lost or sold goes, the rest stay paired.
+  // An older Loom lists none, only how many.
+  const devices = Array.isArray(remote?.devices) ? remote.devices : null;
+  const all = setting(devices ? "All phones" : "Paired phones", remote ? `${remote.phones} paired${remote.address ? `, at ${remote.address}` : ""}` : "", button("Unpair all", async () => {
+    if (!(await confirmSheet("Unpair every phone?", "This one too: each needs a new code from loomctl remote pair on the PC.", "Unpair all", true))) return;
+    // Refused, nothing was unpaired: this phone stays, and so does one you meant to cut off.
+    if (await act(() => run("remote", ["revoke"], { change: true }), "Unpaired")) unpaired();
+  }, "danger"));
   nodes.push(...group("This phone",
     phoneToggle("Wrap long lines", "In an agent's screen, instead of scrolling sideways", "loom-wrap", wrapOn, "1", "0"),
     phoneToggle("Keyboard open", "Show the PC keys under an agent by default", "loom-keys", pref("loom-keys", "") === "1"),
-    setting("Paired phones", remote ? `${remote.phones} paired${remote.address ? `, at ${remote.address}` : ""}` : "", button("Unpair all", async () => {
-      if (!(await confirmSheet("Unpair every phone?", "This one too: each needs a new code from loomctl remote pair on the PC.", "Unpair all", true))) return;
-      await act(() => run("remote", ["revoke"], { change: true }), "Unpaired");
-      store("");
-      hooks.unpaired();
-    }, "danger")),
+    ...(devices ? [] : [all]),
   ));
+  if (devices) nodes.push(...group("Paired phones", ...[...devices].sort((a, b) => +(b.id === mine) - +(a.id === mine)).map(phoneRow), all));
 
   if (trash.length) nodes.push(...group("Deleted worktrees", ...trash.map((x) => setting(x.branch?.replace(/^refs\/heads\//, "") ?? x.folder ?? x.at, `In Loom's trash on the PC: ${x.at}`, el("span")))));
   nodes.push(el("p", "hint", "Deleted worktrees stay in Loom's trash on the PC for a day; docs/loomctl.md says how to move one back."));
   body.replaceChildren(...nodes);
+}
+
+/** Back to pairing, as a refused token does. */
+function unpaired() {
+  store("");
+  hooks.unpaired();
+}
+
+/** A paired phone: its name (a bell when it gets notifications), this one or when it was paired and last seen, Remove. */
+function phoneRow(d: Device) {
+  const me = d.id === mine, name = d.name || "A phone";
+  const seen = d.seen ? age(new Date(d.seen).toISOString()) : "";
+  const when = [me && "This phone", d.paired && `Paired ${new Date(d.paired).toLocaleDateString(undefined, { day: "numeric", month: "short" })}`,
+    !me && (seen ? (seen === "now" ? "Seen just now" : `Seen ${seen} ago`) : "Never seen")].filter(Boolean).join(" · ");
+  const row = setting(name, when, iconButton("trash", `Remove ${name}`, () => void removePhone(d, name, me)));
+  row.classList.add("phone");
+  const bell = ui("bell");
+  bell.removeAttribute("aria-hidden");
+  bell.setAttribute("role", "img");
+  bell.setAttribute("aria-label", "Notifications on");
+  row.querySelector("b")!.replaceChildren(el("span", "", name), ...(d.push ? [bell] : []));
+  return row;
+}
+async function removePhone(d: Device, name: string, me: boolean) {
+  const detail = me ? "This phone goes back to pairing: it needs a new code from loomctl remote pair on the PC."
+    : "It stops reaching Loom and getting notifications. To come back it needs a new code from loomctl remote pair on the PC.";
+  if (!(await confirmSheet(`Remove ${name}?`, detail, "Remove", true))) return;
+  if (!(await act(() => run("remote", ["revoke", d.id], { change: true }), "Removed"))) return;
+  if (me) unpaired();
+  else void read();
 }

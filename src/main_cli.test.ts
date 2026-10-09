@@ -24,19 +24,19 @@ import * as gitparse from "./gitparse.ts";
 import * as stash from "./stash.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "gitStatus", "dictationData"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`${node.declarationList.flags & ts.NodeFlags.Const ? "const" : "let"} ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice, headBranch, syncBranch, removeThread };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
     gone: () => false, invoke: async () => ({}), startupTurns: null, contextOf: () => undefined, closedTaskContexts: new WeakMap(), taskSeq: 3, taskWatch: new Map(), heldEnter: new Map(), keepTasks() {}, keepReceipts() {},
-    threads: [], current: null, unsaved: new Set(), tasks: new Map(), startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }], desktopWindow: undefined,
+    threads: [], current: null, unsaved: new Set(), tasks: new Map(), save() {}, startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }], desktopWindow: undefined,
     ...extra });
   runInContext(code, s);
   Object.assign(s, extra);
@@ -45,6 +45,75 @@ function fixture(extra: Record<string, unknown> = {}) {
 }
 // @ts-ignore Node-only test.
 const check = (n: number) => !process.env.CLI_ITEM || process.env.CLI_ITEM === String(n);
+if (check(219)) {
+  const base = mkdtempSync(join(tmpdir(), "loom-delete-tip-"));
+  const real = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    for (const when of ["cli", "dialog", "closing", "delete", "other-worktree", "unchanged", "configured", "config-lock"]) {
+      const repo = join(base, when), wt = join(base, `${when}-wt`);
+      mkdirSync(repo);
+      real(repo, "init", "-q", "-b", "main");
+      writeFileSync(join(repo, "a.txt"), "main\n");
+      real(repo, "add", "a.txt"); real(repo, "commit", "-qm", "main");
+      const main = real(repo, "rev-parse", "HEAD").trim();
+      real(repo, "switch", "-q", "-c", "approved");
+      writeFileSync(join(repo, "a.txt"), "A\n"); real(repo, "commit", "-qam", "A");
+      const a = real(repo, "rev-parse", "HEAD").trim();
+      real(repo, "switch", "-q", "--detach", main);
+      writeFileSync(join(repo, "a.txt"), "B\n"); real(repo, "commit", "-qam", "B");
+      const b = real(repo, "rev-parse", "HEAD").trim();
+      real(repo, "switch", "-q", "main");
+      real(repo, "worktree", "add", "-q", "--detach", wt, main);
+      assert.notEqual(real(repo, "rev-parse", `${a}^{tree}`), real(repo, "rev-parse", `${b}^{tree}`));
+      assert.equal(real(repo, "rev-list", "--count", `${main}..${a}`), real(repo, "rev-list", "--count", `${main}..${b}`));
+      const move = () => real(repo, "branch", "-f", "approved", b);
+      if (when === "configured" || when === "config-lock") {
+        real(repo, "config", "branch.approved.remote", "origin");
+        real(repo, "config", "branch.neighbor.remote", "keep");
+        if (when === "config-lock") writeFileSync(join(repo, ".git", "config.lock"), "held");
+      }
+      const th = { id: "t", name: "t", dir: wt, repo, branch: "approved", isWorktree: true, panes: [], dispose: async () => { if (when === "closing") move(); } };
+      const threads = [th];
+      const c = fixture({ ...gitparse, threads, cliThread: () => th, toast() {}, renderSide() {}, show() {}, save() {},
+        confirm: async () => { if (when === "dialog") move(); return true; },
+        invoke: async (cmd: string, args: any) => cmd === "worktree_fingerprint" ? "unchanged detached files and index" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "fixture trash") : "",
+        git: async (dir: string, ...args: string[]) => {
+          if (when === "delete" && args[0] === "update-ref" && args.includes("refs/heads/approved")) move();
+          return real(dir, ...args);
+        } });
+      if (when === "cli") {
+        const plan = await c["close-plan"].run({ _: ["t"], delete: "branch" });
+        move();
+        await assert.rejects(c["close-thread"].run({ _: ["t"], yes: true, delete: "branch", plan: plan.data.rev, discard: "commits" }), /changed since plan/);
+        assert.equal(threads.length, 1);
+      } else {
+        if (when === "other-worktree") real(repo, "worktree", "add", "-q", join(base, "other"), "approved");
+        const result = await lastFixture.removeThread(th, "all");
+        if (when === "dialog") {
+          assert.equal(result.removed, false);
+          assert.match(result.error, /changed while the dialog was open.*branch.*commit/);
+        } else if (["unchanged", "configured", "config-lock"].includes(when)) {
+          assert.equal(result.branch, "deleted");
+          if (when === "configured") {
+            assert.throws(() => real(repo, "config", "--get", "branch.approved.remote"));
+            assert.equal(real(repo, "config", "--get", "branch.neighbor.remote").trim(), "keep");
+          }
+          if (when === "config-lock") {
+            assert.match(result.error, /deleted the branch.*settings/);
+            assert.equal(readFileSync(join(repo, ".git", "config.lock"), "utf8"), "held");
+          }
+        }
+        else {
+          assert.equal(result.removed, true);
+          assert.equal(result.branch, "failed");
+          assert.match(result.error, when === "other-worktree" ? /checked out|used by worktree/ : /expected|changed/);
+        }
+      }
+      if (!["unchanged", "configured", "config-lock"].includes(when)) assert.equal(real(repo, "rev-parse", "refs/heads/approved").trim(), when === "other-worktree" ? a : b);
+      console.log(`ok   branch tip approval: ${when}`);
+    }
+  } finally { rmSync(base, { recursive: true, force: true }); }
+}
 if (check(204)) {
   const th = { name: "work", id: "th", dir: "C:/work", panes: [] as any[] };
   const p = { id: "p", th, agent: "codex", sessionId: "selected", generation: 1, providerUsage: null } as any;
@@ -875,4 +944,207 @@ if (check(209)) {
   assert.throws(() => run("louder"), /takes lang, prefix or remove/);
   assert.equal(saved, 12, "each change saved, and only the changes");
   console.log("ok   loomctl dictation lists the mic's languages and prefixes with the PC's pick, and picks, adds and removes them");
+}
+if (check(210)) {
+  // Commits on a detached HEAD are on no branch: deleting the worktree, in any mode, loses them.
+  const repo = mkdtempSync(join(tmpdir(), "loom-cli-detached-"));
+  const real = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
+  try {
+    real("init", "-q", "-b", "main");
+    real("commit", "-q", "--allow-empty", "-m", "start");
+    const th = { id: "t", name: "t", dir: repo, repo: join(repo, "elsewhere"), branch: "loom/t" };
+    fixture({ ...gitparse, git: async (_: string, ...args: string[]) => real(...args), invoke: async () => "fingerprint" });
+    const c = lastFixture;
+    assert.equal((await c.inventory(th, false)).loose, 0, "a HEAD on a branch loses nothing of its own");
+    real("checkout", "-q", "--detach");
+    real("commit", "-q", "--allow-empty", "-m", "detached one");
+    real("commit", "-q", "--allow-empty", "-m", "detached two");
+    assert.equal((await c.inventory(th, false)).loose, 2, "both detached commits count, deleting only the worktree");
+    // The first inventory read the branch git had (main) over the cached loom/t; detached since, it keeps that.
+    assert.equal(await c.headBranch(th), "main", "a detached worktree keeps its branch's name, never HEAD");
+    assert.equal(await c.headBranch({ ...th, repo }), "HEAD", "the checkout itself says HEAD");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+  console.log("ok   commits on a detached HEAD count as lost, and a detached worktree keeps its branch");
+}
+if (check(211)) {
+  // The PC's 5-minute plan poll: each tick reads anew, though the reply took time to come.
+  let now = 1_800_000_000_000, calls = 0;
+  class Clock extends Date { static now() { return now; } }
+  const c = fixture({ Date: Clock, PLAN_PROVIDERS: { claude: { command: "plan_usage" } },
+    invoke: async () => { calls++; now += 800; return { tier: "pro", stale: false, limits: [] }; } });
+  const start = now;
+  for (let tick = 0; tick < 6; tick++) {
+    now = start + tick * 300_000;
+    const got = (await c.usage.run({ _: ["claude"] })).data.claude;
+    assert.equal(got.cached, false, `tick ${tick} read anew`);
+  }
+  assert.equal(calls, 6);
+  now += 60_000;
+  assert.equal((await c.usage.run({ _: ["claude"] })).data.claude.cached, true, "a read between ticks shares the last");
+  console.log("ok   the plan poll reads anew on each 5-minute tick, not every other one");
+}
+if (check(212)) {
+  // A provider's cooldown holds every caller to the ms, measured from its answer;
+  // only the 5-minute floor gets the poll's few seconds of slack.
+  let now = 1_800_000_000_000, calls = 0, limited = true;
+  class Clock extends Date { static now() { return now; } }
+  const c = fixture({ Date: Clock, PLAN_PROVIDERS: { claude: { command: "plan_usage" } },
+    invoke: async () => { calls++; now += 800; if (limited) throw new Error("usage rate limited; retry after 300 seconds"); return { tier: "pro", stale: false, limits: [] }; } });
+  const usage = async (refresh = false) => (await c.usage.run({ _: ["claude"], ...(refresh ? { refresh: true } : {}) })).data.claude;
+  const t0 = now;
+  await usage();
+  assert.equal(calls, 1);
+  const hold = t0 + 800 + 300_000; // the provider's 300 s, from when it answered
+  now = t0 + 300_000; // the next 5-minute tick
+  assert.equal((await usage()).cached, true, "the next poll waited out the cooldown");
+  now = hold - 1;
+  assert.equal((await usage()).cached, true, "a poll 1 ms early");
+  assert.equal((await usage(true)).cached, true, "a forced read 1 ms early");
+  assert.equal(calls, 1);
+  limited = false;
+  now = hold;
+  assert.equal((await usage()).cached, false, "the cooldown's end");
+  assert.equal(calls, 2);
+  // No cooldown: a poll up to 10 s before the floor reads anew, but no earlier, and a forced read always does.
+  const asked = now - 800;
+  now = asked + 300_000 - 10_001;
+  assert.equal((await usage()).cached, true, "11 s before the floor");
+  now = asked + 300_000 - 9_000;
+  assert.equal((await usage()).cached, false, "9 s before the floor");
+  now += 1_000;
+  assert.equal((await usage(true)).cached, false, "--refresh skips the floor");
+  assert.equal(calls, 4);
+  console.log("ok   a provider's cooldown holds polls and forced reads to the ms, from its answer");
+}
+if (check(214)) {
+  // A branch switched in the thread's terminal, not by Loom: status, Create PR,
+  // branches and the deletion inventory all go by the branch git has now.
+  const repo = mkdtempSync(join(tmpdir(), "loom-cli-switch-"));
+  const real = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
+  try {
+    real("init", "-q", "-b", "main");
+    real("commit", "-q", "--allow-empty", "-m", "start");
+    real("remote", "add", "origin", "https://github.com/example/review-fixture.git");
+    const th = { id: "t", name: "t", dir: repo, repo, branch: "main", changed: null, setStat() {} };
+    const pushed: string[][] = [];
+    fixture({ ...gitparse, ...stash, cliThread: () => th, invoke: async () => "fingerprint", changesOpen: false, save() {},
+      git: async (_: string, ...args: string[]) => (args[0] === "push" ? (pushed.push(args), "") : real(...args)) });
+    const c = lastFixture;
+    real("switch", "-q", "-c", "topic"); // in the terminal
+    real("commit", "-q", "--allow-empty", "-m", "topic only");
+    assert.equal((await c.CLI.git.run({ _: ["t", "status"] })).data.branch, "topic", "status kept the branch Loom cached");
+    assert.equal((await c.CLI.git.run({ _: ["t", "pr"] })).data.url, "https://github.com/example/review-fixture/compare/main...topic?expand=1");
+    assert.deepEqual(pushed, [["push", "-u", "origin", "refs/heads/topic:refs/heads/topic"]]);
+    assert.equal((await c.CLI.git.run({ _: ["t", "branches"] })).data.current, "topic");
+    th.branch = "main";
+    assert.equal((await c.inventory(th, true)).commits, 1, "deleting the branch counted main's commits, not topic's");
+    assert.equal(th.branch, "topic");
+    // Detached, a worktree keeps its branch's name; unborn, the checkout's name is the one to come.
+    real("switch", "-q", "--detach");
+    assert.equal((await c.CLI.git.run({ _: ["t", "status"] })).data.branch, "HEAD", "the checkout itself says HEAD");
+    const unborn = mkdtempSync(join(tmpdir(), "loom-cli-unborn-"));
+    try {
+      execFileSync("git", ["-C", unborn, "init", "-q", "-b", "fresh"]);
+      Object.assign(th, { dir: unborn, repo: unborn, branch: "main" });
+      fixture({ ...gitparse, ...stash, cliThread: () => th, invoke: async () => "", changesOpen: false, save() {},
+        git: async (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, ...args], { encoding: "utf8" }) });
+      assert.equal((await lastFixture.CLI.git.run({ _: ["t", "branches"] })).data.current, "fresh");
+    } finally { rmSync(unborn, { recursive: true, force: true }); }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+  console.log("ok   a branch switched in the terminal is the one status, Create PR, branches and deletion use");
+}
+if (check(215)) {
+  // The dialog names the branch it deletes. An agent can switch the worktree to
+  // another branch at the same commit while the dialog is open, or after it.
+  const base = mkdtempSync(join(tmpdir(), "loom-cli-approved-"));
+  const repo = join(base, "repo"), wt = join(base, "wt");
+  const real = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
+  try {
+    mkdirSync(repo);
+    real(repo, "init", "-q", "-b", "main");
+    real(repo, "commit", "-q", "--allow-empty", "-m", "start");
+    real(repo, "branch", "unapproved");
+    real(repo, "worktree", "add", "-q", "-b", "approved", wt);
+    const asked: string[] = [];
+    let answering = () => {}, closing = () => {};
+    const th = { id: "t", name: "t", dir: wt, repo, branch: "approved", isWorktree: true, panes: [], dispose: async () => closing() };
+    const threads = [th];
+    fixture({ ...gitparse, threads, toast() {}, renderSide() {}, show() {}, save() {},
+      confirm: async (what: string) => (asked.push(what), answering(), true),
+      // The native fingerprint of the files and index: the same on either branch.
+      invoke: async (cmd: string, args: any) => (cmd === "worktree_fingerprint" ? "same contents" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "trash") : ""),
+      git: async (dir: string, ...args: string[]) => real(dir, ...args) });
+    const remove = lastFixture.removeThread;
+    const branches = () => real(repo, "branch", "--format=%(refname:short)").split("\n").filter(Boolean).sort();
+    answering = () => real(wt, "switch", "-q", "unapproved");
+    const refused = await remove(th, "all");
+    assert.match(asked[0], /AND the branch approved\?/);
+    assert.deepEqual(branches(), ["approved", "main", "unapproved"], "a branch the dialog never named was deleted");
+    assert.deepEqual([refused.removed, threads.length, existsSync(wt)], [false, 1, true]);
+    assert.match(refused.error, /changed while the dialog was open \(the branch it's on \(unapproved, not approved\)\), so nothing was closed/);
+    // Approved, and then the worktree switches while its panes close, and a status poll reads it.
+    real(wt, "switch", "-q", "approved");
+    answering = () => {};
+    closing = () => (real(wt, "switch", "-q", "unapproved"), (th.branch = "unapproved"));
+    const done = await remove(th, "all");
+    assert.match(asked[1], /AND the branch approved\?/);
+    assert.deepEqual([done.removed, done.branch, existsSync(wt)], [true, "deleted", false]);
+    assert.deepEqual(branches(), ["main", "unapproved"], "the branch deleted wasn't the one approved");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+  console.log("ok   deleting a worktree and its branch deletes the branch the dialog named, or nothing");
+}
+if (check(216)) {
+  // loomctl close-thread --delete branch: the branch its plan named, or without a plan the one Git has checked out.
+  const base = mkdtempSync(join(tmpdir(), "loom-cli-plan-branch-"));
+  const real = (dir: string, ...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
+  let hashed = () => {};
+  /** A repository, a worktree on approved, unapproved at the same commit, and loomctl over it. */
+  const setup = (name: string) => {
+    const repo = join(base, name, "repo"), wt = join(base, name, "wt");
+    mkdirSync(repo, { recursive: true });
+    real(repo, "init", "-q", "-b", "main");
+    real(repo, "commit", "-q", "--allow-empty", "-m", "start");
+    real(repo, "branch", "unapproved");
+    real(repo, "worktree", "add", "-q", "-b", "approved", wt);
+    const th = { id: "t", name: "t", dir: wt, repo, branch: "approved", isWorktree: true, panes: [], dispose: async () => {} };
+    fixture({ ...gitparse, threads: [th], cliThread: () => th, toast() {}, renderSide() {}, show() {}, save() {},
+      sha256: async (text: string) => { const h = await cli.sha256(text); hashed(); return h; },
+      invoke: async (cmd: string, args: any) => (cmd === "worktree_fingerprint" ? "same contents" : cmd === "worktree_remove" ? (real(repo, "worktree", "remove", "--force", args.dir), "trash") : ""),
+      git: async (dir: string, ...args: string[]) => real(dir, ...args) });
+    const f = lastFixture;
+    return { repo, wt, th, f, close: (a: object) => f.CLI["close-thread"].run({ _: ["t"], yes: true, delete: "branch", ...a }),
+      branches: () => real(repo, "branch", "--format=%(refname:short)").split("\n").filter(Boolean).sort() };
+  };
+  try {
+    // A switch before close-thread's own inventory changes the plan's rev.
+    let x = setup("before");
+    let rev = (await x.f.CLI["close-plan"].run({ _: ["t"], delete: "branch" })).data.rev;
+    real(x.wt, "switch", "-q", "unapproved");
+    await assert.rejects(x.close({ plan: rev }), /changed since plan/);
+    assert.deepEqual([x.branches(), existsSync(x.wt)], [["approved", "main", "unapproved"], true]);
+    // A switch, read by a status poll, after that inventory and while the plan's rev is hashed: the plan still matches.
+    x = setup("hashing");
+    const planned = (await x.f.CLI["close-plan"].run({ _: ["t"], delete: "branch" })).data;
+    assert.equal(planned.branch, "approved");
+    let armed = true;
+    hashed = () => { if (armed) (armed = false), real(x.wt, "switch", "-q", "unapproved"), void x.f.syncBranch(x.th); };
+    await x.close({ plan: planned.rev });
+    hashed = () => {};
+    await new Promise((r) => setTimeout(r, 50)); // the poll's sync settles
+    assert.deepEqual(x.branches(), ["main", "unapproved"], "close-thread deleted a branch its plan didn't name");
+    // --force has no plan: a switch in the terminal that Loom's cache hasn't seen.
+    x = setup("forced");
+    real(x.wt, "switch", "-q", "unapproved");
+    await x.close({ force: true });
+    assert.deepEqual([x.branches(), existsSync(x.wt)], [["approved", "main"], false], "close-thread --force deleted the cached branch, not the one checked out");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+  console.log("ok   loomctl close-thread --delete branch deletes its plan's branch, or the one checked out when there's no plan");
 }

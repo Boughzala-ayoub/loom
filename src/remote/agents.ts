@@ -26,7 +26,9 @@ const asks = new Map<string, Menu | null>();
 let saidAt = 0;
 let listKey = "";
 let held = false; // a card kept as it was while its reply is typed: redrawn once you leave its box
-let open: string | null = null; // the agent on show, for the list's highlight
+// The agent the list highlights, apart from the agent on show (`open`): New thread unlights the list, while the
+// agent screen keeps its agent and that agent's draft. Shared, the draft went to the next agent opened.
+let lit: string | null = null;
 
 export const list = el("section", "screen primary");
 list.id = "list";
@@ -56,7 +58,7 @@ for (const [v, label] of [["threads", "Threads"], ["activity", "Activity"]]) {
 }
 
 export function showList(current: string | null) {
-  open = current;
+  lit = current;
   listKey = "";
   drawList();
 }
@@ -71,7 +73,7 @@ export function drawList() {
   const all = panes();
   const waiting = all.filter((p) => p.state === "waiting");
   // Rebuilt only when something besides the ages changed, so a tap never lands on a row being replaced.
-  const key = JSON.stringify([open, view, query, [...folded], app.threads.map((t) => [t.id, t.name, t.branch, t.state, t.changed, t.panes.map((p) => [p.id, p.state, p.title, p.agent])]), view === "activity" ? [...said, ...asks] : 0]);
+  const key = JSON.stringify([lit, view, query, [...folded], app.threads.map((t) => [t.id, t.name, t.branch, t.state, t.changed, t.panes.map((p) => [p.id, p.state, p.title, p.agent])]), view === "activity" ? [...said, ...asks] : 0]);
   const typing = document.activeElement instanceof HTMLInputElement && rows.contains(document.activeElement) ? document.activeElement : null;
   if (key !== listKey || (held && !typing)) {
     listKey = key;
@@ -178,7 +180,7 @@ function threadBlock(t: Thread) {
 function agentRow(p: Pane) {
   const row = button("", () => go(`#/pane/${encodeURIComponent(p.id)}`), `agent ${p.state}`);
   row.dataset.id = p.id;
-  row.setAttribute("aria-current", String(p.id === open));
+  row.setAttribute("aria-current", String(p.id === lit));
   const line1 = el("span", "line1");
   line1.append(el("span", "", p.agent));
   if (p.state !== "idle") line1.append(el("span", `chip ${p.state}`, p.state));
@@ -240,6 +242,7 @@ function choices(p: Pane, m: Menu) {
 }
 
 const drafts = new Map<string, string>(); // each Activity reply's unsent text: the cards are rebuilt as agents change
+const replying = new Set<string>(); // panes whose reply is on its way: a second tap, or Enter, sends nothing
 const replyInput = (pane?: string) => [...rows.querySelectorAll<HTMLInputElement>(".reply input")].find((i) => i.dataset.pane === pane);
 
 function replyBox(p: Pane) {
@@ -249,11 +252,15 @@ function replyBox(p: Pane) {
   input.dataset.pane = p.id;
   input.setAttribute("aria-label", `Reply to ${p.ref}`);
   input.oninput = () => drafts.set(p.id, input.value);
-  form.append(input, el("button", "primary", "Send"));
+  const send = el("button", "primary", "Send");
+  send.disabled = replying.has(p.id);
+  form.append(input, send);
   form.onsubmit = (e) => {
     e.preventDefault();
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || replying.has(p.id)) return;
+    replying.add(p.id);
+    send.disabled = true;
     void act(async () => {
       await run(p.agent === "shell" ? "send" : "submit", [p.id, "-"], { stdin: text, change: true, timeout: 60 });
       // Only the reply that went: one typed while it was on its way stays a draft.
@@ -261,7 +268,10 @@ function replyBox(p: Pane) {
       drafts.delete(p.id);
       const shown = replyInput(p.id); // this box, or the one a rebuild put in its place meanwhile
       if (shown) shown.value = "";
-    }, "Sent");
+    }, "Sent").finally(() => {
+      replying.delete(p.id);
+      for (const b of [send, replyInput(p.id)?.form?.querySelector("button")]) if (b) b.disabled = false;
+    });
   };
   return form;
 }
@@ -376,6 +386,7 @@ promptForm.append(keysBtn, promptText, micBtn, sendBtn);
   paneView.append(topBar(who, [stateChip, more], "#/"), noticeBar, screenBox, dock);
 }
 
+let open: string | null = null; // the agent on show
 let shown: string | null = null; // the last screen drawn, to skip redrawing an unchanged one
 let question = "";
 let older = false; // older lines on screen: the live view waits
@@ -410,6 +421,7 @@ export function showPane(id: string | null, stableId = "") {
     promptText.style.height = "";
     if (promptText.value) promptText.style.height = `${promptText.scrollHeight + 2}px`;
   }
+  paintSend();
   drawHead();
   drawKeys();
   reread();
@@ -432,9 +444,11 @@ export function focusOnPc() {
 let openStable = "", stableFor: string | null = null;
 /** Unsent messages by agent: its stableId, which a restart keeps, else its pane id. None while a link's agent is looked up. */
 const typed = new Map<string, string>();
-/** What each agent's box is sending now, by the same key: on its way, it is no draft for a new clip to join. */
-const outgoing = new Map<string, string>();
+/** What each agent's box is sending now, by the same key, and its send settling: on its way, it is no draft for
+ * a new clip to join, and that agent's Send waits for it. Another agent's doesn't. */
+const outgoing = new Map<string, { text: string; sent: Promise<unknown> }>();
 const draftKey = () => (open === null ? null : (stableFor === open && openStable) || open);
+const paintSend = () => void (sendBtn.disabled = outgoing.has(draftKey() ?? ""));
 
 /** After each read of the list. Once the open agent's pane is missing from it, the one pane with its
  * stableId (saved with each pane, never shared) is the one Loom restored it as: the address follows,
@@ -592,12 +606,12 @@ export async function screen() {
 /** Toggles Loom's phone size on the PC, with the open pane filling the window. */
 async function fitPhone() {
   const p = findPane(open);
-  const th = p && threadOf(p);
   const fitting = !app.phoneSize;
-  // A pane in a thread that isn't showing keeps its size, so it is shown first.
-  if (p && fitting) await run("show", [p.id], { change: true });
+  // A pane in a thread that isn't showing keeps its size, so it is shown first. zoom toggles: show's own reply
+  // says whether the pane fills its thread, not the list, up to 2 s old (focusOnPc).
+  const zoomed = p && !!(await run<{ zoomed?: boolean }>("show", [p.id], { change: true })).zoomed;
   app.phoneSize = (await run<{ phone: boolean }>("window", ["phone"], { change: true })).phone;
-  if (p && (th?.zoomed === p.id) !== fitting) await run("zoom", [p.id], { change: true });
+  if (p && zoomed !== fitting) await run("zoom", [p.id], { change: true });
   toast(app.phoneSize ? "Loom fits the phone now" : "Loom is back at its desktop size");
 }
 
@@ -695,28 +709,29 @@ promptForm.onsubmit = (e) => {
   e.preventDefault();
   void sendPrompt();
 };
-/** Sends what the box holds, and settles once Loom has answered: a dictated ⏎ waits on it. */
-async function sendPrompt() {
-  const text = promptText.value.trim();
-  if (!text || !open) return;
-  sendBtn.disabled = true;
-  const id = open, key = draftKey()!;
+/** Sends what the box holds, and settles once Loom has answered: a dictated ⏎ waits on it. One at a time per agent. */
+function sendPrompt() {
+  const text = promptText.value.trim(), id = open, key = draftKey();
+  if (!text || !id || key === null || outgoing.has(key)) return;
   // An agent gets a task Loom follows to its end. A shell gets the line typed:
   // submit needs Loom's PowerShell prompt and would add a PowerShell comment.
   const cmd = findPane(id)?.agent === "shell" ? "send" : "submit";
-  outgoing.set(key, text);
-  await act(async () => {
+  const sent = act(async () => {
     await run(cmd, [id, "-"], { stdin: text, change: true, timeout: 60 });
     // Only the message that went: one typed while it was on its way, here or for another agent, stays.
     if (typed.get(key)?.trim() === text) typed.delete(key); // left for another agent while it went
     if (draftKey() !== key || promptText.value.trim() !== text) return;
     promptText.value = "";
     promptText.style.height = "";
-  }, "Sent");
-  if (outgoing.get(key) === text) outgoing.delete(key);
-  shown = null;
-  setTimeout(reread, 300);
-  sendBtn.disabled = false;
+  }, "Sent").finally(() => {
+    outgoing.delete(key);
+    paintSend();
+    shown = null;
+    setTimeout(reread, 300);
+  });
+  outgoing.set(key, { text, sent });
+  paintSend();
+  return sent;
 }
 // The box grows with what you type, up to 40% of the screen.
 promptText.addEventListener("input", () => {
@@ -735,9 +750,12 @@ function dictate() {
   const p = findPane(open), key = draftKey(), visit = app.visit;
   if (!p || p.agent === "shell" || key === null) return;
   // Empty, or holding only a message on its way: what you say now is a message of its own.
-  const wasEmpty = !promptText.value.trim() || promptText.value.trim() === outgoing.get(key);
-  void record((text, pick, byHand) => {
+  const wasEmpty = !promptText.value.trim() || promptText.value.trim() === outgoing.get(key)?.text;
+  void record(async (text, pick, byHand) => {
     if (!text) return toast("Nothing heard.");
+    // A send on its way to this agent, typed too, settles first: once it went the box is empty for this
+    // clip, refused it stays and the clip joins it. Read before, the clip joined a message already sent.
+    await outgoing.get(key)?.sent;
     const here = draftKey() === key;
     const box = here ? promptText.value : typed.get(key) ?? "";
     // Alone, the clip is the whole message, after the prefix. Otherwise it joins what the box holds: text
@@ -751,7 +769,7 @@ function dictate() {
     // A ⏎ sends only a message the clip made alone, so nothing already sent goes again under a new key;
     // and the next clip lands only once this one has gone.
     if (here && visit === app.visit) {
-      if (pick.prefix?.enter && byHand && alone) return sendPrompt();
+      if (pick.prefix?.enter && byHand && alone) await sendPrompt();
     } else toast(`What you said to ${p.ref} is in its Message box.`);
   });
 }

@@ -148,9 +148,11 @@ try {
           if (qa.holdGit && a[0] === qa.holdGit[0] && (!qa.holdGit[1] || a[1] === qa.holdGit[1])) return new Promise(resolve => qa.heldGit.push(resolve));
           if (qa.failGit && a[0] === qa.failGit) throw new Error('Test: git refused');
           if (a[0] === 'worktree' && a[1] === 'add' && qa.failCreate) throw new Error('Could not create worktree: branch is locked');
+          // worktree add -b <branch> <dir>: that folder is on that branch now, as git would say.
+          if (a[0] === 'worktree' && a[1] === 'add' && a[2] === '-b') (qa.branchAt ??= {})[a[4]] = a[3];
           if (a[0] === 'status' && qa.statusFor?.[args.dir] !== undefined) return qa.statusFor[args.dir]; // one worktree's own status
           if (a[0] === 'status') return (a.includes('--branch') ? '## main...origin/main [ahead 2]\0' : '') + (qa.clean ? '' : ' M src/main.ts\0M  src/styles.css\0?? notes.txt\0') + (a.includes('--ignored=matching') ? qa.ignored ?? '' : '');
-          if (a[0] === 'branch' && a[1] === '-D' && qa.failBranch) throw new Error('Test: the branch is checked out elsewhere');
+          if (a[0] === 'update-ref' && a.includes('--no-deref') && qa.failBranch) throw new Error('Test: the branch is checked out elsewhere');
           if (a.includes('--numstat')) return '18\t4\tsrc/main.ts\n7\t2\tsrc/styles.css\n';
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
           if ((a[0] === 'diff' || a[0] === 'show') && qa.longDiff) return 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1,601 @@\n context line one\n' + '+added line\n'.repeat(600);
@@ -161,7 +163,9 @@ try {
           if (a[0] === 'rev-list' && a.includes('--not')) return qa.unmerged ?? '0';
           if (a.includes('--show-toplevel')) return args.dir;
           if (a[0] === 'rev-parse') return location.search.includes('long-location') ? '' : 'main';
+          // The branch checked out at that folder, as git would say: each fixture thread's own.
           if (a[0] === 'symbolic-ref' && a.at(-1) === 'refs/remotes/origin/HEAD') return 'refs/remotes/origin/main\n';
+          if (a[0] === 'symbolic-ref') return location.search.includes('long-location') ? '' : 'refs/heads/' + (qa.branchAt?.[args.dir] ?? state.threads.find((t) => t.dir === args.dir)?.branch ?? 'main') + '\n';
           return '';
         }
       }, { shouldMockEvents: true });
@@ -1070,7 +1074,7 @@ try {
         assert.equal(morePanes.ok, false, JSON.stringify(morePanes));
         assert.match(morePanes.error, /changed since plan/);
         assert.ok(await open(a.id) && !(await killed([...paneIds, extra.data.id])), 'Still open, every pane still running');
-        assert.equal(await removals() + await gitCalls('branch -D'), 0);
+        assert.equal(await removals() + await gitCalls('update-ref --no-deref'), 0);
         // With the plan as it now is and the ignored files allowed, it goes, step by step.
         const plan2 = (await cli('close-plan', a.id, '--delete', 'branch')).data;
         const done = await cli('close-thread', a.id, '--yes', '--delete', 'branch', '--plan', plan2.rev, '--discard', 'ignored');
@@ -1086,7 +1090,7 @@ try {
         assert.equal(stuck.ok, false, JSON.stringify(stuck));
         assert.deepEqual([stuck.closed, stuck.steps], [b.id, { panes: 'closed', worktree: 'failed', branch: 'kept' }], JSON.stringify(stuck));
         assert.match(stuck.error, /stopped its panes, but couldn't move its worktree folder to Loom's trash, so its branch was kept/);
-        assert.equal(await gitCalls('branch -D', b.branch), 0, 'No branch deleted after the folder failed');
+        assert.equal(await gitCalls('update-ref --no-deref', `refs/heads/${b.branch}`), 0, 'No branch deleted after the folder failed');
         // The folder goes and the branch won't: said apart. --force still deletes without looking.
         const c = await worktree('cleanup-c');
         await page.evaluate(() => { window.qa.failRemove = false; window.qa.failBranch = true; });
@@ -2947,6 +2951,29 @@ try {
       await audit(name);
       await escape();
     }
+    // Branch rows and callbacks keep the same identities as the CLI data used by the phone.
+    {
+      const th = (await cli('threads')).data.find(t => t.front);
+      const names = ['approved', '\u00a0approved', 'approved\u00a0', 'heads/approved'];
+      for (const [i, name] of names.entries()) {
+        await page.evaluate(({ dir, name, names }) => { window.qa.branchNames = names; (window.qa.branchAt ??= {})[dir] = name; }, { dir: th.dir, name, names });
+        const listed = (await cli('git', th.id, 'branches')).data;
+        assert.deepEqual(listed, { current: name, branches: names });
+        await page.click('#changes-more');
+        await page.locator('.menu-item').filter({ hasText: 'Switch branch' }).click();
+        const rows = page.locator('#pane-menu:not(.hidden) .menu-item');
+        await rows.first().waitFor();
+        assert.deepEqual(await rows.allTextContents(), names.map(b => b === name ? `${b} ✓` : b));
+        await audit(`branches-identity-${i}`);
+        const before = await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args[0] === 'switch').length);
+        await rows.nth(i).click();
+        await page.waitForFunction(n => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args[0] === 'switch').length > n, before);
+        assert.deepEqual(await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'git_run' && c.args.args[0] === 'switch').at(-1).args.args), ['switch', name]);
+        await page.waitForFunction(() => !document.querySelector('#changes-more').disabled);
+      }
+      await page.evaluate(({ dir, branch }) => { delete window.qa.branchNames; window.qa.branchAt[dir] = branch; }, th);
+      await cli('git', th.id, 'branches');
+    }
     await page.locator('.file').first().click({ button: 'right' });
     await audit('file-actions');
     await page.locator('.menu-item').filter({ hasText: /^Discard changes/ }).click();
@@ -2962,6 +2989,19 @@ try {
     // The overview ruler: one mark per run of changed rows, the removal above the addition.
     assert.deepEqual(await page.evaluate(() => [...document.querySelectorAll('#diff-ruler i')].map(m => [m.className, parseFloat(m.style.top) < 100])), [['del', true], ['add', true]]);
     assert.ok(await page.evaluate(() => { const [d, a] = document.querySelectorAll('#diff-ruler i'); return d.getBoundingClientRect().top < a.getBoundingClientRect().top; }), 'Ruler marks keep row order');
+    // A hunk's Discard asks first, as the phone and loomctl do; only the dialog's Discard runs git.
+    const reversed = () => page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'git_stdin' && c.args.args.includes('--reverse')).length);
+    const hunkDiscard = page.locator('#diff-body .line.hunk button[title="Throw this hunk away"]');
+    await hunkDiscard.click();
+    await page.waitForSelector('#confirm[open]');
+    assert.match(await page.locator('#confirm-title').textContent(), /Discard this hunk/);
+    await audit('confirm-hunk-discard');
+    await escape();
+    await page.waitForFunction(() => !document.querySelector('#confirm').open);
+    assert.equal(await reversed(), 0, 'A cancelled hunk Discard runs no git');
+    await hunkDiscard.click();
+    await page.locator('#confirm-action').click();
+    await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'git_stdin' && c.args.args.includes('--reverse')));
     await page.evaluate(() => window.qa.longDiff = true);
     await page.click('#diff-full');
     await page.waitForFunction(() => document.querySelector('#diff-body').textContent.includes('context line one') && window.qa.saved.ui.diffFull);

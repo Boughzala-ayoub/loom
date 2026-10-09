@@ -74,8 +74,12 @@ try {
         $stuck = @()
         foreach ($f in $done) {
             try {
-                # [NullString]: PowerShell passes $null to a string as "", which Replace refuses.
-                if ($f.Previous) { [IO.File]::Replace($f.Backup, $f.Destination, [NullString]::Value) } else { Remove-Item -LiteralPath $f.Destination }
+                # Copied back, not moved: the backup is the image a running
+                # Loom maps, which can be read but not renamed or replaced.
+                if ($f.Previous) {
+                    Copy-Item -LiteralPath $f.Backup -Destination $f.Destination -Force
+                    if ((& $hash $f.Destination) -ne $f.Previous) { throw 'checksum mismatch after the copy back' }
+                } else { Remove-Item -LiteralPath $f.Destination }
             } catch { $stuck += "$($f.Destination) (its previous copy is $($f.Backup)): $_" }
         }
         if ($stuck) { throw "$failure Could not restore $($stuck -join '; ')." }

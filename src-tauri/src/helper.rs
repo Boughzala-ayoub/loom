@@ -86,6 +86,9 @@ fn chain(cmd: &str, input: &[u8]) -> i32 {
     let child = std::process::Command::new("cmd")
         // `/s` strips the outer quotes and runs the rest verbatim.
         .raw_arg(format!("/s /c \"{cmd}\""))
+        // The statusline runs in the pane's folder, which cmd searches before
+        // PATH: a `node.cmd` a checkout carries would run instead of node.
+        .env("NoDefaultCurrentDirectoryInExePath", "1")
         .stdin(std::process::Stdio::piped())
         // Release loom.exe has no console; without this cmd gets a visible one.
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
@@ -281,15 +284,15 @@ fn root_thread(codex_home: &Path, event: &str) -> Option<String> {
 /// env the npm shim would have set. The shim chain is cmd.exe → codex.cmd →
 /// node codex.js → codex.exe, and cmd and node then sit idle under every pane
 /// for its whole life, ~25 MB between them. None = launch through cmd as
-/// before: cmd syntax in the line, or a codex that cmd would not resolve to a
-/// plain npm install.
-pub fn codex_direct(line: &str, cwd: Option<&Path>) -> Option<(PathBuf, Vec<String>, Vec<(&'static str, String)>)> {
+/// before: cmd syntax in the line, or a codex on PATH that isn't a plain npm
+/// install.
+pub fn codex_direct(line: &str) -> Option<(PathBuf, Vec<String>, Vec<(&'static str, String)>)> {
     let tail = line.strip_prefix("codex").filter(|t| t.is_empty() || t.starts_with(' '))?;
     // cmd would act on these (`||` in a startup command, `%var%`): keep cmd.
     if tail.contains(['&', '|', '<', '>', '^', '%', '!']) {
         return None;
     }
-    let shim_dir = codex_shim_dir(cwd)?;
+    let shim_dir = codex_shim_dir()?;
     let pkg = shim_dir.join("node_modules/@openai/codex");
     // pnpm and bun installs keep their own layouts and manager env: cmd path.
     if shim_dir.join("node_modules/.modules.yaml").exists() || shim_dir.to_string_lossy().contains(".bun") {
@@ -313,25 +316,15 @@ pub fn codex_direct(line: &str, cwd: Option<&Path>) -> Option<(PathBuf, Vec<Stri
     Some((exe, split_args(tail), env))
 }
 
-/// The folder holding the npm `codex.cmd` that cmd.exe would run for `codex`:
-/// the pane's folder first, then PATH, trying PATHEXT's extensions in order in
-/// each. Anything else found first (a codex.exe on PATH, a codex.bat in the
-/// repo) is None, and cmd runs that exactly as before.
-fn codex_shim_dir(cwd: Option<&Path>) -> Option<PathBuf> {
-    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
-    let path = std::env::var_os("PATH")?;
-    let dirs = cwd.map(Path::to_path_buf).into_iter().chain(std::env::split_paths(&path));
-    for dir in dirs {
-        for ext in exts.split(';').filter(|e| !e.is_empty()) {
-            let hit = dir.join(format!("codex{ext}"));
-            if hit.is_file() {
-                let npm = ext.eq_ignore_ascii_case(".cmd")
-                    && dir.join("node_modules/@openai/codex/bin/codex.js").is_file();
-                return npm.then_some(dir);
-            }
-        }
-    }
-    None
+/// The folder holding the npm `codex.cmd` that `codex` is on PATH, never the
+/// pane's folder (lib.rs `on_path`). Anything else found first (a codex.exe on
+/// PATH, a pnpm or bun shim) is None, and cmd runs that by its full path.
+fn codex_shim_dir() -> Option<PathBuf> {
+    let hit = crate::on_path("codex")?;
+    let dir = hit.parent()?;
+    let npm = hit.extension().is_some_and(|e| e.eq_ignore_ascii_case("cmd"))
+        && dir.join("node_modules/@openai/codex/bin/codex.js").is_file();
+    npm.then(|| dir.to_path_buf())
 }
 
 /// Split a command line the way the MSVC runtime does, which is how node and
@@ -529,7 +522,7 @@ mod tests {
     #[test]
     #[ignore]
     fn codex_direct_real_install() {
-        let (exe, args, env) = codex_direct(r#"codex resume abc -c "notify=['C:\x\loom.exe','--codex-notify']""#, None)
+        let (exe, args, env) = codex_direct(r#"codex resume abc -c "notify=['C:\x\loom.exe','--codex-notify']""#)
             .expect("an npm codex on PATH");
         println!("{} {args:?} {env:?}", exe.display());
         assert!(exe.ends_with("x86_64-pc-windows-msvc/bin/codex.exe") && exe.is_file());
@@ -539,8 +532,8 @@ mod tests {
 
     #[test]
     fn codex_direct_keeps_cmd_syntax_on_cmd() {
-        assert!(codex_direct("codex || echo gone", None).is_none());
-        assert!(codex_direct("codex %X%", None).is_none());
-        assert!(codex_direct("codexx", None).is_none());
+        assert!(codex_direct("codex || echo gone").is_none());
+        assert!(codex_direct("codex %X%").is_none());
+        assert!(codex_direct("codexx").is_none());
     }
 }

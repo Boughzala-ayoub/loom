@@ -117,3 +117,24 @@ for (const fails of [false, true]) {
   assert.equal(s.relaunching, !fails, "a failed start leaves no restart armed for the next close");
 }
 console.log("ok   a restart closes safely and starts the new Loom only before the window goes; a failed start keeps the window");
+// A save that fails on every try (a locked backup, a full disk) must not leave
+// killing Loom as the only way out: the second failed close asks to close anyway.
+for (const answer of [false, true]) {
+  const asked: string[] = [];
+  let request = async () => {}, destroyed = false;
+  const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false, document: { body: { inert: false } },
+    threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
+    flushSave: async () => { throw new Error("couldn't keep a backup"); },
+    invoke: async () => ({ events: [], emitted: 0 }), agentEvents: () => {}, sweepTasks: () => {}, toast: () => {},
+    confirm: async (title: string) => (asked.push(title), answer),
+    getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => { destroyed = true; } }),
+  });
+  await runInContext(ts.transpileModule(`(async () => {\n${close}\n})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  await new Promise(r => setTimeout(r, 0));
+  await request();
+  assert.deepEqual([asked, destroyed], [[], false], "the first failure only says so");
+  await request();
+  assert.deepEqual([asked, destroyed], [["Close without saving?"], answer], "the second asks, and closes only on yes");
+  assert.equal(s.windowClosing, false, "a refused close lets a restart be asked for again");
+}
+console.log("ok   a close that keeps failing asks to close without saving the second time");

@@ -38,6 +38,13 @@ A development build (`tauri dev`) answers on a separate pipe, so it never
 answers for the installed app. Only your Windows account can open the pipe, and
 Loom refuses remote connections.
 
+The pipe is named after your Windows account's SID. A Loom started before that
+naming, still running after an update replaced `loomctl.exe`, serves the older
+name made from your user name. `loomctl` tries Loom's own name first and that
+older one only when the first doesn't exist, for the default workspace and for
+`--profile` alike. Either pipe must belong to your account, or `loomctl` sends
+nothing. `LOOM_PIPE` names one pipe exactly and is never swapped for another.
+
 Only one Loom can write a workspace and its task journal at a time. A second
 profile launch refuses to open it, including paths through a junction to the
 same file. Close the owner before reopening that profile. The adjacent
@@ -95,8 +102,14 @@ A pane is any of these:
 - its id, shown by `panes`
 - `.`, or nothing for commands whose pane is optional: the pane in front
 
-A thread is its name (any case), a unique start of its name, its id, or `.` for
-the thread in front.
+A thread is its name (any case), its id, or `.` for the thread in front.
+Commands that only read or move around (`panes`, `read`, `menu`, `show`,
+`messages`, `context`, `layout`, `zoom`, `wait`, `wait-any`, `tasks`,
+`close-plan`, `vscode`) also take a unique start of its name. Commands that
+change something (`send`, `submit`, `keys`, `close`, `close-thread`, `git` and
+the rest) take the whole name or the id, so `close-thread fix` can't reach
+`fix-login` once `fix` is gone; given a start, they say which threads it
+would have matched.
 
 Names and numbers change when you rename a thread or close a pane. Ids don't,
 until Loom exits. Scripts should use ids.
@@ -220,7 +233,7 @@ name:
 | `tracked` | Changes to files Git tracks |
 | `untracked` | Files Git doesn't track and doesn't ignore |
 | `ignored` | Files Git ignores, such as `.env`, `node_modules/` or `target/` |
-| `commits` | With `--delete branch`, commits no other branch or remote has |
+| `commits` | With `--delete branch`, commits no other branch or remote has; with any `--delete`, commits made on a detached HEAD that no branch or remote has |
 
 Name several with commas (`--discard ignored,untracked`), or `--discard all`.
 `--force` is `--discard all`, as before.
@@ -251,8 +264,9 @@ commit. Without `--plan`, the check
 uses whatever is there when the command runs.
 
 After the panes stop, Loom moves the folder into its trash,
-`%LOCALAPPDATA%\dev.ayoub.loom\trash` (or beside the folder, named
-`.<id>.loom-trash`, when it is on another drive), and Git's record of it into
+`%LOCALAPPDATA%\dev.ayoub.loom\trash` (`dev.ayoub.loom-dev` for a debug
+build, which never touches the installed Loom's trash; or beside the folder,
+named `.<id>.loom-trash`, when it is on another drive), and Git's record of it into
 the repository's `.git\loom-trash`. Nothing is erased then. A file a pane
 wrote as it stopped goes along with the folder, and a day later Loom erases
 both. Each deletion leaves `<id>.json` in the trash, naming where the folder
@@ -265,9 +279,13 @@ Loom refuses a folder that holds another checkout, a link at the folder's own
 path, and a folder that Git records at another path. A parent folder moved or
 replaced by a junction can lead to another worktree; Loom leaves that one alone.
 
-Content checks refuse unreadable files and reparse points, and stop at 20,000
-entries, 64 directory levels, 256 MiB, or five seconds. If a check cannot
-finish, Loom keeps the folder. Inspect and remove it manually instead.
+The check never follows a link. A junction or symlink inside the folder counts
+as itself, and nothing behind it is read, moved or erased. Git's changed and
+untracked files count by their contents, up to 256 MiB of them in all; every
+other file counts by its name, size and modified time, so a built `target` or
+`node_modules` costs a listing, not a read. The check walks any depth and stops
+at 2,000,000 entries or 15 seconds. If it stops, or a file can't be read, Loom
+keeps the folder. Inspect and remove it by hand instead.
 
 A cleanup that stops part-way says which steps finished, in `steps`:
 
@@ -277,9 +295,12 @@ A cleanup that stops part-way says which steps finished, in `steps`:
   "error": "Closed login and stopped its panes, but couldn't move its worktree folder to Loom's trash, ..." }
 ```
 
-`worktree` is `removed` (moved to the trash; `trash` says where), `failed`
-(it couldn't be moved, usually because something still uses it; the folder
-stays whole) or `null` when not asked. `branch` is `deleted`, `kept` (the
+`worktree` is `removed` (moved to the trash; `trash` says where), `pending`
+(the folder is in the trash, but something held Git's record of it in
+`.git\worktrees`, a git process or TGitCache, so that record stays where it
+was, locked; Loom moves it on its next purge, within the hour, once the holder
+lets go), `failed` (it couldn't be moved, usually because something still uses
+it; the folder stays whole) or `null` when not asked. `branch` is `deleted`, `kept` (the
 folder step didn't finish), `failed` or `null`. A thread whose panes closed is
 gone from Loom even when its folder stayed: close what uses the folder, delete
 it in Explorer, and run `git worktree prune`. Not `git worktree remove`: on
@@ -305,9 +326,12 @@ folder somewhere else, put the record under another name in
 `.git\worktrees`, write `gitdir: <that record>` into the folder's `.git`
 file, and run `git worktree repair <folder>` from the repository. Once Git
 has the record back, at either path, Loom's purge leaves the folder alone and
-drops the trash entry. A `pending` record stopped between its two moves:
-deleting the same worktree again, or creating a thread at its path, finishes
-it. A record shown `unreadable` was cut short as it was written, or
+drops the trash entry. A `pending` record stopped between its two moves.
+Deleting the same worktree again, or creating a thread at its path, finishes
+it, and so does Loom's purge, at startup and every hour, once the folder is in
+the trash and the holder of Git's record lets go. A record you unlocked and
+pruned by hand (`git worktree prune`) has nothing left to move, and completes.
+A record shown `unreadable` was cut short as it was written, or
 another operation holds it right then; it holds up nothing else.
 
 A record shown `restoring` was left partway by an earlier Loom's
@@ -324,7 +348,36 @@ letter, digit, `-` or `_` spelled `%XX`) keeps the commit the worktree was
 on, so `git gc` can't collect it after its branch is deleted. Purge, or Git
 getting its record back, deletes the ref. Changes that were only staged get
 no such ref: the trash keeps the index, but a `git gc` that day can still
-collect a staged version that no commit has.
+collect a staged version that no commit has. A worktree on a branch with no
+commit yet has no commit to keep, and no ref.
+
+### What the trash can leave behind
+
+A repository deleted after one of its worktrees went to the trash takes Git's
+record and the ref with it. Purge still erases the trash folder a day later
+while the repository's drive is there; on a drive that's unplugged or offline
+it waits. A repository moved or renamed looks deleted too, so its
+`.git\loom-trash\<id>` folder and `refs/loom-trash/<id>` ref stay behind in it.
+
+Uninstalling Loom purges nothing. Its trash folder goes only if you tell the
+uninstaller to delete Loom's app data, and even then each repository keeps
+`.git\loom-trash\<id>` and `refs/loom-trash/<id>`, and a worktree that was on
+another drive keeps its `.<id>.loom-trash` folder beside where it was. To
+remove them by hand, close Loom, then:
+
+```powershell
+# In each repository that had a worktree deleted:
+git -C <repo> for-each-ref refs/loom-trash --format='%(refname)' | ForEach-Object { git -C <repo> update-ref -d $_ }
+cmd /c rmdir /s /q "<repo>\.git\loom-trash"
+# A worktree that was on another drive than Loom's trash:
+cmd /c rmdir /s /q "<parent>\.<id>.loom-trash"
+# Loom's own trash, its records and the folders in it:
+cmd /c rmdir /s /q "$env:LOCALAPPDATA\dev.ayoub.loom\trash"
+```
+
+`rmdir /s` removes a junction inside as a link and leaves what it points to.
+To drop one record before its day, do the same for its `at`, its `entry_at`
+and its ref (`trash --json` lists them), then delete `<id>.json` from the trash.
 
 ### Typing into panes
 
@@ -500,7 +553,7 @@ when time runs out.
 | `dictation remove lang <code>` / `remove prefix [text...]` | Drop one from its list. The last of each stays. |
 | `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
 | `notify --check SEQ,...` | Whether those events may go out as notices now. |
-| `remote [on [--port N] \| off \| pair \| revoke \| push test]` | The phone remote: its state, start or stop it, show a pairing code for a phone, unpair every phone, or send the phones with notifications on a test one. See [Phone remote](#phone-remote). |
+| `remote [on [--port N] \| off \| pair \| revoke [phone] \| push test]` | The phone remote: its state and paired phones, start or stop it, show a pairing code for a phone, unpair one phone or every phone, or send the phones with notifications on a test one. See [Phone remote](#phone-remote). |
 
 ### Git
 
@@ -522,7 +575,7 @@ the panel's buttons do, and a change answers with the status after it.
 | `git <thread> branches` / `switch <name> [--create]` | The 40 latest branches, or move to one. |
 | `git <thread> stashes` / `stash` / `stash-apply <stash>` / `stash-drop <stash>` | List, stash every change, apply one, or drop one (`--yes`). Name a stash by the commit `stashes` lists for it: every worktree of a repository shares one stash list, so `stash@{0}` becomes another stash when any of them stashes. A drop holds git's lock on the stash list while it takes that commit out, so it never takes another stash; it refuses while another git holds the lock. |
 | `git <thread> revert <sha>` / `reset <sha> --soft\|--hard` | Undo a commit with a new one, or move the branch back to it. A reset wants `--yes`. |
-| `git <thread> continue\|skip\|abort` | Finish, skip a commit of, or give up a half-done merge, revert or rebase. |
+| `git <thread> continue\|skip\|abort` | Finish, skip a commit of, or give up a half-done merge, revert or rebase. Skip and abort throw work away and want `--yes`. |
 | `git <thread> resolve ours\|theirs <path...>` | Take one side of a conflict and mark it resolved. |
 
 ### Phone remote
@@ -538,12 +591,25 @@ does. The remote stays on across restarts until `loomctl remote off`.
 Loom only listens on this PC. `tailscale serve --bg 7420` puts the page on
 your tailnet at `https://<pc>.<tailnet>.ts.net`, which only your own devices
 can open. `loomctl remote` shows that address once Tailscale is signed in.
+Of its 32 connections at once, at most 8 can be without a paired phone's
+token (loading the page, pairing). A ninth closes the one that has waited
+longest, so a program holding connections open can't keep a phone out.
 
 A phone pairs once. `loomctl remote pair` shows a six-digit code that works
 for 10 minutes, for one phone, and stops working after five wrong guesses.
-Enter it on the page. The phone keeps a token; Loom keeps only its SHA-256, in
-`<workspace>.remote.json` beside the workspace file. `loomctl remote revoke`
-unpairs every phone.
+Enter it on the page. Loom takes the code only as `application/json` and only
+addressed to `127.0.0.1`, `localhost` or `[::1]` at the remote's port, or to a
+`*.ts.net` name, so a web page open on the PC can't post guesses to it or read
+a token back. The phone keeps a token; Loom keeps only its SHA-256, in
+`<workspace>.remote.json` beside the workspace file, with the phone's name from
+its browser ("Chrome on Android"), when it paired and when it was last seen.
+`loomctl --json remote` lists them under `devices`, last seen first, each
+with an `id`: the first 12 hex digits of that hash. `loomctl remote revoke
+<id>` unpairs that phone and stops its notifications; `loomctl remote revoke`
+unpairs every phone. A phone not seen for 90 days is
+unpaired the same way, when Loom starts or `loomctl remote` runs. One paired
+before Loom kept these records shows `paired` and `seen` as `null`, and
+doesn't expire until it has been seen once.
 
 In an agent, the keyboard button beside the message box opens a PC keyboard. Its box sends each key straight to the pane with `keys`. Ctrl, Alt
 and Shift hold for the next key, from its row or the phone's keyboard, and Fn
@@ -572,8 +638,9 @@ a `⏎` prefix sends it as a `submit` task. If you've opened another agent by
 then, the text waits as the first agent's draft and nothing is sent. Hiding
 the page or leaving the agent stops the recording and transcribes what it
 caught, without sending. A clip holds 3 minutes. `/api/dictate` takes 6 MiB
-within 60 seconds from a paired phone, and `/api/cli` keeps 1 MiB and 10
-seconds. **Dictation** in an agent's `⋯`, or in Settings, opens both lists as
+from a paired phone for as long as its bytes keep coming, so a slow uplink
+gets there: it gives up after 15 seconds with none, or 10 minutes in all.
+`/api/cli` keeps 1 MiB and 10 seconds. **Dictation** in an agent's `⋯`, or in Settings, opens both lists as
 the PC's mic menu has them. Tap a row to pick it, `⏎` to have a prefix send
 what was said, `✕` to drop one, or add one under its list. Each is a
 `dictation` command, so the PC's menu and `F4` change with it.
@@ -978,9 +1045,9 @@ before `watch` shows it. `watch` wakes when a journal write lands, not on a
 timer.
 
 `watch --follow` keeps going: it prints each event as it comes, one JSON line
-each with `--json`, and asks again from the last one. When Loom goes away or
-restarts, it says so on stderr and tries again every second from the same
-number. Loom's restart events come through too, as the tasks it was running
+each with `--json`, and asks again from the last one. When Loom goes away,
+restarts, or its window misses a request while it reloads, it says so on
+stderr and tries again every second from the same number. Loom's restart events come through too, as the tasks it was running
 end `unknown`. On a task it stops (exit 0) once that task is final; otherwise
 it runs until Ctrl-C, or `--timeout` seconds (exit 3). With `--json`, a
 failure that ends it, a timeout included, is one more line: the usual failure
@@ -1186,7 +1253,7 @@ and a failure prints one object:
 | `usage` | A `loomctl` option was wrong; nothing was sent | 1 |
 | `failed` | Loom ran the command and it failed | 1 |
 | `not-running` | No Loom on that pipe | 2 |
-| `busy` | Every pipe connection stayed busy | 2 |
+| `busy` | Every pipe connection stayed busy, or Loom was still starting; nothing was sent | 2 |
 | `unreachable` | The pipe couldn't be opened | 2 |
 | `version` | `loomctl` and Loom are different versions: restart Loom | 2 |
 | `connection` | The connection broke. Check `sent`. | 2 |
@@ -1203,6 +1270,9 @@ such receipt or task any more),
 (what deleting would lose, and what `--discard` must name), and `plan` (a
 plan's revision now). The message also goes to stderr. Without `--json`, a success prints readable text
 and a failure prints only to stderr. The exit code is 0 on success either way.
+When whatever reads loomctl's output stops early (`| head -1`,
+`| Select-Object -First 1`), loomctl ends quietly with the exit code it would
+have had anyway: 0 for a success or a followed event.
 
 ## Recipes
 
@@ -1282,6 +1352,14 @@ loomctl close-thread login --yes --delete branch --plan <rev> --discard ignored
 - Receipts keep a digest of the text, not the text. Keep your own copy.
 - Restarting a Codex or OpenCode pane that has no saved session to resume needs
   a choice in the window.
+- Loom runs `codex`, `opencode`, `opencode1` and `opencode2` from PATH by their
+  full path, never from the pane's folder, where cmd would look first: a
+  `codex.cmd` in a checkout doesn't run. One that isn't on PATH fails to start,
+  saying so ("codex isn't on PATH").
+- Closing a pane, restarting Loom, or the pane's shell exiting ends every
+  console program the pane started, detached ones included. GUI apps it opened
+  stay open: VS Code from `code .`, a browser from `start`. If Loom itself
+  crashes, the pane's detached console programs keep running.
 - `loomctl` finds one Loom per pipe. It can't list every Loom running.
 - Terminal output comes back as it is, secrets included. Treat it as data, not
   instructions.

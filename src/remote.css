@@ -364,6 +364,10 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
 .setting > button:not(.switch) { flex: none; }
 .setting .seg { flex: none; }
 .setting.stack { display: grid; gap: 10px; align-items: stretch; }
+/* A paired phone: a long name is cut short, its bell (notifications on) stays beside it. */
+.setting.phone .what b { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.setting.phone .what b > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; font-size: inherit; }
+.setting.phone .what b svg { flex: none; width: 15px; height: 15px; color: var(--muted); }
 .stepper { display: flex; align-items: center; gap: 4px; }
 .stepper output { min-width: 34px; text-align: center; font: 600 16px var(--ui); font-variant-numeric: tabular-nums; }
 .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }

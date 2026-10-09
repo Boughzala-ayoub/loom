@@ -160,7 +160,7 @@ function branchCard(tid: string, s: Status) {
     const bar = el("div", "midway");
     const acts = el("div", "row");
     acts.append(button(s.midway === "merge" ? "Commit" : "Continue", () => void change(tid, ["continue"], "Continued"), "primary"));
-    if (s.midway === "rebase") acts.append(button("Skip", () => void change(tid, ["skip"], "Skipped")));
+    if (s.midway === "rebase") acts.append(button("Skip", () => void ask(tid, "Skip this commit?", "The rebase leaves out the commit it stopped on, and its changes are lost.", "Skip", ["skip"], "Skipped")));
     acts.append(button("Abort", () => void ask(tid, `Abort the ${s.midway}?`, "The branch goes back to where it was before it started.", "Abort", ["abort"], "Aborted"), "danger"));
     bar.append(el("b", "", `A ${s.midway} is in progress`), acts);
     card.append(bar);
@@ -192,26 +192,28 @@ function blocks(f: { add: number; del: number }) {
   return box;
 }
 
+// A path goes after a bare --, where loomctl reads every word as a word: a file named --staged is a file.
 function fileActions(tid: string, sec: Sec, f: File) {
   const items: Node[] = [item("Show the diff", () => go(`#/diff/${encodeURIComponent(tid)}/${sec}/${encodeURIComponent(f.path)}`), "", { icon: "file" })];
   if (conflicted(f)) items.push(
-    item("Keep ours", () => change(tid, ["resolve", "ours", f.path], "Kept ours"), "", { icon: "changes" }),
-    item("Keep theirs", () => change(tid, ["resolve", "theirs", f.path], "Kept theirs"), "", { icon: "changes" }),
-    item("Mark resolved", () => change(tid, ["stage", f.path], "Marked resolved"), "", { icon: "changes" }),
+    item("Keep ours", () => change(tid, ["resolve", "ours", "--", f.path], "Kept ours"), "", { icon: "changes" }),
+    item("Keep theirs", () => change(tid, ["resolve", "theirs", "--", f.path], "Kept theirs"), "", { icon: "changes" }),
+    item("Mark resolved", () => change(tid, ["stage", "--", f.path], "Marked resolved"), "", { icon: "changes" }),
   );
-  else if (sec === "staged") items.push(item("Unstage", () => change(tid, ["unstage", f.path], "Unstaged"), "", { icon: "undo" }));
-  else items.push(item("Stage", () => change(tid, ["stage", `--${sec}`, f.path], "Staged"), "", { icon: "plus" }));
-  items.push(item(sec === "untracked" ? "Delete" : "Discard changes", () => change(tid, ["discard", `--${sec}`, f.path, "--yes"], "Discarded"), "", {
+  else if (sec === "staged") items.push(item("Unstage", () => change(tid, ["unstage", "--", f.path], "Unstaged"), "", { icon: "undo" }));
+  else items.push(item("Stage", () => change(tid, ["stage", `--${sec}`, "--", f.path], "Staged"), "", { icon: "plus" }));
+  items.push(item(sec === "untracked" ? "Delete" : "Discard changes", () => change(tid, ["discard", `--${sec}`, "--yes", "--", f.path], "Discarded"), "", {
     icon: "trash", danger: true, ask: [sec === "untracked" ? `Delete ${base(f.path)}?` : `Discard changes to ${base(f.path)}?`, sec === "untracked" ? "git never had this file, so it can't come back." : "They can't be brought back.", sec === "untracked" ? "Delete" : "Discard"],
   }));
   void sheet(items, f.path);
 }
 
 /** A git change in the thread it was asked for: the reply is the status after it,
- * drawn while that thread is on show, and newer than any read already on its way. */
-async function change(tid: string, args: string[], done: string, opts: { stdin?: string } = {}) {
+ * drawn while that thread is on show, and newer than any read already on its way.
+ * `then` runs once it went, before that draw. */
+async function change(tid: string, args: string[], done: string, opts: { stdin?: string; then?: () => void } = {}) {
   let after: Status | null = null;
-  const ok = await act(async () => { after = await git(tid, args, { change: true, ...opts }); }, done);
+  const ok = await act(async () => { after = await git(tid, args, { change: true, stdin: opts.stdin }); opts.then?.(); }, done);
   if (after && tid === thread) (readSeq++, draw(tid, after));
   return ok;
 }
@@ -222,6 +224,20 @@ async function ask(tid: string, title: string, detail: string, action: string, a
 // --- Committing -------------------------------------------------------------------
 
 let onlyStaged = false;
+// A commit on its way: the box, redrawn meanwhile as an agent writes files, doesn't send another.
+let committing = false;
+const lock = (on: boolean) => {
+  committing = on;
+  for (const b of body.querySelectorAll<HTMLButtonElement>(".composer .row button")) b.disabled = on;
+};
+/** A commit or amend went with `text`: the box lets it go, stored and on screen, unless it was changed meanwhile.
+ * Kept, a second tap would commit it again, with everything else the first one left out. */
+function used(tid: string, text: string) {
+  const key = `loom-commit-${tid}`;
+  if (pref(key, "").trim() === text) setPref(key, "");
+  const box = body.querySelector<HTMLTextAreaElement>(`.composer[data-thread="${CSS.escape(tid)}"] textarea`);
+  if (box?.value.trim() === text) box.value = "";
+}
 function composer(tid: string, s: Status) {
   const box = el("div", "composer");
   box.dataset.thread = tid;
@@ -241,12 +257,13 @@ function composer(tid: string, s: Status) {
   const commit = (push: boolean) => async () => {
     const text = msg.value.trim();
     if (!text) return msg.focus();
-    for (const b of buttons) b.disabled = true;
-    const done = await change(tid, ["commit", "-", ...(onlyStaged ? ["--staged"] : []), ...(push ? ["--push"] : [])], push ? "Committed and pushed" : "Committed", { stdin: text });
-    for (const b of buttons) b.disabled = false;
-    if (done) setPref(draftKey, "");
+    if (committing) return;
+    lock(true);
+    await change(tid, ["commit", "-", ...(onlyStaged ? ["--staged"] : []), ...(push ? ["--push"] : [])], push ? "Committed and pushed" : "Committed", { stdin: text, then: () => used(tid, text) });
+    lock(false);
   };
   const buttons = [button("Commit", commit(false), "primary"), button("Commit & push", commit(true))];
+  for (const b of buttons) b.disabled = committing;
   const row = el("div", "row");
   row.append(...buttons);
   box.append(msg, which, row);
@@ -294,7 +311,7 @@ async function amend(tid: string) {
   const draftKey = `loom-commit-${tid}`;
   const msg = pref(draftKey, "").trim();
   if (!(await confirmSheet("Amend the last commit?", msg ? `Its message becomes: ${msg}` : "Its message stays. Type one in the commit box first to change it.", "Amend", true))) return;
-  if (await change(tid, ["amend", "--yes", ...(msg ? ["-"] : [])], "Amended", msg ? { stdin: msg } : {})) setPref(draftKey, "");
+  await change(tid, ["amend", "--yes", ...(msg ? ["-"] : [])], "Amended", msg ? { stdin: msg, then: () => used(tid, msg) } : {});
 }
 
 async function branches(tid: string) {
@@ -370,7 +387,7 @@ export function showDiff(tid: string, sec: Sec, path: string) {
     const n = ++diffSeq;
     diffBox.replaceChildren(el("p", "hint", "Reading the diff…"));
     try {
-      const got = await run<{ diff: string }>("git", [tid, "diff", path, `--${sec}`, ...(full ? ["--full"] : [])], { timeout: 60 });
+      const got = await run<{ diff: string }>("git", [tid, "diff", `--${sec}`, ...(full ? ["--full"] : []), "--", path], { timeout: 60 });
       if (n === diffSeq) drawDiff(tid, got.diff, sec, path);
     } catch (e) {
       if (n === diffSeq) diffBox.replaceChildren(empty("No diff", e instanceof Error ? e.message : String(e)));
@@ -430,7 +447,7 @@ function drawDiff(tid: string, text: string, sec: Sec | null, path: string) {
   const out: Node[] = [];
   if (sec === "untracked") out.push(fileBar(button("Stage this file", () => {
     const route = location.hash;
-    void change(tid, ["stage", "--untracked", path], "Staged").then((ok) => ok && location.hash === route && history.back());
+    void change(tid, ["stage", "--untracked", "--", path], "Staged").then((ok) => ok && location.hash === route && history.back());
   }, "primary")));
   out.push(...paged(rows.length, (i) => {
     const r: DiffRow = rows[i];
@@ -531,7 +548,7 @@ export async function showFile(tid: string, path: string) {
   const n = ++diffSeq;
   diffBox.replaceChildren(el("p", "hint", "Reading the file…"));
   try {
-    const lines = (await run<{ text: string }>("git", [tid, "file", path], { timeout: 60 })).text.split("\n");
+    const lines = (await run<{ text: string }>("git", [tid, "file", "--", path], { timeout: 60 })).text.split("\n");
     if (n !== diffSeq) return;
     diffBox.replaceChildren(...paged(lines.length, (i) => {
       const line = el("div", "r");

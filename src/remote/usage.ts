@@ -1,6 +1,6 @@
 /** Usage: the account limits the PC's plan chips show, each agent's context,
  * and one Claude session's context broken down. */
-import { age, agentIcon, el, findPane, go, iconButton, panes, run, threadOf, toast, topBar, type Pane } from "./core";
+import { act, age, agentIcon, app, button, el, findPane, go, iconButton, panes, run, threadOf, toast, topBar, ui, type Pane } from "./core";
 import { meter, spark } from "../procs";
 
 type Limit = { label: string; group: string; percent: number; severity: string; resetsAt: string | null };
@@ -42,6 +42,7 @@ const body = el("div", "body");
 const refresh = iconButton("refresh", "Refresh", () => void read(true, true));
 usageView.append(topBar("Usage", [refresh]), body);
 let plans: Record<string, Plan> | null = null;
+let planOff = false; // the PC's Plan usage is off (Settings): nobody asks the accounts, this tab neither
 let readAt = 0;
 
 /** The PC's last reading, or with `force` a new one, as its refresh button asks. */
@@ -50,10 +51,14 @@ export async function read(now = false, force = false) {
   readAt = Date.now();
   if (force) (refresh.disabled = true), draw();
   try {
-    plans = await run<Record<string, Plan>>("usage", force ? ["--refresh"] : [], { timeout: 60 });
-    // Forced and still cached: the account's rate limit holds it.
-    const held = force && Object.entries(plans).find(([, p]) => p.cached && p.nextRefreshAt);
-    if (held) toast(`${held[0] === "claude" ? "Claude" : "Codex"} is rate limited: try again after ${new Date(held[1].nextRefreshAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}.`);
+    // `usage` reads the accounts even with Plan usage off, every 5 minutes this tab is open: asked first.
+    planOff = (await run<{ "plan-usage"?: string }>("set").catch(() => null))?.["plan-usage"] === "off";
+    if (!planOff) {
+      plans = await run<Record<string, Plan>>("usage", force ? ["--refresh"] : [], { timeout: 60 });
+      // Forced and still cached: the account's rate limit holds it.
+      const held = force && Object.entries(plans).find(([, p]) => p.cached && p.nextRefreshAt);
+      if (held) toast(`${held[0] === "claude" ? "Claude" : "Codex"} is rate limited: try again after ${new Date(held[1].nextRefreshAt!).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}.`);
+    }
   } catch (e) {
     if (now) toast(e instanceof Error ? e.message : String(e), true);
   }
@@ -64,7 +69,17 @@ export async function read(now = false, force = false) {
 let drawn = ""; // what the tab shows: drawn again only when that changes, never under a finger for nothing
 export function draw() {
   const nodes: Element[] = [];
-  for (const [kind, name] of [["claude", "Claude"], ["codex", "Codex"]] as const) {
+  refresh.hidden = planOff;
+  if (planOff) {
+    const box = el("section", "provider");
+    const head = el("div", "provider-head");
+    const who = el("div", "who");
+    who.append(el("b", "", "Plan usage is off"), el("span", "", "Loom doesn't ask Claude or Codex for your limits."));
+    head.append(ui("usage"), who, button("Turn on", () => void act(() => run("set", ["plan-usage", "on"], { change: true }), "Plan usage is on").then(() => read(true))));
+    box.append(head);
+    nodes.push(box);
+  }
+  for (const [kind, name] of planOff ? [] : ([["claude", "Claude"], ["codex", "Codex"]] as const)) {
     const plan = plans?.[kind];
     const box = el("section", "provider");
     const head = el("div", "provider-head");
@@ -131,7 +146,7 @@ contextView.append(topBar(ctxWho, [], "#/usage"), ctxBody);
 const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
 
 export async function showContext(id: string) {
-  const p = findPane(id);
+  const p = findPane(id), visit = app.visit;
   ctxName.textContent = p ? `${p.ref} · ${p.agent}` : "This agent is gone";
   ctxSub.textContent = p?.title ?? "";
   ctxBody.replaceChildren(el("p", "hint", "Reading its transcript…"));
@@ -139,8 +154,11 @@ export async function showContext(id: string) {
   try {
     prof = await run<Profile>("context", [id], { timeout: 60 });
   } catch (e) {
-    return void ctxBody.replaceChildren(el("p", "hint", e instanceof Error ? e.message : String(e)));
+    if (visit === app.visit) ctxBody.replaceChildren(el("p", "hint", e instanceof Error ? e.message : String(e)));
+    return;
   }
+  // Read late, after you left for another agent's: that one's screen keeps its own numbers.
+  if (visit !== app.visit) return;
   const window = p?.context?.windowTokens ?? 0;
   const used = window ? Math.round((prof.ctx / window) * 100) : 0;
   const nodes: Node[] = [];

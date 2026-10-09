@@ -15,7 +15,7 @@ import ts from "typescript";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 // Whichever of these main.ts has: the base check was refExists, then resolveBase.
-const fns = source.statements.filter(n => ts.isFunctionDeclaration(n) && ["createThread", "refExists", "resolveBase"].includes(n.name?.text ?? ""));
+const fns = source.statements.filter(n => ts.isFunctionDeclaration(n) && ["createThread", "refExists", "resolveBase", "headBranch"].includes(n.name?.text ?? ""));
 const code = ts.transpileModule(fns.map(n => n.getText(source)).join("\n") + "\nglobalThis.create = createThread;", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 const real = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
 /** createThread in a sandbox, folders under `dir`, git real unless `git` wraps it. */

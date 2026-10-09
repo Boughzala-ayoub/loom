@@ -2,7 +2,7 @@
 // @ts-ignore Node-only test.
 import assert from "node:assert/strict";
 // @ts-ignore Node-only test.
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, rmdirSync, symlinkSync, realpathSync } from "node:fs";
 // @ts-ignore Node-only test.
 import { tmpdir } from "node:os";
 // @ts-ignore Node-only test.
@@ -32,7 +32,8 @@ try {
   renameSync(parent, join(dir, "offline"));
   const prepared: string[] = [];
   const sandbox = createContext({ MAX_PANES: 8, shuttingDown: false, threads: [], git: async (cwd: string, ...args: string[]) => git(cwd, ...args), worktreeDir: async (_: string, slug: string) => join(dir, slug),
-    openThread: (t: unknown) => t, invoke: async (cmd: string, args: { dir: string }) => {
+    openThread: (t: unknown) => t, invoke: async (cmd: string, args: { dir: string; path: string }) => {
+      if (cmd === "canonical_directory") return realpathSync.native(args.path);
       assert.equal(cmd, "worktree_prepare"); prepared.push(args.dir);
     } });
   runInContext(code, sandbox);
@@ -44,4 +45,17 @@ try {
   assert.equal(git(wt, "show", ":a.txt"), "staged");
   assert.equal(readFileSync(join(wt, "a.txt"), "utf8"), "working");
   console.log("ok   creating a thread preserves an unlocked worktree under an unavailable parent");
+
+  // ~\loom as a junction to another drive: the thread keeps the path git records, so deletion finds it.
+  const real = join(dir, "real"), link = join(dir, "link");
+  mkdirSync(real);
+  symlinkSync(real, link, "junction");
+  sandbox.worktreeDir = async (_: string, slug: string) => join(link, slug);
+  try {
+    const linked = await sandbox.create(repo, "linked", "", "", 1);
+    assert.equal(linked.dir, realpathSync.native(join(real, "linked")));
+    const recorded = readFileSync(join(repo, ".git", "worktrees", "linked", "gitdir"), "utf8").trim();
+    assert.equal(realpathSync.native(join(recorded, "..")).toLowerCase(), linked.dir.toLowerCase());
+    console.log("ok   a thread under a junctioned folder keeps the path git records");
+  } finally { rmdirSync(link); } // the link only, never what it points to
 } finally { rmSync(dir, { recursive: true, force: true }); }

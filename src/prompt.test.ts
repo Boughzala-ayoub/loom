@@ -134,6 +134,18 @@ const input = `
 check("A numbered answer above the input box is not a menu", readMenu(input), null);
 check("Codex composer text is not a menu", readMenu("› 1. fix the tests\n\n  100% context left"), null);
 check("A cursor on a lone option is not a menu", readMenu("❯ 2. Something"), null);
+// Claude 2.1 and Codex draw a sent prompt in the transcript with the cursor glyph.
+// One that starts with a number, the agent idle at its input below, asks nothing.
+const ruled = "─".repeat(60);
+check("A numbered prompt in Claude's transcript is not a menu", readMenu([
+  "❯ 1. Fix the login bug in auth.ts", "  2. Add a regression test for it", "", "● Done. Both changes are in.", "", "✻ Worked for 12s", "", ruled, "❯\u00a0", ruled, "  ? for shortcuts",
+].join("\n")), null);
+check("A numbered prompt in Codex's transcript is not a menu", readMenu([
+  "› 1. fix the failing tests", "  2. then run the linter", "", "• Both pass now.", "", "› Ask Codex to do anything", "", "  100% context left",
+].join("\n")), null);
+check("A numbered draft in Claude's input box is not a menu", readMenu(["● Done.", "", ruled, "❯ 1. fix the tests", "  2. then lint", ruled, "  ? for shortcuts"].join("\n")), null);
+check("A question under a numbered prompt is still one", shape(readMenu(["❯ 1. first", "  2. second", "", claude].join("\n")))?.options,
+  ["Yes", "Yes, and don't ask again for rm commands in C:\\projects\\loom", "No, and tell Claude what to do differently (esc)"]);
 
 check("Echo found once", echoes("│ > Yes, go ahead   │", "Yes, go ahead"), [1, 1, 0]);
 check("Echo ignores wrapping", echoes("│ > Yes, go ahead and also │\n│ update the README │", "Yes, go ahead and also update the README"), [1, 1, 0]);

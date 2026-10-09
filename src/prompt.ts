@@ -70,6 +70,8 @@ export function readMenu(screen: string): Menu | null {
   const numbers = [...found.keys()].sort((a, b) => a - b);
   if (numbers[0] !== 1 || numbers.length < 2) return null;
   const options = numbers.map(n => found.get(n)!);
+  // A numbered draft in Claude's input box: its first row sits right under the box's rule.
+  if (PROMPT.test(lines[options[0].line]) && options[0].line > 0 && isRule(lines[options[0].line - 1])) return null;
   const question: string[] = [];
   for (let i = options[0].line - 1; i >= 0 && question.length < 4; i--) {
     if (isRule(lines[i])) break;
@@ -82,6 +84,12 @@ export function readMenu(screen: string): Menu | null {
   let top = options[0].line, end = options[options.length - 1].line;
   while (top > 0 && !isRule(lines[top - 1])) top--;
   while (end + 1 < lines.length && lines[end + 1].trim() && !isRule(lines[end + 1])) end++;
+  // A live input below it makes it a sent prompt in the transcript, drawn with the
+  // same glyph: a question takes the input's place. Claude's input row sits under a
+  // rule; Codex's is a "›" row that isn't an option.
+  for (let i = end + 1; i < lines.length; i++) {
+    if ((PROMPT.test(lines[i]) && isRule(lines[i - 1])) || (CODEX_PROMPT.test(lines[i]) && !OPTION.test(lines[i]))) return null;
+  }
   const prompt = lines.slice(top, end + 1).map(l => (OPTION.test(l) ? l.replace(CURSOR, "") : l).trim()).filter(Boolean);
   // Each option through the rows before the next one (the last: to the prompt's end).
   const full = options.map((o, k) => [o.text, ...lines.slice(o.line + 1, options[k + 1]?.line ?? end + 1).map(l => l.trim())].filter(Boolean).join(" "));
