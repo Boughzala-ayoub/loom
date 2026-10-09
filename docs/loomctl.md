@@ -329,8 +329,10 @@ has the record back, at either path, Loom's purge leaves the folder alone and
 drops the trash entry. A `pending` record stopped between its two moves.
 Deleting the same worktree again, or creating a thread at its path, finishes
 it, and so does Loom's purge, at startup and every hour, once the folder is in
-the trash and the holder of Git's record lets go. A record you unlocked and
-pruned by hand (`git worktree prune`) has nothing left to move, and completes.
+the trash and the holder of Git's record lets go. A record you unlocked by
+hand, pruned (`git worktree prune`) or not, isn't Loom's to move any more: it
+completes with an empty `entry_at`, and Loom never touches a worktree that
+took its name since.
 A record shown `unreadable` was cut short as it was written, or
 another operation holds it right then; it holds up nothing else.
 

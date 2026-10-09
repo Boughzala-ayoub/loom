@@ -163,12 +163,22 @@ fn write_record(file: &mut fs::File, path: &Path, r: &Trashed) -> std::io::Resul
 
 fn finish_record(file: &mut fs::File, path: &Path, r: &mut Trashed) -> Result<String, String> {
     if r.pending {
+        // Loom locks git's record before the folder moves. Once the folder is in
+        // the trash, a record without that lock isn't Loom's any more: unlocked by
+        // hand, maybe pruned, and its name maybe taken by a new worktree since.
+        let mut ours = false;
         if r.entry.try_exists().map_err(|e| e.to_string())? {
             let lock = r.entry.join("locked");
+            let moved = r.from.is_some() && r.at.try_exists().map_err(|e| e.to_string())?;
             if !lock.try_exists().map_err(|e| e.to_string())? {
-                let mut held = fs::OpenOptions::new().write(true).create_new(true).open(&lock).map_err(|e| e.to_string())?;
-                held.write_all(PENDING.as_bytes()).and_then(|_| held.sync_all()).map_err(|e| e.to_string())?;
-            } else if fs::read_to_string(&lock).map_err(|e| e.to_string())? != PENDING {
+                if !moved {
+                    let mut held = fs::OpenOptions::new().write(true).create_new(true).open(&lock).map_err(|e| e.to_string())?;
+                    held.write_all(PENDING.as_bytes()).and_then(|_| held.sync_all()).map_err(|e| e.to_string())?;
+                    ours = true;
+                }
+            } else if fs::read_to_string(&lock).map_err(|e| e.to_string())? == PENDING {
+                ours = true;
+            } else if !moved {
                 return Err(format!("{} is a locked worktree", r.folder.display()));
             }
         }
@@ -177,13 +187,19 @@ fn finish_record(file: &mut fs::File, path: &Path, r: &mut Trashed) -> Result<St
                 fs::rename(from, &r.at).map_err(|e| format!("{}: {e}", from.display()))?;
             }
         }
-        // Both gone while the repository is there: pruned by hand (docs/loomctl.md),
-        // so nothing is left to move. A repository on a drive that's offline isn't that.
-        let pruned = !r.entry.try_exists().map_err(|e| e.to_string())?
-            && r.entry.parent().and_then(Path::parent).is_some_and(|common| fs::read_dir(common).is_ok());
-        if !r.entry_at.try_exists().map_err(|e| e.to_string())? && !pruned {
-            fs::create_dir_all(r.entry_at.parent().unwrap()).and_then(|_| fs::rename(&r.entry, &r.entry_at))
-                .map_err(|e| format!("retained {}, but git administration at {} is still pending: {e}", r.at.display(), r.entry.display()))?;
+        // Released as above, or gone while the repository is there: pruned by hand
+        // (docs/loomctl.md), so nothing is left to move. A repository on a drive
+        // that's offline isn't that.
+        let released = !ours && (r.entry.try_exists().map_err(|e| e.to_string())?
+            || r.entry.parent().and_then(Path::parent).is_some_and(|common| fs::read_dir(common).is_ok()));
+        if !r.entry_at.try_exists().map_err(|e| e.to_string())? {
+            if released {
+                // An empty stand-in, so purge reads this record like any other: done, not restored.
+                fs::create_dir_all(&r.entry_at).map_err(|e| format!("{}: {e}", r.entry_at.display()))?;
+            } else {
+                fs::create_dir_all(r.entry_at.parent().unwrap()).and_then(|_| fs::rename(&r.entry, &r.entry_at))
+                    .map_err(|e| format!("retained {}, but git administration at {} is still pending: {e}", r.at.display(), r.entry.display()))?;
+            }
         }
         let lock = r.entry_at.join("locked");
         if fs::read_to_string(&lock).is_ok_and(|s| s == PENDING) { fs::remove_file(lock).map_err(|e| e.to_string())?; }
@@ -621,6 +637,34 @@ mod tests {
         assert!(!open_record(record).unwrap().1.pending && Path::new(&at).is_dir());
         purge(&trash, Duration::ZERO);
         assert!(records().is_empty() && !Path::new(&at).exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn purge_leaves_a_new_worktree_that_took_a_hand_pruned_records_name() {
+        let dir = std::env::temp_dir().join(format!("loom-pending-reused-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let (repo, wt, trash) = (dir.join("repo"), dir.join("wt"), dir.join("trash"));
+        fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "start"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "t", wt.to_str().unwrap()]);
+        // The repository's first deletion, so there's no loom-trash folder yet.
+        let entry = repo.join(".git/worktrees/wt");
+        let held = fs::OpenOptions::new().read(true).share_mode(1).open(entry.join("index")).unwrap();
+        assert!(remove_worktree(repo.to_str().unwrap(), wt.to_str().unwrap(), &trash).is_err());
+        drop(held);
+        fs::remove_file(entry.join("locked")).unwrap();
+        git(&repo, &["worktree", "prune"]);
+        let other = dir.join("other").join("wt");
+        git(&repo, &["worktree", "add", "-q", "-b", "t2", other.to_str().unwrap()]);
+        assert!(entry.join("HEAD").is_file(), "git reuses the name");
+        purge(&trash, KEEP);
+        assert!(entry.join("HEAD").is_file() && !entry.join("locked").exists(), "purge took the new worktree's record");
+        assert_eq!(git(&other, &["branch", "--show-current"]).trim(), "t2");
+        purge(&trash, Duration::ZERO);
+        assert!(fs::read_dir(&trash).unwrap().next().is_none(), "the trashed folder or its record stayed");
+        assert!(entry.join("HEAD").is_file() && other.is_dir());
         fs::remove_dir_all(dir).unwrap();
     }
 
