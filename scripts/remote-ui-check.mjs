@@ -189,8 +189,10 @@ async function context(width, token = true, push = false) {
     if (new URL(req.url()).pathname === '/api/image') {
       const n = state.images.push({ bytes: req.postDataBuffer() ?? Buffer.alloc(0), type: req.headers()['content-type'], auth: req.headers().authorization });
       if (state.hold.delete('image')) await new Promise(r => (state.held.image = r));
+      // imageDelay: the body takes that long to arrive (a slow uplink), and an aborted upload gets no answer.
+      if (state.imageDelay) await pause(state.imageDelay);
       if (state.failImage) { state.failImage = false; return route.fulfill({ status: 415, json: { ok: false, error: 'Loom takes PNG, JPEG, WebP and GIF images.' } }); }
-      return route.fulfill({ json: { ok: true, path: `C:\\Users\\test\\AppData\\Roaming\\dev.ayoub.loom\\phone-images\\${n}-ab12cd34.png` } });
+      return route.fulfill({ json: { ok: true, path: `C:\\Users\\test\\AppData\\Roaming\\dev.ayoub.loom\\phone-images\\${n}-ab12cd34.png` } }).catch(() => {});
     }
     const c = req.postDataJSON();
     state.calls.push(c);
@@ -2245,7 +2247,31 @@ try {
     assert.deepEqual(state.errors, []);
     await ctx.close();
   }
-  console.log('PASS images: Paste image reads the clipboard, a paste or a pick adds one, a HEIC is refused, a remove takes one off, each agent keeps its own, a refused upload keeps the message, a send carries the paths after the text (or alone) and keeps one added meanwhile, an Activity reply too, and a shell has none');
+  {
+    // A 20 MiB photo over a 0.5 Mbps uplink takes 336 s, which remote.rs allows (600 s from the first byte).
+    // Clocks run 3000 times fast for the upload's deadline only (the page's other waits are under 150 s):
+    // each try must outlast the upload, so one try sends it and the message goes.
+    const { ctx, page, state } = await context(375);
+    await ctx.addInitScript(() => {
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      window.uploadBudgets = [];
+      AbortSignal.timeout = ms => (ms >= 150_000 ? (window.uploadBudgets.push(ms), timeout(ms / 3000)) : timeout(ms));
+    });
+    state.imageDelay = Math.round(20 * 2 ** 20 * 8 / 500_000 * 1000 / 3000);
+    await goto(page, '#/pane/a1', '#screen .line');
+    await page.fill('#prompt textarea', 'Review my photo');
+    await attach(page, '#prompt', JPG);
+    await page.click('#prompt button.primary');
+    await until('the slow photo and its message went', () => submitted(state).length === 1, 15000);
+    assert.equal(state.images.length, 1, 'one try was enough');
+    const budgets = await page.evaluate(() => window.uploadBudgets);
+    assert.ok(budgets.length === 1 && budgets[0] >= 600_000, `each try gives the upload the server's 600 s: ${budgets}`);
+    assert.match(submitted(state)[0], /^Review my photo C:\\.*\\1-ab12cd34\.png$/);
+    assert.equal(await page.locator('#dock .shot').count(), 0);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS images: Paste image reads the clipboard, a paste or a pick adds one, a HEIC is refused, a remove takes one off, each agent keeps its own, a refused upload keeps the message, a send carries the paths after the text (or alone) and keeps one added meanwhile, an Activity reply too, a shell has none, and a 20 MiB photo over a 0.5 Mbps uplink goes in one try');
 } finally {
   await browser.close();
   await new Promise(r => server.close(r));

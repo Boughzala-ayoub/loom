@@ -113,6 +113,10 @@ export function onPaste(box: HTMLElement, key: () => string | null) {
   });
 }
 
+/** How long one try may take: remote.rs gives an image's body 10 minutes from its first byte (CLIP_TOTAL),
+ * so 20 MiB arrives at 0.3 Mbps, and its answer half a minute more. */
+const UPLOAD_MS = 630_000;
+
 /** The images to Loom, one after another: their paths on the PC. A connection lost on the way is tried
  * again; an image sent twice is only saved twice. */
 export async function upload(list: Shot[]) {
@@ -125,7 +129,7 @@ export async function upload(list: Shot[]) {
           method: "POST",
           headers: { Authorization: `Bearer ${app.token}`, "Content-Type": s.blob.type },
           body: s.blob,
-          signal: AbortSignal.timeout(180_000),
+          signal: AbortSignal.timeout(UPLOAD_MS),
         });
       } catch {
         if (attempt < 2) { await sleep(1500); continue; }

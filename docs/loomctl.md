@@ -665,9 +665,11 @@ into the box that carries an image takes it too. Each image waits over the
 box as a thumbnail with its `✕` until the message goes, kept per agent as its
 draft is. Send posts each one to `POST /api/image` with the phone's token,
 then sends the message as a `submit` task: what you typed, then each image's
-path on the PC, on one line. An image alone is its path alone. Loom keeps PNG,
+path on the PC, on one line. An image alone is its path alone. Loom takes PNG,
 JPEG, WebP and GIF, judged by their first bytes, up to 20 MiB each from a
-paired phone, in `phone-images` in its data folder
+paired phone. As with a dictated clip, an image has 10 minutes from its first
+byte to arrive; the phone waits that long on each try, and tries a dropped
+upload twice more. Loom keeps them in `phone-images` in its data folder
 (`%APPDATA%\dev.ayoub.loom`), under a name it picks: `<unix ms>-<8 hex>.png`.
 Each upload deletes the ones there more than 7 days old. Claude Code attaches
 an image from its path and Codex opens it (see Limits).
