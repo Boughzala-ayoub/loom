@@ -142,7 +142,7 @@ pub fn delete_branch(repo: &str, branch: &str, tip: &str) -> Result<(), String> 
 /// `between` runs after the worktrees were read and before the commit: a test's
 /// checkout lands in the gap a real one could.
 fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce()) -> Result<(), String> {
-    use std::io::BufRead;
+    use std::io::{BufRead, Read};
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
@@ -155,6 +155,19 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
         .spawn().map_err(|e| format!("git: {e}"))?;
     let mut input = child.stdin.take().expect("piped");
     let mut output = std::io::BufReader::new(child.stdout.take().expect("piped"));
+    // Read as it comes: a reference-transaction hook printing more than the pipe
+    // holds would stop git before its next reply, with the branch's ref locked,
+    // while this waits for that reply. Its last 64 KiB are kept: git's own error
+    // comes after whatever a hook printed.
+    let mut stderr = child.stderr.take().expect("piped");
+    let errors = std::thread::spawn(move || {
+        let (mut kept, mut chunk) = (Vec::new(), [0u8; 8192]);
+        while let Ok(n @ 1..) = stderr.read(&mut chunk) {
+            kept.extend_from_slice(&chunk[..n]);
+            if kept.len() > 64 << 10 { kept.drain(..kept.len() - (64 << 10)); }
+        }
+        kept
+    });
     // Each verb answers "<verb>: ok"; a refused one ends git, and its stderr says why.
     let mut say = |words: &[&str]| -> Result<(), ()> {
         let verb = words.iter().rev().find(|w| ["start", "prepare", "commit", "abort"].contains(w)).copied();
@@ -184,14 +197,17 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
             Err(e) => Err(Some(e)),
         }
     })();
+    // Whatever went wrong, git gets the end of its input: a transaction it never
+    // committed is dropped, its lock with it, and git exits.
     drop(say);
     drop(input);
-    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    let status = child.wait();
+    let stderr = String::from_utf8_lossy(&errors.join().unwrap_or_default()).trim().to_owned();
+    let status = status.map_err(|e| format!("git: {e}"))?;
     match deleted {
         Ok(()) => Ok(()),
-        Err(Some(why)) => Err(if stderr.is_empty() { why } else { format!("{why} {stderr}") }),
-        Err(None) => Err(if stderr.is_empty() { format!("git update-ref exited {:?}", out.status.code()) } else { stderr }),
+        Err(Some(why)) => Err(why),
+        Err(None) => Err(if stderr.is_empty() { format!("git update-ref exited {:?}", status.code()) } else { stderr }),
     }
 }
 
@@ -639,6 +655,39 @@ mod tests {
         let gone = tip("topic");
         delete_branch(repo.to_str().unwrap(), "topic", &gone).unwrap();
         assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_hook_printing_a_lot_neither_stalls_the_delete_nor_holds_the_branch() {
+        let dir = std::env::temp_dir().join(format!("loom-branch-hook-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (repo, other, hooks) = (dir.join("repo"), dir.join("other"), dir.join("hooks"));
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&hooks).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&repo, &["branch", "topic"]);
+        let tip = git(&repo, &["rev-parse", "topic"]).trim().to_owned();
+        git(&repo, &["worktree", "add", "-q", other.to_str().unwrap(), "topic"]);
+        // 256 KiB on stderr at every step of every ref transaction, more than a pipe holds.
+        fs::write(hooks.join("reference-transaction"), "#!/bin/sh\nhead -c 262144 /dev/zero | tr '\\0' x >&2\n").unwrap();
+        git(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        let lock = repo.join(".git/refs/heads/topic.lock");
+        // On its own thread with a deadline: stalled, the delete would hold topic's lock for good.
+        let delete = || {
+            let (send, receive) = std::sync::mpsc::channel();
+            let (r, t) = (repo.to_str().unwrap().to_owned(), tip.clone());
+            std::thread::spawn(move || send.send(delete_branch(&r, "topic", &t)));
+            receive.recv_timeout(Duration::from_secs(60)).expect("the delete stalled behind the hook's output")
+        };
+        // Refused (checked out), through the prepared and aborted hooks: said why, the lock let go.
+        let error = delete().unwrap_err();
+        assert!(error.starts_with("Cannot delete branch 'topic': checked out at") && error.len() < 300, "{error}");
+        assert!(!lock.exists() && git(&repo, &["rev-parse", "topic"]).trim() == tip);
+        // Deleted, through prepared and committed.
+        git(&repo, &["worktree", "remove", other.to_str().unwrap()]);
+        delete().unwrap();
+        assert!(!lock.exists() && !git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
         fs::remove_dir_all(dir).unwrap();
     }
 
