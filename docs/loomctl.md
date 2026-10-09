@@ -294,7 +294,9 @@ in another worktree fails on `HEAD.lock` as Git says, and can be run again, and
 by the folder they run in. Git working on the repository from another folder
 (`--git-dir`, `GIT_DIR`), Git that isn't git.exe (WSL's, tools built on
 libgit2) and a 32-bit git.exe go unseen. Any git.exe in a worktree counts, `git
-status` included, and so does one whose folder Loom can't read. A Loom killed in
+status` included, and so does one whose folder Loom can't read. While Loom
+can't read where a worktree is (its `gitdir` file under `.git/worktrees`, held
+open by another program), every running git.exe counts. A Loom killed in
 those milliseconds leaves its `HEAD.lock` files behind, and Git names them.
 
 Loom refuses a folder that holds another checkout, a link at the folder's own

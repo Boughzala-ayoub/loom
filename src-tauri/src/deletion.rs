@@ -96,14 +96,14 @@ fn held_by(dirs: &[PathBuf], branch: &str) -> Result<Option<String>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", path.display())),
     };
-    for dir in dirs {
+    for (i, dir) in dirs.iter().enumerate() {
         // Only the line ending goes: a branch name may end in a space Unicode has.
         let head = read(&dir.join("HEAD"))?.unwrap_or_default();
         if head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n')).unwrap_or(&head) == format!("ref: {reference}") {
-            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{}'.", worktree_of(dir))));
+            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{}'.", named(dir, i == 0))));
         }
         if dir.join("index.lock").try_exists().map_err(|e| e.to_string())? {
-            return Ok(Some(busy(branch, &worktree_of(dir), "index.lock")));
+            return Ok(Some(busy(branch, &named(dir, i == 0), "index.lock")));
         }
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START", "rebase-merge/update-refs"] {
             let Some(text) = read(&dir.join(marker))? else { continue };
@@ -126,11 +126,20 @@ fn admin_dirs(common: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
-/// The worktree folder of administration folder `dir`: a linked one's gitdir
-/// names its .git file, and the main one is the repository's.
-fn worktree_of(dir: &Path) -> String {
-    fs::read_to_string(dir.join("gitdir")).map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
-        .unwrap_or_else(|_| dir.parent().unwrap_or(dir).display().to_string())
+/// The worktree folder of administration folder `dir`: the main one (admin_dirs'
+/// first) is the repository's, and a linked one's gitdir names its .git file.
+/// A linked one whose gitdir can't be read (another program holding it open,
+/// say) is unknown, and no other folder stands in for it.
+fn worktree_of(dir: &Path, main: bool) -> Result<String, String> {
+    if main { return Ok(dir.parent().unwrap_or(dir).display().to_string()); }
+    let gitdir = dir.join("gitdir");
+    fs::read_to_string(&gitdir).map(|g| g.trim_end_matches(['\r', '\n']).trim_end_matches(".git").trim_end_matches(['/', '\\']).to_owned())
+        .map_err(|e| format!("{}: {e}", gitdir.display()))
+}
+
+/// Where to say a refusal happened: the worktree folder, or else its administration folder.
+fn named(dir: &Path, main: bool) -> String {
+    worktree_of(dir, main).unwrap_or_else(|_| dir.display().to_string())
 }
 
 fn busy(branch: &str, at: &str, what: &str) -> String {
@@ -150,11 +159,11 @@ impl Drop for HeadLocks {
 /// All of them, or none: one there already is Git's own, busy in that worktree.
 fn lock_heads(dirs: &[PathBuf], branch: &str) -> Result<HeadLocks, String> {
     let mut held = HeadLocks(Vec::new());
-    for dir in dirs {
+    for (i, dir) in dirs.iter().enumerate() {
         let lock = dir.join("HEAD.lock");
         match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
             Ok(_) => held.0.push(lock),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(busy(branch, &worktree_of(dir), "HEAD.lock")),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(busy(branch, &named(dir, i == 0), "HEAD.lock")),
             Err(e) => return Err(format!("{}: {e}", lock.display())),
         }
     }
@@ -166,17 +175,19 @@ fn lock_heads(dirs: &[PathBuf], branch: &str) -> Result<HeadLocks, String> {
 /// and what it started: it may have read the branch already and still be on its
 /// way to naming it in that worktree's HEAD. A checkout holds no lock between
 /// writing the index and HEAD (Git's post-index-change hook runs there). One whose
-/// folder Loom can't read counts too, as does a process list Loom can't read.
+/// folder Loom can't read counts too, as does a process list Loom can't read,
+/// and while a linked worktree's folder is unknown (worktree_of), every one does.
 fn git_running(dirs: &[PathBuf], ours: u32, before: u64, branch: &str) -> Option<String> {
     let key = |path: &str| format!("{}\\", path.replace('/', "\\").trim_end_matches('\\').to_lowercase());
-    let folders: Vec<(String, String)> = dirs.iter().map(|d| worktree_of(d)).chain(dirs.first().map(|c| c.display().to_string()))
-        .map(|at| (key(&at), at)).collect();
+    let folders: Result<Vec<(String, String)>, String> = dirs.iter().enumerate().map(|(i, d)| worktree_of(d, i == 0))
+        .chain(dirs.first().map(|c| Ok(c.display().to_string()))).map(|at| at.map(|at| (key(&at), at))).collect();
     let Some(gits) = crate::procs::gits(ours, before) else {
         return Some(format!("Cannot delete branch '{branch}' now: Loom couldn't list the running Git processes, so it can't tell whether one is checking it out. Try again."));
     };
-    gits.into_iter().find_map(|(pid, cwd)| match cwd {
-        None => Some(format!("Cannot delete branch '{branch}' now: git.exe {pid} is running in a folder Loom can't read, and may be checking it out. Try again once it finishes.")),
-        Some(cwd) => {
+    gits.into_iter().find_map(|(pid, cwd)| match (cwd, &folders) {
+        (None, _) => Some(format!("Cannot delete branch '{branch}' now: git.exe {pid} is running in a folder Loom can't read, and may be checking it out. Try again once it finishes.")),
+        (Some(_), Err(e)) => Some(format!("Cannot delete branch '{branch}' now: Loom couldn't read where one of the repository's worktrees is ({e}), so git.exe {pid} may be running there and checking it out. Try again once it finishes.")),
+        (Some(cwd), Ok(folders)) => {
             let cwd = key(&cwd.to_string_lossy());
             folders.iter().find(|(folder, _)| cwd.starts_with(folder.as_str())).map(|(_, at)| busy(branch, at, &format!("git.exe {pid}")))
         }
@@ -799,7 +810,7 @@ mod tests {
             for _ in 0..400 { if started.exists() { break; } std::thread::sleep(Duration::from_millis(50)); }
             assert!(started.exists(), "the checkout never reached post-index-change");
             // Before the delete, both locks are gone; between, HEAD.lock is Loom's own.
-            assert!(!admin.join("index.lock").exists() && (run != "before" || !admin.join("HEAD.lock").exists()), "a lock shows the checkout");
+            assert!(!admin.join("index.lock").exists() && (run.ends_with("between") || !admin.join("HEAD.lock").exists()), "a lock shows the checkout");
             assert!(Command::new("git").arg("-C").arg(&other).args(["symbolic-ref", "-q", "HEAD"]).output().unwrap().stdout.is_empty(), "HEAD changed before the hook");
             (child, release)
         };
@@ -823,6 +834,26 @@ mod tests {
         let error = delete_branch_with(r, "topic", &tip, || running = Some(paused_switch("between"))).unwrap_err();
         assert!(error.contains("busy") && error.contains("git.exe") && error.contains("put it back"), "{error}");
         kept();
+        finished(running.unwrap());
+        // The worktree's gitdir held open with no sharing, as another program can: Loom can't tell
+        // which folder that worktree is, so the paused git.exe may be in it. Both looks keep the branch.
+        let exclusive = || {
+            let held = fs::OpenOptions::new().read(true).share_mode(0).open(admin.join("gitdir")).unwrap();
+            assert!(fs::read_to_string(admin.join("gitdir")).is_err(), "the gitdir stayed readable");
+            held
+        };
+        let running = paused_switch("unreadable");
+        let held = exclusive();
+        let error = delete_branch(r, "topic", &tip).unwrap_err();
+        assert!(error.contains("gitdir") && error.contains("git.exe"), "{error}");
+        kept();
+        drop(held);
+        finished(running);
+        let (mut running, mut held) = (None, None);
+        let error = delete_branch_with(r, "topic", &tip, || { running = Some(paused_switch("unreadable-between")); held = Some(exclusive()); }).unwrap_err();
+        assert!(error.contains("gitdir") && error.contains("git.exe") && error.contains("put it back"), "{error}");
+        kept();
+        drop(held);
         finished(running.unwrap());
         // Nothing running: deleted.
         delete_branch(r, "topic", &tip).unwrap();
