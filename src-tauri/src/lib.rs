@@ -446,9 +446,10 @@ fn pty_spawn(
         // ConPTY quotes argv MSVC-style; cmd.exe does not understand \" inside
         // its command string. Expand the whole command after that quoting step.
         cmd.args(["/d", "/s", "/c", "%LOOM_COMMAND%"]);
-        // The pane's PATH, which portable-pty reads from the registry, so a
-        // codex installed since Loom started is found too.
-        let line = with_program(&line, |name| find_on(cmd.get_env("PATH")?, name))?;
+        // Loom's own PATH, what it was started with (a dev shell's, a test's
+        // stand-ins), then the pane's, which portable-pty reads from the
+        // registry: a codex installed since Loom started is found there.
+        let line = with_program(&line, |name| on_path(name).or_else(|| find_on(cmd.get_env("PATH")?, name)))?;
         cmd.env("LOOM_COMMAND", line);
         // cmd searches the folder first for what the program runs too, such as
         // the `node` npm's codex.cmd calls. The pane's own programs inherit this,
