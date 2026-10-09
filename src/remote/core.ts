@@ -43,6 +43,10 @@ export function setPref(name: string, value: string) {
   try { if (value) localStorage.setItem(name, value); else localStorage.removeItem(name); } catch { /* see above */ }
 }
 
+/** How long remote.rs takes to read a dictated clip's or an image's body: 10 minutes from its first byte
+ * (CLIP_TOTAL), while bytes keep coming. The phone waits at least that long for its answer. */
+export const BODY_MS = 600_000;
+
 export class Offline extends Error {}
 /** Set by the entry: what a refused token does (back to pairing). */
 export const hooks = { unpaired: () => {}, changed: () => {} };

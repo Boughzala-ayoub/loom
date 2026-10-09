@@ -175,6 +175,8 @@ async function context(width, token = true, push = false) {
       state.clips.push(clip);
       if (state.revoked) return route.fulfill({ status: 401, json: { ok: false, error: 'Pair this phone again.' } });
       if (body.length && state.hold.delete('dictate')) await new Promise(r => (state.held.dictate = r));
+      // dictateDelay: the clip takes that long to arrive and be heard (a slow uplink); an aborted one gets no answer.
+      if (body.length && state.dictateDelay) await pause(state.dictateDelay);
       // failNext: whisper fails on the next clip.
       if (body.length && state.failNext) {
         state.failNext = false;
@@ -182,7 +184,7 @@ async function context(width, token = true, push = false) {
         return void (clip.answered = true);
       }
       // heard: the text, or a function of the clip's size that ties each text to its recording.
-      await route.fulfill({ json: { ok: true, text: body.length ? (typeof state.heard === 'function' ? state.heard(body.length) : state.heard) : '' } });
+      await route.fulfill({ json: { ok: true, text: body.length ? (typeof state.heard === 'function' ? state.heard(body.length) : state.heard) : '' } }).catch(() => {});
       return void (clip.answered = true);
     }
     // An image: its bytes as the body, its path on the PC as the answer (remote.rs image).
@@ -1489,7 +1491,27 @@ try {
     assert.deepEqual(state.errors, []);
     await ctx.close();
   }
-  console.log('PASS dictation: the clip is 16 kHz 16-bit samples with the PC\'s language, the text lands after the prefix or onto a draft, the sheet picks French and auto, and a ⏎ prefix submits it');
+  {
+    // A full 6 MiB clip over a 0.2 Mbps uplink takes 252 s, which remote.rs allows (600 s from the first byte),
+    // then 30 s of whisper. Clocks run 3000 times fast for the clip's deadline only (the page's other waits
+    // are under 150 s): one try must outlast both, so the text lands.
+    const { ctx, page, state } = await context(375);
+    await ctx.addInitScript(() => {
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      window.postBudgets = [];
+      AbortSignal.timeout = ms => (ms >= 150_000 ? (window.postBudgets.push(ms), timeout(ms / 3000)) : timeout(ms));
+    });
+    state.dictateDelay = Math.round((6 * 2 ** 20 * 8 / 200_000 + 30) * 1000 / 3000);
+    await goto(page, '#/pane/a1', '#screen .line');
+    await dictate(page);
+    await until('the slow clip was heard', async () => (await box(page)) === '/prompt run the tests', 15000);
+    assert.equal(clips(state).length, 1, 'one try was enough');
+    const budgets = await page.evaluate(() => window.postBudgets);
+    assert.ok(budgets.length && budgets.every(ms => ms >= 600_000 + 180_000), `each try waits out the server's 600 s and whisper: ${budgets}`);
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS dictation: the clip is 16 kHz 16-bit samples with the PC\'s language, the text lands after the prefix or onto a draft, the sheet picks French and auto, and a ⏎ prefix submits it, and a full clip over a 0.2 Mbps uplink is heard in one try');
   {
     // A transcript that comes after you moved on is never sent, ⏎ or not: it waits as its agent's draft.
     const { ctx, page, state } = await context(375);

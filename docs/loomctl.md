@@ -650,6 +650,7 @@ the page or leaving the agent stops the recording and transcribes what it
 caught, without sending. A clip holds 3 minutes. `/api/dictate` takes 6 MiB
 from a paired phone for as long as its bytes keep coming, so a slow uplink
 gets there: it gives up after 15 seconds with none, or 10 minutes in all.
+The phone waits those 10 minutes and 3 more for whisper before it tries again.
 `/api/cli` keeps 1 MiB and 10 seconds. **Dictation** in an agent's `⋯`, or in Settings, opens both lists as
 the PC's mic menu has them. Tap a row to pick it, `⏎` to have a prefix send
 what was said, `✕` to drop one, or add one under its list. Each is a

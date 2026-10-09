@@ -1,7 +1,7 @@
 /** Dictation on the phone (docs/phone-dictation-study.md): the page records, Loom's whisper on the PC
  * turns the clip into text (POST /api/dictate, remote.rs), and the text comes back for the Message box,
  * with the language and prefix the PC's mic uses. */
-import { act, app, el, hooks, iconButton, run, sheet, sleep, store, toast, button, ui } from "./core";
+import { act, app, BODY_MS, el, hooks, iconButton, run, sheet, sleep, store, toast, button, ui } from "./core";
 
 export type Lang = { label: string; code: string; on: boolean };
 export type Prefix = { text: string; enter: boolean; on: boolean };
@@ -283,6 +283,10 @@ async function decode(clip: Blob) {
   return pcm;
 }
 
+/** How long one try may take: all the time Loom gives the body (6 MiB arrives at 0.09 Mbps), then up to
+ * 3 minutes of whisper on the PC, which may wait its turn for the model first. */
+const POST_MS = BODY_MS + 180_000;
+
 /** The clip to Loom, and what whisper heard. A connection lost on the way is tried again: the clip
  * is still here, and transcribing it twice changes nothing. */
 async function post(pcm: Int16Array, lang: string) {
@@ -293,7 +297,7 @@ async function post(pcm: Int16Array, lang: string) {
         method: "POST",
         headers: { Authorization: `Bearer ${app.token}`, "Content-Type": "application/octet-stream" },
         body: pcm,
-        signal: AbortSignal.timeout(180_000),
+        signal: AbortSignal.timeout(POST_MS),
       });
     } catch {
       if (attempt < 2 && pcm.length) { await sleep(1500); continue; }

@@ -2,7 +2,7 @@
  * waits under its box as a thumbnail you can remove until the message goes. Then it goes up to Loom (POST
  * /api/image, remote.rs), which saves it on the PC and answers its path, and the message carries the paths:
  * Claude Code and Codex open an image from a path in a prompt. */
-import { app, el, hooks, iconButton, item, sheet, sleep, store, toast } from "./core";
+import { app, BODY_MS, el, hooks, iconButton, item, sheet, sleep, store, toast } from "./core";
 
 /** What Loom keeps (remote.rs checks the bytes themselves). */
 const TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
@@ -113,9 +113,9 @@ export function onPaste(box: HTMLElement, key: () => string | null) {
   });
 }
 
-/** How long one try may take: remote.rs gives an image's body 10 minutes from its first byte (CLIP_TOTAL),
- * so 20 MiB arrives at 0.3 Mbps, and its answer half a minute more. */
-const UPLOAD_MS = 630_000;
+/** How long one try may take: all the time Loom gives the body (20 MiB arrives at 0.3 Mbps), and its
+ * answer half a minute more. */
+const UPLOAD_MS = BODY_MS + 30_000;
 
 /** The images to Loom, one after another: their paths on the PC. A connection lost on the way is tried
  * again; an image sent twice is only saved twice. */
