@@ -306,6 +306,10 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
         say(&["commit"]).map_err(|_| None)?;
         let committed = now_ticks();
         let dirs = admin_dirs(&common).map_err(Some)?;
+        // core.worktree may have moved the main worktree meanwhile, with a checkout in either
+        // folder: an answer that changed counts as none (main_worktree).
+        let now = main_worktree(&given, &common);
+        let top = if now == top { now } else { Err(format!("the main worktree of {}, which moved meanwhile", common.display())) };
         let why = match git_running(&dirs, &top, ours, committed, branch) {
             Some(why) => why,
             None => match held_by(&dirs, &top, branch).map_err(Some)? { Some(why) => why, None => return Ok(()) },
@@ -1047,6 +1051,50 @@ mod tests {
         // Nothing running: deleted.
         delete_branch(r, "topic", &tip).unwrap();
         assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_main_worktree_moved_by_core_worktree_during_the_delete_keeps_the_branch() {
+        let dir = std::env::temp_dir().join(format!("loom-branch-coremove-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (repo, working, hooks) = (dir.join("repo"), dir.join("working"), dir.join("hooks"));
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&working).unwrap();
+        fs::create_dir_all(&hooks).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "main\n").unwrap();
+        git(&repo, &["add", "-A"]); git(&repo, &["commit", "-qm", "main"]);
+        git(&repo, &["switch", "-qc", "topic"]);
+        fs::write(repo.join("file.txt"), "topic\n").unwrap();
+        git(&repo, &["commit", "-qam", "topic"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        let (started, release) = (dir.join("started"), dir.join("release"));
+        let unix = |p: &Path| p.to_str().unwrap().replace('\\', "/");
+        fs::write(hooks.join("post-index-change"), format!("#!/bin/sh\ntouch \"{}\"\nwhile [ ! -f \"{}\" ]; do sleep 0.05; done\n", unix(&started), unix(&release))).unwrap();
+        // With every HEAD.lock held, another program moves the main worktree's files to working,
+        // points core.worktree there, and starts `git switch topic` from repo. It runs in working and
+        // pauses in post-index-change, index.lock gone: the look after the commit must still see it.
+        let mut running = None;
+        let error = delete_branch_with(repo.to_str().unwrap(), "topic", &tip, || {
+            assert!(repo.join(".git/HEAD.lock").exists(), "Loom's HEAD.lock isn't held");
+            fs::rename(repo.join("file.txt"), working.join("file.txt")).unwrap();
+            git(&repo, &["config", "core.worktree", working.to_str().unwrap()]);
+            let child = Command::new("git").arg("-C").arg(&repo).args(["switch", "-q", "topic"]).spawn().unwrap();
+            running = Some((child, Release(release.clone())));
+            for _ in 0..400 { if started.exists() { break; } std::thread::sleep(Duration::from_millis(50)); }
+            assert!(started.exists(), "the checkout never reached post-index-change");
+            assert!(!repo.join(".git/index.lock").exists(), "index.lock shows the checkout");
+        }).unwrap_err();
+        assert!(error.contains("git.exe") && error.contains("put it back"), "{error}");
+        assert_eq!(git(&repo, &["rev-parse", "--verify", "refs/heads/topic"]).trim(), tip, "topic went");
+        assert!(!repo.join(".git/HEAD.lock").exists() && !repo.join(".git/refs/heads/topic.lock").exists(), "a lock stayed");
+        let (mut child, release) = running.unwrap();
+        drop(release);
+        assert!(child.wait().unwrap().success(), "the checkout failed");
+        assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/topic");
+        assert_eq!(git(&repo, &["rev-parse", "--verify", "HEAD"]).trim(), tip, "HEAD names a branch that's gone");
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -304,7 +304,8 @@ worktree is the folder `core.worktree` names, as Git reads it, or else the
 folder holding `.git`, which may itself be a junction to the repository's data
 elsewhere. When that folder's `.git` doesn't lead to the repository (a `.git`
 file from `--separate-git-dir`), or there's no main worktree (a bare
-repository), every running git.exe counts too. A Loom killed in those
+repository), every running git.exe counts too. So it does when the main
+worktree moved while Loom deleted the branch. A Loom killed in those
 milliseconds leaves its `HEAD.lock` files behind, and Git names them.
 
 Loom refuses a folder that holds another checkout, a link at the folder's own
