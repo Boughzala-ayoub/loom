@@ -188,8 +188,10 @@ it moves the mouse for about two seconds.
 
 Threads, branches, and panes come back on the next launch. Claude keeps its
 pinned session ID. Codex and OpenCode report their actual session IDs, so two
-panes in the same folder resume separate conversations. Loom never falls back
-silently to a fresh conversation after a resume error.
+panes in the same folder resume separate conversations. An `omp` pane gets an
+id of its own, which OMP reads as `ZELLIJ_PANE_ID`, and comes back with
+`omp --continue`. That reopens the last session the pane ran. Loom never
+falls back silently to a fresh conversation after a resume error.
 
 Codex reports its thread through its `notify` setting, which Loom passes on the
 command line: after every completed turn `loom.exe --codex-notify` records the

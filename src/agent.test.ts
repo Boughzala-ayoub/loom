@@ -26,9 +26,15 @@ for (const cmd of ['opencode1', 'opencode2']) {
   check(`${cmd} does not replace an explicit session`, launch(`${cmd} -s ses_own`, S, true, undefined, 'ses_saved')[4], `${cmd} -s ses_own`);
 }
 check("agentOf cmd", agentOf("cmd"), "shell");
-// OMP runs as a shell command, as before; only its mark is its own.
+// OMP runs as a shell command, as before; only its mark and its resume are its own.
 check("agentOf omp stays a shell", agentOf("omp --model opus"), "shell");
-check("omp keeps its PowerShell host", launch("omp", S, true), ["powershell.exe", "-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", ". $env:LOOM_INIT; omp"]);
+check("omp keeps its PowerShell host", launch("omp", S, false), ["powershell.exe", "-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", `. $env:LOOM_INIT; $env:ZELLIJ_PANE_ID='loom-${S}'; omp`]);
+// OMP finds a pane's last session by its pane id, so a restore resumes that pane's, not the folder's newest.
+check("omp resumes its pane's session", launch("omp --model opus", S, true)[6], `. $env:LOOM_INIT; $env:ZELLIJ_PANE_ID='loom-${S}'; omp --continue --model opus`);
+check("omp's own session choice wins", ["omp -c", "omp --resume=01a1", "omp -r 01a1", "omp --no-session", "omp --goal x", "omp -p hi", "omp --model opus"].map(ownSession), [true, true, true, true, true, true, false]);
+check("omp -r is not continued", launch("omp -r 01a1", S, true)[6], `. $env:LOOM_INIT; $env:ZELLIJ_PANE_ID='loom-${S}'; omp -r 01a1`);
+check("omp needs a safe pane id", launch("omp", "x'; rm", true)[6], ". $env:LOOM_INIT; omp");
+check("ompx is just a shell command", launch("ompx", S, true)[6], ". $env:LOOM_INIT; ompx");
 check("omp shows its mark, others their own", ["omp", " omp --model opus ", "ompx", "cmd", "codex", "opencode2"].map(c => markOf(c, agentOf(c))), ["omp", "omp", "shell", "shell", "codex", "opencode"]);
 check("an agent shows its own mark", markOf("claude", "claude"), "claude");
 

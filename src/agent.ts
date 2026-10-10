@@ -9,6 +9,8 @@
 export type Agent = "claude" | "codex" | "opencode" | "shell";
 
 export const opencodeCommand = (cmd: string) => /^(opencode[12]?)(?=\s|$)/.exec(cmd.trim())?.[1];
+/** OMP runs as a shell command (agentOf); only its mark and its resume are its own. */
+const ompCommand = (cmd: string) => /^omp(\s|$)/.test(cmd.trim());
 
 export function agentOf(cmd: string): Agent {
   if (opencodeCommand(cmd)) return "opencode";
@@ -62,6 +64,8 @@ export const validSessionId = (id: string) => /^[a-zA-Z0-9_-]{1,128}$/.test(id);
  * nor resumes one for it. */
 export function ownSession(cmd: string): boolean {
   const c = cmd.trim();
+  // --goal refuses a resume; --print and --no-session have none to keep.
+  if (ompCommand(c)) return /(^|\s)(-c|--continue|-r|--resume|--no-session|--goal|-p|--print)([=\s]|$)/.test(c);
   const agent = agentOf(c);
   const rest = c.slice((opencodeCommand(c) || agent).length).trim();
   switch (agent) {
@@ -117,7 +121,14 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
       const select = resume && sessionId && !own ? ` --session ${sessionId}` : "";
       return cmdHost(`${opencodeCommand(c)}${select}${rest ? " " + rest : ""}`);
     }
-    default:
+    default: {
+      // OMP's --continue picks up the session its terminal ran last, found by
+      // the terminal's pane id: ZELLIJ_PANE_ID is the first it reads, and it
+      // reads it for nothing else. Named after the pane's sid, each pane gets
+      // its own session back, not just the folder's newest.
+      const run = ompCommand(c) && validSessionId(sid)
+        ? `$env:ZELLIJ_PANE_ID='loom-${sid}'; omp${resume && !own ? " --continue" : ""}${c.slice(3)}`
+        : c;
       // -NoExit so the pane survives the startup command exiting (like aa: the
       // command quits, you keep the shell in the same folder).
       return [
@@ -127,8 +138,9 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        c ? `. $env:LOOM_INIT; ${c}` : ". $env:LOOM_INIT",
+        run ? `. $env:LOOM_INIT; ${run}` : ". $env:LOOM_INIT",
       ];
+    }
   }
 }
 
