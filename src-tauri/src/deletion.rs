@@ -126,14 +126,19 @@ fn admin_dirs(common: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
-/// The main worktree's folder, where it physically is. It holds the repository's
-/// .git, which may be a junction to where the data is (`common`, physical), so it
-/// comes from the path Git names, `given`, before that link is resolved. It counts
-/// only while its .git leads to `common`, which a .git file (--separate-git-dir) or
-/// a bare repository's doesn't: then it's unknown, as an unreadable gitdir is.
+/// The main worktree's folder, where it physically is, as Git names it from the
+/// repository's .git, `given` (before a junction there is resolved; `common` is
+/// where it leads). core.worktree, when set, names it, and Git runs a checkout
+/// there. Otherwise it's the folder holding .git, and counts only while that .git
+/// leads to `common`, which a .git file (--separate-git-dir) doesn't. A bare
+/// repository has none. Unknown, it counts as an unreadable gitdir does.
 fn main_worktree(given: &Path, common: &Path) -> Result<String, String> {
     let unknown = || format!("the main worktree of {}", common.display());
-    let top = crate::canonical_directory(given.parent().ok_or_else(unknown)?.to_string_lossy().into_owned()).map_err(|_| unknown())?;
+    let holder = given.parent().ok_or_else(unknown)?.to_string_lossy().into_owned();
+    // With its gitdir named and no core.worktree, Git takes the folder it runs in.
+    let top = crate::git_run(holder.clone(), vec![format!("--git-dir={}", given.display()), "rev-parse".into(), "--show-toplevel".into()], None, false).map_err(|_| unknown())?;
+    let top = crate::canonical_directory(top.trim().to_owned()).map_err(|_| unknown())?;
+    if top != crate::canonical_directory(holder).map_err(|_| unknown())? { return Ok(top); }
     let git = crate::canonical_directory(Path::new(&top).join(".git").to_string_lossy().into_owned()).map_err(|_| unknown())?;
     if Path::new(&git) == common { Ok(top) } else { Err(unknown()) }
 }
@@ -968,6 +973,66 @@ mod tests {
         };
         let kept = || assert_eq!(git(&repo, &["rev-parse", "--verify", "refs/heads/topic"]).trim(), tip, "topic went");
         let named = format!("'{}'", crate::canonical_directory(r.into()).unwrap());
+        // Paused when the delete looks, and paused in the gap before the commit: both keep the branch.
+        let running = paused_switch("before");
+        let error = delete_branch(r, "topic", &tip).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("git.exe"), "{error}");
+        kept();
+        finished(running);
+        let mut running = None;
+        let error = delete_branch_with(r, "topic", &tip, || running = Some(paused_switch("between"))).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("put it back"), "{error}");
+        kept();
+        finished(running.unwrap());
+        // Nothing running: deleted.
+        delete_branch(r, "topic", &tip).unwrap();
+        assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_checkout_in_a_main_worktree_set_by_core_worktree_keeps_the_branch() {
+        let dir = std::env::temp_dir().join(format!("loom-branch-coreworktree-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (repo, working, hooks) = (dir.join("repo"), dir.join("working"), dir.join("hooks"));
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&working).unwrap();
+        fs::create_dir_all(&hooks).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "main\n").unwrap();
+        git(&repo, &["add", "-A"]); git(&repo, &["commit", "-qm", "main"]);
+        git(&repo, &["switch", "-qc", "topic"]);
+        fs::write(repo.join("file.txt"), "topic\n").unwrap();
+        git(&repo, &["commit", "-qam", "topic"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        git(&repo, &["switch", "-q", "main"]);
+        // repo holds .git, and core.worktree puts the main worktree's files in working: Git started
+        // in repo runs in working, the folder Loom's saved repository path doesn't name.
+        fs::rename(repo.join("file.txt"), working.join("file.txt")).unwrap();
+        git(&repo, &["config", "core.worktree", working.to_str().unwrap()]);
+        git(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        let r = repo.to_str().unwrap();
+        // `git switch topic` from repo, paused in post-index-change: index.lock gone, HEAD on main.
+        let paused_switch = |run: &str| {
+            let (started, release) = (dir.join(format!("{run}-started")), dir.join(format!("{run}-release")));
+            let unix = |p: &Path| p.to_str().unwrap().replace('\\', "/");
+            fs::write(hooks.join("post-index-change"), format!("#!/bin/sh\ntouch \"{}\"\nwhile [ ! -f \"{}\" ]; do sleep 0.05; done\n", unix(&started), unix(&release))).unwrap();
+            let child = Command::new("git").arg("-C").arg(&repo).args(["switch", "-q", "topic"]).spawn().unwrap();
+            let release = Release(release);
+            for _ in 0..400 { if started.exists() { break; } std::thread::sleep(Duration::from_millis(50)); }
+            assert!(started.exists(), "the checkout never reached post-index-change");
+            assert!(!repo.join(".git/index.lock").exists(), "index.lock shows the checkout");
+            assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/main", "HEAD changed before the hook");
+            (child, release)
+        };
+        let finished = |(mut child, release): (std::process::Child, Release)| {
+            drop(release);
+            assert!(child.wait().unwrap().success(), "the checkout failed");
+            assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/topic");
+            assert_eq!(git(&repo, &["rev-parse", "--verify", "HEAD"]).trim(), tip, "HEAD names a branch that's gone");
+            git(&repo, &["switch", "-q", "main"]);
+        };
+        let kept = || assert_eq!(git(&repo, &["rev-parse", "--verify", "refs/heads/topic"]).trim(), tip, "topic went");
+        let named = format!("'{}'", crate::canonical_directory(working.to_string_lossy().into_owned()).unwrap());
         // Paused when the delete looks, and paused in the gap before the commit: both keep the branch.
         let running = paused_switch("before");
         let error = delete_branch(r, "topic", &tip).unwrap_err();
