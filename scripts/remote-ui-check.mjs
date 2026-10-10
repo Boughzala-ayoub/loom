@@ -229,6 +229,7 @@ async function context(width, token = true, push = false) {
     if (holdAs !== 'show' && state.hold.delete(holdAs)) await new Promise(r => (state.held[holdAs] = r));
     let data;
     const threads = [thread('a', 'Alpha'), thread('b', 'Beta', 'codex')];
+    if (state.omp) Object.assign(threads[1].panes[0], { agent: 'shell', mark: 'omp' }); // loomctl's mark for a shell running omp
     // siblings: Alpha:2 runs Codex (sameKind: a second Claude) beside Alpha:1's Claude. closeFirst: Alpha:1 closed
     // on the PC, so the sibling is Alpha:1 now.
     if (state.siblings) {
@@ -380,6 +381,21 @@ try {
     await goto(page, '', '#pairing form'); await fits(page, width, 'pairing'); await ctx.close();
     const { ctx: c2, page: p, state } = await context(width);
     await goto(p, '', '#list .agent'); await fits(p, width, 'threads');
+    // A shell running omp shows OMP's mark, from loomctl's mark.
+    state.omp = true; await goto(p, '', '#list .agent');
+    assert.ok(await p.evaluate(() => [...document.querySelectorAll('#list svg.ico path')].some(e => e.getAttribute('d') === 'M0 2h24v4H0zM6 6h4v10H6zM14 6h4v16h-4z')), `${width}: OMP's mark in the list`);
+    assert.equal(await p.locator('#list .agent', { hasText: 'omp' }).count(), 1, `${width}: the list names OMP`);
+    await fits(p, width, 'threads-omp');
+    // omp finds it by name, in Threads and in Activity.
+    await p.fill('#list input[type=search]', 'omp');
+    await until(`${width}: omp finds OMP in Threads`, async () => (await p.locator('#list .agent').count()) === 1 && (await p.locator('#list .agent', { hasText: 'omp' }).count()) === 1);
+    await p.locator('#list .seg button').filter({ hasText: 'Activity' }).click();
+    await until(`${width}: omp finds OMP in Activity`, async () => (await p.locator('#list .card').count()) === 1 && (await p.locator('#list .card', { hasText: 'Beta / omp' }).count()) === 1);
+    await fits(p, width, 'activity-omp');
+    await p.fill('#list input[type=search]', 'claude');
+    await until(`${width}: claude still finds Claude`, async () => (await p.locator('#list .card').count()) === 1 && (await p.locator('#list .card', { hasText: 'Alpha / claude' }).count()) === 1);
+    await p.locator('#list .seg button').filter({ hasText: 'Threads' }).click();
+    state.omp = false; await goto(p, '', '#list .agent');
     await p.locator('#list .thread-top .icon-btn').first().click(); await fits(p, width, 'thread-menu');
     await sheetButton(p, 'Rename').click(); await fits(p, width, 'rename'); await close(p);
     await p.locator('#list .seg button').filter({ hasText: 'Activity' }).click(); await p.locator('#list .card').first().waitFor(); await fits(p, width, 'activity');

@@ -12,7 +12,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, codexRunning, codexTitle, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
-import { icon } from "./icons";
+import { icon, markOf, type Mark } from "./icons";
 import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, literal, resolveArgs, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { renderRows } from "./rows";
 import { applyStash, listStashes, stashCommit } from "./stash";
@@ -1398,7 +1398,6 @@ let speakShown = true; // Preferences → Speak button: the floating mic over th
 const OVERLAY_MODES = ["off", "background", "always"] as const;
 type OverlayMode = (typeof OVERLAY_MODES)[number];
 let overlayMode: OverlayMode = "off"; // Preferences → Agent overlay; persisted
-let overlayCap = 420; // The tallest the overlay grows to fit its list; set by dragging its height; persisted
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -1898,6 +1897,8 @@ class Pane {
   left?: TaskContext;
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
+  /** The mark it shows, and the name beside it: OMP's for a shell running omp (icons.ts). */
+  get brand(): Mark { return markOf(this.startup, this.agent); }
   sid = ""; // and the claude session it owns, so the next launch resumes it
   startupSettings?: { model?: string; effort?: string };
   providerUsage: Usage | null = null;
@@ -2137,7 +2138,7 @@ class Pane {
     this.startup = startup;
     this.agent = agentOf(startup);
     for (const k of ["ico", "rowIco", "pipIco"] as const) {
-      const fresh = icon(this.agent);
+      const fresh = icon(this.brand);
       this[k].replaceWith(fresh);
       this[k] = fresh;
     }
@@ -2639,7 +2640,7 @@ class Pane {
     const starting = this.starting && !this.dead;
     const word = this.dead ? "Exited" : starting ? "Starting" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
     this.title.textContent = title;
-    this.title.title = `${this.agent}, pane ${index + 1}: ${this.appTitle || title}`;
+    this.title.title = `${this.brand}, pane ${index + 1}: ${this.appTitle || title}`;
     this.stateTag.textContent = state || starting ? word : "";
     this.el.classList.toggle("starting", starting);
     this.el.classList.toggle("busy", this.busy);
@@ -2647,15 +2648,15 @@ class Pane {
     this.el.classList.toggle("dead", this.dead);
     this.el.classList.toggle("active", this.th.active === this);
     // The sidebar row: the agent, then whatever it titled itself.
-    this.rowName.textContent = this.agent;
+    this.rowName.textContent = this.brand;
     this.rowLabel.textContent = title;
     this.rowState.textContent = word;
-    this.row.title = `${this.agent}: ${this.appTitle || title}`;
-    this.row.setAttribute("aria-label", `${this.agent}, ${title}, ${word}`);
+    this.row.title = `${this.brand}: ${this.appTitle || title}`;
+    this.row.setAttribute("aria-label", `${this.brand}, ${title}, ${word}`);
     this.row.dataset.state = state;
     this.row.classList.toggle("on", this.th === current && this.th.active === this);
     this.pip.dataset.state = state;
-    this.pip.title = `${this.agent}: ${title} (${word})`;
+    this.pip.title = `${this.brand}: ${title} (${word})`;
     this.th.paint(); // the thread row sums its panes
     syncSpin();
     // Exiting or relaunching changes whether this pane can be dictated into.
@@ -3000,7 +3001,7 @@ class Thread {
 
   /** Does this row survive the sidebar filter? Name, branch, or an agent's title. */
   matches(q: string) {
-    const hay = [basename(this.repo), this.name, this.branch, ...this.panes.map((p) => `${p.agent} ${p.appTitle}`)].join(" ").toLowerCase();
+    const hay = [basename(this.repo), this.name, this.branch, ...this.panes.map((p) => `${p.brand} ${p.appTitle}`)].join(" ").toLowerCase();
     return hay.includes(q);
   }
 
@@ -3335,7 +3336,6 @@ const flushSave = (): Promise<unknown> => {
       planUsage,
       speakButton: speakShown,
       overlay: overlayMode,
-      overlayCap,
       ui: { thread: threads.indexOf(current!), dashboard: dashboardOpen, dashboardCompact, sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
         sideScroll: $("#threads").scrollTop,
         foldedSections: [...foldedSections], foldedDirs: [...foldedDirs],
@@ -3738,7 +3738,7 @@ function renderDashboard() {
     return { th, p, state, preview, age, messages, menu };
   }));
   const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
-    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${agentGroups.filter(g => p.groupIds.includes(g.id)).map(g => g.name).join(" ")} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
+    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.brand} ${p.label} ${agentGroups.filter(g => p.groupIds.includes(g.id)).map(g => g.name).join(" ")} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
   const counts = $("#dashboard-counts");
   const selectedGroup = agentGroups.find(g => dashboardFilter === `group:${g.id}`);
   const filters = [
@@ -3828,13 +3828,13 @@ function renderDashboard() {
       row.className = "dashboard-row";
       row.dataset.key = p.id;
       row.dataset.state = state;
-      row.title = `${dashboardCompact ? "Open" : "Preview"} ${p.agent} in ${th.name}`;
+      row.title = `${dashboardCompact ? "Open" : "Preview"} ${p.brand} in ${th.name}`;
       if (!dashboardCompact) row.setAttribute("aria-haspopup", "dialog");
       const identity = document.createElement("span");
       identity.className = "dashboard-identity";
-      identity.append(icon(p.agent));
+      identity.append(icon(p.brand));
       const name = document.createElement("strong");
-      name.textContent = `${th.name} / ${p.agent}`;
+      name.textContent = `${th.name} / ${p.brand}`;
       identity.append(name);
       const location = document.createElement("span");
       location.className = "dashboard-location";
@@ -3942,7 +3942,7 @@ function renderDashboard() {
     const selected = all.find(r => r.p === dashboardPreviewPane);
     if (!selected) return closeDashboardPreview();
     const { p, th, state, age } = selected;
-    $("#dashboard-preview-title").textContent = `${th.name} / ${p.agent}`;
+    $("#dashboard-preview-title").textContent = `${th.name} / ${p.brand}`;
     $("#dashboard-preview-meta").textContent = `${basename(th.repo)} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
     $("#dashboard-preview-meta").title = th.dir;
     $("#dashboard-preview-status").textContent = age;
@@ -5389,7 +5389,7 @@ function syncOverlay() {
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || (a.state === "waiting" ? a.p.waitingSince - b.p.waitingSince : a.p.busySince - b.p.busySince))
     .map(({ th, p, state }): OverlayRow => ({
       id: p.id,
-      agent: p.agent,
+      agent: p.brand,
       waiting: state === "waiting",
       name: th.panes.length > 1 ? `${th.name} · ${th.panes.indexOf(p) + 1}` : th.name,
       time: ago(state === "waiting" ? p.waitingSince : p.busySince),
@@ -5398,7 +5398,7 @@ function syncOverlay() {
   const show = wanted && (rows.length > 0 || overlayMode === "always");
   if (show) {
     const style = getComputedStyle(document.documentElement);
-    const state: OverlayState = { rows, cap: overlayCap, vars: Object.fromEntries(OVERLAY_VARS.map(k => [k, style.getPropertyValue(k).trim()])), scheme: theme.scheme ?? "dark" };
+    const state: OverlayState = { rows, vars: Object.fromEntries(OVERLAY_VARS.map(k => [k, style.getPropertyValue(k).trim()])), scheme: theme.scheme ?? "dark" };
     const sent = JSON.stringify(state);
     if (sent !== overlaySent) void emit("overlay-rows", state).then(() => (overlaySent = sent));
   }
@@ -5431,7 +5431,6 @@ void listen("overlay-ready", () => ((overlaySent = ""), syncOverlay()));
 void listen<string>("overlay-pick", e => void comeBack(threads.flatMap(t => t.panes).find(p => p.id === e.payload)));
 void listen("overlay-open", () => void comeBack());
 void listen("overlay-dismiss", () => ((overlayClosedAt = loomFocused), syncOverlay()));
-void listen<number>("overlay-cap", e => ((overlayCap = e.payload), save()));
 
 function paintOverlayPref() {
   const b = $("#overlay-pref");
@@ -5453,7 +5452,7 @@ function renderPicker() {
   const rows = threads
     .flatMap((th) => th.panes.map((p) => ({ th, p, state: paneState(p) })))
     .filter(({ state }) => pickAll || state === "waiting")
-    .filter(({ th, p }) => !q || `${basename(th.repo)} ${th.name} ${th.branch} ${p.agent} ${p.appTitle}`.toLowerCase().includes(q))
+    .filter(({ th, p }) => !q || `${basename(th.repo)} ${th.name} ${th.branch} ${p.brand} ${p.appTitle}`.toLowerCase().includes(q))
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
   list.replaceChildren();
   for (const { th, p, state } of rows) {
@@ -5463,7 +5462,7 @@ function renderPicker() {
     row.dataset.state = state;
     const label = document.createElement("span");
     label.className = "picker-label";
-    label.textContent = `${th.name} / ${p.agent}`;
+    label.textContent = `${th.name} / ${p.brand}`;
     const detail = document.createElement("span");
     detail.className = "picker-detail";
     detail.textContent = p.label;
@@ -5473,7 +5472,7 @@ function renderPicker() {
     const tag = document.createElement("span");
     tag.className = "picker-state";
     tag.textContent = STATE_WORD[state];
-    row.append(icon(p.agent), label, tag, detail, project);
+    row.append(icon(p.brand), label, tag, detail, project);
     row.onclick = () => {
       picker.close();
       revealPane(p);
@@ -6028,7 +6027,7 @@ function paintTabs() {
   // The panes are the first tab: a way back that keeps the diffs open. It wears
   // the focused pane's agent mark, so it reads as the agent, not another diff.
   const n = th.panes.length;
-  mk(th.active ? icon(th.active.agent) : "▦", n === 1 ? (th.active?.agent ?? "pane") : `${n} panes`, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()))
+  mk(th.active ? icon(th.active.brand) : "▦", n === 1 ? (th.active?.brand ?? "pane") : `${n} panes`, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()))
     .classList.add("panes");
   function mk(glyph: string | Node, label: string, on: boolean, pick: () => void, close?: () => void) {
     const b = document.createElement("div");
@@ -8385,6 +8384,7 @@ function paneSettings(p: Pane) {
 }
 const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
+  ...(p.brand && p.brand !== p.agent ? { mark: p.brand } : {}), // OMP's, for the phone; agent stays shell
   // stableId: the same pane's id after Loom restarts, when its id is new.
   title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, stableId: p.stableId, dir: p.th.dir, front: current === p.th && p.th.active === p,
   zoomed: p.th.zoomed === p,
@@ -9926,7 +9926,6 @@ async function main() {
     planUsage?: boolean;
     speakButton?: boolean;
     overlay?: boolean | OverlayMode;
-    overlayCap?: number;
     ui?: { thread?: number; dashboard?: boolean; dashboardCompact?: boolean; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
@@ -9962,7 +9961,6 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   speakShown = saved.speakButton !== false;
   // true was "in background" before there was an "always".
   overlayMode = saved.overlay === true ? "background" : OVERLAY_MODES.find(m => m === saved.overlay) ?? "off";
-  overlayCap = saved.overlayCap ?? overlayCap;
   repos = saved.repos ?? [];
   agentGroups = Array.isArray(saved.agentGroups) ? saved.agentGroups.filter(g => g && typeof g.id === "string" && g.id && typeof g.name === "string" && g.name.trim()) : [];
   reposFolded = new Set(saved.reposFolded ?? []);

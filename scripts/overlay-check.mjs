@@ -128,13 +128,13 @@ try {
   assert.equal(await main.locator('#waiting').textContent(), '1 waiting', 'Dragging must not acknowledge the agent');
   await until('position saved', () => { try { const s = JSON.parse(readFileSync(windowFile, 'utf8')).overlay; return s?.x === moved.x && s?.y === moved.y; } catch { return false; } });
   // Its height fits the list. Dragging the corner keeps the new width; the height
-  // goes back to the list's and becomes the most it grows to.
+  // goes back to the list's.
   const fitted = await overlay.evaluate(() => Math.max(110, Math.ceil(document.querySelector('header').getBoundingClientRect().height + document.querySelector('#rail').getBoundingClientRect().height + 2)));
   assert.ok(Math.abs(await overlay.evaluate(() => innerHeight) - fitted) <= 2, 'The window fits its list');
   win('drag', pid, moved.x + moved.w - 3, moved.y + moved.h - 3, moved.x + moved.w + 77, moved.y + moved.h + 57);
   const sized = await until('overlay resized', () => { const o = overlayWin(pid); return Math.abs(o.w - (moved.w + 80)) <= 6 && Math.abs(o.h - moved.h) <= 6 && o; });
   assert.equal(await overlay.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'Resized, the list still fits');
-  await until('size and cap saved', () => { try { return JSON.parse(readFileSync(windowFile, 'utf8')).overlay?.width > 300 && JSON.parse(readFileSync(profile, 'utf8')).overlayCap > fitted + 30; } catch { return false; } });
+  await until('width saved', () => { try { return JSON.parse(readFileSync(windowFile, 'utf8')).overlay?.width > 300; } catch { return false; } });
   // Clicking the agent brings Loom back on the overview, previewing it.
   const row = await overlay.locator('.row.waiting').boundingBox();
   win('click', pid, ...onScreen(sized, row.x + 60, row.y + row.height / 2));

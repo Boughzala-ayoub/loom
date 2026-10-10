@@ -177,9 +177,10 @@ question, such as a permission prompt, has that question under its name.
 something is waiting or working. **Always** keeps it up, over Loom too. It
 never takes the keyboard from the app you're in.
 
-Its height follows the list. Drag it by its header, and resize it from its
-edges: the width stays where you leave it, and a height you drag to becomes the
-most it grows to before the list scrolls. Loom remembers all three. Click an
+Its height follows the list down to the bottom of the screen, and past that the
+list scrolls. Dropped too low for its smallest height, it moves up to stay on
+the screen. Drag it by its header, and drag its edges to change the width.
+Loom remembers where it is and how wide. Click an
 agent to bring Loom back on the overview with that agent previewed, or the grid
 icon for the overview alone. The close button hides it until you next switch to
 or away from Loom. `node scripts/overlay-check.mjs` tests it in the real app;

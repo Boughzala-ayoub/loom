@@ -28,6 +28,7 @@ try {
         state.threads[0].panes.forEach(p => { p.groupIds = ['active']; });
       }
       if (location.search.includes('dashboard')) Object.assign(state.threads[0].panes[1], { sid: 'dashboard-codex-pane', sessionId: 'valid-session' });
+      if (location.search.includes('omp-pane')) state.threads[2].panes = [{ cmd: 'omp' }];
       if (location.search.includes('needs-session')) delete state.threads[0].panes[1].sessionId;
       if (location.search.includes('many')) state.threads = Array.from({ length: 40 }, (_, i) => thread(`thread-${i}-with-a-long-review-description`, ['claude']));
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
@@ -86,6 +87,7 @@ try {
         if (cmd === 'pty_write' && qa.onWrite) qa.onWrite(args); // Lets a test pane echo or redraw like a live agent.
         if (cmd === 'pty_kill' && qa.controlKill) return window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: `pty-exit:${args.id}`, payload: 1 });
         if (cmd === 'plugin:window|is_focused') return qa.focused ?? true;
+        if (cmd === 'plugin:window|outer_position') return qa.outer ?? { x: 0, y: 0 }; // physical pixels
         if (cmd === 'has_codex_session' && qa.holdCodex) return new Promise(resolve => qa.pendingCodex.push(resolve));
         if (cmd === 'has_codex_session') return args.sid !== 'missing-session';
         if (cmd === 'pane_booted') return true;
@@ -1401,6 +1403,45 @@ try {
       }
       await page.click('#dashboard-select');
     }
+    // An OMP pane runs as a shell command, as before, and shows OMP's mark: in the sidebar, its
+    // header and picture-in-picture, the tab strip, and the overview.
+    await page.goto(base + '?omp-pane');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    assert.equal(await page.evaluate(() => window.qa.panes.find(p => p.argv.at(-1).endsWith('; omp'))?.argv[0]), 'powershell.exe', 'OMP keeps its PowerShell host');
+    const ompMarks = () => page.evaluate(() => Object.fromEntries(['.agent', '.pane-head', '.pip', '.panes', '.dashboard-identity'].map(s =>
+      [s, [...document.querySelectorAll(`${s} svg.ico path`)].filter(p => p.getAttribute('d') === 'M0 2h24v4H0zM6 6h4v10H6zM14 6h4v16h-4z').length])));
+    await cli('show', 'fix-settings');
+    await page.waitForFunction(() => document.querySelector('.panes')?.textContent.includes('omp'));
+    assert.deepEqual(await ompMarks(), { '.agent': 1, '.pane-head': 1, '.pip': 1, '.panes': 1, '.dashboard-identity': 0 }, `OMP's mark, ${width}px`);
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('.agent .agent-name')].some(n => n.textContent === 'omp')), `The sidebar names OMP, ${width}px`);
+    await audit('omp-pane');
+    // omp finds it by name, as each search knows the others: the sidebar filter (set from code, as
+    // under 768px the sidebar is shut), then the overview and Ctrl+K below.
+    const sideFilter = q => page.evaluate(q => { const f = document.querySelector('#side-filter'); f.value = q; f.dispatchEvent(new Event('input')); }, q);
+    await sideFilter('omp');
+    assert.deepEqual(await page.locator('.thread:not(.hidden) .thread-name').allTextContents(), ['fix-settings'], `The sidebar filter finds OMP by omp, ${width}px`);
+    await sideFilter('claude');
+    assert.deepEqual(await page.locator('.thread:not(.hidden) .thread-name').allTextContents(), ['search-polish', 'review-keyboard-navigation'], `The sidebar filter finds Claude by claude, ${width}px`);
+    await sideFilter('');
+    await page.click('#dashboard-btn');
+    await page.waitForFunction(() => [...document.querySelectorAll('.dashboard-identity svg.ico path')].some(p => p.getAttribute('d').startsWith('M0 2h24')));
+    assert.equal(await page.locator('.dashboard-row').filter({ hasText: 'fix-settings / omp' }).count(), 1, `The overview names OMP, ${width}px`);
+    await page.fill('#dashboard-query', 'omp');
+    await page.waitForFunction(() => document.querySelectorAll('.dashboard-row').length === 1);
+    assert.equal(await page.locator('.dashboard-row').filter({ hasText: 'fix-settings / omp' }).count(), 1, `The overview finds OMP by omp, ${width}px`);
+    await audit('omp-overview-search');
+    await page.fill('#dashboard-query', '');
+    await audit('omp-overview');
+    await page.keyboard.press('Control+k');
+    await page.waitForSelector('#thread-picker[open]');
+    await page.fill('#picker-query', 'omp');
+    assert.deepEqual(await page.locator('.picker-row .picker-label').allTextContents(), ['fix-settings / omp'], `Ctrl+K finds and names OMP, ${width}px`);
+    await audit('omp-picker');
+    for (const [q, n] of [['claude', 2], ['codex', 1]]) {
+      await page.fill('#picker-query', q);
+      assert.equal(await page.locator('.picker-row').count(), n, `Ctrl+K still finds ${q}, ${width}px`);
+    }
+    await page.keyboard.press('Escape');
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');
@@ -2170,8 +2211,6 @@ try {
     const sentRows = await page.evaluate(() => window.qa.overlayRows.at(-1));
     assert.deepEqual(sentRows.rows.map(r => [r.name, r.agent, r.waiting, r.time, r.ask]), [['review-keyboard-navigation', 'claude', true, 'now', 'Bash command · rm -rf build']], 'The overlay lists the waiting agent and what it asks');
     assert.ok(sentRows.vars['--panel'], 'The overlay gets the theme colours');
-    await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-cap', payload: 300 }));
-    await page.waitForFunction(() => window.qa.saved.overlayCap === 300);
     await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-pick', payload: window.qa.overlayPane }));
     await page.waitForSelector('#dashboard-preview[open]');
     assert.equal(await page.locator('#dashboard-preview-title').textContent(), 'review-keyboard-navigation / claude', 'A click previews that agent in the overview');
@@ -2202,11 +2241,25 @@ try {
     const overlayPage = await context.newPage();
     await overlayPage.setViewportSize({ width: 300, height: 240 });
     await overlayPage.goto(base + '/overlay.html');
+    // Where the window's top sits on a 1000 px screen: it grows into the room below that.
+    const placeAt = y => overlayPage.evaluate(y => {
+      Object.defineProperty(screen, 'availTop', { value: 0, configurable: true });
+      Object.defineProperty(screen, 'availHeight', { value: 1000, configurable: true });
+      Object.defineProperty(window, 'screenY', { value: y, configurable: true });
+    }, y);
+    await placeAt(100);
     const row = (name, i, waiting, ask = '') => ({ id: `pane-${i}`, name, agent: i % 3 ? 'claude' : 'codex', waiting, time: i ? `${i}m` : 'now', ask });
-    const few = { rows: [row('search-polish', 0, true, 'Bash command · rm -rf build'), row('fix-settings · 2', 1, false), row('usageOverlay', 2, false)], cap: 420, vars: {}, scheme: 'dark' };
+    const few = { rows: [row('search-polish', 0, true, 'Bash command · rm -rf build'), row('fix-settings · 2', 1, false), row('usageOverlay', 2, false)], vars: {}, scheme: 'dark' };
     const lastSize = () => overlayPage.evaluate(() => JSON.parse(JSON.stringify(window.qa.calls.filter(c => c.cmd === 'plugin:window|set_size').at(-1)?.args.value ?? null))?.Logical);
     // The window follows: apply the size the page asked for, as the real window would.
     const follow = async () => { const size = await lastSize(); await overlayPage.setViewportSize({ width: 300, height: Math.round(size.height) }); return size.height; };
+    // The size the page asks for after `act`, which it does once things settle.
+    const refitted = async act => {
+      const n = await overlayPage.evaluate(() => window.qa.calls.filter(c => c.cmd === 'plugin:window|set_size').length);
+      await act();
+      await overlayPage.waitForFunction(n => window.qa.calls.filter(c => c.cmd === 'plugin:window|set_size').length > n, n);
+      return lastSize();
+    };
     await overlayPage.waitForFunction(state => {
       window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-rows', payload: state }); // Again until it renders: the page may not be listening yet.
       return document.querySelectorAll('.row').length > 0;
@@ -2220,27 +2273,56 @@ try {
     assert.equal(await overlayPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'overlay: horizontal overflow');
     await overlayPage.evaluate(() => {
       window.qa.picked = [];
-      window.qa.caps = [];
       const on = (event, list) => window.__TAURI_INTERNALS__.invoke('plugin:event|listen', { event, handler: window.__TAURI_INTERNALS__.transformCallback(e => list.push(e.payload)) });
       on('overlay-pick', window.qa.picked);
-      on('overlay-cap', window.qa.caps);
     });
     await overlayPage.locator('.row').nth(1).click();
     await overlayPage.waitForFunction(() => window.qa.picked.length === 1);
     assert.deepEqual(await overlayPage.evaluate(() => window.qa.picked), ['pane-1'], 'A click reports that agent');
     await overlayPage.mouse.move(0, 0);
     await overlayPage.screenshot({ path: `${out}/overlay-${width}.png`, animations: 'disabled' });
-    // A long list stops at the cap and scrolls.
-    const many = { ...few, cap: 200, rows: [...few.rows, ...['a', 'b', 'c', 'd', 'e'].map((n, i) => row(n, i + 3, false))] };
+    // Low on the screen, a long list stops at the bottom and scrolls.
+    await placeAt(800);
+    const many = { ...few, rows: [...few.rows, ...['a', 'b', 'c', 'd'].map((n, i) => row(n, i + 3, false)), { ...row('e', 7, false), agent: 'omp' }] };
     await overlayPage.evaluate(state => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-rows', payload: state }), many);
     await overlayPage.waitForFunction(() => document.querySelectorAll('.row').length === 8);
-    assert.equal(Math.round(await follow()), 200, 'A long list stops at the cap');
-    assert.equal(await overlayPage.locator('#list').evaluate(el => el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY === 'auto'), true, 'Past the cap, the list scrolls');
+    assert.equal(await overlayPage.evaluate(() => [...document.querySelectorAll('.row')].find(r => r.querySelector('.name').textContent === 'e').querySelector('svg.ico path').getAttribute('d')), 'M0 2h24v4H0zM6 6h4v10H6zM14 6h4v16h-4z', 'The overlay shows OMP\'s mark');
+    assert.equal(Math.round(await follow()), 200, 'A long list stops at the bottom of the screen');
+    assert.equal(await overlayPage.locator('#list').evaluate(el => el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY === 'auto'), true, 'Past the bottom of the screen, the list scrolls');
     await overlayPage.screenshot({ path: `${out}/overlay-capped-${width}.png`, animations: 'disabled' });
-    // Dragging the height sets the cap once you let go.
-    await overlayPage.setViewportSize({ width: 300, height: 160 });
-    await overlayPage.waitForFunction(() => window.qa.caps.length === 1);
-    assert.deepEqual(await overlayPage.evaluate(() => window.qa.caps), [160], 'A dragged height becomes the cap');
+    // Moved up, it grows to the whole list.
+    const longest = await overlayPage.evaluate(() => Math.ceil(document.querySelector('header').getBoundingClientRect().height + document.querySelector('#rail').getBoundingClientRect().height + 2));
+    assert.ok(longest > 200, 'The long list is taller than the room left low on the screen');
+    const moved = await refitted(async () => {
+      await placeAt(100);
+      await overlayPage.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://move', payload: { x: 0, y: 100 } }));
+    });
+    assert.equal(Math.round(moved.height), longest, 'Moved up, it grows to the whole list');
+    await follow();
+    assert.equal(await overlayPage.locator('#list').evaluate(el => el.scrollHeight <= el.clientHeight), true, 'With room for it, the long list needs no scrolling');
+    // A height you drag to goes back to the list's once you let go.
+    const dragged = await refitted(() => overlayPage.setViewportSize({ width: 300, height: 160 }));
+    assert.equal(Math.round(dragged.height), longest, 'A dragged height goes back to the list');
+    // 50 px from the bottom of a 150% screen above the primary (negative offsets), under its 110 px
+    // minimum: it keeps 110 and moves up the 60 CSS px it would hang over, 90 physical px.
+    const lifted = await overlayPage.evaluate(async () => {
+      Object.defineProperty(screen, 'availTop', { value: -1000, configurable: true });
+      Object.defineProperty(screen, 'availHeight', { value: 1000, configurable: true });
+      Object.defineProperty(window, 'screenY', { value: -50, configurable: true });
+      Object.defineProperty(window, 'devicePixelRatio', { value: 1.5, configurable: true });
+      window.qa.outer = { x: -300, y: -75 };
+      const n = window.qa.calls.length;
+      await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://move', payload: { x: -300, y: -75 } });
+      for (let t = 0; t < 50 && !window.qa.calls.slice(n).some(c => c.cmd === 'plugin:window|set_position'); t++) await new Promise(r => setTimeout(r, 100));
+      const calls = JSON.parse(JSON.stringify(window.qa.calls.slice(n)));
+      return { at: calls.find(c => c.cmd === 'plugin:window|set_position')?.args.value?.Physical, size: calls.filter(c => c.cmd === 'plugin:window|set_size').at(-1)?.args.value?.Logical?.height };
+    });
+    assert.deepEqual(lifted, { at: { x: -300, y: -165 }, size: 110 }, 'With less room than its minimum, the overlay moves up to keep its bottom on the screen');
+    await overlayPage.evaluate(() => {
+      Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true });
+      delete window.qa.outer;
+    });
+    await placeAt(100);
     await overlayPage.setViewportSize({ width: 220, height: 110 });
     assert.equal(await overlayPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'overlay at its minimum size: horizontal overflow');
     await overlayPage.screenshot({ path: `${out}/overlay-min-${width}.png`, animations: 'disabled' });

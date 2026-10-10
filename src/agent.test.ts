@@ -1,5 +1,6 @@
 // Self-check for agentOf / launch. Run: node src/agent.test.ts
 import { agentOf, codexRunning, codexThread, codexTitle, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
+import { markOf } from "./icons.ts";
 
 let fails = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -25,6 +26,11 @@ for (const cmd of ['opencode1', 'opencode2']) {
   check(`${cmd} does not replace an explicit session`, launch(`${cmd} -s ses_own`, S, true, undefined, 'ses_saved')[4], `${cmd} -s ses_own`);
 }
 check("agentOf cmd", agentOf("cmd"), "shell");
+// OMP runs as a shell command, as before; only its mark is its own.
+check("agentOf omp stays a shell", agentOf("omp --model opus"), "shell");
+check("omp keeps its PowerShell host", launch("omp", S, true), ["powershell.exe", "-NoLogo", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", ". $env:LOOM_INIT; omp"]);
+check("omp shows its mark, others their own", ["omp", " omp --model opus ", "ompx", "cmd", "codex", "opencode2"].map(c => markOf(c, agentOf(c))), ["omp", "omp", "shell", "shell", "codex", "opencode"]);
+check("an agent shows its own mark", markOf("claude", "claude"), "claude");
 
 check("new claude pane pins an id", launch("claude", S, false), ["claude", "--session-id", S, ...H]);
 check("restored claude pane resumes", launch("claude", S, true), ["claude", "--resume", S, ...H]);
