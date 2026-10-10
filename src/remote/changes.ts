@@ -24,7 +24,7 @@ let statusKey = "";
 // so a late answer never puts one thread's files and buttons under another's name.
 let readSeq = 0, diffSeq = 0, filesSeq = 0;
 // ponytail: every read re-reads this many, as the PC's panel does; a few hundred is still one small reply
-let commitLimit = 10; // the commits listed; "Show more commits" adds 50, another thread starts at 10
+let commitLimit = 10; // the commits listed; "Show more commits" adds 50, "Show fewer commits" and another thread start at 10
 const git = (tid: string, args: string[], opts: { stdin?: string; change?: boolean; timeout?: number } = {}) =>
   run<Status>("git", [tid, `--commits=${commitLimit}`, ...args], { timeout: 120, ...opts }); // before args: a path follows a bare --
 
@@ -154,6 +154,7 @@ function draw(tid: string, s: Status) {
     }));
     nodes.push(box);
     if (s.moreCommits) nodes.push(button("Show more commits", () => ((commitLimit = s.commits.length + 50), void read(true)), "more-rows"));
+    if (s.commits.length > 10) nodes.push(button("Show fewer commits", () => ((commitLimit = 10), void read(true)), "more-rows"));
   }
   // A message being typed keeps its box, never rebuilt: the caret stays, and so does a word the phone's keyboard is composing.
   const at = typing ? nodes.findIndex((n) => n instanceof HTMLElement && n.matches(".composer")) : -1;

@@ -6245,7 +6245,7 @@ let changesOpen = false;
 const foldedSections = new Set<string>(["Commits"]);
 const foldedDirs = new Set<string>();
 // ponytail: one count for every thread; each poll re-reads this many, a few hundred is still one cheap git log
-let commitLimit = 10; // Commits rows; "Show more" adds 50
+let commitLimit = 10; // Commits rows; "Show more" adds 50, "Show less" goes back to 10
 /** The right panel is Orca's: git's view of the thread, or every file in it. */
 let panel: "changes" | "files" = "changes";
 const openDirs = new Set<string>(); // Files tree folders unfolded; shut by default, the repo is big
@@ -6853,14 +6853,16 @@ async function readChanges() {
         d.oncontextmenu = (e) => (e.preventDefault(), showMenu(d, commitMenuFor(th, sha)));
         body.append(d);
       }
-      if (lines.length > commitLimit) {
-        const more = document.createElement("button"); // Tab reaches it, Enter and Space press it
-        more.type = "button";
-        more.className = "commit more";
-        more.textContent = "Show more";
-        more.onclick = () => ((commitLimit += 50), void refreshChanges());
-        body.append(more);
-      }
+      const pager = (label: string, limit: number) => {
+        const b = document.createElement("button"); // Tab reaches it, Enter and Space press it
+        b.type = "button";
+        b.className = "commit more";
+        b.textContent = label;
+        b.onclick = () => ((commitLimit = limit), void refreshChanges());
+        body.append(b);
+      };
+      if (lines.length > commitLimit) pager("Show more", commitLimit + 50);
+      if (commitLimit > 10 && lines.length > 10) pager("Show less", 10);
     }
   }
   // A diff tab on screen describes what the panel just re-read: keep them in step.

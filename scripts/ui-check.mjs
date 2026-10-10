@@ -2986,24 +2986,30 @@ try {
     await audit('commit-actions');
     await escape();
     // 160 commits, 50 more at a time: "Show more" is a button Tab reaches. Enter takes 10 rows to 60,
-    // Space 60 to 110, a click 110 to 160, and then it's gone.
+    // Space 60 to 110, a click 110 to 160, and then it's gone. "Show less", there past 10, goes back to 10.
     await page.evaluate(() => { window.qa.commits = 160; });
     await page.click('#changes-refresh');
-    const commitRows = (n) => page.waitForFunction(n => document.querySelectorAll('.commit:not(.more)').length === n && !!document.querySelector('.commit.more') === n < 160, n);
+    const commitRows = (n) => page.waitForFunction(n => {
+      const pagers = [...document.querySelectorAll('.commit.more')].map(b => b.textContent);
+      return document.querySelectorAll('.commit:not(.more)').length === n && pagers.includes('Show more') === n < 160 && pagers.includes('Show less') === n > 10;
+    }, n);
+    const showMore = page.getByRole('button', { name: 'Show more', exact: true });
     await commitRows(10);
-    assert.equal(await page.getByRole('button', { name: 'Show more', exact: true }).count(), 1, `Show more is no button at ${width}px`);
-    await page.locator('.commit.more').evaluate(more => { const before = document.createElement('button'); before.id = 'qa-before-more'; more.before(before); before.focus(); });
+    assert.equal(await showMore.count(), 1, `Show more is no button at ${width}px`);
+    await showMore.evaluate(more => { const before = document.createElement('button'); before.id = 'qa-before-more'; more.before(before); before.focus(); });
     await page.keyboard.press('Tab');
-    assert.ok(await page.evaluate(() => document.activeElement?.matches('.commit.more')), `Tab skips Show more at ${width}px`);
+    assert.ok(await page.evaluate(() => document.activeElement?.textContent === 'Show more'), `Tab skips Show more at ${width}px`);
     await page.evaluate(() => document.getElementById('qa-before-more').remove());
     await page.keyboard.press('Enter');
     await commitRows(60);
-    await page.locator('.commit.more').focus();
+    await showMore.focus();
     await page.keyboard.press('Space');
     await commitRows(110);
-    await page.locator('.commit.more').click();
+    await showMore.click();
     await commitRows(160);
     await audit('commits-more');
+    await page.getByRole('button', { name: 'Show less', exact: true }).click();
+    await commitRows(10);
     await page.evaluate(() => { delete window.qa.commits; });
     await page.locator('.file').first().click();
     await page.waitForSelector('#diff:not(.hidden) .line');

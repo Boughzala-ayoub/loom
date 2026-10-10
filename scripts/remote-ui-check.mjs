@@ -429,14 +429,19 @@ try {
     await p.locator('#changes [aria-label="Git actions"]').click(); await sheetButton(p, 'Restore a stash').click(); await p.locator('#sheet .pair').waitFor(); await fits(p, width, 'stashes'); await close(p);
     await p.locator('#changes .commit-row .icon-btn').first().click(); await fits(p, width, 'commit-menu'); await close(p);
     // 60 commits: 10 and "Show more commits", then all 60 asked for and listed, and no button; another thread starts at 10.
+    // "Show fewer commits", there past 10, goes back to 10.
     state.history = 60; await p.locator('#changes [aria-label="Refresh"]').click();
-    const more = p.locator('#changes .more-rows');
-    await until(`${width}: 10 commits and more`, async () => (await p.locator('#changes .commit-row').count()) === 10 && await more.isVisible());
+    const more = p.locator('#changes .more-rows', { hasText: 'Show more commits' }), fewer = p.locator('#changes .more-rows', { hasText: 'Show fewer commits' });
+    await until(`${width}: 10 commits and more`, async () => (await p.locator('#changes .commit-row').count()) === 10 && await more.isVisible() && !(await fewer.count()));
     await fits(p, width, 'commits-more'); await taps(p, width, '#changes .body');
     await more.click();
-    await until(`${width}: 60 commits`, async () => (await p.locator('#changes .commit-row').count()) === 60 && !(await more.count()));
+    await until(`${width}: 60 commits`, async () => (await p.locator('#changes .commit-row').count()) === 60 && !(await more.count()) && await fewer.isVisible());
     assert.equal(git(state, 'status').at(-1).commits, 60, 'the phone asks for the commits it shows');
     await fits(p, width, 'commits-all');
+    await fewer.click();
+    await until(`${width}: back to 10 commits`, async () => (await p.locator('#changes .commit-row').count()) === 10 && await more.isVisible() && !(await fewer.count()));
+    assert.equal(git(state, 'status').at(-1).commits, 10, 'Show fewer commits asks for 10');
+    await more.click(); await until(`${width}: 60 commits again`, async () => (await p.locator('#changes .commit-row').count()) === 60);
     await p.evaluate(() => { location.hash = '#/changes/b'; });
     await until(`${width}: Beta starts at 10`, async () => (await p.locator('#changes .picker b').textContent()).includes('Beta') && (await p.locator('#changes .commit-row').count()) === 10);
     assert.equal(git(state, 'status').at(-1).commits, 10, 'another thread asks for 10');
