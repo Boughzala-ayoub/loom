@@ -798,10 +798,18 @@ if (check(208)) {
     await git({}, "unstage", "a[1].txt");
     await git({ untracked: true }, "discard", "a[1].txt");
     assert.deepEqual([existsSync(join(repo, "a[1].txt")), existsSync(join(repo, "a1.txt"))], [false, true], "deleting a[1].txt keeps a1.txt");
+    // The phone pages the commits: --commits N of them, and moreCommits while git has older ones.
+    real("commit", "-q", "--allow-empty", "-m", "second");
+    real("commit", "-q", "--allow-empty", "-m", "third");
+    const two = (await c.git.run({ _: ["t", "status"], commits: 2 })).data;
+    assert.deepEqual(JSON.parse(JSON.stringify([two.commits.map((x: any) => x.subject), two.moreCommits])), [["third", "second"], true], "2 of 3 commits, and more");
+    const three = (await c.git.run({ _: ["t", "status"], commits: 3 })).data;
+    assert.deepEqual([three.commits.length, three.moreCommits], [3, false], "all 3 commits, and no more");
+    assert.equal((await git({}, "status")).data.commits.length, 3, "10 by default");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
-  console.log("ok   loomctl git stages, unstages and deletes the named file only, and a rename as both names");
+  console.log("ok   loomctl git stages, unstages and deletes the named file only, and a rename as both names; status pages its commits");
 }
 if (check(213)) {
   // Every worktree of a repository shares one stash list. The stash listed as

@@ -198,6 +198,8 @@ async function context(width, token = true, push = false) {
     }
     const c = req.postDataJSON();
     state.calls.push(c);
+    // loomctl takes --commits=N out of the words; the phone sends it before every git action.
+    if (c.cmd === 'git' && Array.isArray(c.argv) && /^--commits=\d+$/.test(c.argv[1])) c.commits = +c.argv.splice(1, 1)[0].slice(10);
     if (req.url().endsWith('/pair')) return route.fulfill({ json: { ok: true, token: 'fixture-token' } });
     // revoked: this phone was unpaired on the PC, so every call answers 401.
     if (state.revoked) return route.fulfill({ status: 401, json: { ok: false, error: 'Pair this phone again.' } });
@@ -318,6 +320,11 @@ async function context(width, token = true, push = false) {
         else if (action === 'branches') data = state.branchList ?? { current: `loom/${id}`, branches: [`loom/${id}`, 'feature/next'] };
         else if (action === 'stashes') data = { stashes: [{ ref: 'stash@{0}', sha: '5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c', message: `WIP on loom/${id}: abc1234 A saved change` }] };
         else data = status(id);
+        // history: the thread has that many commits, and the phone gets the --commits it asked for.
+        if (data.commits && state.history) {
+          data.commits = Array.from({ length: Math.min(state.history, c.commits) }, (_, i) => ({ sha: `c${i}`, subject: `Commit ${i}` }));
+          data.moreCommits = state.history > c.commits;
+        }
         // gitChurn: an agent in the thread writes a new file before each read.
         if (action === 'status' && state.gitChurn) data.untracked.push(file(`made-${state.gitChurn++}.txt`, '?', '?'));
         // flagFile: a new file named like one of git's options. committed: nothing is staged after a commit.
@@ -421,6 +428,20 @@ try {
     delete state.branchList;
     await p.locator('#changes [aria-label="Git actions"]').click(); await sheetButton(p, 'Restore a stash').click(); await p.locator('#sheet .pair').waitFor(); await fits(p, width, 'stashes'); await close(p);
     await p.locator('#changes .commit-row .icon-btn').first().click(); await fits(p, width, 'commit-menu'); await close(p);
+    // 60 commits: 10 and "Show more commits", then all 60 asked for and listed, and no button; another thread starts at 10.
+    state.history = 60; await p.locator('#changes [aria-label="Refresh"]').click();
+    const more = p.locator('#changes .more-rows');
+    await until(`${width}: 10 commits and more`, async () => (await p.locator('#changes .commit-row').count()) === 10 && await more.isVisible());
+    await fits(p, width, 'commits-more'); await taps(p, width, '#changes .body');
+    await more.click();
+    await until(`${width}: 60 commits`, async () => (await p.locator('#changes .commit-row').count()) === 60 && !(await more.count()));
+    assert.equal(git(state, 'status').at(-1).commits, 60, 'the phone asks for the commits it shows');
+    await fits(p, width, 'commits-all');
+    await p.evaluate(() => { location.hash = '#/changes/b'; });
+    await until(`${width}: Beta starts at 10`, async () => (await p.locator('#changes .picker b').textContent()).includes('Beta') && (await p.locator('#changes .commit-row').count()) === 10);
+    assert.equal(git(state, 'status').at(-1).commits, 10, 'another thread asks for 10');
+    await p.evaluate(() => { location.hash = '#/changes/a'; }); await until(`${width}: Alpha again`, async () => (await p.locator('#changes .picker b').textContent()).includes('Alpha'));
+    delete state.history;
     for (const sec of ['unstaged', 'staged', 'untracked']) { await goto(p, `#/diff/a/${sec}/alpha.txt`, '#diff .hunk'); await fits(p, width, `diff-${sec}`); }
     await goto(p, '#/commit/a/abc1234', '#diff .commit-head'); await fits(p, width, 'commit');
     await goto(p, '#/files/a', '#files .list-row'); await fits(p, width, 'files'); await goto(p, '#/file/a/alpha.txt', '#diff .r'); await fits(p, width, 'file');

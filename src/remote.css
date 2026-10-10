@@ -317,6 +317,7 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
 .diff .hunk code { flex: 1 1 100%; overflow-wrap: anywhere; font-size: 12px; }
 .diff .hunk button { min-height: 44px; padding: 0 14px; border-radius: 22px; font: 600 14px var(--ui); }
 .diff .more-rows { display: block; width: calc(100% - 32px); margin: 14px 16px 0; font: 600 15px var(--ui); }
+#changes .more-rows { display: block; width: 100%; margin-top: 10px; font: 600 15px var(--ui); }
 .diff .file-head { margin-top: 14px; padding: 8px 12px; background: var(--raise); color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
 .commit-head { display: grid; gap: 6px; padding: 14px 16px; border-bottom: 1px solid var(--edge); font: 15px/1.45 var(--ui); }
 .commit-head b { font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }

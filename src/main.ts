@@ -6244,6 +6244,8 @@ const changesBtn = $("#changes-btn");
 let changesOpen = false;
 const foldedSections = new Set<string>(["Commits"]);
 const foldedDirs = new Set<string>();
+// ponytail: one count for every thread; each poll re-reads this many, a few hundred is still one cheap git log
+let commitLimit = 10; // Commits rows; "Show more" adds 50
 /** The right panel is Orca's: git's view of the thread, or every file in it. */
 let panel: "changes" | "files" = "changes";
 const openDirs = new Set<string>(); // Files tree folders unfolded; shut by default, the repo is big
@@ -6672,7 +6674,7 @@ async function readChanges() {
       syncBranch(th).then(() => git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch")),
       git(th.dir, "diff", "--numstat").then(parseNumstat),
       git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
-      git(th.dir, "log", "--oneline", "-10").catch(() => ""),
+      git(th.dir, "log", "--oneline", "-n", String(commitLimit + 1)).catch(() => ""), // one past: is there more?
       // What git stopped in the middle of: "merge", "revert", "rebase" or "".
       invoke<string>("git_midway", { dir: th.dir }).catch(() => ""),
       git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => new Map<string, Stat>()),
@@ -6839,8 +6841,9 @@ async function readChanges() {
       void refreshChanges();
     };
     body.append(h);
-    if (!foldedSections.has("Commits"))
-      for (const line of log.trim().split("\n")) {
+    if (!foldedSections.has("Commits")) {
+      const lines = log.trim().split("\n");
+      for (const line of lines.slice(0, commitLimit)) {
         const d = document.createElement("div");
         d.className = "commit";
         const [sha, ...msg] = line.split(" ");
@@ -6850,6 +6853,14 @@ async function readChanges() {
         d.oncontextmenu = (e) => (e.preventDefault(), showMenu(d, commitMenuFor(th, sha)));
         body.append(d);
       }
+      if (lines.length > commitLimit) {
+        const more = document.createElement("div");
+        more.className = "commit more";
+        more.textContent = "Show more";
+        more.onclick = () => ((commitLimit += 50), void refreshChanges());
+        body.append(more);
+      }
+    }
   }
   // A diff tab on screen describes what the panel just re-read: keep them in step.
   if (th.tab) void showTab();
@@ -6946,13 +6957,14 @@ async function prUrl(th: Thread) {
 
 /** The Changes panel as data, for loomctl git: the branch and its upstream, git's
  * half-done merge, revert or rebase, the three sections with their +/- counts,
- * and the last 10 commits. Reading it refreshes the thread's sidebar numbers. */
-async function gitStatus(th: Thread) {
+ * and the last `commits` commits, with moreCommits when git has older ones.
+ * Reading it refreshes the thread's sidebar numbers. */
+async function gitStatus(th: Thread, commits = 10) {
   const [z, unstaged, staged, log, midway, head] = await Promise.all([
     syncBranch(th).then(() => git(th.dir, "status", "--porcelain=v1", "-z", "-uall", "--branch")),
     git(th.dir, "diff", "--numstat").then(parseNumstat),
     git(th.dir, "diff", "--numstat", "--cached").then(parseNumstat),
-    git(th.dir, "log", "--oneline", "-10").catch(() => ""),
+    git(th.dir, "log", "--oneline", "-n", String(commits + 1)).catch(() => ""), // one past: is there more?
     invoke<string>("git_midway", { dir: th.dir }).catch(() => ""),
     git(th.dir, "diff", "--numstat", "HEAD").then(parseNumstat, () => new Map<string, Stat>()),
   ]);
@@ -6964,12 +6976,14 @@ async function gitStatus(th: Thread) {
   // orig rides along: stage, unstage and discard take a rename's rows from here.
   const row = (c: Change, stats: Map<string, Stat>) => ({ ...c, ...(stats.get(c.path) ?? { add: 0, del: 0 }) });
   const tracked = status.filter((c) => c.x !== "?");
+  const lines = log.split("\n").filter(Boolean);
   return {
     thread: th.id, name: th.name, dir: th.dir, branch: th.branch, upstream, ahead, behind, midway,
     unstaged: tracked.filter((c) => c.y !== " ").map((c) => row(c, unstaged)),
     staged: tracked.filter((c) => c.x !== " ").map((c) => row(c, staged)),
     untracked: status.filter((c) => c.x === "?").map((c) => row(c, new Map())),
-    commits: log.split("\n").filter(Boolean).map((l) => ({ sha: l.slice(0, l.indexOf(" ")), subject: l.slice(l.indexOf(" ") + 1) })),
+    commits: lines.slice(0, commits).map((l) => ({ sha: l.slice(0, l.indexOf(" ")), subject: l.slice(l.indexOf(" ") + 1) })),
+    moreCommits: lines.length > commits,
     changed: th.changed,
   };
 }
@@ -8955,12 +8969,13 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   git: {
-    usage: "git <thread> [status | diff [path...] [--staged|--untracked] [--full] | show <sha> [--full] | files | file <path> | stage|unstage|discard [path...] [--unstaged|--staged|--untracked] | apply - [--cached] [--reverse] | commit <message...> [--staged] [--push] | amend [message...] | undo | push | pull | fetch | force-push | pr | branches | switch <name> [--create] | stashes | stash | stash-apply <stash> | stash-drop <stash> | revert <sha> | reset <sha> --soft|--hard | continue | skip | abort | resolve ours|theirs <path...>] [--yes]",
-    help: "The Changes panel from the command line, with git's own commands as the panel runs them. Bare or status: the branch, its upstream and how far apart, a half-done merge, revert or rebase, the unstaged, staged and untracked files with their +/- counts, and the last 10 commits. diff and show print a diff (--full: whole files); files lists the thread's files and file prints one. stage, unstage and discard take paths, or a whole section. apply - takes a hunk's patch on standard input. commit commits everything, or with --staged only the index, and --push pushes after. pr pushes and gives GitHub's compare page. What can lose work wants --yes: discard, apply --reverse without --cached, amend, undo, force-push, stash-drop, reset, abort and skip. A change answers with the status after it.",
-    options: { staged: "bool", unstaged: "bool", untracked: "bool", full: "bool", cached: "bool", reverse: "bool", push: "bool", create: "bool", soft: "bool", hard: "bool", yes: "bool" },
+    usage: "git <thread> [status [--commits N] | diff [path...] [--staged|--untracked] [--full] | show <sha> [--full] | files | file <path> | stage|unstage|discard [path...] [--unstaged|--staged|--untracked] | apply - [--cached] [--reverse] | commit <message...> [--staged] [--push] | amend [message...] | undo | push | pull | fetch | force-push | pr | branches | switch <name> [--create] | stashes | stash | stash-apply <stash> | stash-drop <stash> | revert <sha> | reset <sha> --soft|--hard | continue | skip | abort | resolve ours|theirs <path...>] [--yes]",
+    help: "The Changes panel from the command line, with git's own commands as the panel runs them. Bare or status: the branch, its upstream and how far apart, a half-done merge, revert or rebase, the unstaged, staged and untracked files with their +/- counts, and the last 10 commits, or --commits N of them, with moreCommits true when git has older ones. diff and show print a diff (--full: whole files); files lists the thread's files and file prints one. stage, unstage and discard take paths, or a whole section. apply - takes a hunk's patch on standard input. commit commits everything, or with --staged only the index, and --push pushes after. pr pushes and gives GitHub's compare page. What can lose work wants --yes: discard, apply --reverse without --cached, amend, undo, force-push, stash-drop, reset, abort and skip. A change answers with the status after it, --commits counting there too.",
+    options: { staged: "bool", unstaged: "bool", untracked: "bool", full: "bool", cached: "bool", reverse: "bool", push: "bool", create: "bool", soft: "bool", hard: "bool", yes: "bool", commits: "int" },
     run: async (a) => {
       const th = cliThread(cliWord(a, 0, "a thread"));
       const [what = "status", ...rest] = a._.slice(1);
+      const commits = num(a, "commits", 10, 1, 100_000);
       const run = (...args: string[]) => git(th.dir, ...args);
       const sure = (why: string) => {
         if (!flag(a, "yes")) throw new Error(`${why} Add --yes to go ahead.`);
@@ -8979,11 +8994,11 @@ const CLI: Record<string, CliCommand> = {
         th.setStat(th.changed);
         save();
         if (th === current && changesOpen) void refreshChanges();
-        return { data: await gitStatus(th), text };
+        return { data: await gitStatus(th, commits), text };
       };
       switch (what) {
         case "status": {
-          const g = await gitStatus(th);
+          const g = await gitStatus(th, commits);
           return { data: g, text: summary(g) };
         }
         case "diff": {

@@ -2844,6 +2844,10 @@ dialog :is(input:not([type="radio"], [type="checkbox"]), select) {
   color: var(--faint);
   font-weight: 400;
 }
+.commit.more {
+  color: var(--faint);
+  text-align: center;
+}
 #changes-refresh .i,
 #changes-close .i,
 #changes-more .i {

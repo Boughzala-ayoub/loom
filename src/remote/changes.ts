@@ -10,7 +10,7 @@ type File = { path: string; x: string; y: string; add: number; del: number };
 type Sec = "staged" | "unstaged" | "untracked";
 type Status = {
   thread: string; name: string; branch: string; upstream: string; ahead: number; behind: number; midway: string;
-  staged: File[]; unstaged: File[]; untracked: File[]; commits: { sha: string; subject: string }[];
+  staged: File[]; unstaged: File[]; untracked: File[]; commits: { sha: string; subject: string }[]; moreCommits?: boolean;
 };
 
 const SECTIONS: [Sec, string][] = [["staged", "Staged"], ["unstaged", "Changes"], ["untracked", "New files"]];
@@ -23,7 +23,10 @@ let statusKey = "";
 // Each screen's newest read: a reply to an older one, or for another thread, is dropped,
 // so a late answer never puts one thread's files and buttons under another's name.
 let readSeq = 0, diffSeq = 0, filesSeq = 0;
-const git = (tid: string, args: string[], opts: { stdin?: string; change?: boolean; timeout?: number } = {}) => run<Status>("git", [tid, ...args], { timeout: 120, ...opts });
+// ponytail: every read re-reads this many, as the PC's panel does; a few hundred is still one small reply
+let commitLimit = 10; // the commits listed; "Show more commits" adds 50, another thread starts at 10
+const git = (tid: string, args: string[], opts: { stdin?: string; change?: boolean; timeout?: number } = {}) =>
+  run<Status>("git", [tid, `--commits=${commitLimit}`, ...args], { timeout: 120, ...opts }); // before args: a path follows a bare --
 
 // --- The summary ------------------------------------------------------------------
 
@@ -58,7 +61,7 @@ export function showSummary(id: string | null) {
     noThread.hidden = false;
     return;
   }
-  if (t.id !== thread) (status = null), (statusKey = "");
+  if (t.id !== thread) (status = null), (statusKey = ""), (commitLimit = 10);
   thread = t.id;
   setPref("loom-changes", t.id);
   pickerBtn.hidden = false;
@@ -150,6 +153,7 @@ function draw(tid: string, s: Status) {
       return row;
     }));
     nodes.push(box);
+    if (s.moreCommits) nodes.push(button("Show more commits", () => ((commitLimit = s.commits.length + 50), void read(true)), "more-rows"));
   }
   // A message being typed keeps its box, never rebuilt: the caret stays, and so does a word the phone's keyboard is composing.
   const at = typing ? nodes.findIndex((n) => n instanceof HTMLElement && n.matches(".composer")) : -1;

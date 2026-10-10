@@ -157,6 +157,7 @@ try {
           if (a[0] === 'ls-files') return 'README.md\0preview.png\0src/main.ts\0src/styles.css\0src/ui/menu.ts\0';
           if ((a[0] === 'diff' || a[0] === 'show') && qa.longDiff) return 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1,601 @@\n context line one\n' + '+added line\n'.repeat(600);
           if (a[0] === 'diff' || a[0] === 'show') return (a.includes('-U999999') ? ' context line one\n context line two\n' : '') + 'diff --git a/src/main.ts b/src/main.ts\n--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1 +1 @@\n-old navigation\n+const description = "A long line of source code that should remain readable when reviewing changes inside a narrow workspace window.";\n';
+          if (a[0] === 'log' && qa.commits) return Array.from({ length: Math.min(qa.commits, +a[a.indexOf('-n') + 1]) }, (_, i) => `c${i} Commit ${i}\n`).join('');
           if (a[0] === 'log') return 'abc123 Improve workspace navigation\n';
           if (a[0] === 'branch') return (qa.branchNames ?? ['main', 'loom/search-polish']).map(b => 'refs/heads/' + b).join('\n') + '\n';
           if (a[0] === 'stash' && a[1] === 'list') return 'stash@{0}\t5a1c0de5a1c0de5a1c0de5a1c0de5a1c0de5a1c\tOn main: workspace polish\n';
@@ -2984,6 +2985,14 @@ try {
     await page.locator('.commit').first().click({ button: 'right' });
     await audit('commit-actions');
     await escape();
+    // 60 commits: 10 rows and "Show more", then all 60 and no "Show more".
+    await page.evaluate(() => { window.qa.commits = 60; });
+    await page.click('#changes-refresh');
+    await page.waitForFunction(() => document.querySelectorAll('.commit:not(.more)').length === 10 && document.querySelector('.commit.more'));
+    await page.locator('.commit.more').click();
+    await page.waitForFunction(() => document.querySelectorAll('.commit:not(.more)').length === 60 && !document.querySelector('.commit.more'));
+    await audit('commits-more');
+    await page.evaluate(() => { delete window.qa.commits; });
     await page.locator('.file').first().click();
     await page.waitForSelector('#diff:not(.hidden) .line');
     await page.click('#changes-close'); // under 760px the panel covers the diff
