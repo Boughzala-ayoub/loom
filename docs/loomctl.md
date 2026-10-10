@@ -299,9 +299,12 @@ where each worktree is from its `gitdir` file under `.git/worktrees`, absolute
 or relative to that folder (`worktree.useRelativePaths`). Git counts a relative
 path from where that folder physically is, so Loom first resolves any junction
 in the repository's path, a saved one included. While it can't read that file
-(another program holding it open), every running git.exe counts. A
-Loom killed in those milliseconds leaves its `HEAD.lock` files behind, and Git
-names them.
+(another program holding it open), every running git.exe counts. The main
+worktree is the folder holding `.git`, which may itself be a junction to the
+repository's data elsewhere. When that folder's `.git` doesn't lead to the
+repository (a `.git` file from `--separate-git-dir`, a bare repository), every
+running git.exe counts too. A Loom killed in those milliseconds leaves its
+`HEAD.lock` files behind, and Git names them.
 
 Loom refuses a folder that holds another checkout, a link at the folder's own
 path, and a folder that Git records at another path. A parent folder moved or

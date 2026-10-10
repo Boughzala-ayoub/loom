@@ -88,8 +88,8 @@ pub fn fingerprint(root: &Path, index: Option<&Path>, hashed: &[String]) -> Resu
 /// there, or rebased or bisected there while its HEAD is detached (Git's
 /// worktreepath ref atom misses those). Or why it may be about to: a checkout
 /// holds the worktree's index.lock while it writes the files, and Loom can't
-/// tell which branch. None: none holds it.
-fn held_by(dirs: &[PathBuf], branch: &str) -> Result<Option<String>, String> {
+/// tell which branch. None: none holds it. `top` is the main worktree's folder (main_worktree).
+fn held_by(dirs: &[PathBuf], top: &Result<String, String>, branch: &str) -> Result<Option<String>, String> {
     let reference = format!("refs/heads/{branch}");
     let read = |path: &Path| match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
@@ -100,10 +100,10 @@ fn held_by(dirs: &[PathBuf], branch: &str) -> Result<Option<String>, String> {
         // Only the line ending goes: a branch name may end in a space Unicode has.
         let head = read(&dir.join("HEAD"))?.unwrap_or_default();
         if head.strip_suffix("\r\n").or_else(|| head.strip_suffix('\n')).unwrap_or(&head) == format!("ref: {reference}") {
-            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{}'.", named(dir, i == 0))));
+            return Ok(Some(format!("Cannot delete branch '{branch}': checked out at '{}'.", named(dir, (i == 0).then_some(top)))));
         }
         if dir.join("index.lock").try_exists().map_err(|e| e.to_string())? {
-            return Ok(Some(busy(branch, &named(dir, i == 0), "index.lock")));
+            return Ok(Some(busy(branch, &named(dir, (i == 0).then_some(top)), "index.lock")));
         }
         for marker in ["rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START", "rebase-merge/update-refs"] {
             let Some(text) = read(&dir.join(marker))? else { continue };
@@ -126,13 +126,25 @@ fn admin_dirs(common: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(dirs)
 }
 
-/// The worktree folder of administration folder `dir`: the main one (admin_dirs'
-/// first) is the repository's, and a linked one's gitdir names its .git file,
+/// The main worktree's folder, where it physically is. It holds the repository's
+/// .git, which may be a junction to where the data is (`common`, physical), so it
+/// comes from the path Git names, `given`, before that link is resolved. It counts
+/// only while its .git leads to `common`, which a .git file (--separate-git-dir) or
+/// a bare repository's doesn't: then it's unknown, as an unreadable gitdir is.
+fn main_worktree(given: &Path, common: &Path) -> Result<String, String> {
+    let unknown = || format!("the main worktree of {}", common.display());
+    let top = crate::canonical_directory(given.parent().ok_or_else(unknown)?.to_string_lossy().into_owned()).map_err(|_| unknown())?;
+    let git = crate::canonical_directory(Path::new(&top).join(".git").to_string_lossy().into_owned()).map_err(|_| unknown())?;
+    if Path::new(&git) == common { Ok(top) } else { Err(unknown()) }
+}
+
+/// The worktree folder of administration folder `dir`: the main one's (admin_dirs'
+/// first) is `main`, and a linked one's gitdir names its .git file,
 /// relative to `dir` when Git keeps relative paths (worktree.useRelativePaths).
 /// A linked one whose gitdir can't be read (another program holding it open,
 /// say) or names no .git is unknown, and no other folder stands in for it.
-fn worktree_of(dir: &Path, main: bool) -> Result<String, String> {
-    if main { return Ok(dir.parent().unwrap_or(dir).display().to_string()); }
+fn worktree_of(dir: &Path, main: Option<&Result<String, String>>) -> Result<String, String> {
+    if let Some(top) = main { return top.clone(); }
     let gitdir = dir.join("gitdir");
     let named = fs::read_to_string(&gitdir).map_err(|e| format!("{}: {e}", gitdir.display()))?;
     // An absolute path replaces `dir` in the join, and `..` resolves as text, as in spelled.
@@ -144,7 +156,7 @@ fn worktree_of(dir: &Path, main: bool) -> Result<String, String> {
 }
 
 /// Where to say a refusal happened: the worktree folder, or else its administration folder.
-fn named(dir: &Path, main: bool) -> String {
+fn named(dir: &Path, main: Option<&Result<String, String>>) -> String {
     worktree_of(dir, main).unwrap_or_else(|_| dir.display().to_string())
 }
 
@@ -163,13 +175,13 @@ impl Drop for HeadLocks {
 }
 
 /// All of them, or none: one there already is Git's own, busy in that worktree.
-fn lock_heads(dirs: &[PathBuf], branch: &str) -> Result<HeadLocks, String> {
+fn lock_heads(dirs: &[PathBuf], top: &Result<String, String>, branch: &str) -> Result<HeadLocks, String> {
     let mut held = HeadLocks(Vec::new());
     for (i, dir) in dirs.iter().enumerate() {
         let lock = dir.join("HEAD.lock");
         match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
             Ok(_) => held.0.push(lock),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(busy(branch, &named(dir, i == 0), "HEAD.lock")),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(busy(branch, &named(dir, (i == 0).then_some(top)), "HEAD.lock")),
             Err(e) => return Err(format!("{}: {e}", lock.display())),
         }
     }
@@ -182,10 +194,10 @@ fn lock_heads(dirs: &[PathBuf], branch: &str) -> Result<HeadLocks, String> {
 /// way to naming it in that worktree's HEAD. A checkout holds no lock between
 /// writing the index and HEAD (Git's post-index-change hook runs there). One whose
 /// folder Loom can't read counts too, as does a process list Loom can't read,
-/// and while a linked worktree's folder is unknown (worktree_of), every one does.
-fn git_running(dirs: &[PathBuf], ours: u32, before: u64, branch: &str) -> Option<String> {
+/// and while a worktree's folder is unknown (worktree_of, main_worktree), every one does.
+fn git_running(dirs: &[PathBuf], top: &Result<String, String>, ours: u32, before: u64, branch: &str) -> Option<String> {
     let key = |path: &str| format!("{}\\", path.replace('/', "\\").trim_end_matches('\\').to_lowercase());
-    let folders: Result<Vec<(String, String)>, String> = dirs.iter().enumerate().map(|(i, d)| worktree_of(d, i == 0))
+    let folders: Result<Vec<(String, String)>, String> = dirs.iter().enumerate().map(|(i, d)| worktree_of(d, (i == 0).then_some(top)))
         .chain(dirs.first().map(|c| Ok(c.display().to_string()))).map(|at| at.map(|at| (key(&at), at))).collect();
     let Some(gits) = crate::procs::gits(ours, before) else {
         return Some(format!("Cannot delete branch '{branch}' now: Loom couldn't list the running Git processes, so it can't tell whether one is checking it out. Try again."));
@@ -227,11 +239,12 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
     let common = crate::git_run(repo.into(), vec!["rev-parse".into(), "--git-common-dir".into()], None, false)?;
-    let common = Path::new(repo).join(common.trim());
+    let given = Path::new(repo).join(common.trim());
     // Where it physically is, links resolved, once for both looks: Git writes a worktree's
     // relative gitdir from there, and runs in physical folders. `repo` may be a saved path
     // that's a junction now, at another depth. Only read here, and HEAD.lock is the same file.
-    let common = PathBuf::from(crate::canonical_directory(common.to_string_lossy().into_owned()).map_err(|e| format!("{}: {e}", common.display()))?);
+    let common = PathBuf::from(crate::canonical_directory(given.to_string_lossy().into_owned()).map_err(|e| format!("{}: {e}", given.display()))?);
+    let top = main_worktree(&given, &common);
     let dirs = admin_dirs(&common)?;
     let reference = format!("refs/heads/{branch}");
     let mut child = Command::new("git").arg("-C").arg(repo).args(["update-ref", "--no-deref", "--stdin", "-z"])
@@ -266,13 +279,13 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
     let ours = child.id();
     let deleted = (|| {
         say(&["start"]).and_then(|_| say(&[&format!("delete {reference}"), tip, "prepare"])).map_err(|_| None)?;
-        if let Some(why) = held_by(&dirs, branch).map_err(Some)? {
+        if let Some(why) = held_by(&dirs, &top, branch).map_err(Some)? {
             let _ = say(&["abort"]);
             return Err(Some(why));
         }
         // Only the branch is locked meanwhile: the other worktrees work on.
         let waited = Instant::now() + Duration::from_secs(3);
-        while let Some(why) = git_running(&dirs, ours, u64::MAX, branch) {
+        while let Some(why) = git_running(&dirs, &top, ours, u64::MAX, branch) {
             if Instant::now() >= waited {
                 let _ = say(&["abort"]);
                 return Err(Some(why));
@@ -280,17 +293,17 @@ fn delete_branch_with(repo: &str, branch: &str, tip: &str, between: impl FnOnce(
             std::thread::sleep(Duration::from_millis(50));
         }
         // An abort on an early return is git reaching the end of its input.
-        let _heads = lock_heads(&dirs, branch).map_err(Some)?;
-        if let Some(why) = held_by(&dirs, branch).map_err(Some)? {
+        let _heads = lock_heads(&dirs, &top, branch).map_err(Some)?;
+        if let Some(why) = held_by(&dirs, &top, branch).map_err(Some)? {
             return Err(Some(why));
         }
         between();
         say(&["commit"]).map_err(|_| None)?;
         let committed = now_ticks();
         let dirs = admin_dirs(&common).map_err(Some)?;
-        let why = match git_running(&dirs, ours, committed, branch) {
+        let why = match git_running(&dirs, &top, ours, committed, branch) {
             Some(why) => why,
-            None => match held_by(&dirs, branch).map_err(Some)? { Some(why) => why, None => return Ok(()) },
+            None => match held_by(&dirs, &top, branch).map_err(Some)? { Some(why) => why, None => return Ok(()) },
         };
         let back = say(&["start"]).and_then(|_| say(&[&format!("create {reference}"), tip, "prepare"])).and_then(|_| say(&["commit"]));
         Err(Some(match back {
@@ -870,7 +883,7 @@ mod tests {
         // from the administration folder, sees the paused git.exe there, and both looks keep the branch.
         fs::write(admin.join("gitdir"), "../../../../other/.git\n").unwrap();
         fs::write(other.join(".git"), "gitdir: ../repo/.git/worktrees/other\n").unwrap();
-        assert_eq!(worktree_of(&admin, false).unwrap(), other.display().to_string());
+        assert_eq!(worktree_of(&admin, None).unwrap(), other.display().to_string());
         let named = format!("'{}'", crate::canonical_directory(other.to_string_lossy().into_owned()).unwrap());
         let running = paused_switch("relative");
         let error = delete_branch(r, "topic", &tip).unwrap_err();
@@ -909,6 +922,67 @@ mod tests {
     struct Release(PathBuf);
     impl Drop for Release {
         fn drop(&mut self) { let _ = fs::write(&self.0, "go"); }
+    }
+
+    #[test]
+    fn a_checkout_in_a_main_worktree_whose_git_folder_is_a_junction_keeps_the_branch() {
+        let dir = std::env::temp_dir().join(format!("loom-branch-gitlink-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let (repo, data, hooks) = (dir.join("repo"), dir.join("storage").join("git-data"), dir.join("hooks"));
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(dir.join("storage")).unwrap();
+        fs::create_dir_all(&hooks).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "main\n").unwrap();
+        git(&repo, &["add", "-A"]); git(&repo, &["commit", "-qm", "main"]);
+        git(&repo, &["switch", "-qc", "topic"]);
+        fs::write(repo.join("file.txt"), "topic\n").unwrap();
+        git(&repo, &["commit", "-qam", "topic"]);
+        let tip = git(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+        git(&repo, &["switch", "-q", "main"]);
+        // The repository's data moved to storage\git-data, and repo\.git is a junction there: Git's
+        // common dir is repo\.git, and the folder above where it physically is is storage, not repo.
+        fs::rename(repo.join(".git"), &data).unwrap();
+        junction(&repo.join(".git"), &data);
+        assert_eq!(git(&repo, &["rev-parse", "--git-common-dir"]).trim(), ".git");
+        git(&repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+        let r = repo.to_str().unwrap();
+        // `git switch topic` in the main worktree, paused in post-index-change: index.lock gone, HEAD on main.
+        let paused_switch = |run: &str| {
+            let (started, release) = (dir.join(format!("{run}-started")), dir.join(format!("{run}-release")));
+            let unix = |p: &Path| p.to_str().unwrap().replace('\\', "/");
+            fs::write(hooks.join("post-index-change"), format!("#!/bin/sh\ntouch \"{}\"\nwhile [ ! -f \"{}\" ]; do sleep 0.05; done\n", unix(&started), unix(&release))).unwrap();
+            let child = Command::new("git").arg("-C").arg(&repo).args(["switch", "-q", "topic"]).spawn().unwrap();
+            let release = Release(release);
+            for _ in 0..400 { if started.exists() { break; } std::thread::sleep(Duration::from_millis(50)); }
+            assert!(started.exists(), "the checkout never reached post-index-change");
+            assert!(!data.join("index.lock").exists(), "index.lock shows the checkout");
+            assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/main", "HEAD changed before the hook");
+            (child, release)
+        };
+        let finished = |(mut child, release): (std::process::Child, Release)| {
+            drop(release);
+            assert!(child.wait().unwrap().success(), "the checkout failed");
+            assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]).trim(), "refs/heads/topic");
+            assert_eq!(git(&repo, &["rev-parse", "--verify", "HEAD"]).trim(), tip, "HEAD names a branch that's gone");
+            git(&repo, &["switch", "-q", "main"]);
+        };
+        let kept = || assert_eq!(git(&repo, &["rev-parse", "--verify", "refs/heads/topic"]).trim(), tip, "topic went");
+        let named = format!("'{}'", crate::canonical_directory(r.into()).unwrap());
+        // Paused when the delete looks, and paused in the gap before the commit: both keep the branch.
+        let running = paused_switch("before");
+        let error = delete_branch(r, "topic", &tip).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("git.exe"), "{error}");
+        kept();
+        finished(running);
+        let mut running = None;
+        let error = delete_branch_with(r, "topic", &tip, || running = Some(paused_switch("between"))).unwrap_err();
+        assert!(error.contains("busy") && error.contains(&named) && error.contains("put it back"), "{error}");
+        kept();
+        finished(running.unwrap());
+        // Nothing running: deleted.
+        delete_branch(r, "topic", &tip).unwrap();
+        assert!(!git(&repo, &["for-each-ref", "refs/heads/"]).contains("refs/heads/topic\n"), "topic stayed");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
