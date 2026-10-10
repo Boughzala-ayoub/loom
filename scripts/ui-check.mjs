@@ -2985,12 +2985,24 @@ try {
     await page.locator('.commit').first().click({ button: 'right' });
     await audit('commit-actions');
     await escape();
-    // 60 commits: 10 rows and "Show more", then all 60 and no "Show more".
-    await page.evaluate(() => { window.qa.commits = 60; });
+    // 160 commits, 50 more at a time: "Show more" is a button Tab reaches. Enter takes 10 rows to 60,
+    // Space 60 to 110, a click 110 to 160, and then it's gone.
+    await page.evaluate(() => { window.qa.commits = 160; });
     await page.click('#changes-refresh');
-    await page.waitForFunction(() => document.querySelectorAll('.commit:not(.more)').length === 10 && document.querySelector('.commit.more'));
+    const commitRows = (n) => page.waitForFunction(n => document.querySelectorAll('.commit:not(.more)').length === n && !!document.querySelector('.commit.more') === n < 160, n);
+    await commitRows(10);
+    assert.equal(await page.getByRole('button', { name: 'Show more', exact: true }).count(), 1, `Show more is no button at ${width}px`);
+    await page.locator('.commit.more').evaluate(more => { const before = document.createElement('button'); before.id = 'qa-before-more'; more.before(before); before.focus(); });
+    await page.keyboard.press('Tab');
+    assert.ok(await page.evaluate(() => document.activeElement?.matches('.commit.more')), `Tab skips Show more at ${width}px`);
+    await page.evaluate(() => document.getElementById('qa-before-more').remove());
+    await page.keyboard.press('Enter');
+    await commitRows(60);
+    await page.locator('.commit.more').focus();
+    await page.keyboard.press('Space');
+    await commitRows(110);
     await page.locator('.commit.more').click();
-    await page.waitForFunction(() => document.querySelectorAll('.commit:not(.more)').length === 60 && !document.querySelector('.commit.more'));
+    await commitRows(160);
     await audit('commits-more');
     await page.evaluate(() => { delete window.qa.commits; });
     await page.locator('.file').first().click();

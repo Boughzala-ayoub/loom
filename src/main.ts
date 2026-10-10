@@ -6854,7 +6854,8 @@ async function readChanges() {
         body.append(d);
       }
       if (lines.length > commitLimit) {
-        const more = document.createElement("div");
+        const more = document.createElement("button"); // Tab reaches it, Enter and Space press it
+        more.type = "button";
         more.className = "commit more";
         more.textContent = "Show more";
         more.onclick = () => ((commitLimit += 50), void refreshChanges());

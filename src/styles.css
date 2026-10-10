@@ -2845,6 +2845,10 @@ dialog :is(input:not([type="radio"], [type="checkbox"]), select) {
   font-weight: 400;
 }
 .commit.more {
+  display: block; /* a button, drawn as the commit rows above it */
+  width: 100%;
+  border: 0;
+  line-height: inherit;
   color: var(--faint);
   text-align: center;
 }
