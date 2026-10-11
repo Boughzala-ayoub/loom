@@ -3,6 +3,7 @@ const claudeComposer = claudeCapture.lines.join("\n");
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
 import { readMenu, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
+import codexQuestion from "./fixtures/codex-question.json" with { type: "json" };
 
 let fails = 0;
 // The summary fields; `prompt` gets checks of its own.
@@ -64,6 +65,13 @@ check("Codex approval", readMenu(codex)?.options.length, 3);
 check("Codex question", readMenu(codex)?.question, ["Would you like to run the following command?", "$ npm test"]);
 check("Codex approval keys: its numbers and the letters it names", menuKeys(readMenu(codex)!), ["1", "2", "3", "y", "a"]);
 check("Claude permission keys: its numbers", menuKeys(readMenu(claude)!), ["1", "2", "3"]);
+// Codex's Shift+Left question stays open while the agent and its timer run above it.
+const queuedQuestion = readMenu(codexQuestion.screen)!;
+const tickingQuestion = readMenu(codexQuestion.screen.replace(/Working \([^\n]+/, "Working (2m 59s • esc to interrupt)"))!;
+check("Codex queued question excludes the running transcript", queuedQuestion.question, ["Which test drink?"]);
+check("Codex timer ticks do not replace the queued question", menuRev(tickingQuestion), menuRev(queuedQuestion));
+check("Codex highlight moves do not replace the queued question", menuRev(readMenu(codexQuestion.screen.replace("› 1.", "  1.").replace("  2.", "› 2."))!), menuRev(queuedQuestion));
+check("Codex queued question changes still invalidate an answer", menuRev(readMenu(codexQuestion.screen.replace(/Which test drink\?/g, "Which breakfast?"))!) === menuRev(queuedQuestion), false);
 // Review R14-7: a narrow pane wraps the shortcut onto the option's next row.
 const codexWrapped = `
 Would you like to run the following command?

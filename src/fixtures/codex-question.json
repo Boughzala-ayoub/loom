@@ -1,0 +1,4 @@
+{
+  "version": "0.162.1",
+  "screen": "\n  >_ OpenAI Codex (v0.162.1)\n     ~\\Videos\\claude\\loom\n\n  Tip: Use the desktop app. Install it from https://chatgpt.com/codex?app-landing-page=true and run codex app.\n\n\n› This is an isolated UI reproduction. Do not read or change files and do not use shell tools. Use request_user_input or request_user_input_async to ask one multiple-choice\n  question: Which test drink? Options Tea and Coffee, with a short description for each. After I answer, reply with the selected drink only.\n\n\n• Which test drink?\n\n  • Tea — a light, soothing drink.\n  • Coffee — a bold, energizing drink.\n\n• Working (1m 58s • esc to interrupt)\n\n• Queued follow-up inputs\n\n  Which test drink?\n\n  › 1. Tea — a light, soothing drink.\n    2. Coffee — a bold, energizing drink.\n    3. Other\n\n  enter submit   ctrl+] skip   shift+→ main prompt"
+}

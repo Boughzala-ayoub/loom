@@ -10,6 +10,7 @@ assert.equal((await fetch(base)).status, 200, 'Production preview must be servin
 const out = resolve('node_modules/.cache/ui-check', process.env.UI_THEME || '');
 mkdirSync(out, { recursive: true });
 const mocks = readFileSync('node_modules/@tauri-apps/api/mocks.js', 'utf8').replace(/^export \{.*$/m, '');
+const codexQuestion = JSON.parse(readFileSync('src/fixtures/codex-question.json', 'utf8')).screen;
 const browser = await chromium.launch({ channel: 'chrome', headless: true, ignoreDefaultArgs: ['--hide-scrollbars'] });
 let checks = 0;
 try {
@@ -278,6 +279,30 @@ try {
     }, [cmd, argv, stdin ?? null, key ?? null, timeout]);
     const cli = (cmd, ...argv) => call(cmd, argv);
     if (width === 1280) {
+      await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'cli_ready'));
+      await page.evaluate(screen => {
+        const qa = window.qa, pane = qa.panes.find(p => p.codexStateId);
+        qa.questionTick = 0;
+        qa.questionSelected = false;
+        qa.drawQuestion = () => pane.onOut.onmessage('\x1b[2J\x1b[H' + screen
+          .replace(/Working \([^\n]+/, `Working (${++qa.questionTick}s • esc to interrupt)`)
+          .replace('› 1.', qa.questionSelected ? '  1.' : '› 1.')
+          .replace('    2.', qa.questionSelected ? '  › 2.' : '    2.').replaceAll('\n', '\r\n'));
+        qa.onWrite = ({ id, data }) => {
+          if (id === pane.id && /^\x1b[[O]B$/.test(data)) { qa.questionSelected = true; qa.drawQuestion(); }
+        };
+        qa.drawQuestion();
+      }, codexQuestion);
+      await page.waitForTimeout(100);
+      const queued = await cli('menu', 'search-polish:2');
+      await page.evaluate(() => window.qa.drawQuestion());
+      await page.waitForTimeout(100);
+      const picked = await cli('choose', 'search-polish:2', '2', '--menu', queued.data.rev);
+      assert.equal(picked.ok, true, JSON.stringify(picked));
+      assert.match(picked.data.text, /Coffee/);
+      const writes = await page.evaluate(() => window.qa.calls.filter(c => c.cmd === 'pty_write').map(c => c.args.data));
+      assert.deepEqual(writes, ['\x1b[B', '\r'], 'Timer ticks before and during choose must still send one arrow and Enter');
+      console.log('PASS Codex Shift+Left question survives timer ticks before and during loomctl choose');
       // A Changes action keeps the thread and the message it began with: switching
       // threads (loomctl show, which works under a dialog too) while git answers
       // moves neither, and a list git gave for a thread you left never shows.
