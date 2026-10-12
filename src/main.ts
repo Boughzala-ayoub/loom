@@ -1865,6 +1865,11 @@ class Pane {
    * pane can wait its turn for a boot slot this long. */
   starting = true;
   busySince = 0; // when this stretch of work began, for the overview's "Working · 12m"
+  /** When the latest stretch of output began (activity), shown as work or not:
+   * under an unread alert it isn't, yet a turn Claude began by itself started
+   * there (agentTurn). */
+  workSince = 0;
+  private workAt = 0; // that stretch's last output
   quietSince = Date.now(); // when it last stopped working (or was made), for "Idle · 5m"
   get busy() { return this._busy; }
   set busy(on: boolean) {
@@ -2485,7 +2490,10 @@ class Pane {
       if (status && !this.busy && !this.waiting) ((this.busy = true), this.paint());
       return;
     }
-    if (Date.now() - this.lastIn < 300) return;
+    const now = Date.now();
+    if (now - this.lastIn < 300) return;
+    if (now - this.workAt >= 1500) this.workSince = now;
+    this.workAt = now;
     clearTimeout(this.idle);
     this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
     if (this.busy || this.waiting) return;
@@ -4712,14 +4720,14 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
  * itself (a finished background job's notice, a scheduled wake-up) or one sent
  * from outside Loom's window. Claude reports no start for it, so Loom meets it
  * at its first Stop, question or failure, with no task open on the pane. It
- * becomes a task of its own (source "agent"), working since the pane began
- * working, and the report then goes to it, so it ends and notifies as any
- * turn does. Never with a task open (the report is that task's, or comes
- * between its Enter and its start), and never from a replaced process. True
- * when it made one. */
+ * becomes a task of its own (source "agent"), working since its output began
+ * (Pane.workSince) or else since the report, and the report then goes to it,
+ * so it ends and notifies as any turn does. Never with a task open (the
+ * report is that task's, or comes between its Enter and its start), and never
+ * from a replaced process. True when it made one. */
 function agentTurn(p: Pane, s: Signal, launch: number, open: Task[], ctx?: TaskContext): boolean {
   if (p.agent !== "claude" || open.length || launch !== p.generation || !(s.kind === "stop" || s.kind === "approval" || s.kind === "fail")) return false;
-  const at = p.busySince > 0 && p.busySince <= s.at ? p.busySince : s.at;
+  const at = p.workSince > 0 && p.workSince <= s.at ? p.workSince : s.at;
   const t = turnTask(p, "agent", "", at, { gen: launch }, ctx);
   void moveTask(t, { state: "working", signal: "agent", correlation: "sequence" }, at, ctx);
   // An Esc or Ctrl-C before its report didn't end it (Claude reported on after

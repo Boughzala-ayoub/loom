@@ -74,7 +74,7 @@ console.log("ok   A later Enter hold preserves an earlier report's captured cont
 {
   const { p, tasks, taskWatch, f } = fixture();
   f.finishTaskReplay(); // past Loom's startup read, which holds reports until it's done
-  Object.assign(p, { agent: "claude", busySince: 5 });
+  Object.assign(p, { agent: "claude", workSince: 5 });
   f.taskSignal(p, { kind: "stop", at: 9, response: "r1" });
   const [t, ...more] = [...tasks.values()];
   assert.equal(more.length, 0);
@@ -131,7 +131,7 @@ function swept() {
 // ends cancelled, whether a person's Enter began it or Claude itself did.
 for (const source of ["manual", "agent"]) {
   const { p, tasks, pushed, screen, clock, sweep, f } = swept();
-  p.busySince = 900;
+  p.workSince = 900;
   if (source === "manual") {
     const t = f.turnTask(p, "manual", model.promptMatch("A"), 900);
     f.enterTurn(t, 900);
@@ -153,7 +153,7 @@ for (const source of ["manual", "agent"]) {
   // Asking at Loom's first sight of it, answered, then interrupted. A Ctrl-C
   // before it asked (clearing a draft, say) didn't end it: it asked after.
   const { p, tasks, pushed, screen, clock, sweep, f } = swept();
-  Object.assign(p, { busySince: 900, interruptAt: 950 });
+  Object.assign(p, { workSince: 900, interruptAt: 950 });
   clock.at = 1000;
   f.taskSignal(p, { kind: "approval", at: 1000, detail: "Bash" });
   const [t] = [...tasks.values()];
@@ -171,3 +171,49 @@ for (const source of ["manual", "agent"]) {
   assert.deepEqual(pushed, ["approval"]);
 }
 console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, never completed");
+
+// Pane's own busy, wake and activity, on the clock and timers the test runs.
+const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "activity", "wake"]);
+const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+function claudePane() {
+  const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true,
+    window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
+  runInContext(paneCode, s);
+  const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, paint() {} });
+  fx.th.panes[fx.th.panes.indexOf(fx.p)] = p;
+  const later = (to: number) => {
+    for (const t of timers) if (t.run && t.due <= to) ((fx.clock.at = t.due), t.run(), (t.run = null));
+    fx.clock.at = to;
+  };
+  const out = (at: number) => (later(at), p.activity());
+  return { ...fx, p, later, out };
+}
+{
+  // A turn Claude begins under an alert nobody has read draws no work on the
+  // pane (the alert stays), yet its task starts where its output did, not
+  // where the turn before it began.
+  const { p, tasks, f, later, out } = claudePane();
+  out(10_000); out(10_500);
+  later(11_000);
+  p.wake(undefined, "bell");
+  for (let at = 3_600_000; at < 3_610_000; at += 1000) out(at);
+  assert.deepEqual([p.waiting, p.busy], [true, false], "output under an unread alert shows as work");
+  later(3_610_000);
+  f.taskSignal(p, { kind: "stop", at: 3_610_000 });
+  const [t] = [...tasks.values()];
+  assert.equal(t.startedAt, 3_600_000, "the turn took the start of the one before it");
+}
+{
+  // Its own bell, and the redraw after it, come before Loom reads its Stop.
+  const { p, tasks, f, later, out } = claudePane();
+  for (let at = 5000; at < 9000; at += 1000) out(at);
+  later(9000);
+  p.wake(undefined, "bell");
+  out(9200);
+  later(9400);
+  f.taskSignal(p, { kind: "stop", at: 9050 });
+  assert.equal([...tasks.values()][0].startedAt, 5000, "the turn's own bell moved its start");
+}
+console.log("ok   A turn Claude began by itself starts where its output did, unread alert or not");

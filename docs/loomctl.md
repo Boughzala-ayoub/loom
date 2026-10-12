@@ -863,8 +863,9 @@ started it in `source`:
   by itself, after a background job it started finished or a scheduled wake-up,
   or one sent from outside Loom's window. Claude reports no start for such a
   turn, so the task appears at its first Stop, question or failure with no task
-  open on the pane, working since the pane began working. It then ends like
-  any turn, and its notices go out as any task's do. Codex and OpenCode turns
+  open on the pane, working since its output began, even under an alert
+  nobody has read, or since that report when Loom saw none before it. It
+  then ends like any turn, and its notices go out as any task's do. Codex and OpenCode turns
   no Enter explains still make no task.
 
 A `send`, `manual` or `agent` task then moves like a submit's, on the same reports and
