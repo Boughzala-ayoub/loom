@@ -4722,6 +4722,9 @@ function agentTurn(p: Pane, s: Signal, launch: number, open: Task[], ctx?: TaskC
   const at = p.busySince > 0 && p.busySince <= s.at ? p.busySince : s.at;
   const t = turnTask(p, "agent", "", at, { gen: launch }, ctx);
   void moveTask(t, { state: "working", signal: "agent", correlation: "sequence" }, at, ctx);
+  // An Esc or Ctrl-C before its report didn't end it (Claude reported on after
+  // it), so the sweep never judges that one.
+  if (p.interruptAt <= s.at) watched(t).escSeen = p.interruptAt;
   taskSignal(p, s, ctx);
   return true;
 }
@@ -4965,9 +4968,10 @@ function sweepTasks(closing = false) {
     const screen = p.screen(true);
     const busy = p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
       : (p.agent === "claude" && claudeWorking(screen)) || interruptHint(p.screen(true, true), p.agent, () => screenCells(p));
-    // Esc or Ctrl-C after the Enter and after any Stop, judged once, 2 s on.
+    // Esc or Ctrl-C after the Enter (a turn Claude began by itself has none:
+    // after it began) and after any Stop, judged once, 2 s on.
     const esc = p.interruptAt;
-    const escNew = esc > (t.submittedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;
+    const escNew = esc > (t.submittedAt ?? t.startedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;
     if (escNew && now - esc >= 2000) {
       w.escSeen = esc;
       if (!busy) {

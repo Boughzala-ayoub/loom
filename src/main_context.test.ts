@@ -9,22 +9,22 @@ import ts from "typescript";
 import * as model from "./task.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "watched"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "watched", "sweepTasks", "QUIET_MS"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`let ${d.getText(source)};`);
 }
-function fixture() {
+function fixture(extra: Record<string, unknown> = {}) {
   const th = { id: "thread-1", name: "At Enter", panes: [] as any[] };
-  const p = { id: "pane-1", generation: 1, agent: "codex", th };
+  const p: any = { id: "pane-1", generation: 1, agent: "codex", th };
   th.panes.push({}, p);
   const tasks = new Map(), taskWatch = new Map();
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
-    journal: async () => {}, sweepSoon() {}, keepTasks() {}, keepReceipts() {}, adoptManual: () => false });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+    journal: async () => {}, sweepSoon() {}, keepTasks() {}, keepReceipts() {}, adoptManual: () => false, ...extra });
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -112,3 +112,62 @@ console.log("ok   A later Enter hold preserves an earlier report's captured cont
   assert.equal(codex.tasks.size, 0, "Codex's untracked turns stay untracked");
 }
 console.log("ok   A turn of Claude's no Enter explains becomes an agent task at its Stop or question");
+
+/** A fixture past the startup read whose sweep reads, at the time the test
+ * sets, the screen it sets (Claude working, its input, a question), and which
+ * records the notices that go out. */
+function swept() {
+  const clock = { at: 0 }, pushed: string[] = [], screen = { busy: false, input: false, menu: false };
+  const fx = fixture({ Date: class extends Date { static now() { return clock.at; } }, pushNotice: (_: unknown, e: any) => pushed.push(e.state),
+    shuttingDown: false, gone: () => false, sweepTimer: 0, clearInterval() {}, claudeWorking: () => screen.busy, interruptHint: () => false,
+    screenCells: () => [], liveScreen: () => "", readInput: () => ({ kind: screen.input ? "empty" : "unknown" }), readMenu: () => (screen.menu ? { question: [], options: ["Yes", "No"] } : null) });
+  fx.f.finishTaskReplay();
+  Object.assign(fx.p, { agent: "claude", dead: false, interruptAt: 0, screen: () => "" });
+  const sweep = async (at: number) => ((clock.at = at), fx.f.sweepTasks(), await new Promise((r) => setTimeout(r, 0)));
+  return { ...fx, clock, pushed, screen, sweep };
+}
+// Claude runs no Stop hook for a turn Esc or Ctrl-C interrupts, so a Stop
+// before one, that another Stop hook sent on, completes nothing: the turn
+// ends cancelled, whether a person's Enter began it or Claude itself did.
+for (const source of ["manual", "agent"]) {
+  const { p, tasks, pushed, screen, clock, sweep, f } = swept();
+  p.busySince = 900;
+  if (source === "manual") {
+    const t = f.turnTask(p, "manual", model.promptMatch("A"), 900);
+    f.enterTurn(t, 900);
+    f.taskSignal(p, { kind: "start", at: 900, match: t.match });
+  }
+  clock.at = 1000;
+  f.taskSignal(p, { kind: "stop", at: 1000 });
+  screen.busy = true;
+  await sweep(1600);
+  p.interruptAt = 2000;
+  Object.assign(screen, { busy: false, input: true });
+  await sweep(4500);
+  const [t, ...more] = [...tasks.values()];
+  assert.equal(more.length, 0);
+  assert.deepEqual([t.source, t.state, t.reason], [source, "cancelled", "interrupted"], `${source}: Ctrl-C after a Stop Claude went on from`);
+  assert.deepEqual(pushed, [], `${source}: an interrupted turn notified`);
+}
+{
+  // Asking at Loom's first sight of it, answered, then interrupted. A Ctrl-C
+  // before it asked (clearing a draft, say) didn't end it: it asked after.
+  const { p, tasks, pushed, screen, clock, sweep, f } = swept();
+  Object.assign(p, { busySince: 900, interruptAt: 950 });
+  clock.at = 1000;
+  f.taskSignal(p, { kind: "approval", at: 1000, detail: "Bash" });
+  const [t] = [...tasks.values()];
+  screen.menu = true;
+  await sweep(3000);
+  assert.equal(t.state, "approval", "a Ctrl-C before Claude asked ended the turn that asked");
+  Object.assign(screen, { menu: false, busy: true });
+  clock.at = 3500;
+  f.taskSignal(p, { kind: "resume", at: 3500 }); // the answer went in (Pane.wrote)
+  await sweep(3600);
+  p.interruptAt = 4000;
+  Object.assign(screen, { busy: false, input: true });
+  await sweep(6500);
+  assert.deepEqual([t.source, t.state, t.reason], ["agent", "cancelled", "interrupted"], "Ctrl-C after answering its question");
+  assert.deepEqual(pushed, ["approval"]);
+}
+console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, never completed");
