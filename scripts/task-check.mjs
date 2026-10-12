@@ -3543,7 +3543,8 @@ try {
     ok('Typing evidence is the launch\'s that got it: a relaunch clears it, an empty Enter after claims no run, typing in the new launch is tracked');
   }
 
-  // A person's prompt during a tracked submit's turn: two tasks, one each, one Stop ends both; repeated idle adds nothing.
+  // A person's prompt during a tracked submit's turn: two tasks, one each, one
+  // Stop ends both; later Stops add nothing to them.
   {
     await agent(claude, { busy: false, input: '' });
     const before = await taskIds();
@@ -3563,8 +3564,11 @@ try {
     const count = await events();
     for (let i = 0; i < 2; i++) await endTurn('claude', claude, 'tracked overlap task', 'Both done.');
     await page.waitForTimeout(1200);
-    assert.deepEqual([await events(), (await newTasks(before)).length], [count, 2], 'Repeated idle reports: no event, no task');
-    ok('A typed prompt during a tracked submit is its own task, one Stop completes both, and repeated idle reports add nothing');
+    // A redraw and a Stop with no task open are, to Loom, a turn Claude began
+    // by itself (agentTurn): one task of its own, as the second Stop is that turn's.
+    const sources = (await newTasks(before)).map((t) => t.source).sort();
+    assert.deepEqual([await events(), sources], [count, ['agent', 'manual', 'submit']], "Later Stops: no event on the ended tasks, and one turn of Claude's own");
+    ok('A typed prompt during a tracked submit is its own task, one Stop completes both, and later Stops add nothing to them');
   }
 
   // The same words in two turns are two tasks, each completed once; Codex the same.
