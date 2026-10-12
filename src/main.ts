@@ -4721,13 +4721,17 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
  * from outside Loom's window. Claude reports no start for it, so Loom meets it
  * at its first Stop, question or failure, with no task open on the pane. It
  * becomes a task of its own (source "agent"), working since its output began
- * (Pane.workSince) or else since the report, and the report then goes to it,
- * so it ends and notifies as any turn does. Never with a task open (the
- * report is that task's, or comes between its Enter and its start), and never
- * from a replaced process. True when it made one. */
+ * (Pane.workSince, once the pane's last task ended) or else since the
+ * report, and the report then goes to it, so it ends and notifies as any turn
+ * does. Never with a task open (the report is that task's, or comes between
+ * its Enter and its start), and never from a replaced process. True when it
+ * made one. */
 function agentTurn(p: Pane, s: Signal, launch: number, open: Task[], ctx?: TaskContext): boolean {
   if (p.agent !== "claude" || open.length || launch !== p.generation || !(s.kind === "stop" || s.kind === "approval" || s.kind === "fail")) return false;
-  const at = p.workSince > 0 && p.workSince <= s.at ? p.workSince : s.at;
+  // Output from before the pane's last task ended was that turn's: a report
+  // can reach Loom before any output of its own turn does.
+  const ended = Math.max(0, ...[...tasks.values()].map((t) => (t.pane === p.id && t.endedAt) || 0));
+  const at = p.workSince > ended && p.workSince <= s.at ? p.workSince : s.at;
   const t = turnTask(p, "agent", "", at, { gen: launch }, ctx);
   void moveTask(t, { state: "working", signal: "agent", correlation: "sequence" }, at, ctx);
   // An Esc or Ctrl-C before its report didn't end it (Claude reported on after

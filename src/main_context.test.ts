@@ -181,7 +181,7 @@ function claudePane() {
   const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
-  const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, paint() {} });
+  const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, screen: () => "", paint() {} });
   fx.th.panes[fx.th.panes.indexOf(fx.p)] = p;
   const later = (to: number) => {
     for (const t of timers) if (t.run && t.due <= to) ((fx.clock.at = t.due), t.run(), (t.run = null));
@@ -217,3 +217,27 @@ function claudePane() {
   assert.equal([...tasks.values()][0].startedAt, 5000, "the turn's own bell moved its start");
 }
 console.log("ok   A turn Claude began by itself starts where its output did, unread alert or not");
+for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
+  // A person's turn ends (its task completed), and Claude's next turn reports
+  // a failure or a question before Loom reads any output of it: the output
+  // Loom has is the ended turn's, so the task starts at its report. Output
+  // after that task ended is the new turn's.
+  const { p, tasks, f, later, out, sweep, screen } = claudePane();
+  const prior = f.turnTask(p, "manual", model.promptMatch("A"), 9_000);
+  f.enterTurn(prior, 9_000);
+  f.taskSignal(p, { kind: "start", at: 9_500, match: prior.match });
+  out(10_000); out(10_500);
+  later(11_000);
+  p.wake(undefined, "bell");
+  f.taskSignal(p, { kind: "stop", at: 11_000 });
+  screen.input = true;
+  later(11_700);
+  await sweep(11_700);
+  assert.deepEqual([prior.state, prior.endedAt], ["completed", 11_700]);
+  if (fresh) out(3_590_000);
+  later(3_600_000);
+  f.taskSignal(p, { kind, at: 3_600_000, detail: "rate_limit" });
+  const t = [...tasks.values()].find((t) => t.source === "agent");
+  assert.equal(t.startedAt, fresh ? 3_590_000 : 3_600_000, `${kind}: the turn took the start of the one that ended before it`);
+}
+console.log("ok   A turn Claude began by itself never starts in a turn that ended before it");
