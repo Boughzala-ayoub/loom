@@ -1434,7 +1434,7 @@ try {
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     assert.equal(await page.evaluate(() => window.qa.panes.find(p => p.argv.at(-1).endsWith('; omp'))?.argv[0]), 'powershell.exe', 'OMP keeps its PowerShell host');
     const ompMarks = () => page.evaluate(() => Object.fromEntries(['.agent', '.pane-head', '.pip', '.panes', '.dashboard-identity'].map(s =>
-      [s, [...document.querySelectorAll(`${s} svg.ico path`)].filter(p => p.getAttribute('d') === 'M0 2h24v4H0zM6 6h4v10H6zM14 6h4v16h-4z').length])));
+      [s, [...document.querySelectorAll(`${s} svg.ico path`)].filter(p => p.getAttribute('d') === 'M0 1.5h24v4.5H0zM3 6h6v10.5H3zM13.5 6h6v16.5h-6z').length])));
     await cli('show', 'fix-settings');
     await page.waitForFunction(() => document.querySelector('.panes')?.textContent.includes('omp'));
     assert.deepEqual(await ompMarks(), { '.agent': 1, '.pane-head': 1, '.pip': 1, '.panes': 1, '.dashboard-identity': 0 }, `OMP's mark, ${width}px`);
@@ -1449,7 +1449,7 @@ try {
     assert.deepEqual(await page.locator('.thread:not(.hidden) .thread-name').allTextContents(), ['search-polish', 'review-keyboard-navigation'], `The sidebar filter finds Claude by claude, ${width}px`);
     await sideFilter('');
     await page.click('#dashboard-btn');
-    await page.waitForFunction(() => [...document.querySelectorAll('.dashboard-identity svg.ico path')].some(p => p.getAttribute('d').startsWith('M0 2h24')));
+    await page.waitForFunction(() => [...document.querySelectorAll('.dashboard-identity svg.ico path')].some(p => p.getAttribute('d').startsWith('M0 1.5h24')));
     assert.equal(await page.locator('.dashboard-row').filter({ hasText: 'fix-settings / omp' }).count(), 1, `The overview names OMP, ${width}px`);
     await page.fill('#dashboard-query', 'omp');
     await page.waitForFunction(() => document.querySelectorAll('.dashboard-row').length === 1);
@@ -2311,7 +2311,7 @@ try {
     const many = { ...few, rows: [...few.rows, ...['a', 'b', 'c', 'd'].map((n, i) => row(n, i + 3, false)), { ...row('e', 7, false), agent: 'omp' }] };
     await overlayPage.evaluate(state => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'overlay-rows', payload: state }), many);
     await overlayPage.waitForFunction(() => document.querySelectorAll('.row').length === 8);
-    assert.equal(await overlayPage.evaluate(() => [...document.querySelectorAll('.row')].find(r => r.querySelector('.name').textContent === 'e').querySelector('svg.ico path').getAttribute('d')), 'M0 2h24v4H0zM6 6h4v10H6zM14 6h4v16h-4z', 'The overlay shows OMP\'s mark');
+    assert.equal(await overlayPage.evaluate(() => [...document.querySelectorAll('.row')].find(r => r.querySelector('.name').textContent === 'e').querySelector('svg.ico path').getAttribute('d')), 'M0 1.5h24v4.5H0zM3 6h6v10.5H3zM13.5 6h6v16.5h-6z', 'The overlay shows OMP\'s mark');
     assert.equal(Math.round(await follow()), 200, 'A long list stops at the bottom of the screen');
     assert.equal(await overlayPage.locator('#list').evaluate(el => el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY === 'auto'), true, 'Past the bottom of the screen, the list scrolls');
     await overlayPage.screenshot({ path: `${out}/overlay-capped-${width}.png`, animations: 'disabled' });

@@ -383,7 +383,7 @@ try {
     await goto(p, '', '#list .agent'); await fits(p, width, 'threads');
     // A shell running omp shows OMP's mark, from loomctl's mark.
     state.omp = true; await goto(p, '', '#list .agent');
-    assert.ok(await p.evaluate(() => [...document.querySelectorAll('#list svg.ico path')].some(e => e.getAttribute('d') === 'M0 2h24v4H0zM6 6h4v10H6zM14 6h4v16h-4z')), `${width}: OMP's mark in the list`);
+    assert.ok(await p.evaluate(() => [...document.querySelectorAll('#list svg.ico path')].some(e => e.getAttribute('d') === 'M0 1.5h24v4.5H0zM3 6h6v10.5H3zM13.5 6h6v16.5h-6z')), `${width}: OMP's mark in the list`);
     assert.equal(await p.locator('#list .agent', { hasText: 'omp' }).count(), 1, `${width}: the list names OMP`);
     await fits(p, width, 'threads-omp');
     // omp finds it by name, in Threads and in Activity.
