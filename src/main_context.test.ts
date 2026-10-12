@@ -286,3 +286,27 @@ for (const pruned of [false, true]) {
   assert.deepEqual([t.gen, t.startedAt], [2, 3_600_000], "the new launch's turn took the old launch's start");
 }
 console.log("ok   A turn Claude began by itself starts after the pane's last task ended, pruned or relaunched");
+for (const first of [11_800, 13_000]) {
+  // Claude begins its own turn right after a person's task ended: its first
+  // output 1.3 s after the last one (or, the control, 2.5 s after), then a
+  // draw every half second for 65 s. Its task runs from that first output.
+  const { p, tasks, f, later, out, sweep, screen } = claudePane();
+  const prior = f.turnTask(p, "manual", model.promptMatch("A"), 9_000);
+  f.enterTurn(prior, 9_000);
+  f.taskSignal(p, { kind: "start", at: 9_500, match: prior.match });
+  out(10_000); out(10_500);
+  later(11_000);
+  p.wake(undefined, "bell");
+  f.taskSignal(p, { kind: "stop", at: 11_000 });
+  screen.input = true;
+  later(11_700);
+  await sweep(11_700);
+  assert.deepEqual([prior.state, p.workSince], ["completed", 0]);
+  for (let at = first; at < first + 65_000; at += 500) out(at);
+  later(first + 65_000);
+  f.taskSignal(p, { kind: "stop", at: first + 65_000 });
+  await sweep(first + 65_700);
+  const t = [...tasks.values()].find((t) => t.source === "agent");
+  assert.deepEqual([t.state, t.startedAt, t.endedAt - t.startedAt], ["completed", first, 65_700], `first output ${first - 10_500} ms after the last`);
+}
+console.log("ok   A turn Claude began by itself right after a task ended starts at its first output");

@@ -1868,7 +1868,7 @@ class Pane {
   /** When the latest stretch of output began (activity), shown as work or not:
    * under an unread alert it isn't, yet a turn Claude began by itself started
    * there (agentTurn). 0 from when a task of the pane ends (moveTask) until
-   * output after a quiet spell begins the next stretch. */
+   * the next output, which begins the next stretch however soon it comes. */
   workSince = 0;
   private workAt = 0; // that stretch's last output
   quietSince = Date.now(); // when it last stopped working (or was made), for "Idle · 5m"
@@ -2493,7 +2493,7 @@ class Pane {
     }
     const now = Date.now();
     if (now - this.lastIn < 300) return;
-    if (now - this.workAt >= 1500) this.workSince = now;
+    if (!this.workSince || now - this.workAt >= 1500) this.workSince = now;
     this.workAt = now;
     clearTimeout(this.idle);
     this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
