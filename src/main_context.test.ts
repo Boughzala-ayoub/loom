@@ -175,7 +175,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "activity", "wake"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "activity", "wake", "programStatus"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane() {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -310,3 +310,20 @@ for (const first of [11_800, 13_000]) {
   assert.deepEqual([t.state, t.startedAt, t.endedAt - t.startedAt], ["completed", first, 65_700], `first output ${first - 10_500} ms after the last`);
 }
 console.log("ok   A turn Claude began by itself right after a task ended starts at its first output");
+{
+  // OMP runs as a shell pane's startup command, which the prompt's marks never
+  // see, and says itself when it works (OSC 7501): busy then, idle on any
+  // other state. An agent pane keeps its own reading.
+  const { p, clock } = claudePane();
+  p.agent = "shell";
+  clock.at = 5000;
+  p.programStatus("state=working:app=omp");
+  assert.deepEqual([p.busy, p.busySince], [true, 5000], "OMP working");
+  for (const d of ["?", "app=omp"]) (p.programStatus(d), assert.equal(p.busy, true, `${d} changed it`));
+  p.programStatus("state=done:app=omp");
+  assert.equal(p.busy, false, "OMP done");
+  const claude = claudePane().p;
+  claude.programStatus("state=working:app=claude");
+  assert.equal(claude.busy, false, "Claude's pane read its report");
+}
+console.log("ok   A shell pane's program working (OSC 7501, OMP) reads as working");

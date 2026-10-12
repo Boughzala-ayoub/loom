@@ -29,7 +29,7 @@ try {
         state.threads[0].panes.forEach(p => { p.groupIds = ['active']; });
       }
       if (location.search.includes('dashboard')) Object.assign(state.threads[0].panes[1], { sid: 'dashboard-codex-pane', sessionId: 'valid-session' });
-      if (location.search.includes('omp-pane')) state.threads[2].panes = [{ cmd: 'omp' }];
+      if (location.search.includes('omp-pane')) Object.assign(state, { overlay: 'always' }).threads[2].panes = [{ cmd: 'omp' }];
       if (location.search.includes('needs-session')) delete state.threads[0].panes[1].sessionId;
       if (location.search.includes('many')) state.threads = Array.from({ length: 40 }, (_, i) => thread(`thread-${i}-with-a-long-review-description`, ['claude']));
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
@@ -1440,6 +1440,22 @@ try {
     assert.deepEqual(await ompMarks(), { '.agent': 1, '.pane-head': 1, '.pip': 1, '.panes': 1, '.dashboard-identity': 0 }, `OMP's mark, ${width}px`);
     assert.ok(await page.evaluate(() => [...document.querySelectorAll('.agent .agent-name')].some(n => n.textContent === 'omp')), `The sidebar names OMP, ${width}px`);
     await audit('omp-pane');
+    // OMP says itself when it works (OSC 7501), which its shell's marks never see: the pane
+    // reads as working, the overlay lists it, and done takes it off.
+    const ompPane = await page.evaluate(() => {
+      const qa = window.qa;
+      qa.overlayRows = [];
+      window.__TAURI_INTERNALS__.invoke('plugin:event|listen', { event: 'overlay-rows', handler: window.__TAURI_INTERNALS__.transformCallback(e => qa.overlayRows.push(e.payload)) });
+      return qa.panes.find(p => p.argv.at(-1).endsWith('; omp')).id;
+    });
+    const ompSays = state => page.evaluate(([id, state]) => window.qa.panes.find(p => p.id === id).onOut.onmessage(`\x1b]7501;state=${state}:app=omp\x1b\\`), [ompPane, state]);
+    await ompSays('working');
+    await page.waitForFunction(id => window.qa.overlayRows.at(-1)?.rows.some(r => r.id === id && r.agent === 'omp' && !r.waiting), ompPane);
+    assert.equal((await cli('panes')).data.find(p => p.id === ompPane).state, 'working', `OMP working reads as working, ${width}px`);
+    await audit('omp-working');
+    await ompSays('done');
+    await page.waitForFunction(id => !window.qa.overlayRows.at(-1)?.rows.some(r => r.id === id), ompPane);
+    assert.equal((await cli('panes')).data.find(p => p.id === ompPane).state, 'idle', `OMP done reads as idle, ${width}px`);
     // omp finds it by name, as each search knows the others: the sidebar filter (set from code, as
     // under 768px the sidebar is shut), then the overview and Ctrl+K below.
     const sideFilter = q => page.evaluate(q => { const f = document.querySelector('#side-filter'); f.value = q; f.dispatchEvent(new Event('input')); }, q);

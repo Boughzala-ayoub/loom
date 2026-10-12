@@ -2244,6 +2244,7 @@ class Pane {
       return true;
     });
     this.term.parser.registerOscHandler(99, (d) => (d.includes("p=?") || this.wake(undefined, "osc99"), true));
+    this.term.parser.registerOscHandler(7501, (d) => (this.programStatus(d), true));
     // Claude rings BEL when a turn finishes (Stop hook / idle prompt).
     this.term.onBell(() => this.wake(undefined, "bell"));
     this.fit.fit();
@@ -2824,6 +2825,17 @@ class Pane {
       }
       this.receiptRunning = undefined;
     }
+    this.paint();
+  }
+  /** OSC 7501 Program Status (docs/feature-study.md section 3) from what a
+   * shell pane runs: OMP says unasked whether it's working. Run as the pane's
+   * startup command it gets none of the prompt's marks (mark), which only see
+   * lines typed at it, so without this its pane never read as working. Any
+   * state but `working` is not busy. A query (`?`) goes unanswered. */
+  programStatus(data: string) {
+    const state = /(?:^|:)state=(\w+)/.exec(data)?.[1];
+    if (this.agent !== "shell" || !state || (state === "working") === this.busy) return;
+    this.busy = state === "working";
     this.paint();
   }
   /** Commands a shell with Loom's prompt finished (OSC 133 D), whether the last
