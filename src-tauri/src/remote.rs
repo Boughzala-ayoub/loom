@@ -6,6 +6,8 @@
 //! `loomctl remote pair` shows. A phone can also sign up for Loom's task
 //! notices as Web Push notifications (docs/phone-notifications-study.md):
 //! this keeps the subscriptions and posts what push.ts encrypts and signs.
+//! On the phone's own hotspot, where Tailscale can't reach it, the phone link
+//! (link.rs) carries the phone's page to this same port instead.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -296,6 +298,9 @@ async fn stop(app: &AppHandle) {
 
 async fn accept(app: AppHandle, listener: TcpListener) {
     let port = listener.local_addr().map_or(PORT, |a| a.port());
+    // The phone link runs while the server does: `stop` aborting this ends it too. A debug build's
+    // has its own name, so the phone keeps it apart from the installed Loom's.
+    let _link = Abort(tauri::async_runtime::spawn(crate::link::run(if cfg!(debug_assertions) { "loom-dev" } else { "loom" }, port)));
     loop {
         let stream = match listener.accept().await {
             Ok((stream, _)) => stream,
@@ -322,6 +327,15 @@ async fn accept(app: AppHandle, listener: TcpListener) {
             STRANGERS.leave(id);
             ACTIVE.fetch_sub(1, Ordering::AcqRel);
         });
+    }
+}
+
+/// Aborts its task when dropped.
+struct Abort(JoinHandle<()>);
+
+impl Drop for Abort {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -462,6 +476,7 @@ async fn route(app: &AppHandle, request: &Request, port: u16) -> Reply {
         ("POST", "/api/image") => image(app, request).await,
         ("POST", "/api/push") => push(app, request),
         ("POST", "/api/procs") => procs(app, request).await,
+        ("GET", "/api/link") => link_secret(request),
         _ => Reply::error(404, "Not found."),
     }
 }
@@ -512,6 +527,17 @@ fn pairable(request: &Request, port: u16) -> Option<Reply> {
     let local = [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")].contains(&host);
     let tailnet = host.split(':').next().unwrap_or("").trim_end_matches('.').ends_with(".ts.net");
     (!local && !tailnet).then(|| Reply::error(403, "Pair from this PC or your tailnet's address."))
+}
+
+/// The phone link's secret (link.rs), for the phone over Tailscale only: the
+/// tailnet is what vouches for it. Its own token isn't asked for, since the
+/// link is the phone app's, which has none.
+fn link_secret(request: &Request) -> Reply {
+    let host = request.header("host").unwrap_or("").to_ascii_lowercase();
+    if !host.split(':').next().unwrap_or("").trim_end_matches('.').ends_with(".ts.net") {
+        return Reply::error(403, "Ask over Tailscale.");
+    }
+    Reply::json(200, json!({ "secret": crate::link::secret() }))
 }
 
 fn pair(app: &AppHandle, request: &Request) -> Reply {
@@ -973,6 +999,16 @@ mod tests {
         });
         assert_eq!(status.unwrap(), Some(12), "two minutes of steady upload is a clip, not a timeout");
         assert_eq!(stalled.err().unwrap().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn the_link_secret_is_for_the_tailnet_only() {
+        let status = |host: &str| link_secret(&Request { method: "GET".into(), path: "/api/link".into(), body: Vec::new(),
+            headers: vec![("Host".into(), host.into())] }).status;
+        for host in ["127.0.0.1:7420", "localhost:7420", "evil.example", "ts.net.evil.example", ""] {
+            assert_eq!(status(host), 403, "{host}");
+        }
+        assert_eq!(status("pc.tail1234.ts.net"), 200);
     }
 
     #[test]

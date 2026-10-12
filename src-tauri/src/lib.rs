@@ -18,6 +18,7 @@ mod usage;
 mod pipe;
 mod control;
 mod remote;
+mod link;
 mod procs;
 mod deletion;
 mod stash;
