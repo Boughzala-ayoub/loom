@@ -8,6 +8,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -243,15 +244,17 @@ public final class Link {
   void local(App a, Socket page) {
     try {
       page.setTcpNoDelay(true);
-      boolean hotspot = onHotspot(a);
-      Socket pc = null;
+      boolean hotspot = onHotspot(a), skipped = hotspot && tailnetDown.contains(a.name);
       // Tailscale first. With the PC on the hotspot too, only while its check passes, and with less patience.
-      if (!hotspot || !tailnetDown.contains(a.name)) {
-        pc = viaTailnet(a.tailnet, hotspot ? 2500 : 6000);
-        if (pc == null && hotspot && a.tailnet != 0) down(a, true);
-      }
+      Socket pc = skipped ? null : viaTailnet(a.tailnet, hotspot ? 2500 : 6000);
+      if (pc == null && !skipped && hotspot && a.tailnet != 0) down(a, true);
       boolean tailnet = pc != null;
       if (pc == null && hotspot) pc = viaHotspot(a.name);
+      // Nothing on the hotspot after all: the PC has just left it, for a network where Tailscale may work again.
+      if (pc == null && skipped && (pc = viaTailnet(a.tailnet, 2500)) != null) {
+        tailnet = true;
+        down(a, false);
+      }
       log.accept(a.name + ": " + (pc == null ? "no way to the PC" : tailnet ? "over Tailscale" : "over the hotspot"));
       if (pc == null) {
         close(page);
@@ -293,6 +296,9 @@ public final class Link {
           s.setSoTimeout(0);
           return s;
         }
+      } catch (SocketTimeoutException e) {
+        close(s);
+        return null; // no answer in 2 s: the PC has left the hotspot, and the rest would keep the page as long each
       } catch (IOException e) {
         // gone since its last ping: the next one
       }
