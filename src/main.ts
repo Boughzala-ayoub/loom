@@ -853,7 +853,7 @@ const THEMES: Theme[] = [
       "--accent-dim": "rgba(226, 228, 232, 0.12)",
       "--ok": "#8be5af",
       "--err": "#e3858e",
-      "--warn": "#b5bbc4",
+      "--warn": "#f3b559",
       "--blue": "#6ca9ea",
       "--magenta": "#d487bb",
       "--cyan": "#5edcf4",
