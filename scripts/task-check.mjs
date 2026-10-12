@@ -3279,14 +3279,17 @@ try {
     assert.deepEqual([o?.source, o?.state, o?.correlation], ['manual', 'working', 'sequence'], JSON.stringify(o));
     await endTurn('opencode', ocPane, '');
     await until(o.task, 'completed');
-    // An Enter on an empty input sends nothing, and a turn nobody's Enter explains (a background notice) stays untracked.
+    // An Enter on an empty input sends nothing, and a turn nobody's Enter
+    // explains (a background notice) is Claude's own: a task at its Stop.
     await agent(claude, { busy: false, input: '' });
     before = await taskIds();
     await typeIn(claude, '');
     await startTurn('claude', claude, 'a background notice');
     await endTurn('claude', claude, 'a background notice');
     await page.waitForTimeout(800);
-    assert.deepEqual(await newTasks(before), [], 'No task for an empty Enter or a turn no Enter sent');
+    const [notice, ...more] = await newTasks(before);
+    assert.deepEqual([more.length, notice?.source, notice?.correlation], [0, 'agent', 'sequence'], `No task for an empty Enter, and Claude's own for a turn no Enter sent: ${JSON.stringify(notice)}`);
+    await until(notice.task, 'completed');
     // The Overview's reply box is a person's input too: its own text names the prompt.
     await agent(claude, { busy: false, input: '' });
     await page.evaluate((id) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, '']] }), claude);
