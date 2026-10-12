@@ -27,3 +27,6 @@ src-tauri/.build
 *.njsproj
 *.sln
 *.sw?
+
+# Loom's phone app build (android/build.mjs)
+android/out/

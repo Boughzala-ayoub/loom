@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Loom's phone app: the phone link (Link.java), so Loom's page in the browser reaches the PC over Tailscale, or
+     over this phone's hotspot while Tailscale can't. Built by build.mjs. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.local.loom">
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <application android:label="Loom" android:icon="@drawable/icon" android:theme="@android:style/Theme.DeviceDefault">
+    <activity android:name=".Main" android:exported="true" android:theme="@android:style/Theme.Translucent.NoTitleBar"
+        android:excludeFromRecents="true" android:noHistory="true">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+    </activity>
+    <service android:name=".Keep" android:exported="false" android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Carries Loom's phone page to the PC over Tailscale or this phone's hotspot" />
+    </service>
+  </application>
+</manifest>
