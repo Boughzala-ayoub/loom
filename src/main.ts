@@ -839,6 +839,27 @@ const THEMES: Theme[] = [
     },
   },
   {
+    label: "cyberpunk silver",
+    vars: {
+      "--bg": "#0a0f1b",
+      "--panel": "#101623",
+      "--raise": "#181e2c",
+      "--line": "#1d2433",
+      "--line-strong": "#2b3343",
+      "--text": "#dfe7f0",
+      "--muted": "#93a0b2",
+      "--faint": "#7c8a9f",
+      "--accent": "#e2e4e8",
+      "--accent-dim": "rgba(226, 228, 232, 0.12)",
+      "--ok": "#8be5af",
+      "--err": "#e3858e",
+      "--warn": "#b5bbc4",
+      "--blue": "#6ca9ea",
+      "--magenta": "#d487bb",
+      "--cyan": "#5edcf4",
+    },
+  },
+  {
     label: "matrix",
     vars: {
       "--bg": "#030904",
