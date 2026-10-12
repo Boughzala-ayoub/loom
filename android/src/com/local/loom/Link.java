@@ -13,6 +13,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -281,10 +282,13 @@ public final class Link {
     LinkedBlockingDeque<Socket> q = idle.get(app);
     // The PC opens a new connection for each one used: a burst of the page's waits a moment for those.
     long until = System.currentTimeMillis() + 2000;
+    boolean pinged = false;
     while (true) {
       Socket s;
       try {
-        s = q.poll(Math.max(0, until - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
+        // The newest first. Each one joins the end when it proves itself or answers a ping, so the ones that
+        // stopped answering (the PC left, or came back on new connections) gather at the front.
+        s = q.pollLast(Math.max(0, until - System.currentTimeMillis()), TimeUnit.MILLISECONDS);
       } catch (InterruptedException e) {
         return null;
       }
@@ -297,13 +301,46 @@ public final class Link {
           return s;
         }
       } catch (SocketTimeoutException e) {
+        // No answer in 2 s. The PC may have left the hotspot, and then the rest would keep the page 2 s each. Yet
+        // some may answer: the PC listens on a new one only once those it opened before have proven themselves
+        // (link.rs), and a PC that came back adds new ones. A ping commits none to a page: ask them all at once.
         close(s);
-        return null; // no answer in 2 s: the PC has left the hotspot, and the rest would keep the page as long each
+        if (pinged || !answering(q)) return null;
+        pinged = true;
+        continue;
       } catch (IOException e) {
         // gone since its last ping: the next one
       }
       close(s);
     }
+  }
+
+  /**
+   * Pings every waiting connection at once and keeps those that answer within 1 s. Whether any wait now: those, or
+   * new ones proven meanwhile.
+   */
+  boolean answering(LinkedBlockingDeque<Socket> q) {
+    List<Socket> asked = new ArrayList<>();
+    for (Socket s; (s = q.poll()) != null;) {
+      try {
+        write(s, "P");
+        asked.add(s);
+      } catch (IOException e) {
+        close(s);
+      }
+    }
+    long until = System.currentTimeMillis() + 1000;
+    for (Socket s : asked) {
+      try {
+        s.setSoTimeout((int) Math.max(1, until - System.currentTimeMillis()));
+        if (!"P".equals(line(s))) throw new IOException("no answer");
+      } catch (IOException e) {
+        close(s);
+      }
+    }
+    // Those that answered go last, so they're taken before new ones proven meanwhile, which the PC may not listen on yet.
+    for (Socket s : asked) if (!s.isClosed()) q.offer(s);
+    return !q.isEmpty();
   }
 
   /** TLS to the PC's tailnet name, as `tailscale serve` expects, or null. */
