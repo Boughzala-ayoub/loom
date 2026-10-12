@@ -12,7 +12,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { proofFor, statusFor, flat, foot } from "./apply";
 import { agentOf, codexRunning, codexTitle, launch, opencodeCommand, ownSession, validSessionId, type Agent } from "./agent";
-import { icon, markOf, type Mark } from "./icons";
+import { icon } from "./icons";
 import { parseStatus, lossInventory, parseBranch, upstreamLabel, parseNumstat, sumStat, diffRows, fileRows, hunkPatch, tree, gitAct, literal, resolveArgs, type Act, type Change, type DiffRow, type Sec, type Stat, type Node as Tree } from "./gitparse";
 import { renderRows } from "./rows";
 import { applyStash, listStashes, stashCommit } from "./stash";
@@ -1919,13 +1919,15 @@ class Pane {
   /** Codex asked (an approval or a question, OSC 9) and no answer went in
    * since. Its title says Working all through one, but nothing runs. */
   codexAsking = false;
+  /** What OMP last said of itself (OSC 7501, programStatus): working,
+   * blocked, done, error or idle. Unset until this launch says one, and again
+   * once OMP quits (clear) and its shell's prompt has the pane. */
+  programState: string | undefined;
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
   /** Where it was when it left its thread (keepContext). Every copy after is this one, last known. */
   left?: TaskContext;
   startup = ""; // command this pane booted with, persisted for restore
   agent: Agent = "shell"; // what `startup` runs, see agent.ts
-  /** The mark it shows, and the name beside it: OMP's for a shell running omp (icons.ts). */
-  get brand(): Mark { return markOf(this.startup, this.agent); }
   sid = ""; // and the claude session it owns, so the next launch resumes it
   startupSettings?: { model?: string; effort?: string };
   providerUsage: Usage | null = null;
@@ -2165,7 +2167,7 @@ class Pane {
     this.startup = startup;
     this.agent = agentOf(startup);
     for (const k of ["ico", "rowIco", "pipIco"] as const) {
-      const fresh = icon(this.brand);
+      const fresh = icon(this.agent);
       this[k].replaceWith(fresh);
       this[k] = fresh;
     }
@@ -2350,6 +2352,7 @@ class Pane {
     this.receiptRunning = undefined;
     this.codexState = undefined;
     this.codexAsking = false;
+    this.programState = undefined;
     this.providerUsage = null;
     this.startupStarted = Date.now();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
@@ -2496,7 +2499,10 @@ class Pane {
   private activity() {
     if (this.agent === "shell") return;
     if (this.opencodeStatus) return;
-    if (this.agent === "codex" || this.agent === "opencode") {
+    // OMP says itself whether a turn runs (programStatus). Once it quits, its
+    // shell's marks do (mark).
+    if (this.agent === "omp" && this.programState === undefined) return;
+    if (this.agent === "codex" || this.agent === "opencode" || this.agent === "omp") {
       // ponytail: both keep drawing while idle (codex's star field, opencode's
       // TUI), so output alone says nothing. Codex's title says whether a turn
       // runs, status row shown or not; without one, the interrupt hint where
@@ -2505,7 +2511,8 @@ class Pane {
       // Clear busy when it goes, even without a ring. Read the live screen
       // after xterm joins PTY chunks, not scrolled history. An unanswered
       // approval runs nothing, whatever the title says.
-      const running = this.agent === "codex" && this.codexState !== undefined ? codexRunning(this.codexState) : interruptHint(this.screen(true, true), this.agent, () => screenCells(this));
+      const running = this.agent === "omp" ? this.programState === "working"
+        : this.agent === "codex" && this.codexState !== undefined ? codexRunning(this.codexState) : interruptHint(this.screen(true, true), this.agent, () => screenCells(this));
       const status = running && !this.codexAsking;
       if (!status && this.busy) ((this.busy = false), this.paint());
       // An alert or Esc can clear busy while the hint stays visible. Reconcile
@@ -2660,7 +2667,7 @@ class Pane {
   seen() {
     if (!this.waiting) return;
     this.waiting = false;
-    if (this.agent === "codex" || this.agent === "opencode") this.activity();
+    if (this.agent === "codex" || this.agent === "opencode" || this.agent === "omp") this.activity();
     this.paint();
     if (dashboardOpen) renderDashboard();
   }
@@ -2671,7 +2678,7 @@ class Pane {
     const starting = this.starting && !this.dead;
     const word = this.dead ? "Exited" : starting ? "Starting" : this.waiting ? "Waiting" : this.busy ? "Working" : "Ready";
     this.title.textContent = title;
-    this.title.title = `${this.brand}, pane ${index + 1}: ${this.appTitle || title}`;
+    this.title.title = `${this.agent}, pane ${index + 1}: ${this.appTitle || title}`;
     this.stateTag.textContent = state || starting ? word : "";
     this.el.classList.toggle("starting", starting);
     this.el.classList.toggle("busy", this.busy);
@@ -2679,15 +2686,15 @@ class Pane {
     this.el.classList.toggle("dead", this.dead);
     this.el.classList.toggle("active", this.th.active === this);
     // The sidebar row: the agent, then whatever it titled itself.
-    this.rowName.textContent = this.brand;
+    this.rowName.textContent = this.agent;
     this.rowLabel.textContent = title;
     this.rowState.textContent = word;
-    this.row.title = `${this.brand}: ${this.appTitle || title}`;
-    this.row.setAttribute("aria-label", `${this.brand}, ${title}, ${word}`);
+    this.row.title = `${this.agent}: ${this.appTitle || title}`;
+    this.row.setAttribute("aria-label", `${this.agent}, ${title}, ${word}`);
     this.row.dataset.state = state;
     this.row.classList.toggle("on", this.th === current && this.th.active === this);
     this.pip.dataset.state = state;
-    this.pip.title = `${this.brand}: ${title} (${word})`;
+    this.pip.title = `${this.agent}: ${title} (${word})`;
     this.th.paint(); // the thread row sums its panes
     syncSpin();
     // Exiting or relaunching changes whether this pane can be dictated into.
@@ -2800,6 +2807,9 @@ class Pane {
    * whether the prompt is waiting for a command (;B), and which command line
    * runs (;E), which pairs a send --receipt with its own ;D. A is ignored. */
   private mark(data: string) {
+    // OMP draws each prompt in its transcript between marks of its own (A,
+    // then B C D;0), for terminals to jump between them: never its shell's.
+    if (this.agent === "omp" && this.programState !== undefined) return;
     const [kind, code, ...rest] = data.split(";");
     if (kind === "B") return void (this.atPrompt = true);
     if (kind === "E") {
@@ -2827,15 +2837,28 @@ class Pane {
     }
     this.paint();
   }
-  /** OSC 7501 Program Status (docs/feature-study.md section 3) from what a
-   * shell pane runs: OMP says unasked whether it's working. Run as the pane's
-   * startup command it gets none of the prompt's marks (mark), which only see
-   * lines typed at it, so without this its pane never read as working. Any
-   * state but `working` is not busy. A query (`?`) goes unanswered. */
+  /** OSC 7501 Program Status (docs/feature-study.md section 3): OMP says
+   * unasked when a turn runs (working), waits on you (blocked: its question,
+   * or a tool it may not run unasked), ends (done, error, or idle when Esc
+   * stopped it), and that it quit (clear). That is its report of a turn, as
+   * Claude's hooks and Codex's notify are theirs: it moves the pane's tasks,
+   * raises the alert where a turn ends or asks, and says whether the pane
+   * works (activity). A query (`?`) goes unanswered. */
   programStatus(data: string) {
     const state = /(?:^|:)state=(\w+)/.exec(data)?.[1];
-    if (this.agent !== "shell" || !state || (state === "working") === this.busy) return;
-    this.busy = state === "working";
+    if (this.agent !== "omp" || !state || state === this.programState) return;
+    const was = this.programState, at = Date.now();
+    this.programState = state === "clear" ? undefined : state;
+    let detail: string | undefined; // what it asks, or why it failed: base64 UTF-8
+    try { detail = new TextDecoder().decode(Uint8Array.from(atob(/(?:^|:)msg=([\w+/=]+)/.exec(data)?.[1] ?? ""), (c) => c.charCodeAt(0))).slice(0, 200) || undefined; } catch {}
+    if (state === "working") taskSignal(this, { kind: was === "blocked" ? "resume" : "start", at });
+    else if (state === "blocked") taskSignal(this, { kind: "approval", at, detail });
+    else if (state === "done") taskSignal(this, { kind: "end", at });
+    else if (state === "error") taskSignal(this, { kind: "fail", at, detail });
+    else if (was === "working" || was === "blocked") taskSignal(this, { kind: "interrupt", at });
+    if (state === "blocked" || state === "done" || state === "error") return this.wake(undefined, "osc7501");
+    if (this.programState) return this.activity();
+    this.busy = false;
     this.paint();
   }
   /** Commands a shell with Loom's prompt finished (OSC 133 D), whether the last
@@ -3043,7 +3066,7 @@ class Thread {
 
   /** Does this row survive the sidebar filter? Name, branch, or an agent's title. */
   matches(q: string) {
-    const hay = [basename(this.repo), this.name, this.branch, ...this.panes.map((p) => `${p.brand} ${p.appTitle}`)].join(" ").toLowerCase();
+    const hay = [basename(this.repo), this.name, this.branch, ...this.panes.map((p) => `${p.agent} ${p.appTitle}`)].join(" ").toLowerCase();
     return hay.includes(q);
   }
 
@@ -3780,7 +3803,7 @@ function renderDashboard() {
     return { th, p, state, preview, age, messages, menu };
   }));
   const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
-    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.brand} ${p.label} ${agentGroups.filter(g => p.groupIds.includes(g.id)).map(g => g.name).join(" ")} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
+    && (!q || `${th.repo} ${th.name} ${th.branch} ${p.agent} ${p.label} ${agentGroups.filter(g => p.groupIds.includes(g.id)).map(g => g.name).join(" ")} ${preview} ${messages?.user || ""} ${messages?.agent || ""}`.toLowerCase().includes(q)));
   const counts = $("#dashboard-counts");
   const selectedGroup = agentGroups.find(g => dashboardFilter === `group:${g.id}`);
   const filters = [
@@ -3870,13 +3893,13 @@ function renderDashboard() {
       row.className = "dashboard-row";
       row.dataset.key = p.id;
       row.dataset.state = state;
-      row.title = `${dashboardCompact ? "Open" : "Preview"} ${p.brand} in ${th.name}`;
+      row.title = `${dashboardCompact ? "Open" : "Preview"} ${p.agent} in ${th.name}`;
       if (!dashboardCompact) row.setAttribute("aria-haspopup", "dialog");
       const identity = document.createElement("span");
       identity.className = "dashboard-identity";
-      identity.append(icon(p.brand));
+      identity.append(icon(p.agent));
       const name = document.createElement("strong");
-      name.textContent = `${th.name} / ${p.brand}`;
+      name.textContent = `${th.name} / ${p.agent}`;
       identity.append(name);
       const location = document.createElement("span");
       location.className = "dashboard-location";
@@ -3984,7 +4007,7 @@ function renderDashboard() {
     const selected = all.find(r => r.p === dashboardPreviewPane);
     if (!selected) return closeDashboardPreview();
     const { p, th, state, age } = selected;
-    $("#dashboard-preview-title").textContent = `${th.name} / ${p.brand}`;
+    $("#dashboard-preview-title").textContent = `${th.name} / ${p.agent}`;
     $("#dashboard-preview-meta").textContent = `${basename(th.repo)} / ${th.branch || th.dir} / Pane ${th.panes.indexOf(p) + 1}`;
     $("#dashboard-preview-meta").title = th.dir;
     $("#dashboard-preview-status").textContent = age;
@@ -4175,7 +4198,7 @@ function sendReply(p: Pane, text: string, { gen, beforePaste, check, beforeEnter
 /** Where an agent's "finished or needs you" came from: the terminal bell,
  * OSC 9 (Codex), OSC 99 (OpenCode's TUI) or a marker file (Claude's hooks,
  * OpenCode's plugin). */
-type WakeSource = "bell" | "osc9" | "osc99" | "hook";
+type WakeSource = "bell" | "osc9" | "osc99" | "osc7501" | "hook";
 /** What Loom wrote is kept apart from what came back. Written: the SHA-256 and
  * byte count of the text's UTF-8 (never the text: prompts hold secrets), the
  * caller's --key, when Loom accepted it, and how far its writes got (`steps`).
@@ -4507,7 +4530,7 @@ async function push(message: Omit<PushMessage, "at">): Promise<{ sent: number; f
   return out;
 }
 
-const AGENT_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", opencode: "OpenCode" };
+const AGENT_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", opencode: "OpenCode", omp: "OMP" };
 /** A task notice the policy sends, as a phone notification: what ended, and a tap opens the agent. */
 async function pushNotice(t: Task, e: TaskEvent) {
   const kind = notifyKind(e.state);
@@ -4648,7 +4671,10 @@ const PLACEHOLDER = /\[Pasted text #\d+|\[Pasted Content \d+ chars\]|\[Image #\d
  * is a task now; anything else waits for the agent to report the turn
  * (adoptManual), so an Enter that sent nothing never becomes a task. */
 function manualEnter(p: Pane, text?: string): ManualEnter | Task | undefined {
-  if (!(p.agent === "claude" || p.agent === "codex" || p.agent === "opencode") || p.dead || readMenu(liveScreen(p, false))) return;
+  if (p.agent === "shell" || p.dead || readMenu(liveScreen(p, false))) return;
+  // OMP sends a prompt only between turns: mid-turn it joins the turn that
+  // runs (whose one done ends both), and while OMP asks, it answers.
+  if (p.agent === "omp" && !(p.programState === "idle" || p.programState === "done" || p.programState === "error")) return;
   let read = text;
   if (read === undefined && p.agent !== "opencode") {
     const input = inputState(p);
@@ -4712,7 +4738,7 @@ async function replyAsPerson(p: Pane, text: string) {
 /** A report no task claimed, after a person's Enter waiting for one
  * (manualEnter): the turn it reports is theirs, a task of its own from that
  * Enter on, and the report goes to it. Claude names a prompt as it goes in
- * (start, with its match), OpenCode only that a run started, Codex only a
+ * (start, with its match), OpenCode and OMP only that a run started, Codex only a
  * finished turn's prompts (an end, with its mentions). A report with no such
  * Enter (a background notice's turn, say) isn't a person's: Claude's becomes
  * its own task (agentTurn). Enters older than the one a report took stay
@@ -4728,7 +4754,7 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
     p.manual = p.manual.slice(i + 1);
     return m;
   };
-  if (s.kind === "start" && !s.token && !moved.length && (p.agent === "claude" ? s.match : p.agent === "opencode" && !s.match)) {
+  if (s.kind === "start" && !s.token && !moved.length && (p.agent === "claude" ? s.match : (p.agent === "opencode" || p.agent === "omp") && !s.match)) {
     const m = take(s.at, s.match ?? null, p.agent === "claude" ? 10_000 : Infinity);
     if (!m) return false;
     enterTurn(turnTask(p, "manual", s.match ?? m.match ?? "", m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }, ctx), m.at, ctx);
@@ -5012,7 +5038,8 @@ function sweepTasks(closing = false) {
     // its title's run state says the turn still runs, and once it has one, it
     // alone does. A hint is read only where the agent draws it (interruptHint).
     const screen = p.screen(true);
-    const busy = p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
+    const busy = p.agent === "omp" ? p.programState === "working"
+      : p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
       : (p.agent === "claude" && claudeWorking(screen)) || interruptHint(p.screen(true, true), p.agent, () => screenCells(p));
     // Esc or Ctrl-C after the Enter (a turn Claude began by itself has none:
     // after it began) and after any Stop, judged once, 2 s on.
@@ -5458,7 +5485,7 @@ function syncOverlay() {
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state] || (a.state === "waiting" ? a.p.waitingSince - b.p.waitingSince : a.p.busySince - b.p.busySince))
     .map(({ th, p, state }): OverlayRow => ({
       id: p.id,
-      agent: p.brand,
+      agent: p.agent,
       waiting: state === "waiting",
       name: th.panes.length > 1 ? `${th.name} · ${th.panes.indexOf(p) + 1}` : th.name,
       time: ago(state === "waiting" ? p.waitingSince : p.busySince),
@@ -5521,7 +5548,7 @@ function renderPicker() {
   const rows = threads
     .flatMap((th) => th.panes.map((p) => ({ th, p, state: paneState(p) })))
     .filter(({ state }) => pickAll || state === "waiting")
-    .filter(({ th, p }) => !q || `${basename(th.repo)} ${th.name} ${th.branch} ${p.brand} ${p.appTitle}`.toLowerCase().includes(q))
+    .filter(({ th, p }) => !q || `${basename(th.repo)} ${th.name} ${th.branch} ${p.agent} ${p.appTitle}`.toLowerCase().includes(q))
     .sort((a, b) => STATE_RANK[a.state] - STATE_RANK[b.state]);
   list.replaceChildren();
   for (const { th, p, state } of rows) {
@@ -5531,7 +5558,7 @@ function renderPicker() {
     row.dataset.state = state;
     const label = document.createElement("span");
     label.className = "picker-label";
-    label.textContent = `${th.name} / ${p.brand}`;
+    label.textContent = `${th.name} / ${p.agent}`;
     const detail = document.createElement("span");
     detail.className = "picker-detail";
     detail.textContent = p.label;
@@ -5541,7 +5568,7 @@ function renderPicker() {
     const tag = document.createElement("span");
     tag.className = "picker-state";
     tag.textContent = STATE_WORD[state];
-    row.append(icon(p.brand), label, tag, detail, project);
+    row.append(icon(p.agent), label, tag, detail, project);
     row.onclick = () => {
       picker.close();
       revealPane(p);
@@ -6096,7 +6123,7 @@ function paintTabs() {
   // The panes are the first tab: a way back that keeps the diffs open. It wears
   // the focused pane's agent mark, so it reads as the agent, not another diff.
   const n = th.panes.length;
-  mk(th.active ? icon(th.active.brand) : "▦", n === 1 ? (th.active?.brand ?? "pane") : `${n} panes`, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()))
+  mk(th.active ? icon(th.active.agent) : "▦", n === 1 ? (th.active?.agent ?? "pane") : `${n} panes`, !th.tab, () => ((th.tab = null), paintTabs(), void showTab()))
     .classList.add("panes");
   function mk(glyph: string | Node, label: string, on: boolean, pick: () => void, close?: () => void) {
     const b = document.createElement("div");
@@ -8453,7 +8480,6 @@ function paneSettings(p: Pane) {
 }
 const paneData = (p: Pane) => ({
   id: p.id, ref: paneName(p), thread: p.th.name, threadId: p.th.id, n: p.th.panes.indexOf(p) + 1, agent: p.agent,
-  ...(p.brand && p.brand !== p.agent ? { mark: p.brand } : {}), // OMP's, for the phone; agent stays shell
   // stableId: the same pane's id after Loom restarts, when its id is new.
   title: p.label, state: cliState(p), sessionId: p.sessionId ?? null, stableId: p.stableId, dir: p.th.dir, front: current === p.th && p.th.active === p,
   zoomed: p.th.zoomed === p,
@@ -8537,7 +8563,7 @@ function cliCommand(a: Args) {
   if ((model !== undefined || effort !== undefined) && family === "shell") throw new Error("--model and --effort require an agent.");
   // These values cross cmd.exe for npm shims. Accept identifiers, never shell syntax.
   if (model !== undefined && !/^[a-z0-9][a-z0-9._:/\[\]-]{0,127}$/i.test(model)) throw new Error("--model needs a model identifier without spaces or shell characters.");
-  if (effort !== undefined && (family === "opencode" || !/^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(effort))) throw new Error("--effort takes none, minimal, low, medium, high, xhigh, max or auto for Claude or Codex; the agent validates model support.");
+  if (effort !== undefined && (family === "opencode" || family === "omp" || !/^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(effort))) throw new Error("--effort takes none, minimal, low, medium, high, xhigh, max or auto for Claude or Codex; the agent validates model support.");
   return s.cmd + (model === undefined ? "" : ` --model ${model}`) + (effort === undefined ? "" : family === "codex" ? ` -c model_reasoning_effort=${effort}` : ` --effort ${effort}`);
 }
 

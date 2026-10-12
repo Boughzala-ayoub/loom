@@ -4,16 +4,17 @@
  * next launch resumes it, a "turn finished" signal, and no shell host under
  * them: a PowerShell sitting behind an agent costs ~65 MB a pane for nothing
  * but the prompt you land on when the agent quits, and a dead pane relaunches
- * on Enter instead. Anything else is a shell command and gets PowerShell with
- * shell-init.ps1 dot-sourced (OSC 133 command marks, the busy dot). */
-export type Agent = "claude" | "codex" | "opencode" | "shell";
+ * on Enter instead. OMP is an agent that keeps the shell (launch). Anything
+ * else is a shell command and gets PowerShell with shell-init.ps1 dot-sourced
+ * (OSC 133 command marks, the busy dot). */
+export type Agent = "claude" | "codex" | "opencode" | "omp" | "shell";
 
 export const opencodeCommand = (cmd: string) => /^(opencode[12]?)(?=\s|$)/.exec(cmd.trim())?.[1];
-/** OMP runs as a shell command (agentOf); only its mark and its resume are its own. */
 const ompCommand = (cmd: string) => /^omp(\s|$)/.test(cmd.trim());
 
 export function agentOf(cmd: string): Agent {
   if (opencodeCommand(cmd)) return "opencode";
+  if (ompCommand(cmd)) return "omp";
   const m = /^(claude|codex|opencode)(\s|$)/.exec(cmd.trim());
   return (m?.[1] as Agent) ?? "shell";
 }

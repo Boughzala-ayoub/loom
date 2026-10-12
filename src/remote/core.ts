@@ -2,12 +2,11 @@
  * threads it last read, navigation, sheets, toasts and small DOM helpers.
  * The app keeps nothing of Loom's own: every action is a loomctl command, so
  * it happens on the PC through the functions its buttons call. */
-import { icon as agentIcon, type Mark } from "../icons";
+import { icon as agentIcon } from "../icons";
 import type { Agent } from "../agent";
 
 export type Pane = {
   id: string; ref: string; threadId: string; agent: Agent; title: string; state: string; lastOutput: string | null;
-  mark?: Mark; // OMP's mark for a shell running omp (icons.ts); otherwise the agent's
   stableId?: string; // the same pane's id after Loom restarts, when `id` is new (older Looms: none)
   model: string | null; effort: string | null; notify: string;
   context: { usedTokens: number; windowTokens: number; remainingPercent: number } | null;

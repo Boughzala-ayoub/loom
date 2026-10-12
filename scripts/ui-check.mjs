@@ -1428,8 +1428,8 @@ try {
       }
       await page.click('#dashboard-select');
     }
-    // An OMP pane runs as a shell command, as before, and shows OMP's mark: in the sidebar, its
-    // header and picture-in-picture, the tab strip, and the overview.
+    // An OMP pane keeps its PowerShell host and shows OMP's mark: in the sidebar, its header and
+    // picture-in-picture, the tab strip, and the overview.
     await page.goto(base + '?omp-pane');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     assert.equal(await page.evaluate(() => window.qa.panes.find(p => p.argv.at(-1).endsWith('; omp'))?.argv[0]), 'powershell.exe', 'OMP keeps its PowerShell host');
@@ -1440,22 +1440,44 @@ try {
     assert.deepEqual(await ompMarks(), { '.agent': 1, '.pane-head': 1, '.pip': 1, '.panes': 1, '.dashboard-identity': 0 }, `OMP's mark, ${width}px`);
     assert.ok(await page.evaluate(() => [...document.querySelectorAll('.agent .agent-name')].some(n => n.textContent === 'omp')), `The sidebar names OMP, ${width}px`);
     await audit('omp-pane');
-    // OMP says itself when it works (OSC 7501), which its shell's marks never see: the pane
-    // reads as working, the overlay lists it, and done takes it off.
+    // A person's prompt to OMP, and OMP's turn as it sends it: its reports (OSC 7501), the
+    // marks it draws its prompt between (OSC 133), its answer, then done and its bell. The pane
+    // works all through it, as the overlay shows, then waits on you, and the task completes.
     const ompPane = await page.evaluate(() => {
       const qa = window.qa;
       qa.overlayRows = [];
       window.__TAURI_INTERNALS__.invoke('plugin:event|listen', { event: 'overlay-rows', handler: window.__TAURI_INTERNALS__.transformCallback(e => qa.overlayRows.push(e.payload)) });
       return qa.panes.find(p => p.argv.at(-1).endsWith('; omp')).id;
     });
-    const ompSays = state => page.evaluate(([id, state]) => window.qa.panes.find(p => p.id === id).onOut.onmessage(`\x1b]7501;state=${state}:app=omp\x1b\\`), [ompPane, state]);
+    const ompOut = d => page.evaluate(([id, d]) => window.qa.panes.find(p => p.id === id).onOut.onmessage(d), [ompPane, d]);
+    const ompSays = state => ompOut(`\x1b]7501;state=${state}:app=omp\x1b\\`);
+    const ompState = async () => (await cli('panes')).data.find(p => p.id === ompPane).state;
+    const ompRow = id => window.qa.overlayRows.at(-1)?.rows.find(r => r.id === id);
+    await ompSays('idle');
+    const tasksBefore = (await cli('tasks')).data.length;
+    await page.locator(`.pane[data-id="${ompPane}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('fix the tests');
+    await page.keyboard.press('Enter');
+    await ompOut('\x1b]133;A\x07');
     await ompSays('working');
-    await page.waitForFunction(id => window.qa.overlayRows.at(-1)?.rows.some(r => r.id === id && r.agent === 'omp' && !r.waiting), ompPane);
-    assert.equal((await cli('panes')).data.find(p => p.id === ompPane).state, 'working', `OMP working reads as working, ${width}px`);
+    await ompOut('\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07\r\n> fix the tests\r\n');
+    await page.waitForFunction(id => { const r = window.qa.overlayRows.at(-1)?.rows.find(r => r.id === id); return r?.agent === 'omp' && !r.waiting; }, ompPane);
+    await page.waitForTimeout(2000); // past the 1.5 s of quiet that ends a turn read from its output
+    await ompOut('Reading src/app.ts\r\n');
+    assert.equal(await ompState(), 'working', `OMP working reads as working through its prompt's marks, ${width}px`);
+    assert.equal((await page.evaluate(ompRow, ompPane))?.waiting, false, `The overlay lists OMP working, ${width}px`);
+    const ompTask = (await cli('tasks')).data.slice(tasksBefore);
+    assert.deepEqual(ompTask.map(t => [t.agent, t.source, t.state]), [['omp', 'manual', 'working']], `The prompt is OMP's task, ${width}px`);
     await audit('omp-working');
     await ompSays('done');
+    await ompOut('\x07');
+    await page.waitForFunction(id => window.qa.overlayRows.at(-1)?.rows.find(r => r.id === id)?.waiting, ompPane);
+    assert.equal(await ompState(), 'waiting', `OMP done waits on you, ${width}px`);
+    assert.equal((await cli('task', ompTask[0].task)).data.state, 'completed', `OMP's done completes its task, ${width}px`);
+    await page.locator(`.pane[data-id="${ompPane}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.press('ArrowLeft'); // a key in the pane: you've seen it
     await page.waitForFunction(id => !window.qa.overlayRows.at(-1)?.rows.some(r => r.id === id), ompPane);
-    assert.equal((await cli('panes')).data.find(p => p.id === ompPane).state, 'idle', `OMP done reads as idle, ${width}px`);
+    assert.equal(await ompState(), 'idle', `Seen, OMP reads idle, ${width}px`);
     // omp finds it by name, as each search knows the others: the sidebar filter (set from code, as
     // under 768px the sidebar is shut), then the overview and Ctrl+K below.
     const sideFilter = q => page.evaluate(q => { const f = document.querySelector('#side-filter'); f.value = q; f.dispatchEvent(new Event('input')); }, q);

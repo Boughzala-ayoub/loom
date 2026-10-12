@@ -10,7 +10,7 @@ import * as model from "./task.ts";
 import { pruneSettled } from "./cli.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -19,12 +19,12 @@ for (const node of source.statements) {
 }
 function fixture(extra: Record<string, unknown> = {}) {
   const th = { id: "thread-1", name: "At Enter", panes: [] as any[] };
-  const p: any = { id: "pane-1", generation: 1, agent: "codex", th };
+  const p: any = { id: "pane-1", generation: 1, agent: "codex", th, manual: [] };
   th.panes.push({}, p);
   const tasks = new Map(), taskWatch = new Map();
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
-    journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, adoptManual: () => false, ...extra });
+    journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
   runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
@@ -175,14 +175,14 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "activity", "wake", "programStatus"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "programState", "activity", "wake", "seen", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane() {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
-  const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, screen: () => "", paint() {} });
+  const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
   fx.th.panes[fx.th.panes.indexOf(fx.p)] = p;
   const later = (to: number) => {
     for (const t of timers) if (t.run && t.due <= to) ((fx.clock.at = t.due), t.run(), (t.run = null));
@@ -311,19 +311,65 @@ for (const first of [11_800, 13_000]) {
 }
 console.log("ok   A turn Claude began by itself right after a task ended starts at its first output");
 {
-  // OMP runs as a shell pane's startup command, which the prompt's marks never
-  // see, and says itself when it works (OSC 7501): busy then, idle on any
-  // other state. An agent pane keeps its own reading.
-  const { p, clock } = claudePane();
-  p.agent = "shell";
-  clock.at = 5000;
-  p.programStatus("state=working:app=omp");
-  assert.deepEqual([p.busy, p.busySince], [true, 5000], "OMP working");
-  for (const d of ["?", "app=omp"]) (p.programStatus(d), assert.equal(p.busy, true, `${d} changed it`));
-  p.programStatus("state=done:app=omp");
-  assert.equal(p.busy, false, "OMP done");
-  const claude = claudePane().p;
-  claude.programStatus("state=working:app=claude");
-  assert.equal(claude.busy, false, "Claude's pane read its report");
+  // OMP between turns takes a person's Enter, then says itself what its turn
+  // does (OSC 7501), drawing its prompt in the transcript between OSC 133
+  // marks meanwhile: working through them, asking, answered, done. Its task
+  // and its pane go as a Claude or Codex turn's do.
+  const { p, tasks, pushed, clock, later } = claudePane();
+  const say = async (d: string) => (p.programStatus(`state=${d}:app=omp`), await new Promise((r) => setTimeout(r, 0)));
+  p.agent = "omp";
+  await say("idle");
+  clock.at = 1000;
+  p.manual = [{ at: 1000, launch: 1, match: null }]; // manualEnter, at the Enter
+  await say("working");
+  for (const m of ["A", "B", "C", "D;0"]) p.mark(m);
+  assert.equal(p.busy, true, "OMP's D;0 ended the turn it said was working");
+  later(5000);
+  p.activity();
+  const [t, ...more] = [...tasks.values()];
+  assert.equal(more.length, 0);
+  assert.deepEqual([p.busy, p.waiting, p.commands, p.atPrompt], [true, false, 0, false], "its transcript's marks read as a shell's");
+  assert.deepEqual([t.source, t.state, t.correlation, t.startedAt], ["manual", "working", "sequence", 1000]);
+  await say(`blocked:kind=question:msg=${btoa("Which database?")}`);
+  assert.deepEqual([p.busy, p.waiting, t.state, t.detail], [false, true, "approval", "Which database?"], "asking");
+  p.seen();
+  await say("working");
+  assert.deepEqual([p.busy, t.state], [true, "working"], "answered");
+  later(9000);
+  await say("done");
+  assert.deepEqual([p.busy, p.waiting, t.state, t.endedAt], [false, true, "completed", 9000], "done");
+  assert.deepEqual(pushed, ["approval", "completed"]);
+  p.wake(undefined, "bell"); // OMP rings after it, as it notifies
+  assert.equal(p.turns, 0, "its bell counted a turn its report had");
+  // A turn sent from elsewhere under the unread alert: working once it's read.
+  await say("working");
+  assert.deepEqual([p.busy, p.waiting], [false, true]);
+  p.seen();
+  assert.equal(p.busy, true, "read, the alert gave way to its work");
 }
-console.log("ok   A shell pane's program working (OSC 7501, OMP) reads as working");
+for (const [end, state, notice] of [["idle", "cancelled", []], ["error:msg=" + btoa("rate limited"), "failed", ["failed"]], ["clear", "cancelled", []]] as const) {
+  // Esc stops the turn (idle), it fails (error), or OMP quits mid-turn (clear).
+  const { p, pushed, clock, f } = claudePane();
+  p.agent = "omp";
+  p.programStatus("state=idle");
+  const t = f.turnTask(p, "submit", "", 1000);
+  f.enterTurn(t, 1000);
+  clock.at = 2000;
+  p.programStatus("state=working");
+  p.programStatus(`state=${end}`);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.busy, p.waiting, pushed], [state, false, state === "failed", notice], end);
+  if (state === "failed") assert.equal(t.detail, "rate limited");
+}
+{
+  // Once OMP has quit, its shell's prompt has the pane, and its marks count.
+  const { p } = claudePane();
+  p.agent = "omp";
+  p.programStatus("state=idle");
+  p.programStatus("state=clear");
+  p.mark("C");
+  assert.equal(p.busy, true, "a command at the shell's prompt");
+  p.mark("D;0");
+  assert.deepEqual([p.busy, p.commands], [false, 1]);
+}
+console.log("ok   OMP's own reports (OSC 7501) move its pane and its tasks as Claude's and Codex's do");

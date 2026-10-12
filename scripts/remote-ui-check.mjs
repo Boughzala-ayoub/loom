@@ -229,7 +229,7 @@ async function context(width, token = true, push = false) {
     if (holdAs !== 'show' && state.hold.delete(holdAs)) await new Promise(r => (state.held[holdAs] = r));
     let data;
     const threads = [thread('a', 'Alpha'), thread('b', 'Beta', 'codex')];
-    if (state.omp) Object.assign(threads[1].panes[0], { agent: 'shell', mark: 'omp' }); // loomctl's mark for a shell running omp
+    if (state.omp) threads[1].panes[0].agent = 'omp';
     // siblings: Alpha:2 runs Codex (sameKind: a second Claude) beside Alpha:1's Claude. closeFirst: Alpha:1 closed
     // on the PC, so the sibling is Alpha:1 now.
     if (state.siblings) {
@@ -381,7 +381,7 @@ try {
     await goto(page, '', '#pairing form'); await fits(page, width, 'pairing'); await ctx.close();
     const { ctx: c2, page: p, state } = await context(width);
     await goto(p, '', '#list .agent'); await fits(p, width, 'threads');
-    // A shell running omp shows OMP's mark, from loomctl's mark.
+    // An OMP pane shows OMP's mark.
     state.omp = true; await goto(p, '', '#list .agent');
     assert.ok(await p.evaluate(() => [...document.querySelectorAll('#list svg.ico path')].some(e => e.getAttribute('d') === 'M0 1.5h24v4.5H0zM3 6h6v10.5H3zM13.5 6h6v16.5h-6z')), `${width}: OMP's mark in the list`);
     assert.equal(await p.locator('#list .agent', { hasText: 'omp' }).count(), 1, `${width}: the list names OMP`);

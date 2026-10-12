@@ -524,10 +524,15 @@ Each agent says "done" its own way, and Loom listens to all of them:
   `session.execution.*` pair on 2.x) and on a question, form or permission
   prompt (any of those blocks mid-turn and never goes idle), and does nothing
   outside a Loom pane.
+- **omp** says what its turn does with OSC 7501, its `terminal.programStatus`
+  setting, on by default: working, blocked on its question or on a tool it may
+  not run unasked, then done, error, or idle when Esc stopped it. Loom ignores
+  the shell marks (OSC 133) OMP draws around each prompt in its transcript
+  while it runs, and reads them again once OMP quits and its PowerShell is back.
 - **claude** uses hooks, below. Terminal BEL and OSC 99 (kitty notifications)
   count too, for anything else that rings.
 
-OpenCode's plugin reports Working and Waiting directly. Pending questions and
+OpenCode's plugin and OMP report Working and Waiting directly. Pending questions and
 permissions stay Waiting until answered. Child-session completion cannot mark
 the parent done. Other agents use terminal notifications and activity detection;
 the echo right after a keystroke does not count as work.

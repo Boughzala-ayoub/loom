@@ -66,7 +66,7 @@ export function showList(current: string | null) {
 
 function matches(t: Thread, p?: Pane) {
   if (!query) return true;
-  const words = [t.name, t.branch, base(t.repo), ...(p ? [p.mark ?? p.agent, p.title, p.ref] : [])].join(" ").toLowerCase();
+  const words = [t.name, t.branch, base(t.repo), ...(p ? [p.agent, p.title, p.ref] : [])].join(" ").toLowerCase();
   return words.includes(query);
 }
 
@@ -151,7 +151,7 @@ function threadBlock(t: Thread) {
     const pips = el("span", "pips");
     pips.append(...[...t.panes].sort((a, b) => rank(a) - rank(b)).slice(0, 4).map((p) => {
       const pip = el("span", `pip ${p.state}`);
-      pip.append(agentIcon(p.mark ?? p.agent));
+      pip.append(agentIcon(p.agent));
       return pip;
     }));
     if (t.panes.length > 4) pips.append(el("span", "", `+${t.panes.length - 4}`));
@@ -183,11 +183,11 @@ function agentRow(p: Pane) {
   row.dataset.id = p.id;
   row.setAttribute("aria-current", String(p.id === lit));
   const line1 = el("span", "line1");
-  line1.append(el("span", "", p.mark ?? p.agent));
+  line1.append(el("span", "", p.agent));
   if (p.state !== "idle") line1.append(el("span", `chip ${p.state}`, p.state));
   const when = el("span", "when");
   when.dataset.pane = p.id;
-  row.append(agentIcon(p.mark ?? p.agent), line1, when, el("span", "line2", p.title || " "));
+  row.append(agentIcon(p.agent), line1, when, el("span", "line2", p.title || " "));
   return row;
 }
 
@@ -212,10 +212,10 @@ function activity() {
     card.dataset.pane = p.id;
     const head = button("", () => go(`#/pane/${encodeURIComponent(p.id)}`), "card-head");
     const who = el("span", "who");
-    who.append(el("b", "", `${t.name} / ${p.mark ?? p.agent}`), el("span", "", p.title || t.branch));
+    who.append(el("b", "", `${t.name} / ${p.agent}`), el("span", "", p.title || t.branch));
     const when = el("span", "when");
     when.dataset.pane = p.id;
-    head.append(agentIcon(p.mark ?? p.agent), who, ...(p.state !== "idle" ? [el("span", `chip ${p.state}`, p.state)] : []), when);
+    head.append(agentIcon(p.agent), who, ...(p.state !== "idle" ? [el("span", `chip ${p.state}`, p.state)] : []), when);
     card.append(head);
     const s = said.get(p.id);
     if (s?.user) card.append(quote("You", s.user, "said you"));
@@ -499,7 +499,7 @@ export function drawHead() {
     stateChip.textContent = "";
     return;
   }
-  whoName.textContent = `${p.ref} · ${p.mark ?? p.agent}`;
+  whoName.textContent = `${p.ref} · ${p.agent}`;
   whoTitle.textContent = p.title;
   stateChip.textContent = p.state;
   stateChip.className = `chip ${p.state}`;
@@ -859,7 +859,7 @@ function paneActions() {
     item("Stop", () => run("stop", [p.id, "--yes"], { change: true }), "Stopped", { icon: "stop", danger: true, ask: [`Stop ${p.ref}?`, "The pane stays, with what it last showed.", "Stop"] }),
     item("Close this agent", async () => { await run("close", [p.id, "--yes"], { change: true }); back(); }, "Closed", { icon: "close", danger: true, ask: [`Close ${p.ref}?`, "Its pane goes from the thread.", "Close"] }),
   );
-  void sheet(items, `${p.ref} · ${p.mark ?? p.agent}`);
+  void sheet(items, `${p.ref} · ${p.agent}`);
 }
 
 // --- A new thread -----------------------------------------------------------

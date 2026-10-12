@@ -846,7 +846,7 @@ file. The id, its `--key` and its events still answer after Loom restarts.
 Three other turns are tasks too, each with its own id, and every task says what
 started it in `source`:
 
-- `send`: an ordinary `loomctl send` to Claude, Codex or OpenCode with Enter.
+- `send`: an ordinary `loomctl send` to Claude, Codex, OpenCode or OMP with Enter.
   The task is made right before its Enter, so a send that stops sooner leaves
   none, and `send` answers with its id as `task` (the receipt token, with
   `--receipt`). A send to a shell, or with `--no-enter`, makes none.
@@ -854,10 +854,11 @@ started it in `source`:
   the Overview's reply box, or dictated. Loom notes the Enter and, where it
   can read the input, a hash of the prompt, never the text. The task appears
   only when the agent reports the turn that Enter sent: Claude's prompt hook
-  naming it, OpenCode's first run after it, Codex's turn report naming its
-  prompt (or, when Loom could read Codex's input, at the Enter itself, since
+  naming it, OpenCode's or OMP's first run after it, Codex's turn report naming
+  its prompt (or, when Loom could read Codex's input, at the Enter itself, since
   Codex reports only a finished turn). An Enter on an empty input and one that
-  answers a question on screen make no task. A report from a launch the pane
+  answers a question on screen make no task, nor does one OMP gets mid-turn
+  (it joins the turn that runs) or while it asks. A report from a launch the pane
   has since replaced makes none either.
 - `agent`: a turn of Claude's that no Enter in Loom explains: one Claude began
   by itself, after a background job it started finished or a scheduled wake-up,
@@ -865,7 +866,7 @@ started it in `source`:
   turn, so the task appears at its first Stop, question or failure with no task
   open on the pane, working since its output began, even under an alert
   nobody has read, or since that report when Loom saw none before it. It
-  then ends like any turn, and its notices go out as any task's do. Codex and OpenCode turns
+  then ends like any turn, and its notices go out as any task's do. Codex, OpenCode and OMP turns
   no Enter explains still make no task.
 
 A `send`, `manual` or `agent` task then moves like a submit's, on the same reports and
@@ -1223,7 +1224,7 @@ To also learn where each event happened, add `--notification-context` to
 The context is what Loom copied when it recorded the event: `threadId`,
 `threadName`, `paneId` (the event's `pane`), `paneNumber` (its place in the
 thread then), `paneTitle`, `agent`, `provider` (the CLI family: `claude`,
-`codex`, `opencode` or `shell`), `capturedAt`, `origin` and `issues`. A later
+`codex`, `opencode`, `omp` or `shell`), `capturedAt`, `origin` and `issues`. A later
 rename, move or close doesn't change it. `paneTitle` is set only when Loom
 named the pane itself (`Terminal`, `Agent session`). A title the running
 program set can hold a prompt or a path, so it comes back null. `origin` is

@@ -5,10 +5,11 @@
  * dragging the width is yours to keep. */
 import { emit, listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize, PhysicalPosition } from "@tauri-apps/api/window";
-import { icon, type Mark } from "./icons";
+import { icon } from "./icons";
+import type { Agent } from "./agent";
 
 /** `ask`: for a waiting agent with a menu on screen, what it asks. */
-export type OverlayRow = { id: string; name: string; agent: Mark; waiting: boolean; time: string; ask: string };
+export type OverlayRow = { id: string; name: string; agent: Agent; waiting: boolean; time: string; ask: string };
 export type OverlayState = { rows: OverlayRow[]; vars: Record<string, string>; scheme: string };
 
 const MIN = 110; // the window's min_inner_size in lib.rs
