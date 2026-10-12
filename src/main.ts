@@ -1867,7 +1867,8 @@ class Pane {
   busySince = 0; // when this stretch of work began, for the overview's "Working · 12m"
   /** When the latest stretch of output began (activity), shown as work or not:
    * under an unread alert it isn't, yet a turn Claude began by itself started
-   * there (agentTurn). */
+   * there (agentTurn). 0 from when a task of the pane ends (moveTask) until
+   * output after a quiet spell begins the next stretch. */
   workSince = 0;
   private workAt = 0; // that stretch's last output
   quietSince = Date.now(); // when it last stopped working (or was made), for "Idle · 5m"
@@ -4428,6 +4429,9 @@ function moveTask(t: Task, c: TaskChange, at = Date.now(), ctx = contextOf(t)): 
   if (isFinal(state)) {
     t.settledAt = event.seq;
     taskWatch.delete(t.id);
+    // The pane's output so far was this turn's, never a later one's (agentTurn).
+    const p = paneById(t.pane);
+    if (p) p.workSince = 0;
     // Ended with its Enter still held (another write, the pane gone or
     // restarted): that Enter will never be pressed, so its receipt settles.
     const held = heldEnter.get(t.id);
@@ -4721,17 +4725,14 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
  * from outside Loom's window. Claude reports no start for it, so Loom meets it
  * at its first Stop, question or failure, with no task open on the pane. It
  * becomes a task of its own (source "agent"), working since its output began
- * (Pane.workSince, once the pane's last task ended) or else since the
- * report, and the report then goes to it, so it ends and notifies as any turn
- * does. Never with a task open (the report is that task's, or comes between
- * its Enter and its start), and never from a replaced process. True when it
- * made one. */
+ * after the pane's last task ended (Pane.workSince: a report can reach Loom
+ * before any output of its own turn does) or else since the report, and the
+ * report then goes to it, so it ends and notifies as any turn does. Never
+ * with a task open (the report is that task's, or comes between its Enter and
+ * its start), and never from a replaced process. True when it made one. */
 function agentTurn(p: Pane, s: Signal, launch: number, open: Task[], ctx?: TaskContext): boolean {
   if (p.agent !== "claude" || open.length || launch !== p.generation || !(s.kind === "stop" || s.kind === "approval" || s.kind === "fail")) return false;
-  // Output from before the pane's last task ended was that turn's: a report
-  // can reach Loom before any output of its own turn does.
-  const ended = Math.max(0, ...[...tasks.values()].map((t) => (t.pane === p.id && t.endedAt) || 0));
-  const at = p.workSince > ended && p.workSince <= s.at ? p.workSince : s.at;
+  const at = p.workSince > 0 && p.workSince <= s.at ? p.workSince : s.at;
   const t = turnTask(p, "agent", "", at, { gen: launch }, ctx);
   void moveTask(t, { state: "working", signal: "agent", correlation: "sequence" }, at, ctx);
   // An Esc or Ctrl-C before its report didn't end it (Claude reported on after

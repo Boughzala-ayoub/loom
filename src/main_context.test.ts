@@ -7,9 +7,10 @@ import { readFileSync } from "node:fs";
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
+import { pruneSettled } from "./cli.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "watched", "sweepTasks", "QUIET_MS"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -23,8 +24,8 @@ function fixture(extra: Record<string, unknown> = {}) {
   const tasks = new Map(), taskWatch = new Map();
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
-    journal: async () => {}, sweepSoon() {}, keepTasks() {}, keepReceipts() {}, adoptManual: () => false, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+    journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, adoptManual: () => false, ...extra });
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -241,3 +242,47 @@ for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true
   assert.equal(t.startedAt, fresh ? 3_590_000 : 3_600_000, `${kind}: the turn took the start of the one that ended before it`);
 }
 console.log("ok   A turn Claude began by itself never starts in a turn that ended before it");
+for (const pruned of [false, true]) {
+  // A person's task ended an hour ago, and then left the history (only the
+  // last 500 to finish stay, keepTasks): Claude's next turn, reporting a
+  // failure before any output of its own, still starts at its report.
+  const { p, tasks, f, later, out, sweep, screen } = claudePane();
+  const prior = f.turnTask(p, "manual", model.promptMatch("A"), 9_000);
+  f.enterTurn(prior, 9_000);
+  f.taskSignal(p, { kind: "start", at: 9_500, match: prior.match });
+  out(10_000); out(10_500);
+  later(11_000);
+  p.wake(undefined, "bell");
+  f.taskSignal(p, { kind: "stop", at: 11_000 });
+  screen.input = true;
+  later(11_700);
+  await sweep(11_700);
+  assert.equal(prior.state, "completed");
+  if (pruned) {
+    for (let i = 0; i < 500; i++) tasks.set(`other-${i}`, { id: `other-${i}`, pane: "pane-2", state: "completed", settledAt: prior.settledAt + (i + 1) / 1000, events: [] });
+    f.keepTasks();
+    assert.deepEqual([tasks.has(prior.id), tasks.size], [false, 500], "the person's task was pruned");
+  }
+  later(3_600_000);
+  f.taskSignal(p, { kind: "fail", at: 3_600_000, detail: "rate_limit" });
+  const t = [...tasks.values()].find((t) => t.source === "agent");
+  assert.equal(t.startedAt, 3_600_000, `${pruned ? "pruned" : "kept"}: the turn took the start of one that ended before it`);
+}
+{
+  // Relaunched mid-turn: the old launch's task ends with it (sweepTasks), and
+  // the new launch's first report, before any output of its own, starts there.
+  const { p, tasks, f, later, out, sweep } = claudePane();
+  const prior = f.turnTask(p, "manual", model.promptMatch("A"), 9_000);
+  f.enterTurn(prior, 9_000);
+  f.taskSignal(p, { kind: "start", at: 9_500, match: prior.match });
+  out(10_000); out(10_500);
+  p.generation = 2;
+  later(11_000);
+  await sweep(11_000);
+  assert.deepEqual([prior.state, prior.reason], ["cancelled", "pane-restarted"]);
+  later(3_600_000);
+  f.taskSignal(p, { kind: "fail", at: 3_600_000, detail: "rate_limit" });
+  const t = [...tasks.values()].find((t) => t.source === "agent");
+  assert.deepEqual([t.gen, t.startedAt], [2, 3_600_000], "the new launch's turn took the old launch's start");
+}
+console.log("ok   A turn Claude began by itself starts after the pane's last task ended, pruned or relaunched");
