@@ -309,8 +309,10 @@ try {
   await page.locator('#list .agent').first().waitFor();
   const phoneToken = await page.evaluate(() => localStorage.getItem('loom-token'));
   assert.match(phoneToken, /^[0-9a-f]{64}$/);
+  // The agents' symbols come in the page's own font, under Loom's CSP: a phone's fonts drew ⏵ and ← as boxes.
+  assert.deepEqual(await page.evaluate(() => document.fonts.load('12px "Loom Symbols"', '⏵←').then(f => f.map(x => x.status), e => [String(e)])), ['loaded']);
   await page.context().close();
-  console.log('PASS pairing from the page');
+  console.log('PASS pairing from the page, and its symbols font');
 
   // Dictation: /api/dictate's refusals, the sentence's samples through the real whisper, then the
   // phone's mic recording it from Chrome's fake microphone, and the Dictation sheet changing the PC.

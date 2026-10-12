@@ -1,6 +1,10 @@
 /* The phone app (remote.html). Flat greys and hairlines, as the PC wears them:
    amber is the one loud colour, and it means an agent wants you. A PC theme's
    colours land on these same names. */
+/* The symbols agents draw (⏵ ⎿ ✻ ← ▛ ⠋), the same on every phone: a phone's
+   own fonts drew ⏵ and ← as boxes. Built by scripts/symbols-font.py. */
+@font-face { font-family: "Loom Symbols"; src: url("./fonts/loom-symbols.woff") format("woff");
+  unicode-range: U+2190-21FF, U+2300-23FF, U+2500-27BF, U+27F0-297F, U+29C0-29FF, U+2B00-2BFF; }
 :root {
   color-scheme: dark;
   --bg: #0f0f0f;
@@ -18,8 +22,8 @@
   --blue: #8fb3e8;
   --magenta: #c3a3dc;
   --cyan: #7fc6cf;
-  --ui: "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
-  --mono: "Cascadia Mono", "Roboto Mono", "Droid Sans Mono", Consolas, monospace;
+  --ui: "Segoe UI Variable Text", "Loom Symbols", "Segoe UI", Roboto, "Helvetica Neue", system-ui, sans-serif;
+  --mono: "Loom Symbols", "Cascadia Mono", "Roboto Mono", "Droid Sans Mono", Consolas, monospace;
   --tap: 48px;
   --edge: color-mix(in srgb, var(--text) 9%, transparent);
   --edge-hi: color-mix(in srgb, var(--text) 14%, transparent);

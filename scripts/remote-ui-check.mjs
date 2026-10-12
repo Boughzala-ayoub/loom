@@ -268,7 +268,7 @@ async function context(width, token = true, push = false) {
       case 'zoom': state.zoomed.delete(c.argv[0]) || state.zoomed.add(c.argv[0]); data = { zoomed: state.zoomed.has(c.argv[0]) }; break;
       case 'messages': data = threads.map(t => ({ pane: t.panes[0].id, user: 'Please review the changes and check the real behavior.', agent: 'The review is ready. This is a sample response.' })); break;
       case 'menu': data = question(c.argv[0]); break;
-      case 'read': data = { text: 'sample screen', cols: 120, rows: [{ runs: [{ x: 0, text: 'sample screen' }] }], ...(c.argv.includes('--menu') ? { menu: question(c.argv[0]) } : {}) }; break;
+      case 'read': data = { text: state.screen ?? 'sample screen', cols: 120, rows: [{ runs: [{ x: 0, text: state.screen ?? 'sample screen' }] }], ...(c.argv.includes('--menu') ? { menu: question(c.argv[0]) } : {}) }; break;
       // theme: { name, scheme, vars }, a real palette the PC wears (the default's vars are the page's own).
       case 'theme': data = state.theme ? [{ ...state.theme, current: true }] : ['loom', 'nord', 'light'].map((name, i) => ({ name, scheme: i === 2 ? 'light' : 'dark', current: i === 0, vars: {} })); break;
       // The task manager's reading comes from remote.rs itself, not loomctl (core.ts run's path).
@@ -1081,6 +1081,22 @@ try {
   }
   console.log('PASS after a PC restart: a notification opens the new pane, old or new, and an open agent follows its new id, renamed too');
 
+  // --- Agents' symbols come in the page's own font ---------------------------------------------------
+  // A phone's fonts drew Claude's ⏵ and ← as boxes: the screen draws them with Loom Symbols.
+  {
+    const { ctx, page, state } = await context(375);
+    state.screen = '⏵⏵ auto mode on · ← for agents';
+    await goto(page, '#/pane/a1', '#screen .line');
+    const cdp = await ctx.newCDPSession(page);
+    await cdp.send('DOM.enable'); await cdp.send('CSS.enable');
+    const { root } = await cdp.send('DOM.getDocument');
+    const { nodeId } = await cdp.send('DOM.querySelector', { nodeId: root.nodeId, selector: '#screen .line span' });
+    let fonts = [];
+    await until('the symbols in Loom Symbols', async () => (({ fonts } = await cdp.send('CSS.getPlatformFontsForNode', { nodeId })), fonts.some(f => f.familyName === 'Loom Symbols' && f.isCustomFont && f.glyphCount === 3)))
+      .catch(e => { throw new Error(`${e.message}: ${JSON.stringify(fonts)}`); });
+    await ctx.close();
+    console.log('PASS an agent\'s ⏵ and ← come in Loom Symbols');
+  }
   // --- A pane closed on the PC stays gone, and its draft goes to no other agent ----------------------
   {
     const { ctx, page, state } = await context(375);
