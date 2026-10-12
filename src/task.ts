@@ -150,10 +150,13 @@ export function fitBatch(rows: unknown[], limit = CONTEXT_BATCH): number {
   return n;
 }
 
-/** What started a task: `loomctl submit`, an ordinary `loomctl send`, or a
+/** What started a task: `loomctl submit`, an ordinary `loomctl send`, a
  * person in Loom's window (typing in the pane, the Overview's reply box,
- * dictation). A task from before sources were kept was a submit. */
-export type TaskSource = "submit" | "send" | "manual";
+ * dictation), or Claude itself (`agent`): a turn no Enter in Loom explains,
+ * such as one a finished background job's notice began, which Loom meets at
+ * its Stop, question or failure (main.ts agentTurn). A task from before sources
+ * were kept was a submit. */
+export type TaskSource = "submit" | "send" | "manual" | "agent";
 
 export type Task = {
   id: string;

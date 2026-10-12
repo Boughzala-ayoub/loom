@@ -4669,8 +4669,9 @@ async function replyAsPerson(p: Pane, text: string) {
  * Enter on, and the report goes to it. Claude names a prompt as it goes in
  * (start, with its match), OpenCode only that a run started, Codex only a
  * finished turn's prompts (an end, with its mentions). A report with no such
- * Enter (a background notice's turn, say) stays untracked, and so do Enters
- * older than the one a report took. True when it took the report. `ctx`:
+ * Enter (a background notice's turn, say) isn't a person's: Claude's becomes
+ * its own task (agentTurn). Enters older than the one a report took stay
+ * untracked. True when it took the report. `ctx`:
  * where the pane was when a report the startup read deferred came. */
 function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChange][], ctx?: TaskContext): boolean {
   // A replaced process's late report is stale: it starts no task, whatever Enter it went with.
@@ -4705,6 +4706,24 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
     return made;
   }
   return false;
+}
+
+/** A turn of Claude's that no Enter in Loom explains: one Claude began by
+ * itself (a finished background job's notice, a scheduled wake-up) or one sent
+ * from outside Loom's window. Claude reports no start for it, so Loom meets it
+ * at its first Stop, question or failure, with no task open on the pane. It
+ * becomes a task of its own (source "agent"), working since the pane began
+ * working, and the report then goes to it, so it ends and notifies as any
+ * turn does. Never with a task open (the report is that task's, or comes
+ * between its Enter and its start), and never from a replaced process. True
+ * when it made one. */
+function agentTurn(p: Pane, s: Signal, launch: number, open: Task[], ctx?: TaskContext): boolean {
+  if (p.agent !== "claude" || open.length || launch !== p.generation || !(s.kind === "stop" || s.kind === "approval" || s.kind === "fail")) return false;
+  const at = p.busySince > 0 && p.busySince <= s.at ? p.busySince : s.at;
+  const t = turnTask(p, "agent", "", at, { gen: launch }, ctx);
+  void moveTask(t, { state: "working", signal: "agent", correlation: "sequence" }, at, ctx);
+  taskSignal(p, s, ctx);
+  return true;
 }
 
 /** The notification policy's history as the journal keeps it (task.ts notifies), oldest first. */
@@ -4823,7 +4842,7 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
   // changeFields keeps the doubt; only a shell's token, which is this task's
   // own, clears it).
   const moved = route(open, s);
-  if (adoptManual(p, s, launch, moved, ctx)) return;
+  if (adoptManual(p, s, launch, moved, ctx) || (!moved.length && agentTurn(p, s, launch, open, ctx))) return;
   for (const [t, c] of moved) {
     // The latest Stop's final message is the one its completion names.
     if (c.signal === "stop") Object.assign(watched(t), { stopAt: Date.now(), response: s.kind === "stop" ? s.response : undefined });
@@ -9540,7 +9559,7 @@ const CLI: Record<string, CliCommand> = {
   },
   watch: {
     usage: "watch [task] [--after N] [--follow] [--metadata [--policy | --policy-v4] [--notification-context]]",
-    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send or manual) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one. --metadata --policy-v4 opts into loom-durable-events-v4: disposition replaces notify with send, held, muted or none. Persist held notices before advancing next, then recheck with notify --check SEQ --policy-v4. Owner release creates no new event. The v3 contract is unchanged. --notification-context, with --metadata and --policy or --policy-v4, adds where each event happened as Loom recorded it (context: threadId, threadName, paneId, paneNumber, paneTitle, agent, provider, capturedAt, origin, issues), with source loom-durable-events-v3-context-v1 or loom-durable-events-v4-context-v1. A title the running program set is never in it. Such an answer holds at most 1000 events and 512 KiB: read on from next.",
+    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send, manual or agent) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one. --metadata --policy-v4 opts into loom-durable-events-v4: disposition replaces notify with send, held, muted or none. Persist held notices before advancing next, then recheck with notify --check SEQ --policy-v4. Owner release creates no new event. The v3 contract is unchanged. --notification-context, with --metadata and --policy or --policy-v4, adds where each event happened as Loom recorded it (context: threadId, threadName, paneId, paneNumber, paneTitle, agent, provider, capturedAt, origin, issues), with source loom-durable-events-v3-context-v1 or loom-durable-events-v4-context-v1. A title the running program set is never in it. Such an answer holds at most 1000 events and 512 KiB: read on from next.",
     options: { after: "int", metadata: "bool", policy: "bool", "policy-v4": "bool", "notification-context": "bool" },
     run: async (a, ctx) => {
       const one = a._[0] ? cliTask(a._[0]) : undefined;

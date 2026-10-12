@@ -843,7 +843,7 @@ Enter went in. From then on Loom records where the task got to, from what the
 agent itself reports, and keeps that record in a journal beside your workspace
 file. The id, its `--key` and its events still answer after Loom restarts.
 
-Two other turns are tasks too, each with its own id, and every task says what
+Three other turns are tasks too, each with its own id, and every task says what
 started it in `source`:
 
 - `send`: an ordinary `loomctl send` to Claude, Codex or OpenCode with Enter.
@@ -856,12 +856,18 @@ started it in `source`:
   only when the agent reports the turn that Enter sent: Claude's prompt hook
   naming it, OpenCode's first run after it, Codex's turn report naming its
   prompt (or, when Loom could read Codex's input, at the Enter itself, since
-  Codex reports only a finished turn). An Enter on an empty input, one that
-  answers a question on screen, and a turn no such Enter explains (an agent's
-  background notice, input from outside Loom) make no task. A report from a
-  launch the pane has since replaced makes none either.
+  Codex reports only a finished turn). An Enter on an empty input and one that
+  answers a question on screen make no task. A report from a launch the pane
+  has since replaced makes none either.
+- `agent`: a turn of Claude's that no Enter in Loom explains: one Claude began
+  by itself, after a background job it started finished or a scheduled wake-up,
+  or one sent from outside Loom's window. Claude reports no start for such a
+  turn, so the task appears at its first Stop, question or failure with no task
+  open on the pane, working since the pane began working. It then ends like
+  any turn, and its notices go out as any task's do. Codex and OpenCode turns
+  no Enter explains still make no task.
 
-A `send` or `manual` task then moves like a submit's, on the same reports and
+A `send`, `manual` or `agent` task then moves like a submit's, on the same reports and
 with the same rules: a quiet pane never completes it, and without the agent's
 own end it ends `unknown`. Its record keeps no text at all for `manual`
 (`sha256` empty, `bytes` 0), only the prompt's match.
@@ -1141,7 +1147,7 @@ holds back its notices not sent yet, and turning it on again sends none of
 them: only events after that.
 
 `watch --metadata --policy` gives each event two more fields than
-`--metadata`: `source` (`submit`, `send`, `manual`) and `notify` (whether it
+`--metadata`: `source` (`submit`, `send`, `manual`, `agent`) and `notify` (whether it
 may go out), under `"source": "loom-durable-events-v3"`. Policy mutes only turn
 `notify` from true to false. `notify --check 41,52` asks right before sending:
 
@@ -1239,7 +1245,7 @@ Task records resolve `ref` from the pane ID each time they are read. After close
 | Field | Meaning |
 | --- | --- |
 | `task`, `key` | Its id, and the `--key` it came with |
-| `source` | What started it: `submit`, `send` or `manual` (a task from before Loom kept this says `submit`) |
+| `source` | What started it: `submit`, `send`, `manual` or `agent` (a task from before Loom kept this says `submit`) |
 | `state`, `final` | Where it is, and whether that can change |
 | `pane`, `ref`, `agent`, `generation` | The pane and the launch it went to |
 | `paneClosed` | Whether its pane has closed; `ref` is null then |
@@ -1256,7 +1262,7 @@ Task records resolve `ref` from the pane ID each time they are read. After close
 | `saved` | Whether the journal has its latest change, a change of `uncertain` or `correlation` without a new state included |
 
 An event's `signal` says what moved it: `loomctl` (accepted or manually ended), `enter`,
-`prompt`, `token`, `run` (OpenCode), `screen`, `approval`, `answered`,
+`prompt`, `token`, `run` (OpenCode), `agent` (an `agent` task accepted and working), `screen`, `approval`, `answered`,
 `turn-end`, `turn-failed`, `interrupt`, `interrupted`, `pane`, `quiet` or
 `restart`.
 
