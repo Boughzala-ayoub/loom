@@ -1927,13 +1927,15 @@ class Pane {
   cursorTurn: boolean | undefined;
   /** Cursor's turns by their generation_id, which its hooks name: the one
    * whose start came last (cursorGen), and each one an Esc or Ctrl-C went
-   * into (cursorEsc), whose error is that interrupt, kept until its first
-   * stop counts (agentReport). cursorEscAt: when the last Esc or Ctrl-C that
-   * answered no question went in, which a turn that started before it (its
-   * start report says when) takes as its own, once Loom hears of that turn. */
+   * into, with when (cursorEsc), kept until its first stop counts
+   * (agentReport). Its error written after that Esc is the interrupt, and
+   * one written before is a failure of its own. cursorEscs: when each Esc or
+   * Ctrl-C that answered no question went in, oldest first. A turn Loom
+   * hears of later takes the first one after its start (its report says
+   * when) as its own. */
   cursorGen: string | undefined;
-  cursorEsc = new Set<string>();
-  cursorEscAt = 0;
+  cursorEsc = new Map<string, number>();
+  cursorEscs: number[] = [];
   /** Cursor shows a question (an approval, trusting its folder), read off the
    * screen: no hook reports one. Raised once per question (cursorQuestion). */
   cursorAsking = false;
@@ -2375,8 +2377,8 @@ class Pane {
     this.codexAsking = false;
     this.cursorTurn = undefined;
     this.cursorGen = undefined;
-    this.cursorEsc = new Set();
-    this.cursorEscAt = 0;
+    this.cursorEsc = new Map();
+    this.cursorEscs = [];
     this.cursorAsking = false;
     this.cursorAnswered = undefined;
     this.programState = undefined;
@@ -2987,8 +2989,11 @@ class Pane {
       // the turn goes on), so only one with none on screen stops the turn:
       // the one running, or one Loom hasn't heard of yet (agentReport).
       if (this.agent === "cursor" && !this.cursorAsking) {
-        this.cursorEscAt = Date.now();
-        if (this.cursorTurn && this.cursorGen) this.cursorEsc.add(this.cursorGen);
+        const at = Date.now();
+        // ponytail: the last 16 only; one 250 ms poll's starts need far fewer.
+        if (this.cursorEscs.push(at) > 16) this.cursorEscs.shift();
+        // The first Esc into a turn stopped it.
+        if (this.cursorTurn && this.cursorGen && !this.cursorEsc.has(this.cursorGen)) this.cursorEsc.set(this.cursorGen, at);
       }
       this.answeredCursor();
     }
@@ -5078,18 +5083,26 @@ function agentReport(p: Pane, s: Signal) {
     if (turnsSeen.size > 1000) turnsSeen.delete(turnsSeen.values().next().value!);
   }
   if (p.agent === "cursor" && (s.launch ?? p.generation) === p.generation) {
-    // An Esc or Ctrl-C that went in after this turn's prompt hook stopped it,
-    // even one Loom sent before it heard of the turn (the hooks are read every 250 ms).
-    if (s.kind === "start" && s.turn && p.cursorEscAt >= s.at) p.cursorEsc.add(s.turn);
+    // The first Esc or Ctrl-C that went in after this turn's prompt hook
+    // stopped it, even one Loom sent before it heard of the turn (the hooks
+    // are read every 250 ms). Starts come in order, so one before this start
+    // stops no turn Loom has yet to hear of.
+    if (s.kind === "start" && s.turn) {
+      p.cursorEscs = p.cursorEscs.filter((at) => at >= s.at);
+      if (p.cursorEscs.length) p.cursorEsc.set(s.turn, p.cursorEscs[0]);
+    }
     // The newest start is the pane's current turn, and it runs.
     if (s.kind === "start") (p.cursorGen = s.turn), p.cursorRuns(true);
     if (s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") {
       // A turn's first stop (turnsSeen) goes to that turn's task (taskSignal),
       // even after a newer turn started. The error of a turn an Esc or Ctrl-C
-      // went into is that interrupt; any other turn's is its own.
+      // went into, written after it, is that interrupt. Any other error is its
+      // own, even one Loom reads after the Esc: Loom sent the Esc to the turn
+      // it last heard of, which may have failed already.
       const turn = s.turn;
       if (turn) {
-        if (s.kind === "fail" && p.cursorEsc.has(turn)) s = { at: s.at, launch: s.launch, kind: "interrupt", turn };
+        const esc = p.cursorEsc.get(turn);
+        if (s.kind === "fail" && esc !== undefined && esc <= s.at) s = { at: s.at, launch: s.launch, kind: "interrupt", turn };
         p.cursorEsc.delete(turn);
       }
       // The current turn's stop ends it on the pane. Done or failed raises the
