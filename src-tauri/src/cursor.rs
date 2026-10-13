@@ -38,7 +38,26 @@ pub fn install(home: &Path, exe: &Path) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(&path, merged).map_err(|e| format!("Could not write {}: {e}", path.display()))
+    replace(&path, &merged).map_err(|e| format!("Could not write {}: {e}", path.display()))
+}
+
+/// `text` written beside `path` under a name no other write uses, then renamed
+/// over it. Panes restored together install at once, and a read between
+/// another's truncate and write (std::fs::write) took the empty file for none
+/// and saved Loom's entries alone. Now a read gets the old file or the new one,
+/// and a write that fails leaves the old one.
+fn replace(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
+    let written = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)
+        .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_all()))
+        .and_then(|_| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// hooks.json with Loom's entries for `exe`, or None when it already has them
@@ -186,6 +205,52 @@ mod tests {
         assert!(quote.contains(r"& 'C:\\it''s\\loom.exe' --cursor-hook"));
         assert!(super::merge(Some("/* mine */ {}"), exe).is_err(), "comments: left alone");
         assert!(super::merge(Some("[]"), exe).is_err());
+    }
+
+    /// Panes restored together install at once (main.ts restores them in
+    /// parallel). Each must read the user's file whole, never one another
+    /// install has half written, and keep the user's entries.
+    #[test]
+    fn parallel_installs_keep_the_users() {
+        let home = std::env::temp_dir().join(format!("loom-cursor-parallel-{}", std::process::id()));
+        let hooks = home.join(".cursor").join("hooks.json");
+        std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+        let theirs = serde_json::json!({ "version": 1, "hooks": { "afterFileEdit": [{ "command": "fmt" }] }, "note": "x".repeat(16384) }).to_string();
+        for attempt in 0..30 {
+            std::fs::write(&hooks, &theirs).unwrap();
+            let start = std::sync::Barrier::new(8);
+            let errors: usize = std::thread::scope(|s| {
+                let workers: Vec<_> = (0..8).map(|_| s.spawn(|| {
+                    start.wait();
+                    (0..30).filter(|_| super::install(&home, Path::new(r"C:\Loom\loom.exe")).is_err()).count()
+                })).collect();
+                workers.into_iter().map(|w| w.join().unwrap()).sum()
+            });
+            let kept = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&hooks).unwrap()).ok().map(|v| v["hooks"]["afterFileEdit"][0]["command"] == "fmt");
+            assert_eq!((kept, errors), (Some(true), 0), "attempt {attempt}: the user's hook kept, no install failed");
+        }
+        let left: Vec<_> = std::fs::read_dir(hooks.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["hooks.json"], "no temporary file left behind");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A write that fails, here because the file is held open without delete
+    /// sharing, leaves the user's file as it was and no temporary file.
+    #[test]
+    fn failed_install_leaves_the_users() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let home = std::env::temp_dir().join(format!("loom-cursor-held-{}", std::process::id()));
+        let hooks = home.join(".cursor").join("hooks.json");
+        std::fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+        let theirs = "{\"version\":1,\"hooks\":{\"afterFileEdit\":[{\"command\":\"fmt\"}]}}";
+        std::fs::write(&hooks, theirs).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1 /* FILE_SHARE_READ */).open(&hooks).unwrap();
+        assert!(super::install(&home, Path::new(r"C:\Loom\loom.exe")).is_err());
+        drop(held);
+        assert_eq!(std::fs::read_to_string(&hooks).unwrap(), theirs);
+        let left: Vec<_> = std::fs::read_dir(hooks.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(left, ["hooks.json"], "no temporary file left behind");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Cursor's CLI as installed here: node.exe from its newest version folder.
