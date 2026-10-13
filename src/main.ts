@@ -2950,10 +2950,11 @@ class Pane {
   answers(d: string) {
     if (d.startsWith("\x1b[200~")) return false;
     if (d.includes("\r")) return true;
-    // Shift+Tab picks the option that names it ("allow all edits ... (shift+tab)").
-    if (d === "\x1b[Z") {
-      const asked = readMenu(liveScreen(this, false));
-      return !!asked && (asked.full ?? asked.options).some((o) => /shift\s*\+\s*tab/i.test(o));
+    // Shift+Tab and Tab pick the option that names them ("allow all edits ...
+    // (shift+tab)", Cursor's "Add Shell(echo) to allowlist? (tab)").
+    if (d === "\x1b[Z" || d === "\t") {
+      const asked = readMenu(liveScreen(this, false)), key = d === "\t" ? /\(tab\)\s*$/i : /shift\s*\+\s*tab/i;
+      return !!asked && (asked.full ?? asked.options).some((o) => key.test(o));
     }
     if (!/^[0-9a-z]$/i.test(d)) return false;
     const menu = readMenu(liveScreen(this, false)) ?? (this.agent === "claude" ? readSurvey(liveScreen(this, true, true)) : null);

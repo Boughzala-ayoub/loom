@@ -8,7 +8,7 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
 import { pruneSettled } from "./cli.ts";
-import { readMenu, menuRev } from "./prompt.ts";
+import { readMenu, menuRev, menuKeys, readSurvey } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "turnsSeen"]);
@@ -176,11 +176,11 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorStarted", "cursorEnded", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorStarted", "cursorEnded", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, ...extra,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, tasks: fx.tasks, ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
   const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
@@ -385,7 +385,7 @@ const CURSOR_ASK = ` $  echo hi in .
     Skip & tell the agent what to do instead (esc or n)
 `;
 const cursorPane = (view: { text: string }) => {
-  const c = claudePane({ readMenu, menuRev, liveScreen: () => view.text, turnReceipts() {} });
+  const c = claudePane({ readMenu, menuRev, menuKeys, readSurvey, liveScreen: () => view.text, turnReceipts() {} });
   c.p.agent = "cursor";
   return c;
 };
@@ -504,5 +504,27 @@ for (const late of [null, "aborted", "error"]) {
   cursorStop(c, "error", "gB");
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([b.state, p.waiting, pushed], ["failed", true, ["completed", "failed"]]);
+}
+{
+  // Tab picks an approval's allowlist option, "(tab)" (Cursor's allowlistApprove):
+  // an answer. The next approval, drawn straight over it, asks again.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
+  clock.at = 2000;
+  view.text = CURSOR_ASK;
+  p.activity();
+  clock.at = p.lastIn = 3000;
+  const answer = p.answers("\t");
+  p.wrote("\t", true, answer);
+  p.seen();
+  assert.deepEqual([answer, p.waiting, t.state], [true, false, "working"], "Tab answered the approval");
+  view.text = CURSOR_ASK.replace("echo hi", "echo next").replace("Not in allowlist: echo", "Not in allowlist: next");
+  p.activity();
+  assert.deepEqual([p.waiting, t.state, t.detail], [true, "approval", "$  echo next in . Run this command? Not in allowlist: next"], "the next approval asks");
+  view.text = "  → Add a follow-up\n";
+  assert.equal(p.answers("\t"), false, "Tab in the composer answers nothing");
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");
