@@ -1100,6 +1100,66 @@ for (const queued of [false, true]) {
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([a.state, p.waiting, pushed], ["approval", true, ["approval"]], `queued ${queued}`);
 }
+// What a relaunch resets (Pane.launch), now on launch 2, with launch 1's tasks swept away.
+const cursorRelaunch = async (c: ReturnType<typeof cursorPane>) => {
+  Object.assign(c.p, { generation: 2, waiting: false, cursorTurn: undefined, cursorGen: undefined, cursorEsc: new Map(), cursorEscs: [], cursorAsking: false, cursorAnswered: undefined, cursorFeedback: false, manual: [] });
+  await c.sweep(c.clock.at);
+};
+for (const delivered of [true, false]) {
+  // y answers A's approval in launch 1, its acknowledgement late. The pane
+  // relaunches, and B asks the very same question in launch 2. The old
+  // write's outcome, delivered or failed, is launch 1's: B still asks, its
+  // question isn't taken as answered, and no answer of B's is in doubt.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, clock, f } = c;
+  clock.at = p.lastIn = 1000;
+  cursorPrompt(c, "A", "gA");
+  clock.at = 2000;
+  view.text = CURSOR_ASK;
+  p.activity();
+  clock.at = p.lastIn = 3000;
+  const answered = p.sending("y");
+  clock.at = 3200;
+  await cursorRelaunch(c);
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 3200);
+  f.enterTurn(b, 3200);
+  f.agentEvents([[p.id, { kind: "start", t: 3250, launch: 2, match: b.match, turn: "gB" }]]);
+  clock.at = 3500;
+  p.activity();
+  assert.deepEqual([b.state, p.cursorAsking, p.waiting], ["approval", true, true], "B asks");
+  clock.at = 4000;
+  p.wrote("y", delivered, answered, 3000);
+  p.activity();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([b.state, !!b.answerInDoubt, p.cursorAsking, p.busy, p.waiting], ["approval", false, true, false, true], `launch 1's answer, ${delivered ? "delivered" : "failed"}`);
+}
+{
+  // An Esc goes to launch 1 at 2000, its acknowledgement late. The pane
+  // relaunches, and B's start in launch 2 (3250) waits behind that write. The
+  // write's outcome comes in at 3500, its writer having begun at 3300. It's
+  // launch 1's: it lets B's start through and stops nothing of launch 2's, so
+  // B's genuine error at 4000 fails B.
+  const c = cursorPane({ text: "" });
+  const { p, pushed, clock, f } = c;
+  clock.at = p.lastIn = 1000;
+  cursorPrompt(c, "A", "gA");
+  clock.at = p.lastIn = 2000;
+  const esc = p.sending("\x1b");
+  clock.at = 3200;
+  await cursorRelaunch(c);
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 3200);
+  f.enterTurn(b, 3200);
+  f.agentEvents([[p.id, { kind: "start", t: 3250, launch: 2, match: b.match, turn: "gB" }]]);
+  assert.equal(b.state, "submitted", "B's start waits behind the old write");
+  clock.at = 3500;
+  p.wrote("\x1b", true, esc, 3300);
+  assert.deepEqual([b.state, p.cursorEscs.length], ["working", 0], "the old write lets B's start through, and stops nothing");
+  clock.at = 4000;
+  f.agentEvents([[p.id, { kind: "fail", t: 4000, launch: 2, turn: "gB", detail: "Cursor reported an error" }]]);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([b.state, p.waiting, pushed], ["failed", true, ["failed"]]);
+}
 for (const end of ["completed", "error", "aborted"]) {
   // An open Overview redraws when a Cursor turn stops. Done or failed, the
   // pane already waits then, so its card never reads idle until the next tick.

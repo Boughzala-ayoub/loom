@@ -2250,7 +2250,10 @@ class Pane {
       void invoke<number>("pty_write", { id: this.id, data: d }).then((began) => {
         this.wrote(d, true, sent, began || undefined);
         release();
-        if (this.waitingSince === waitingSince) this.seen(); // A failed write must leave the attention signal intact.
+        // A failed write must leave the attention signal intact, and so must
+        // one to a launch since replaced.
+        if (this.generation !== sent.gen) return;
+        if (this.waitingSince === waitingSince) this.seen();
         if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint());
       }, e => {
         if (mark) manualFailed(mark);
@@ -3010,7 +3013,8 @@ class Pane {
     if (dashboardOpen) renderDashboard();
   }
   /** What writing `d` means, read off the screen as it's typed: the agent can
-   * redraw for it before the write is acknowledged (wrote). `answer`: it
+   * redraw for it before the write is acknowledged (wrote). `gen`: the launch
+   * it goes to, whose alone it is (generation). `answer`: it
    * settles the question on screen (answers), and `menu`, which of Cursor's
    * (menuRev). `stop`: an Esc or Ctrl-C with neither Cursor's question nor
    * its feedback open, which stops the turn running: that turn, when it was
@@ -3020,7 +3024,7 @@ class Pane {
     const answer = this.answers(d), cursor = this.agent === "cursor";
     const menu = answer && cursor && this.cursorAsking ? readMenu(liveScreen(this, false), this.agent) : null;
     const stop = cursor && (d === "\x1b" || d === "\x03") && !this.cursorAsking && !this.cursorFeedback;
-    return { answer, ...(menu ? { menu: menuRev(menu) } : {}), ...(stop ? { stop: { turn: this.cursorTurn ? this.cursorGen : undefined, at: Date.now(), release: holdReports(this) } } : {}) };
+    return { gen: this.generation, answer, ...(menu ? { menu: menuRev(menu) } : {}), ...(stop ? { stop: { turn: this.cursorTurn ? this.cursorGen : undefined, at: Date.now(), release: holdReports(this) } } : {}) };
   }
   /** Cursor's question `rev` is answered, the one on screen as the answer was
    * typed: drawn on until Cursor redraws, it isn't asked again, while one
@@ -3045,6 +3049,10 @@ class Pane {
    * task's own Enter). */
   wrote(data: string, delivered: boolean, sent: Meant, began?: number) {
     const stop = sent.stop;
+    // A write to a launch since replaced (a stop, a restart) is that one's:
+    // it touches nothing of this launch's question, tasks, interruptions or
+    // alert. The reports it held still go on.
+    if (sent.gen !== this.generation) return void stop?.release();
     if (delivered && (data === "\x1b" || data === "\x03")) {
       this.interruptAt = Date.now();
       this.codexAsking = false;
@@ -4251,9 +4259,9 @@ function keys(p: Pane, data: string) {
 }
 /** Enter, then clear the alert the way typing it would. */
 async function submit(p: Pane) {
-  const since = p.waitingSince;
+  const since = p.waitingSince, gen = p.generation;
   await keys(p, "\r");
-  if (p.waitingSince === since) p.seen(); // A new alert raised meanwhile stays.
+  if (p.waitingSince === since && p.generation === gen) p.seen(); // A new alert raised meanwhile stays, and so does a new launch's.
 }
 
 /** Input that stopped short of Enter. `typed`: the text is in the running
@@ -5112,7 +5120,7 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
 }
 
 /** What a write means to the process, read as it's typed (Pane.sending). */
-type Meant = { answer: boolean; menu?: string; stop?: { turn?: string; at: number; release: () => void } };
+type Meant = { gen: number; answer: boolean; menu?: string; stop?: { turn?: string; at: number; release: () => void } };
 
 /** A Cursor pane's reports, held unjudged while an Esc or Ctrl-C that stops
  * its turn is written (Pane.sending). Cursor's stop reports can arrive before
