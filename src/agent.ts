@@ -1,19 +1,24 @@
 /** Which agent a startup command runs, and the argv that boots it in a pane.
  *
- * Three agents get first-class treatment — a session pinned per pane so the
+ * Four agents get first-class treatment — a session pinned per pane so the
  * next launch resumes it, a "turn finished" signal, and no shell host under
- * them: a PowerShell sitting behind an agent costs ~65 MB a pane for nothing
+ * them (Claude, Codex, OpenCode, Cursor): a PowerShell sitting behind an agent costs ~65 MB a pane for nothing
  * but the prompt you land on when the agent quits, and a dead pane relaunches
  * on Enter instead. OMP is an agent that keeps the shell (launch). Anything
  * else is a shell command and gets PowerShell with shell-init.ps1 dot-sourced
  * (OSC 133 command marks, the busy dot). */
-export type Agent = "claude" | "codex" | "opencode" | "omp" | "shell";
+export type Agent = "claude" | "codex" | "opencode" | "omp" | "cursor" | "shell";
 
 export const opencodeCommand = (cmd: string) => /^(opencode[12]?)(?=\s|$)/.exec(cmd.trim())?.[1];
 const ompCommand = (cmd: string) => /^omp(\s|$)/.test(cmd.trim());
+/** Cursor's agent CLI by its first name, `cursor-agent`. Its newer one,
+ * `agent`, is other CLIs' too (Grok's agent.exe can come first on PATH), so a
+ * startup of `agent` stays a shell command. */
+export const cursorCommand = (cmd: string) => /^(cursor-agent)(?=\s|$)/.exec(cmd.trim())?.[1];
 
 export function agentOf(cmd: string): Agent {
   if (opencodeCommand(cmd)) return "opencode";
+  if (cursorCommand(cmd)) return "cursor";
   if (ompCommand(cmd)) return "omp";
   const m = /^(claude|codex|opencode)(\s|$)/.exec(cmd.trim());
   return (m?.[1] as Agent) ?? "shell";
@@ -68,10 +73,13 @@ export function ownSession(cmd: string): boolean {
   // --goal refuses a resume; --print and --no-session have none to keep.
   if (ompCommand(c)) return /(^|\s)(-c|--continue|-r|--resume|--no-session|--goal|-p|--print)([=\s]|$)/.test(c);
   const agent = agentOf(c);
-  const rest = c.slice((opencodeCommand(c) || agent).length).trim();
+  const rest = c.slice((opencodeCommand(c) || cursorCommand(c) || agent).length).trim();
   switch (agent) {
     case "claude":
       return /(^|\s)(-r|--resume|-c|--continue|--session-id)(\s|$)/.test(c);
+    case "cursor":
+      // `resume` and `ls` pick a chat; --print has none to keep.
+      return /^(resume|ls)(\s|$)/.test(rest) || /(^|\s)(--resume|--continue|-p|--print)([=\s]|$)/.test(rest);
     case "codex":
       return /^(resume|fork)(\s|$)/.test(rest);
     case "opencode":
@@ -90,18 +98,20 @@ export function ownSession(cmd: string): boolean {
  * statusline tee). Resume vs fresh is the caller's call: `--resume` on a session
  * that was never written exits, so it checks the transcript exists first.
  *
- * codex and opencode are npm shims (.cmd), so they need cmd.exe — a 4 MB host.
- * The Rust side launches an npm codex's native codex.exe straight from this
- * line instead (helper.rs: codex_direct), skipping cmd and node entirely.
+ * codex, opencode and cursor are shims (.cmd), so they need cmd.exe — a 4 MB
+ * host. The Rust side launches an npm codex's native codex.exe straight from
+ * this line instead (helper.rs: codex_direct), skipping cmd and node entirely,
+ * and Cursor's node.exe (cursor.rs: direct), skipping cmd and PowerShell.
  * Their actual session IDs arrive from the provider (codex's notify script,
- * opencode's plugin), separately from Claude's preassigned sid. Never guess by
+ * opencode's plugin, Cursor's prompt hook), separately from Claude's
+ * preassigned sid. Never guess by
  * directory or hide resume errors: a codex resume without an id is its picker,
  * which a pane only reaches through its "Choose session" notice. */
 export function launch(cmd: string, sid: string, resume: boolean, effort?: string, sessionId?: string): string[] {
   if (sessionId && !validSessionId(sessionId)) throw new Error("Invalid agent session ID");
   const c = cmd.trim();
   const agent = agentOf(c);
-  const rest = c.slice((opencodeCommand(c) || agent).length).trim();
+  const rest = c.slice((opencodeCommand(c) || cursorCommand(c) || agent).length).trim();
   const args = rest ? rest.split(/\s+/) : []; // ponytail: no quoted args in startups
   const own = ownSession(c);
   switch (agent) {
@@ -121,6 +131,13 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
     case "opencode": {
       const select = resume && sessionId && !own ? ` --session ${sessionId}` : "";
       return cmdHost(`${opencodeCommand(c)}${select}${rest ? " " + rest : ""}`);
+    }
+    case "cursor": {
+      // Its chat id arrives from its beforeSubmitPrompt hook (helper.rs), so a
+      // pane resumes the chat it last sent a prompt in; without one, a new chat.
+      // The Rust side launches the node.exe its shim would run (cursor.rs: direct).
+      const select = resume && sessionId && !own ? ` --resume ${sessionId}` : "";
+      return cmdHost(`${cursorCommand(c)}${select}${rest ? " " + rest : ""}`);
     }
     default: {
       // OMP's --continue picks up the session its terminal ran last, found by

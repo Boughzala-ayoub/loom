@@ -35,6 +35,14 @@ check("omp -r is not continued", launch("omp -r 01a1", S, true)[6], `. $env:LOOM
 check("omp needs a safe pane id", launch("omp", "x'; rm", true)[6], ". $env:LOOM_INIT; omp");
 check("ompx is just a shell command", launch("ompx", S, true)[6], ". $env:LOOM_INIT; ompx");
 
+// Cursor's CLI by its first name, cursor-agent: `agent` may be Grok's. Its chat id comes from its prompt hook.
+check("agentOf cursor", ["cursor-agent", " cursor-agent --model gpt-5 ", "agent", "cursor-agents", "cursor"].map(agentOf), ["cursor", "cursor", "shell", "shell", "shell"]);
+check("new cursor pane starts a chat", launch("cursor-agent", S, false), ["cmd.exe", "/d", "/s", "/c", "cursor-agent"]);
+check("restored cursor pane resumes its chat", launch("cursor-agent --model gpt-5", S, true, undefined, "b138b315-3d59")[4], "cursor-agent --resume b138b315-3d59 --model gpt-5");
+check("no chat yet, a new one", launch("cursor-agent", S, true)[4], "cursor-agent");
+check("cursor's own chat choice wins", ["cursor-agent resume", "cursor-agent ls", "cursor-agent --resume=abc", "cursor-agent --continue", "cursor-agent -p hi", "cursor-agent --model gpt-5"].map(ownSession), [true, true, true, true, true, false]);
+check("cursor's own --resume is left alone", launch("cursor-agent --resume abc", S, true, undefined, "saved")[4], "cursor-agent --resume abc");
+
 check("new claude pane pins an id", launch("claude", S, false), ["claude", "--session-id", S, ...H]);
 check("restored claude pane resumes", launch("claude", S, true), ["claude", "--resume", S, ...H]);
 check(

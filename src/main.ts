@@ -1404,6 +1404,7 @@ const DEFAULT_STARTUPS: Startup[] = [
   { label: "codex", cmd: "codex" },
   { label: "opencode", cmd: "opencode" },
   { label: "opencode2", cmd: "opencode2" },
+  { label: "cursor", cmd: "cursor-agent" },
   { label: "powershell", cmd: "" },
   { label: "cmd", cmd: "cmd" },
   { label: "git bash", cmd: '& "$env:ProgramFiles\\Git\\bin\\bash.exe" -i -l' },
@@ -1919,6 +1920,16 @@ class Pane {
   /** Codex asked (an approval or a question, OSC 9) and no answer went in
    * since. Its title says Working all through one, but nothing runs. */
   codexAsking = false;
+  /** Whether a Cursor turn runs, as its hooks say (wake: cursor:busy until
+   * cursor:done, aborted or error). Unset until this launch's first, as when
+   * Loom couldn't add its hooks: then its "ctrl+c to stop" alone says busy. */
+  cursorTurn: boolean | undefined;
+  /** Cursor shows a question (an approval, trusting its folder), read off the
+   * screen: no hook reports one. Raised once per question (cursorQuestion). */
+  cursorAsking = false;
+  /** The question an answer went to (menuRev), still drawn until Cursor
+   * redraws: not asked again. */
+  private cursorAnswered: string | undefined;
   /** What OMP last said of itself (OSC 7501, programStatus): working,
    * blocked, done, error or idle. Unset until this launch says one, and again
    * once OMP quits (clear) and its shell's prompt has the pane. */
@@ -2352,6 +2363,9 @@ class Pane {
     this.receiptRunning = undefined;
     this.codexState = undefined;
     this.codexAsking = false;
+    this.cursorTurn = undefined;
+    this.cursorAsking = false;
+    this.cursorAnswered = undefined;
     this.programState = undefined;
     this.providerUsage = null;
     this.startupStarted = Date.now();
@@ -2414,7 +2428,7 @@ class Pane {
         this.startupOutput = (this.startupOutput + d).slice(-4096);
         this.retryCodexStartup();
       }
-      const readsScreen = this.agent === "codex" || this.agent === "opencode";
+      const readsScreen = this.agent === "codex" || this.agent === "opencode" || this.agent === "cursor";
       this.term.write(d, () => {
         ack();
         if (!this.disposed && readsScreen) this.activity();
@@ -2502,7 +2516,8 @@ class Pane {
     // OMP says itself whether a turn runs (programStatus). Once it quits, its
     // shell's marks do (mark).
     if (this.agent === "omp" && this.programState === undefined) return;
-    if (this.agent === "codex" || this.agent === "opencode" || this.agent === "omp") {
+    if (this.agent === "cursor") this.cursorQuestion();
+    if (this.agent === "codex" || this.agent === "opencode" || this.agent === "omp" || this.agent === "cursor") {
       // ponytail: both keep drawing while idle (codex's star field, opencode's
       // TUI), so output alone says nothing. Codex's title says whether a turn
       // runs, status row shown or not; without one, the interrupt hint where
@@ -2512,8 +2527,9 @@ class Pane {
       // after xterm joins PTY chunks, not scrolled history. An unanswered
       // approval runs nothing, whatever the title says.
       const running = this.agent === "omp" ? this.programState === "working"
+        : this.agent === "cursor" && this.cursorTurn !== undefined ? this.cursorTurn
         : this.agent === "codex" && this.codexState !== undefined ? codexRunning(this.codexState) : interruptHint(this.screen(true, true), this.agent, () => screenCells(this));
-      const status = running && !this.codexAsking;
+      const status = running && !this.codexAsking && !this.cursorAsking;
       if (!status && this.busy) ((this.busy = false), this.paint());
       // An alert or Esc can clear busy while the hint stays visible. Reconcile
       // current state on every draw, including after the alert is acknowledged.
@@ -2529,6 +2545,24 @@ class Pane {
     if (this.busy || this.waiting) return;
     this.busy = true;
     this.paint();
+  }
+
+  /** Cursor's questions (an approval, trusting its folder) have no hook, so
+   * the screen says when one shows: it asks in the pane's task and raises the
+   * alert, as Codex's OSC 9 does for its own. Gone, the pane works on (an
+   * answer in Loom also says so: wrote). */
+  private cursorQuestion() {
+    const menu = readMenu(liveScreen(this, false));
+    if (this.cursorAnswered !== undefined) {
+      if (menu && menuRev(menu) === this.cursorAnswered) return;
+      this.cursorAnswered = undefined;
+    }
+    if (!!menu === this.cursorAsking) return;
+    this.cursorAsking = !!menu;
+    if (!menu) return;
+    taskSignal(this, { kind: "approval", at: Date.now(), detail: menu.question.join(" ").slice(0, 200) || undefined });
+    // The hook's source: one source counts a launch's turns (wake), and an approval counts as Codex's does.
+    this.wake(undefined, "hook");
   }
 
   /** GPU rendering. A page gets ~16 WebGL contexts, so they are budgeted:
@@ -2626,6 +2660,21 @@ class Pane {
       }
       effort = undefined;
     }
+    if (this.agent === "cursor" && effort?.startsWith("cursor:")) {
+      const state = effort.slice("cursor:".length);
+      effort = undefined;
+      if (this.dead) return;
+      this.cursorTurn = state === "busy";
+      // Esc ends a turn twice, aborted and error in either order, and neither
+      // raises the alert: you stopped it (OMP's idle after Esc raises none either).
+      if (state === "busy" || state === "aborted" || (state === "error" && Date.now() - this.interruptAt < 5000)) {
+        if (state === "busy") this.waiting = false;
+        this.busy = state === "busy" && !this.cursorAsking;
+        this.paint();
+        if (dashboardOpen) renderDashboard();
+        return;
+      }
+    }
     if (effort && /^[a-z]+$/.test(effort) && effort !== this.effort) {
       this.effort = effort;
       save();
@@ -2667,7 +2716,7 @@ class Pane {
   seen() {
     if (!this.waiting) return;
     this.waiting = false;
-    if (this.agent === "codex" || this.agent === "opencode" || this.agent === "omp") this.activity();
+    if (this.agent === "codex" || this.agent === "opencode" || this.agent === "omp" || this.agent === "cursor") this.activity();
     this.paint();
     if (dashboardOpen) renderDashboard();
   }
@@ -2896,6 +2945,13 @@ class Pane {
     const menu = readMenu(liveScreen(this, false)) ?? (this.agent === "claude" ? readSurvey(liveScreen(this, true, true)) : null);
     return !!menu && menuKeys(menu).includes(d.toLowerCase());
   }
+  /** Cursor's question, if one shows, has its answer (Esc skips an approval). */
+  private answeredCursor() {
+    if (!this.cursorAsking) return;
+    this.cursorAsking = false;
+    const asked = readMenu(liveScreen(this, false));
+    this.cursorAnswered = asked ? menuRev(asked) : undefined;
+  }
   /** When Esc or Ctrl-C last went in, by anyone. Agents report no end for a
    * turn they were interrupted in (Claude Code runs no Stop hook), so a task
    * there ends on this and the agent no longer working (sweepTasks). */
@@ -2909,11 +2965,12 @@ class Pane {
    * doubt (`answerInDoubt`, not `uncertain`: an answer says nothing about the
    * task's own Enter). */
   wrote(data: string, delivered: boolean, answer: boolean) {
-    if (delivered && (data === "\x1b" || data === "\x03")) (this.interruptAt = Date.now()), (this.codexAsking = false);
+    if (delivered && (data === "\x1b" || data === "\x03")) (this.interruptAt = Date.now()), (this.codexAsking = false), this.answeredCursor();
     if (!answer) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
     this.codexAsking = false;
+    this.answeredCursor();
     taskSignal(this, { kind: "resume", at: Date.now() });
     // An answer went in, to a tracked task's question or a turn Loom hasn't
     // adopted yet; an alert the write itself raised stays.
@@ -3703,6 +3760,8 @@ function toggleDashboard(on = !dashboardOpen) {
 function liveScreen(p: Pane, joined = true, surveyOnly = false) {
   // Every read stops at the screen's width: the alternate screen never reflows, so a
   // narrower terminal leaves the cells it had past it on its rows (xterm's Buffer.resize).
+  // Cursor's rows always come joined: its menu reader takes an option xterm wrapped as one row.
+  joined ||= p.agent === "cursor";
   const buf = p.term.buffer.active;
   const lines: string[] = [];
   let survey = false;
@@ -4530,7 +4589,7 @@ async function push(message: Omit<PushMessage, "at">): Promise<{ sent: number; f
   return out;
 }
 
-const AGENT_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", opencode: "OpenCode", omp: "OMP" };
+const AGENT_NAMES: Record<string, string> = { claude: "Claude", codex: "Codex", opencode: "OpenCode", omp: "OMP", cursor: "Cursor" };
 /** A task notice the policy sends, as a phone notification: what ended, and a tap opens the agent. */
 async function pushNotice(t: Task, e: TaskEvent) {
   const kind = notifyKind(e.state);
@@ -4737,7 +4796,7 @@ async function replyAsPerson(p: Pane, text: string) {
 
 /** A report no task claimed, after a person's Enter waiting for one
  * (manualEnter): the turn it reports is theirs, a task of its own from that
- * Enter on, and the report goes to it. Claude names a prompt as it goes in
+ * Enter on, and the report goes to it. Claude and Cursor name a prompt as it goes in
  * (start, with its match), OpenCode and OMP only that a run started, Codex only a
  * finished turn's prompts (an end, with its mentions). A report with no such
  * Enter (a background notice's turn, say) isn't a person's: Claude's becomes
@@ -4754,8 +4813,8 @@ function adoptManual(p: Pane, s: Signal, launch: number, moved: [Task, TaskChang
     p.manual = p.manual.slice(i + 1);
     return m;
   };
-  if (s.kind === "start" && !s.token && !moved.length && (p.agent === "claude" ? s.match : (p.agent === "opencode" || p.agent === "omp") && !s.match)) {
-    const m = take(s.at, s.match ?? null, p.agent === "claude" ? 10_000 : Infinity);
+  if (s.kind === "start" && !s.token && !moved.length && (p.agent === "claude" || p.agent === "cursor" ? s.match : (p.agent === "opencode" || p.agent === "omp") && !s.match)) {
+    const m = take(s.at, s.match ?? null, p.agent === "claude" || p.agent === "cursor" ? 10_000 : Infinity);
     if (!m) return false;
     enterTurn(turnTask(p, "manual", s.match ?? m.match ?? "", m.at, { gen: launch, ...(m.uncertain ? { uncertain: "submit" } : {}) }, ctx), m.at, ctx);
     taskSignal(p, s, ctx);
@@ -4961,6 +5020,9 @@ function agentEvents(events: [string, unknown][]) {
   }
 }
 function agentReport(p: Pane, s: Signal) {
+  // Cursor reports an interrupted turn as aborted and as an error, in either
+  // order: after an Esc or Ctrl-C, its error is that interrupt.
+  if (p.agent === "cursor" && s.kind === "fail" && s.at - p.interruptAt < 5000 && s.at >= p.interruptAt) s = { at: s.at, launch: s.launch, kind: "interrupt" };
   if (s.kind === "end" && s.turn) {
     const key = `${p.id}:${s.launch ?? p.generation}:${s.turn}`;
     if (turnsSeen.has(key)) return;
@@ -5039,6 +5101,7 @@ function sweepTasks(closing = false) {
     // alone does. A hint is read only where the agent draws it (interruptHint).
     const screen = p.screen(true);
     const busy = p.agent === "omp" ? p.programState === "working"
+      : p.agent === "cursor" && p.cursorTurn !== undefined ? p.cursorTurn
       : p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
       : (p.agent === "claude" && claudeWorking(screen)) || interruptHint(p.screen(true, true), p.agent, () => screenCells(p));
     // Esc or Ctrl-C after the Enter (a turn Claude began by itself has none:
@@ -5236,7 +5299,7 @@ function choiceRow(p: Pane, th: Thread, menu: AgentMenu) {
     b.dataset.key = `choice-${p.id}-${i}`;
     b.dataset.n = String(i + 1); // Drawn by CSS: the number key that picks it, the agent's own numbering.
     b.textContent = label;
-    b.title = `Choose "${label}" in ${p.agent} (key ${i + 1} on the session)`;
+    b.title = menu.unnumbered ? `Choose "${label}" in ${p.agent}` : `Choose "${label}" in ${p.agent} (key ${i + 1} on the session)`;
     b.onclick = () => void answer(p, () => choose(p, menu, i));
     row.append(b);
   });
@@ -8563,7 +8626,7 @@ function cliCommand(a: Args) {
   if ((model !== undefined || effort !== undefined) && family === "shell") throw new Error("--model and --effort require an agent.");
   // These values cross cmd.exe for npm shims. Accept identifiers, never shell syntax.
   if (model !== undefined && !/^[a-z0-9][a-z0-9._:/\[\]-]{0,127}$/i.test(model)) throw new Error("--model needs a model identifier without spaces or shell characters.");
-  if (effort !== undefined && (family === "opencode" || family === "omp" || !/^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(effort))) throw new Error("--effort takes none, minimal, low, medium, high, xhigh, max or auto for Claude or Codex; the agent validates model support.");
+  if (effort !== undefined && (family === "opencode" || family === "omp" || family === "cursor" || !/^(none|minimal|low|medium|high|xhigh|max|auto)$/.test(effort))) throw new Error("--effort takes none, minimal, low, medium, high, xhigh, max or auto for Claude or Codex; the agent validates model support.");
   return s.cmd + (model === undefined ? "" : ` --model ${model}`) + (effort === undefined ? "" : family === "codex" ? ` -c model_reasoning_effort=${effort}` : ` --effort ${effort}`);
 }
 
@@ -10415,12 +10478,12 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
     receiveAgentBatch(e.payload);
   }).then(() => invoke<number>("agent_batch_base")).then(routeAgentBatches);
 
-  // Codex's notify script and the opencode plugin drop the session id a pane is
+  // Codex's notify script, the opencode plugin and Cursor's prompt hook drop the session id a pane is
   // really on (agent.ts). Only the next launch needs it, so it rides the 4 s
   // tick — on the 250 ms one it cost a file open per pane, under the pty lock.
   let sessionPoll: Promise<void> | undefined;
   const pollSessions = () => sessionPoll ??= (async () => {
-    const panes = threads.flatMap((t) => t.panes).filter((p) => p.agent === "codex" || p.agent === "opencode");
+    const panes = threads.flatMap((t) => t.panes).filter((p) => p.agent === "codex" || p.agent === "opencode" || p.agent === "cursor");
     if (!panes.length) return;
     const got = await invoke<[string, string, number | null][]>("take_sessions", { ids: panes.map((p) => p.id) }).catch(() => []);
     let changed = false;

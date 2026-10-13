@@ -4,8 +4,9 @@
  * numbered list with a cursor glyph on the highlighted option. Text pasted into
  * one of those is not an answer, and the Enter after it picks whatever is
  * highlighted, so the overview offers the options as buttons instead. */
-/** `options` are each option's first row; `full`, each with the rows it wraps onto. */
-export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[]; keys?: string[]; full?: string[] };
+/** `options` are each option's first row; `full`, each with the rows it wraps onto.
+ * `unnumbered`: its numbers aren't keys (Cursor's), so only Loom counts them. */
+export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[]; keys?: string[]; full?: string[]; unnumbered?: boolean };
 
 export const claudeDivider = (line: string) => /^[ \t\u00a0]*[\u2500\u2501\u2550-]{3,}[ \t\u00a0]*$/.test(line);
 export const claudeComposer = (line: string) => /^[ \t]*[\u276f>]([ \t\u00a0]|$)/.test(line);
@@ -37,18 +38,75 @@ const isRule = (line: string) => RULE.test(line) && !!line.trim();
 
 /** The single keys that answer `menu` at once: its numbers (or its own keys),
  * and a letter an option names as its shortcut, Codex's "Yes, proceed (y)",
- * also where a narrow pane wrapped it onto the option's next row. */
+ * also where a narrow pane wrapped it onto the option's next row, or Cursor's
+ * "[a] Trust this workspace". */
 export const menuKeys = (menu: Menu) => [
-  ...(menu.keys ?? menu.options.map((_, i) => String(i + 1))),
-  ...(menu.full ?? menu.options).flatMap((o) => /\(([a-z])\)\s*$/i.exec(o)?.[1].toLowerCase() ?? []),
+  ...(menu.keys ?? (menu.unnumbered ? [] : menu.options.map((_, i) => String(i + 1)))),
+  ...(menu.full ?? menu.options).flatMap((o) => (/\(([a-z])\)\s*$/i.exec(o) ?? /^\[([a-z])\]\s/i.exec(o))?.[1].toLowerCase() ?? []),
 ];
+
+// Cursor's menus have no numbers. An approval marks its highlighted option
+// "→ Run (once) (y)", each option ending in its key ("(tab)", "(shift+tab)",
+// "(esc or n)"); its trust box, "▶ [a] Trust this workspace", each starting
+// with it. Up and Down move the highlight, as in the numbered ones.
+const CURSOR_PICK = /^[→▶]\s+/;
+const CURSOR_KEY = /\([a-z]+(?:\+[a-z]+)?(?: or [a-z]+)?\)$/i;
+const CURSOR_LETTER = /^\[[a-z]\]\s+\S/i;
+
+/** Cursor's question on the screen's `raw` rows, or null. Its options sit
+ * where the text after the highlighted one's glyph starts, the one nearest
+ * the bottom: the question above them sits further left. An option narrow
+ * pane wrapped goes on at that column to the row with its key (xterm's own
+ * wraps come joined: liveScreen). Its composer, "→ Add a follow-up", is a
+ * "→" row too, which takes a question's place: one under the options makes
+ * them an answered question left in the transcript. */
+function cursorMenu(raw: string[]): Menu | null {
+  const rows = raw.map((l) => {
+    const inner = l.replace(/^\s*[│┃║]/, "").replace(/[\s│┃║]+$/, ""), text = inner.trimStart();
+    return { at: inner.length - text.length, text };
+  });
+  const text = (i: number) => rows[i].text.replace(CURSOR_PICK, "");
+  const keyed = (i: number) => CURSOR_KEY.test(rows[i].text) || CURSOR_LETTER.test(text(i));
+  // The row an option that starts at row i ends on, or -1: none starts there.
+  const end = (i: number, col: number) => {
+    if (CURSOR_LETTER.test(text(i))) return i;
+    for (let j = i; j < Math.min(rows.length, i + 4); j++) {
+      if (j > i && (rows[j].at !== col || CURSOR_PICK.test(rows[j].text))) return -1;
+      if (CURSOR_KEY.test(rows[j].text)) return j;
+    }
+    return -1;
+  };
+  let pick = -1, col = 0;
+  for (let i = rows.length - 1; i >= 0 && pick < 0; i--) {
+    const glyph = CURSOR_PICK.exec(rows[i].text);
+    if (glyph && end(i, rows[i].at + glyph[0].length) >= 0) (pick = i), (col = rows[i].at + glyph[0].length);
+  }
+  if (pick < 0) return null;
+  const options = [{ first: pick, last: end(pick, col) }];
+  for (let i = options[0].last + 1, last; i < rows.length && rows[i].at === col && (last = end(i, col)) >= 0; i = last + 1) options.push({ first: i, last });
+  for (let i = pick - 1; i >= 0 && rows[i].at === col && keyed(i); ) {
+    let first = i;
+    while (!CURSOR_LETTER.test(text(first)) && first > 0 && rows[first - 1].at === col && !keyed(first - 1)) first--;
+    options.unshift({ first, last: i });
+    i = first - 1;
+  }
+  const first = options[0].first, last = options[options.length - 1].last;
+  if (options.length < 2 || rows.slice(last + 1).some((r) => CURSOR_PICK.test(r.text))) return null;
+  const said = options.map((o) => [text(o.first), ...rows.slice(o.first + 1, o.last + 1).map((r) => r.text)].join(" "));
+  const lines = raw.map(unbox), question: string[] = [];
+  for (let i = first - 1; i >= 0 && question.length < 4 && !isRule(lines[i]); i--) if (lines[i].trim()) question.unshift(lines[i].trim());
+  let top = first;
+  while (top > 0 && !isRule(lines[top - 1])) top--;
+  const prompt = lines.slice(top, last + 1).map((l) => l.replace(CURSOR_PICK, "").trim()).filter(Boolean);
+  return { question, options: said, selected: options.findIndex((o) => o.first === pick), multi: false, prompt, full: said, unnumbered: true };
+}
 
 export function readMenu(screen: string): Menu | null {
   const lines = screen.split("\n").map(unbox);
   // The highlighted option nearest the bottom: menus sit under the transcript.
   let at = -1;
   for (let i = lines.length - 1; i >= 0 && at < 0; i--) if (CURSOR.test(lines[i]) && OPTION.test(lines[i])) at = i;
-  if (at < 0) return null;
+  if (at < 0) return cursorMenu(screen.split("\n"));
   // Walk out from the cursor over consecutive numbers. Non-option lines between
   // them are wrapped text or per-option descriptions; three in a row end the list.
   const found = new Map<number, { line: number; text: string; cursor: boolean }>();
@@ -242,6 +300,10 @@ function readCodexInput(rows: Cell[][], cursor: Cursor | undefined): Input {
 
 // Codex's "Working (3s • esc to interrupt)", OpenCode's "esc interrupt" ("esc again to interrupt" after one press).
 const HINT = /\besc\s+(?:again\s+)?(?:to\s+)?interrupt/i;
+// Cursor's composer row while a turn runs ("→ Add a follow-up … ctrl+c to stop"),
+// and its spinner, two braille frames then a word ("⠘⠣ Running", "⠰⠳ Working").
+const CURSOR_HINT = /ctrl\+c to stop\s*$/;
+const CURSOR_SPIN = /^\s?[\u2800-\u28ff]{2} +\S/;
 // Claude Code 2.1.288+ keeps the hint only in its API retry banner, which takes
 // its spinner's row: a frame in column 0, never the transcript's "●".
 const CLAUDE_RETRY = /^[·✢✳*✶✻✽] .*·\s*next try in\s.*·\s*esc to interrupt\s*$/;
@@ -268,7 +330,8 @@ function codexOwn(line: string, cells?: () => Cell[][]): boolean {
  * draft can say it. Claude: its retry banner in the live rows above its input
  * box, or the footer under the box. Codex: its status row in the few rows
  * above the "›" composer, or the footer below the composer's own rows.
- * Anything else (OpenCode's footer): the last three rows with text. */
+ * Cursor: its "→" composer's row and the spinner above it. Anything else
+ * (OpenCode's footer): the last three rows with text. */
 export function interruptHint(screen: string, agent: string, cells?: () => Cell[][]): boolean {
   const lines = screen.split("\n");
   let end = lines.length;
@@ -298,6 +361,16 @@ export function interruptHint(screen: string, agent: string, cells?: () => Cell[
     // Cut before its "(elapsed" in a pane that narrow, it reads idle: only
     // Codex's run-state title (Pane.codexState) can say then, and it wins when present.
     return from(j) || lines.slice(Math.max(0, i - 4), i).some((l) => CODEX_STATUS.test(l) && codexOwn(l, cells));
+  }
+  if (agent === "cursor") {
+    // Its composer, the last "→" row: the hint at its end, or the spinner in
+    // the rows above it (a narrow pane may leave the hint out). A question's
+    // highlighted option is a "→" row too, with neither: asking isn't working.
+    for (let i = end - 1; i >= 0; i--) {
+      if (!/^\s*→\s/.test(lines[i])) continue;
+      return CURSOR_HINT.test(lines[i]) || lines.slice(Math.max(0, i - 8), i).some((l) => CURSOR_SPIN.test(l));
+    }
+    return false;
   }
   return from(end - 3);
 }

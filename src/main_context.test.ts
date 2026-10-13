@@ -8,9 +8,10 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
 import { pruneSettled } from "./cli.ts";
+import { readMenu, menuRev } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "turnsSeen"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -25,7 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
     journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -175,11 +176,11 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "programState", "activity", "wake", "seen", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-function claudePane() {
+function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
   const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
@@ -373,3 +374,82 @@ for (const [end, state, notice] of [["idle", "cancelled", []], ["error:msg=" + b
   assert.deepEqual([p.busy, p.commands], [false, 1]);
 }
 console.log("ok   OMP's own reports (OSC 7501) move its pane and its tasks as Claude's and Codex's do");
+// Cursor's CLI (2026.10.01): an approval as its screen draws it, and its composer.
+const CURSOR_ASK = ` $  echo hi in .
+
+ Run this command?
+ Not in allowlist: echo
+  → Run (once) (y)
+    Add Shell(echo) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+`;
+const cursorPane = (view: { text: string }) => {
+  const c = claudePane({ readMenu, menuRev, liveScreen: () => view.text, turnReceipts() {} });
+  c.p.agent = "cursor";
+  return c;
+};
+{
+  // Cursor's hooks say when its turn starts (cursor:busy, then the start that
+  // names its prompt) and ends (cursor:done, then its end). Its approval shows
+  // on the screen alone, and stays drawn a moment after its answer. Its task
+  // and its pane go as a Claude turn's do.
+  const view = { text: "  → Add a follow-up\n" };
+  const { p, tasks, pushed, clock, later, f } = cursorPane(view);
+  clock.at = p.lastIn = 1000;
+  p.manual = [{ at: 1000, launch: 1, match: null }]; // manualEnter, at the Enter
+  p.wake("cursor:busy", "hook");
+  f.agentReport(p, { kind: "start", at: 1200, launch: 1, match: model.promptMatch("run echo hi") });
+  const [t, ...more] = [...tasks.values()];
+  assert.equal(more.length, 0);
+  assert.deepEqual([p.busy, p.waiting, t.source, t.state, t.startedAt], [true, false, "manual", "working", 1200], "working");
+  clock.at = 3000;
+  view.text = CURSOR_ASK;
+  p.activity();
+  assert.deepEqual([p.busy, p.waiting, t.state, t.detail], [false, true, "approval", "$  echo hi in . Run this command? Not in allowlist: echo"], "asking");
+  p.activity();
+  assert.equal(p.turns, 1, "one question, one alert");
+  clock.at = p.lastIn = 3500; // Enter on "Run (once)"
+  p.answeredCursor();
+  f.taskSignal(p, { kind: "resume", at: 3500 });
+  p.seen();
+  assert.deepEqual([p.busy, p.waiting, t.state, p.turns], [true, false, "working", 1], "answered, its menu still drawn");
+  view.text = " ⠰⠳ Working\n\n  → Add a follow-up        ctrl+c to stop\n";
+  p.activity();
+  later(9000);
+  p.wake("cursor:done", "hook");
+  f.agentReport(p, { kind: "end", at: 9000, launch: 1, turn: "g1" });
+  f.agentReport(p, { kind: "end", at: 9000, launch: 1, turn: "g1" });
+  assert.deepEqual([p.busy, p.waiting, t.state, t.endedAt, p.turns], [false, true, "completed", 9000, 2], "done");
+  await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
+  assert.deepEqual(pushed, ["approval", "completed"]);
+}
+for (const order of [["aborted", "error"], ["error", "aborted"]]) {
+  // Esc: Cursor reports the turn aborted and failed, either first. It's cancelled, and raises no alert.
+  const { p, tasks, pushed, clock, f } = cursorPane({ text: "" });
+  const t = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(t, 1000);
+  p.wake("cursor:busy", "hook");
+  f.agentReport(p, { kind: "start", at: 1100, launch: 1, match: t.match });
+  clock.at = p.interruptAt = 2000;
+  for (const end of order) {
+    p.wake(`cursor:${end}`, "hook");
+    f.agentReport(p, end === "aborted" ? { kind: "interrupt", at: 2100, launch: 1 } : { kind: "fail", at: 2100, launch: 1, detail: "Cursor reported an error" });
+  }
+  await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
+  assert.deepEqual([t.state, p.busy, p.waiting, pushed, tasks.size], ["cancelled", false, false, [], 1], order.join(" then "));
+}
+{
+  // An error with no Esc before it fails the turn, and raises the alert.
+  const { p, pushed, clock, f } = cursorPane({ text: "" });
+  const t = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(t, 1000);
+  p.wake("cursor:busy", "hook");
+  f.agentReport(p, { kind: "start", at: 1100, launch: 1, match: t.match });
+  clock.at = 60_000;
+  p.wake("cursor:error", "hook");
+  f.agentReport(p, { kind: "fail", at: 60_000, launch: 1, detail: "Cursor reported an error" });
+  await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
+  assert.deepEqual([t.state, p.busy, p.waiting, pushed], ["failed", false, true, ["failed"]]);
+}
+console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");

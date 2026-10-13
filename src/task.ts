@@ -128,7 +128,7 @@ export function taskContext(raw: unknown): TaskContext {
  * names the CLI family, not a model vendor); an event from before contexts
  * existed is `legacy`. */
 export function contextRecord(t: Pick<Task, "pane" | "agent">, c?: TaskContext) {
-  const agent = ["claude", "codex", "opencode", "omp", "shell"].includes(t.agent) ? t.agent : null;
+  const agent = ["claude", "codex", "opencode", "omp", "cursor", "shell"].includes(t.agent) ? t.agent : null;
   return {
     threadId: c?.threadId ?? null, threadName: c?.threadName ?? null, paneId: t.pane, paneNumber: c?.paneNumber ?? null, paneTitle: c?.paneTitle ?? null,
     agent, provider: agent, capturedAt: c?.capturedAt == null ? null : new Date(c.capturedAt).toISOString(), origin: c?.origin ?? "legacy", issues: c ? [...c.issues] : [],

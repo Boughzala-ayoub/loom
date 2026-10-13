@@ -30,6 +30,7 @@ try {
       }
       if (location.search.includes('dashboard')) Object.assign(state.threads[0].panes[1], { sid: 'dashboard-codex-pane', sessionId: 'valid-session' });
       if (location.search.includes('omp-pane')) Object.assign(state, { overlay: 'always' }).threads[2].panes = [{ cmd: 'omp' }];
+      if (location.search.includes('cursor-pane')) Object.assign(state, { overlay: 'always' }).threads[2].panes = [{ cmd: 'cursor-agent' }];
       if (location.search.includes('needs-session')) delete state.threads[0].panes[1].sessionId;
       if (location.search.includes('many')) state.threads = Array.from({ length: 40 }, (_, i) => thread(`thread-${i}-with-a-long-review-description`, ['claude']));
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
@@ -1505,6 +1506,69 @@ try {
       assert.equal(await page.locator('.picker-row').count(), n, `Ctrl+K still finds ${q}, ${width}px`);
     }
     await page.keyboard.press('Escape');
+    // A Cursor pane (cursor-agent) shows Cursor's mark. Its hooks say when a turn runs and ends
+    // (the wakes and agent-events Rust drains from them), and its approval, unnumbered, shows on
+    // its screen alone: the overview offers its options and picks one with Cursor's own keys.
+    await page.goto(base + '?cursor-pane');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    const cursor = await page.evaluate(() => { const p = window.qa.panes.find(p => p.argv.at(-1) === 'cursor-agent'); return p && { id: p.id, argv: p.argv, launch: p.launch }; });
+    assert.deepEqual(cursor?.argv.slice(0, 4), ['cmd.exe', '/d', '/s', '/c'], 'cursor-agent goes to Rust as a cmd line, which runs its node.exe');
+    await cli('show', 'fix-settings');
+    await page.waitForFunction(() => document.querySelector('.panes')?.textContent.includes('cursor'));
+    assert.deepEqual(await page.evaluate(() => ['.agent', '.pane-head', '.pip', '.panes'].map(s => [...document.querySelectorAll(`${s} svg.ico path`)].filter(p => p.getAttribute('d').startsWith('M11.503.131')).length)),
+      [1, 1, 1, 1], `Cursor's mark, ${width}px`);
+    assert.ok(await page.evaluate(() => [...document.querySelectorAll('.agent .agent-name')].some(n => n.textContent === 'cursor')), `The sidebar names Cursor, ${width}px`);
+    let cursorBatch = 0;
+    const cursorOut = d => page.evaluate(([id, d]) => window.qa.panes.find(p => p.id === id).onOut.onmessage(d), [cursor.id, d]);
+    const cursorWake = state => page.evaluate(([id, m]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, m]] }), [cursor.id, `cursor:${state}\n${cursor.launch}`]);
+    const cursorReport = ev => page.evaluate(([id, ev, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: [[id, ev]] } }),
+      [cursor.id, { ...ev, launch: cursor.launch, t: Date.now(), src: 'cursor' }, ++cursorBatch]);
+    const cursorState = async () => (await cli('panes')).data.find(p => p.id === cursor.id).state;
+    const until = async (ok, what) => { for (const end = Date.now() + 8000; !(await ok()); await page.waitForTimeout(100)) if (Date.now() > end) throw new Error(`Timed out: ${what}`); };
+    await cursorOut('\x1b[2J\x1b[H  Cursor Agent\r\n\r\n  → Plan, search, build anything\r\n');
+    const cursorTasks = (await cli('tasks')).data.length;
+    await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('run echo hi');
+    await page.keyboard.press('Enter');
+    await cursorWake('busy');
+    await cursorReport({ kind: 'start', match: '0123456789abcdef' });
+    await cursorOut('\x1b[2J\x1b[H  run echo hi\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
+    await until(async () => (await cursorState()) === 'working', `Cursor's busy hook reads as working, ${width}px`);
+    const cursorTask = (await cli('tasks')).data.slice(cursorTasks);
+    assert.deepEqual(cursorTask.map(t => [t.agent, t.source, t.state]), [['cursor', 'manual', 'working']], `The prompt is Cursor's task, ${width}px`);
+    await audit('cursor-working');
+    await page.evaluate(id => {
+      const qa = window.qa, pane = qa.panes.find(p => p.id === id);
+      qa.cursorSel = 0;
+      qa.drawCursorAsk = () => pane.onOut.onmessage('\x1b[2J\x1b[H────────────────────────\r\n $  echo hi in .\r\n\r\n Run this command?\r\n Not in allowlist: echo\r\n'
+        + ['Run (once) (y)', 'Add Shell(echo) to allowlist? (tab)', 'Run Everything (shift+tab)', 'Skip & tell the agent what to do instead (esc or n)'].map((o, i) => `${i === qa.cursorSel ? '  → ' : '    '}${o}`).join('\r\n') + '\r\n');
+      qa.onWrite = ({ id: to, data }) => { if (to === id && /^\x1b[[O][AB]$/.test(data)) ((qa.cursorSel += data.endsWith('B') ? 1 : -1), qa.drawCursorAsk()); };
+      qa.drawCursorAsk();
+    }, cursor.id);
+    await until(async () => (await cursorState()) === 'waiting', `Cursor's approval waits on you, ${width}px`);
+    assert.equal((await cli('tasks')).data.find(t => t.task === cursorTask[0].task).state, 'approval', `Its task asks, ${width}px`);
+    await page.click('#dashboard-btn');
+    const cursorCard = page.locator('.dashboard-card').filter({ hasText: 'fix-settings / cursor' });
+    await cursorCard.locator('.dashboard-choices button').first().waitFor();
+    assert.deepEqual(await cursorCard.locator('.dashboard-choices button').allTextContents(),
+      ['Run (once) (y)', 'Add Shell(echo) to allowlist? (tab)', 'Run Everything (shift+tab)', 'Skip & tell the agent what to do instead (esc or n)'], `Cursor's approval becomes its options, ${width}px`);
+    assert.match(await cursorCard.locator('.dashboard-question').textContent(), /Run this command\?/, `The card shows what Cursor asks, ${width}px`);
+    await audit('cursor-approval');
+    await page.evaluate(() => { window.qa.chooseStart = window.qa.calls.length; });
+    await cursorCard.locator('.dashboard-choices button').nth(1).click();
+    await page.waitForFunction(id => window.qa.calls.slice(window.qa.chooseStart).some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data === '\r'), cursor.id);
+    assert.deepEqual(await page.evaluate(id => window.qa.calls.slice(window.qa.chooseStart).filter(c => c.cmd === 'pty_write' && c.args.id === id).map(c => c.args.data), cursor.id),
+      ['\x1b[B', '\r'], `One arrow and Enter pick Cursor's second option, ${width}px`);
+    await page.evaluate(() => { window.qa.onWrite = null; });
+    await cursorOut('\x1b[2J\x1b[H  run echo hi\r\n  ⬢ Ran echo hi\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
+    await until(async () => (await cursorState()) === 'working', `Answered, Cursor works on, ${width}px`);
+    await cursorWake('done');
+    await cursorReport({ kind: 'end', turn: 'g1' });
+    await cursorOut('\x1b[2J\x1b[H  run echo hi\r\n  It printed hi.\r\n\r\n  → Add a follow-up\r\n');
+    await until(async () => (await cursorState()) === 'waiting', `Cursor's done waits on you, ${width}px`);
+    assert.equal((await cli('task', cursorTask[0].task)).data.state, 'completed', `Cursor's done completes its task, ${width}px`);
+    await audit('cursor-done-overview');
+    await page.click('#dashboard-btn');
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');

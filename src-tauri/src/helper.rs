@@ -186,6 +186,54 @@ pub fn claude_hook() -> i32 {
     0
 }
 
+/// `loom.exe --cursor-hook`, Cursor's prompt and turn-end hooks (cursor.rs).
+/// beforeSubmitPrompt starts a prompt, named by `prompt_match`, and its chat
+/// is the pane's session from then on (LOOM_SESSION_FILE, as Codex's notify
+/// writes it): a chat with a prompt in it is one `--resume` can open. stop
+/// ends the turn: completed, aborted (Esc) or error. The pane learns both
+/// through a wake marker (OpenCode's form: `cursor:busy`, `cursor:done`,
+/// `cursor:aborted`, `cursor:error`), since Cursor rings no bell in Loom.
+/// Prints `{}`, which asks nothing of Cursor, and always exits 0.
+pub fn cursor_hook() -> i32 {
+    print!("{{}}");
+    let Some(pane) = loom_pane() else { return 0 };
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let Ok(p) = serde_json::from_str::<serde_json::Value>(input.trim_start_matches('\u{feff}')) else { return 0 };
+    let Some((event, state)) = cursor_event(&p) else { return 0 };
+    task_event(&pane, "cursor", event);
+    let launch = std::env::var("LOOM_LAUNCH").ok().filter(|l| l.parse::<u64>().is_ok());
+    let line = |text: String| launch.as_ref().map_or_else(|| text.clone(), |l| format!("{text}\n{l}"));
+    if state == "busy" {
+        // What agent.ts validSessionId takes: it lands on --resume's command line.
+        let id = p["conversation_id"].as_str()
+            .filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+        if let (Some(id), Some(file)) = (id, std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from)) {
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            publish(&file, &line(id.to_string()));
+        }
+    }
+    let dir = std::env::temp_dir().join("loom-wait");
+    let _ = std::fs::create_dir_all(&dir);
+    publish(&dir.join(&pane), &line(format!("cursor:{state}")));
+    0
+}
+
+/// A Cursor hook's report as a task event, and the pane's state after it.
+/// An interrupted turn reports stop twice, aborted and error, in either order;
+/// the pane, which saw the Esc, tells them apart (main.ts agentReport).
+fn cursor_event(p: &serde_json::Value) -> Option<(serde_json::Value, &'static str)> {
+    Some(match (p["hook_event_name"].as_str()?, p["status"].as_str()) {
+        ("beforeSubmitPrompt", _) => (serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?) }), "busy"),
+        ("stop", Some("completed")) => (serde_json::json!({ "kind": "end", "turn": p["generation_id"] }), "done"),
+        ("stop", Some("aborted")) => (serde_json::json!({ "kind": "interrupt" }), "aborted"),
+        ("stop", _) => (serde_json::json!({ "kind": "fail", "detail": "Cursor reported an error" }), "error"),
+        _ => return None,
+    })
+}
+
 fn claude_event(p: &serde_json::Value) -> Option<serde_json::Value> {
     let text = |v: &serde_json::Value| v.as_str().map(|s| s.chars().take(200).collect::<String>());
     Some(match p["hook_event_name"].as_str()? {
@@ -333,7 +381,7 @@ fn codex_shim_dir() -> Option<PathBuf> {
 /// Split a command line the way the MSVC runtime does, which is how node and
 /// then codex.exe would have received it: whitespace separates, quotes group,
 /// backslashes are literal unless they precede a quote.
-fn split_args(s: &str) -> Vec<String> {
+pub(crate) fn split_args(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let (mut quoted, mut any) = (false, false);
@@ -484,6 +532,21 @@ mod tests {
         // The prompt's text never leaves the hook: only its match does.
         assert!(!ev(json!({ "hook_event_name": "UserPromptSubmit", "prompt": "secret-token-123" })).unwrap().to_string().contains("secret"));
         assert!(!ev(json!({ "hook_event_name": "Stop", "last_assistant_message": "secret-answer-456" })).unwrap().to_string().contains("secret"), "nor the answer's");
+    }
+
+    #[test]
+    fn cursor_hooks_become_task_events() {
+        use serde_json::json;
+        let ev = |v: serde_json::Value| cursor_event(&v);
+        // Payload shapes as Cursor's CLI 2026.10.01 sends them (its "status" on stop).
+        let prompt = json!({ "conversation_id": "b138b315-3d59-435d-8f85-295395398782", "generation_id": "b127b9b4", "prompt": "run the tests", "hook_event_name": "beforeSubmitPrompt" });
+        assert_eq!(ev(prompt), Some((json!({ "kind": "start", "match": prompt_match("run the tests") }), "busy")));
+        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "completed", "generation_id": "b127b9b4" })), Some((json!({ "kind": "end", "turn": "b127b9b4" }), "done")));
+        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "aborted" })), Some((json!({ "kind": "interrupt" }), "aborted")));
+        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "error" })), Some((json!({ "kind": "fail", "detail": "Cursor reported an error" }), "error")));
+        assert_eq!(ev(json!({ "hook_event_name": "sessionStart" })), None);
+        assert_eq!(ev(json!({ "hook_event_name": "beforeSubmitPrompt" })), None, "no prompt, no start");
+        assert!(!ev(json!({ "hook_event_name": "beforeSubmitPrompt", "prompt": "secret-token-123" })).unwrap().0.to_string().contains("secret"));
     }
 
     #[test]

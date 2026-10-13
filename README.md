@@ -2,7 +2,7 @@
 
 A thread-driven agentic terminal workspace for Windows, shaped like Orca. A
 **thread** is one branch of work in its own git worktree, with an agent running
-in it: `claude`, `codex` or `opencode`. Threads sit in a sidebar grouped by
+in it: `claude`, `codex`, `opencode` or Cursor's `cursor-agent`. Threads sit in a sidebar grouped by
 repo; the current one shows its panes, real ConPTY terminals, in a grid. Cut
 as many threads as you like and every agent keeps running while you look at
 another one.
@@ -12,8 +12,8 @@ Tauri v2 (Rust backend, system WebView2) + xterm.js. No Electron, no Node at run
 ## Requirements
 
 - **Windows 10/11** — WebView2 ships with Windows 11.
-- **`claude`, `codex` and/or `opencode` on PATH**, whichever you cut threads
-  with. `git` on PATH for worktrees.
+- **`claude`, `codex`, `opencode` and/or `cursor-agent` on PATH**, whichever
+  you cut threads with. `git` on PATH for worktrees.
 - **VS Code (`code`)** on PATH for the `VS Code` button / `F5`. Optional.
 
 ## Install
@@ -87,7 +87,7 @@ The sidebar lists threads under the project they came from, one line each:
 the thread's name, a mark per agent, the lines it has changed, and how long
 since anything drew. The thread you are on also lists one row per pane, the way
 Orca lists agent sessions under a worktree: the provider's mark, the agent
-(`claude`, `codex`, `opencode`, `shell`) and whatever it titled itself. Other
+(`claude`, `codex`, `opencode`, `cursor`, `shell`) and whatever it titled itself. Other
 threads fold their agents into the marks, and clicking a mark opens that pane,
 so thirty threads fit on one screen. A thread's chevron lists or folds its
 agents by hand, and that choice sticks. Projects fold on click; both orders
@@ -187,8 +187,11 @@ or away from Loom. `node scripts/overlay-check.mjs` tests it in the real app;
 it moves the mouse for about two seconds.
 
 Threads, branches, and panes come back on the next launch. Claude keeps its
-pinned session ID. Codex and OpenCode report their actual session IDs, so two
-panes in the same folder resume separate conversations. An `omp` pane gets an
+pinned session ID. Codex, OpenCode and Cursor report their actual session IDs, so two
+panes in the same folder resume separate conversations. Cursor's prompt hook
+names the chat each prompt goes to, and the pane comes back with
+`cursor-agent --resume <id>`. A Cursor pane that never got a prompt starts a new
+chat. An `omp` pane gets an
 id of its own, which OMP reads as `ZELLIJ_PANE_ID`, and comes back with
 `omp --continue`. That reopens the last session the pane ran. Loom never
 falls back silently to a fresh conversation after a resume error.
@@ -206,8 +209,11 @@ a themed in-app confirmation, with Cancel focused by default.
 
 When an agent quits, the pane says `[exited N] — Enter relaunches`, and Enter
 brings it back into the same session. Agents no longer run inside a PowerShell:
-`claude.exe` runs bare, `opencode` runs under `cmd.exe`, and an npm-installed
-`codex` runs its native `codex.exe` directly. npm's shim would otherwise keep a
+`claude.exe` runs bare, `opencode` runs under `cmd.exe`, an npm-installed
+`codex` runs its native `codex.exe` directly, and `cursor-agent` runs the
+`node.exe` and `index.js` from the newest folder under its `versions\`, as its
+own `cursor-agent.ps1` would. Its shim would otherwise keep a `cmd.exe` and a
+PowerShell idle under the pane, about 70 MB between them. npm's shim would otherwise keep a
 `cmd.exe` and a `node.exe` idle under every codex pane, about 25 MB between
 them. A codex that `cmd` would resolve some other way (pnpm, bun, a `codex.exe`
 earlier on PATH), or a startup line with `cmd` syntax in it, still goes through
@@ -529,10 +535,35 @@ Each agent says "done" its own way, and Loom listens to all of them:
   not run unasked, then done, error, or idle when Esc stopped it. Loom ignores
   the shell marks (OSC 133) OMP draws around each prompt in its transcript
   while it runs, and reads them again once OMP quits and its PowerShell is back.
+- **cursor** (`cursor-agent`) reports through hooks in `~\.cursor\hooks.json`.
+  Loom adds its own entries to that file when a Cursor pane starts, and keeps
+  any of yours. Cursor runs a plugin's hooks for tools and sessions but never
+  for prompts and turn ends (2026.10.01), so the user's file is the one that
+  works. `beforeSubmitPrompt` and `stop` run `loom.exe --cursor-hook`, which
+  does nothing outside a Loom pane. The Cursor editor reads the same file and
+  runs them there too, a process start each time, for nothing. A file that
+  isn't plain JSON (comments) is left alone, and its panes run without
+  reports. `stop` says whether the turn completed, was aborted (Esc) or
+  failed. An Esc reports both aborted and an error, and Loom reads that as
+  the interrupt. Cursor's approvals and its folder-trust question have no
+  hook: Loom reads them off the screen, raises the alert, and the overview
+  offers their options as buttons. Cursor wraps each hook command in
+  PowerShell code, then runs it through Git Bash when `MSYSTEM` or `SHELL`
+  names Git Bash. Bash rejects that code and exits 2, which Cursor reads as
+  the hook blocking the prompt. Loom clears `MSYSTEM` and `SHELL` in its
+  Cursor panes. A `cursor-agent` you start from Git Bash yourself drops every
+  prompt ("Hook blocked with message") while `~\.cursor\hooks.json` holds any
+  hook, Loom's or yours. Start it from PowerShell or cmd, or in Git Bash as
+  `env -u MSYSTEM -u SHELL cursor-agent.cmd`. That file also makes Cursor run
+  the prompt and stop hooks in `~\.claude\settings.json`. Without it, Cursor
+  skips them. Only
+  `cursor-agent` counts as Cursor. `agent`, Cursor's newer name, is also what
+  Grok's CLI installs (`~\.grok\bin\agent.exe`), so a startup of `agent`
+  stays a shell command.
 - **claude** uses hooks, below. Terminal BEL and OSC 99 (kitty notifications)
   count too, for anything else that rings.
 
-OpenCode's plugin and OMP report Working and Waiting directly. Pending questions and
+OpenCode's plugin, OMP and Cursor's hooks report Working and Waiting directly. Pending questions and
 permissions stay Waiting until answered. Child-session completion cannot mark
 the parent done. Other agents use terminal notifications and activity detection;
 the echo right after a keystroke does not count as work.

@@ -14,6 +14,7 @@ mod codex_state;
 mod output;
 mod cache;
 mod opencode;
+mod cursor;
 mod usage;
 mod pipe;
 mod control;
@@ -412,7 +413,20 @@ fn pty_spawn(
         *line = opencode::launch(line, cwd.as_deref().unwrap_or("."))?;
         opencode::install(&app.path().home_dir().map_err(|e| e.to_string())?)?;
     }
-    let direct = cmd_line.as_deref().and_then(helper::codex_direct);
+    let is_cursor = cmd_line.as_deref().and_then(cursor::command).is_some();
+    if is_cursor {
+        // Its turns are reported by hooks in ~/.cursor/hooks.json. A pane
+        // whose file Loom can't add them to still runs, without the reports.
+        let home = app.path().home_dir().map_err(|e| e.to_string())?;
+        if let Err(e) = cursor::install(&home, &exe) {
+            eprintln!("pane {id}: {e}");
+        }
+    }
+    // Loom's PATH, then the pane's, as cmd finds a program below: one
+    // installed since Loom started is only in the pane's.
+    let pane_path = CommandBuilder::new("cmd.exe").get_env("PATH").map(|p| p.to_os_string());
+    let find = |name: &str| on_path(name).or_else(|| find_on(pane_path.as_deref()?, name));
+    let direct = cmd_line.as_deref().and_then(|line| helper::codex_direct(line).or_else(|| cursor::direct(line, find)));
     let mut cmd = match &direct {
         Some((exe, args, env)) => {
             let mut cmd = CommandBuilder::new(exe);
@@ -509,6 +523,13 @@ fn pty_spawn(
     // scrollbar) and every wheel tick is a redraw through ConPTY. Keep it
     // inline, as Codex is kept (agent.ts: tui.alternate_screen=never).
     cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
+    // Cursor runs its hooks with PowerShell's syntax, yet through Git Bash when
+    // either of these says Git Bash (a Loom started from Git Bash), and then
+    // every hook fails (2026.10.01). Without them it picks PowerShell.
+    if is_cursor {
+        cmd.env_remove("MSYSTEM");
+        cmd.env_remove("SHELL");
+    }
     // Shell panes dot-source this (agent.ts: `. $env:LOOM_INIT`) — a variable,
     // not a literal path, so a data dir with spaces needs no quoting.
     cmd.env("LOOM_INIT", &init);
@@ -1495,11 +1516,13 @@ fn collect_message(last: &mut LastMessages, provider: &str, v: &serde_json::Valu
         "opencode" if v["type"] == "user" => ("user", &v["text"], "text"),
         "opencode" if v["type"] == "assistant" => ("assistant", &v["content"], "text"),
         "opencode" => (v["info"]["role"].as_str().unwrap_or(""), &v["parts"], "text"),
+        "cursor" => (v["role"].as_str().unwrap_or(""), &v["message"]["content"], "text"),
         _ => return,
     };
     if role != "user" && role != "assistant" { return; }
     if role == "user" && !last.user.is_empty() || role == "assistant" && !last.agent.is_empty() { return; }
     let text = message_text(content, kind);
+    let text = if provider == "cursor" && role == "user" { cursor::prompt_text(&text).to_string() } else { text };
     if text.is_empty() { return; }
     if role == "user" && (text.starts_with("<task-notification>") || text.starts_with("<system-reminder>")
         || text.starts_with("<environment_context>") || text.starts_with("<local-command")) { return; }
@@ -1604,6 +1627,7 @@ fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -
             "codex" => codex_files.iter().find(|(_, path)| rollout_is(path, &sid))
                 .map(|(_, path)| recent_messages(path, "codex")).unwrap_or_default(),
             "opencode" | "opencode1" | "opencode2" => opencode::messages(&dir, &sid, &agent).ok_or("OpenCode export failed or timed out")?,
+            "cursor" => cursor::transcript(&home, &dir, &sid).map(|path| recent_messages(&path, "cursor")).unwrap_or_default(),
             _ => continue,
         };
         messages.insert(id, last);
@@ -2039,6 +2063,7 @@ pub fn run() {
         Some("--session-start") => std::process::exit(helper::session_start()),
         Some("--codex-notify") => std::process::exit(helper::codex_notify(args.get(1).map(String::as_str))),
         Some("--claude-hook") => std::process::exit(helper::claude_hook()),
+        Some("--cursor-hook") => std::process::exit(helper::cursor_hook()),
         _ => {}
     }
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V")) {
@@ -2552,6 +2577,19 @@ mod tests {
         assert_eq!(super::recent_messages(&codex, "codex").agent, "Working on it");
         std::fs::write(&codex, format!("{}{}", std::fs::read_to_string(&codex).unwrap(), big(100_000).repeat(90))).unwrap();
         assert_eq!(super::recent_messages(&codex, "codex"), super::LastMessages::default(), "bounded at 8 MiB");
+
+        // Cursor's agent transcript (2026.10.01): the prompt inside the tags Cursor puts around it, then tool calls beside text.
+        let cursor = root.join("cursor.jsonl");
+        let records = [
+            serde_json::json!({"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Tuesday, Oct 13, 2026, 12:30 AM (UTC+1)</timestamp>\n<user_query>\nRun echo loomprobe\n</user_query>"}]}}),
+            serde_json::json!({"role":"assistant","message":{"content":[{"type":"text","text":"I'll run it."},{"type":"tool_use","name":"Shell","input":{"command":"echo loomprobe"}}]}}),
+            serde_json::json!({"role":"assistant","message":{"content":[{"type":"text","text":"It printed `loomprobe`."}]}}),
+            serde_json::json!({"type":"turn_ended","status":"success"}),
+        ];
+        std::fs::write(&cursor, records.iter().map(|v| format!("{v}\n")).collect::<String>()).unwrap();
+        assert_eq!(super::recent_messages(&cursor, "cursor"), super::LastMessages {
+            user: "Run echo loomprobe".into(), agent: "It printed `loomprobe`.".into(),
+        });
 
         let export = serde_json::json!({"messages":[
             {"info":{"role":"user"},"parts":[{"type":"text","text":"Review this"}]},

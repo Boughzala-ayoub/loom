@@ -394,6 +394,63 @@ for (const screen of ["How is Claude doing this session? 1: Bad 2: Fine 3: Good 
   check("survey choices retain their direct keys including zero", m && [m.options, m.keys, m.selected], [["Bad", "Fine", "Good", "Dismiss"], ["1", "2", "3", "0"], -1]);
 }
 check("an incomplete survey is not actionable", readSurvey("How is Claude doing this session? 1: Bad"), null);
+// Cursor's CLI (2026.10.01), as its screens read through ConPTY at 120 columns.
+const cursorFooter = `
+  Auto · 5.9%
+  ~\\AppData\\Local\\Temp\\probe\\ws · master`;
+const cursorWorking = ` ⠘⠣ Running  41 tokens
+    Tip: Type ? in the prompt bar to show in-app hints.
+
+  → Add a follow-up                                                                                     ctrl+c to stop
+
+  1 task${cursorFooter}`;
+const cursorIdle = `  It printed loomprobe.
+
+  → Add a follow-up
+${cursorFooter}`;
+const cursorAsk = `────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  echo loomprobe in .
+
+ Run this command?
+ Not in allowlist: echo
+  → Run (once) (y)
+    Add Shell(echo) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+`;
+check("Cursor: working, by its composer's hint", interruptHint(cursorWorking, "cursor"), true);
+check("Cursor: working, by its spinner where a narrow pane drops the hint", interruptHint(cursorWorking.replace("ctrl+c to stop", ""), "cursor"), true);
+check("Cursor: idle at its composer", interruptHint(cursorIdle, "cursor"), false);
+check("Cursor: the hint quoted in its transcript isn't work", interruptHint(`  Press ctrl+c to stop\n${cursorIdle}`, "cursor"), false);
+check("Cursor: asking isn't working", interruptHint(cursorAsk, "cursor"), false);
+check("Cursor's approval, unnumbered", shape(readMenu(cursorAsk)), {
+  question: ["$  echo loomprobe in .", "Run this command?", "Not in allowlist: echo"],
+  options: ["Run (once) (y)", "Add Shell(echo) to allowlist? (tab)", "Run Everything (shift+tab)", "Skip & tell the agent what to do instead (esc or n)"],
+  selected: 0, multi: false,
+});
+check("Cursor's highlight moved down", readMenu(cursorAsk.replace("  → Run (once) (y)\n    Add Shell", "    Run (once) (y)\n  → Add Shell"))?.selected, 1);
+check("Cursor's keys are its letters, not numbers", menuKeys(readMenu(cursorAsk)!), ["y"]);
+check("an answered approval under Cursor's composer is no question", readMenu(`${cursorAsk}  ⬢ Ran echo loomprobe\n\n${cursorIdle}`), null);
+check("Cursor's draft with a key in it is no question", readMenu(`  → fix it (y)\n${cursorFooter}`), null);
+check("Cursor's options wrapped in a narrow pane", shape(readMenu(cursorAsk.replace("    Skip & tell the agent what to do instead (esc or n)", "    Skip & tell the agent what to do\n    instead (esc or n)").replace("    Add Shell(echo) to allowlist? (tab)", "    Add Shell(echo) to\n    allowlist? (tab)"))), {
+  question: ["$  echo loomprobe in .", "Run this command?", "Not in allowlist: echo"],
+  options: ["Run (once) (y)", "Add Shell(echo) to allowlist? (tab)", "Run Everything (shift+tab)", "Skip & tell the agent what to do instead (esc or n)"],
+  selected: 0, multi: false,
+});
+check("Cursor's wrapped options, the highlight on the last", readMenu(cursorAsk.replace("  → Run (once) (y)", "    Run (once) (y)").replace("    Skip & tell the agent what to do instead (esc or n)", "  → Skip & tell the agent what to do\n    instead (esc or n)").replace("    Add Shell(echo) to allowlist? (tab)", "    Add Shell(echo) to\n    allowlist? (tab)"))?.options.length, 4);
+const cursorTrust = `  ╭──────────────────────────────────────────────╮
+  │  Do you trust the contents of this directory? │
+  │                                               │
+  │    C:\\projects\\new                           │
+  │                                               │
+  │  ▶ [a] Trust this workspace                   │
+  │    [q] Quit                                   │
+  │                                               │
+  │  Use arrow keys to navigate, Enter to select, or press the key shown │
+  ╰──────────────────────────────────────────────╯`;
+check("Cursor's trust box", shape(readMenu(cursorTrust)), { question: ["Do you trust the contents of this directory?", "C:\\projects\\new"], options: ["[a] Trust this workspace", "[q] Quit"], selected: 0, multi: false });
+check("Cursor's trust keys", menuKeys(readMenu(cursorTrust)!), ["a", "q"]);
 for (const prefix of ["? Documentation\n", "  tool output\n", "> quote\n", "```text\n"]) {
   check("quoted surveys lack an active footer", readSurvey(prefix + "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss"), null);
 }

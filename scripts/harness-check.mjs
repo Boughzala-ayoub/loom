@@ -1,10 +1,13 @@
 // Build first: npm run build, then cargo build --features tauri/custom-protocol
-// Real agents, real API calls (two short turns each): Claude, Codex and
-// OpenCode panes in the real app, read back through the overview.
+// Real agents, real API calls (two short turns each): Claude, Codex,
+// OpenCode and Cursor panes in the real app, read back through the overview.
+// HARNESS_AGENTS=cursor (comma-separated) runs only those.
 //  1. A first turn that runs ~20 s: while it works, each card says Working and
 //     shows the prompt; when it ends, Waiting and the reply.
 //  2. A question tool prompt: the card turns Waiting while the turn is still
 //     open, with the question on screen.
+// Cursor asks before it runs a shell command it hasn't been allowed: in 1 the
+// check answers that from the overview's own button, and 2 is such a question.
 // The work folder is fixed so each agent's folder-trust answer sticks; the
 // first run answers those prompts with Enter. Screenshots go to SHOTS (default:
 // the check's folder).
@@ -22,9 +25,10 @@ const work = join(dir, 'work');
 const shots = process.env.SHOTS || dir;
 mkdirSync(work, { recursive: true });
 if (!existsSync(join(work, '.git'))) execFileSync('git', ['init', '-q', work]); // Restoring a thread asks git about it.
-const AGENTS = ['claude', 'codex', 'opencode'];
+const AGENTS = (process.env.HARNESS_AGENTS || 'claude,codex,opencode,cursor').split(',');
+const CMDS = { cursor: 'cursor-agent' };
 const profile = join(dir, `p-${Date.now()}.json`);
-writeFileSync(profile, JSON.stringify({ repos: [work], threads: [{ repo: work, dir: work, name: 'harness', branch: '', panes: AGENTS.map(cmd => ({ cmd })), layout: 'cols' }], ui: { sideOpen: false, thread: 0 } }));
+writeFileSync(profile, JSON.stringify({ repos: [work], threads: [{ repo: work, dir: work, name: 'harness', branch: '', panes: AGENTS.map(a => ({ cmd: CMDS[a] ?? a })), layout: 'cols' }], ui: { sideOpen: false, thread: 0 } }));
 writeFileSync(profile.replace(/\.json$/, '.window.json'), JSON.stringify({ main: { width: 1500, height: 900, x: 40, y: 40, prev_x: 40, prev_y: 40, maximized: false, fullscreen: false, visible: true, decorated: true } }));
 async function until(what, fn, ms = 6000, every = 250) {
   for (const end = Date.now() + ms; Date.now() < end; await pause(every)) { const v = await fn(); if (v) return v; }
@@ -90,9 +94,9 @@ try {
       const s = await screen(i);
       if (/trust\s+this\s+folder|Do\s+you\s+trust/i.test(s)) {
         // Claude's default is "No, exit": move to the yes before confirming.
-        const selected = s.split('\n').find(l => /[❯›]\s*(\d\.\s*)?\S/.test(l)) ?? '';
+        const selected = s.split('\n').find(l => /[❯›▶]\s*(\d\.\s*)?\S/.test(l)) ?? '';
         await page.locator('.pane .xterm').nth(i).click();
-        await page.keyboard.press(/yes|trust and continue/i.test(selected) ? 'Enter' : 'ArrowDown');
+        await page.keyboard.press(/yes|trust and continue|trust this workspace/i.test(selected) ? 'Enter' : 'ArrowDown');
         same = 0;
         await pause(700);
         return false;
@@ -115,7 +119,14 @@ try {
   for (const [i, agent] of AGENTS.entries()) log(`${agent} after sending:\n${await tail(i)}`);
   await overview(true);
   const history = Object.fromEntries(AGENTS.map(a => [a, []]));
-  const seen = Object.fromEntries(AGENTS.map(a => [a, { workingWithPrompt: false }]));
+  const seen = Object.fromEntries(AGENTS.map(a => [a, { workingWithPrompt: false, answeredInOverview: false }]));
+  // Cursor's approval of the shell command, answered as a person would from its card.
+  const runOnce = agent => page.evaluate(agent => {
+    const c = [...document.querySelectorAll('.dashboard-card')].find(c => c.textContent.includes(`harness / ${agent}`));
+    const b = [...(c?.querySelectorAll('.dashboard-choices button') ?? [])].find(b => /^Run \(once\)/.test(b.textContent));
+    b?.click();
+    return !!b;
+  }, agent);
   await until('every first turn ends', async () => {
     let done = 0;
     for (const agent of AGENTS) {
@@ -123,6 +134,7 @@ try {
       const line = JSON.stringify(c);
       if (history[agent].at(-1)?.line !== line) history[agent].push({ t: Math.round(performance.now() / 1000), line });
       if (c?.status.startsWith('Working') && c.you?.includes('setTimeout')) seen[agent].workingWithPrompt = true;
+      if (agent === 'cursor' && c?.status.startsWith('Waiting') && /Run this command/.test(c.question) && await runOnce(agent)) seen[agent].answeredInOverview = true;
       if (c?.status.startsWith('Waiting') && c.reply?.includes('PONG')) done++;
     }
     await sampleTitles();
@@ -137,6 +149,7 @@ try {
   for (const agent of AGENTS) {
     const c = await card(agent);
     results[agent] = { workingWithPrompt: seen[agent].workingWithPrompt, endsWaitingWithReply: !!(c?.status.startsWith('Waiting') && c.reply?.includes('PONG') && c.you?.includes('setTimeout')) };
+    if (agent === 'cursor') results[agent].answeredInOverview = seen[agent].answeredInOverview;
   }
 
   // 2. A question tool while the turn stays open.
@@ -145,6 +158,7 @@ try {
     claude: 'Use the AskUserQuestion tool to ask me whether I prefer tea or coffee. Do nothing else.',
     codex: 'Use the request_user_input tool to ask me whether I prefer tea or coffee. Do nothing else.',
     opencode: 'Use the question tool to ask me whether I prefer tea or coffee. Do nothing else.',
+    cursor: 'Run this exact shell command: node -e "console.log(42)" -- then reply with the number it printed.',
   };
   for (const [i, agent] of AGENTS.entries()) await type(i, ASK[agent]);
   await overview(true);
