@@ -112,12 +112,15 @@ function cursorMenu(raw: string[]): Menu | null {
 const inputBelow = (lines: string[], end: number) =>
   lines.some((l, i) => i > end && ((PROMPT.test(l) && isRule(lines[i - 1])) || (CODEX_PROMPT.test(l) && !OPTION.test(l))));
 
-export function readMenu(screen: string): Menu | null {
+/** The question on `screen`, or null. `agent`: the pane's, when known. Only
+ * Cursor draws its unnumbered menus, so on another agent's screen one is
+ * quoted text, whatever input that agent draws below it. */
+export function readMenu(screen: string, agent?: string): Menu | null {
   const lines = screen.split("\n").map(unbox);
   // The highlighted option nearest the bottom: menus sit under the transcript.
   let at = -1;
   for (let i = lines.length - 1; i >= 0 && at < 0; i--) if (CURSOR.test(lines[i]) && OPTION.test(lines[i])) at = i;
-  if (at < 0) return cursorMenu(screen.split("\n"));
+  if (at < 0) return agent === undefined || agent === "cursor" ? cursorMenu(screen.split("\n")) : null;
   // Walk out from the cursor over consecutive numbers. Non-option lines between
   // them are wrapped text or per-option descriptions; three in a row end the list.
   const found = new Map<number, { line: number; text: string; cursor: boolean }>();
@@ -266,7 +269,7 @@ function readCodexInput(rows: Cell[][], cursor: Cursor | undefined): Input {
   if (!cursor || cursor.hidden) return unknown(`Codex's cursor is ${cursor ? "hidden" : "unknown"}, so Loom can't place its input.`);
   const lines = rows.map((r) => r.map((c) => c.ch || "").join(""));
   // Approvals and other choices draw "› 1. ..." where the composer was.
-  if (readMenu(lines.join("\n"))) return unknown("Codex is asking a question, not showing its input.");
+  if (readMenu(lines.join("\n"), "codex")) return unknown("Codex is asking a question, not showing its input.");
   if (cursor.x < 2 || cursor.y < 0 || cursor.y >= lines.length) return unknown("Codex's cursor isn't in its composer.");
   // The composer's first row: the nearest "› " at or above the cursor.
   let at = cursor.y;

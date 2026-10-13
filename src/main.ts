@@ -1786,7 +1786,7 @@ async function micStop() {
       // otherwise take this Enter, and this text would go with its own. A
       // question that came up while whisper ran ignores the paste, and Enter
       // would answer it.
-      const asking = () => !!readMenu(liveScreen(p, false));
+      const asking = () => !!readMenu(liveScreen(p, false), p.agent);
       const entered = await inTurn(p, async (live) => {
         if (asking()) return false;
         p.term.paste(text);
@@ -2564,7 +2564,7 @@ class Pane {
    * alert, as Codex's OSC 9 does for its own. Gone, the pane works on (an
    * answer in Loom also says so: wrote). */
   private cursorQuestion() {
-    const menu = readMenu(liveScreen(this, false));
+    const menu = readMenu(liveScreen(this, false), this.agent);
     if (this.cursorAnswered !== undefined) {
       if (menu && menuRev(menu) === this.cursorAnswered) return;
       this.cursorAnswered = undefined;
@@ -2954,18 +2954,18 @@ class Pane {
     // Shift+Tab and Tab pick the option that names them ("allow all edits ...
     // (shift+tab)", Cursor's "Add Shell(echo) to allowlist? (tab)").
     if (d === "\x1b[Z" || d === "\t") {
-      const asked = readMenu(liveScreen(this, false)), key = d === "\t" ? /\(tab\)\s*$/i : /shift\s*\+\s*tab/i;
+      const asked = readMenu(liveScreen(this, false), this.agent), key = d === "\t" ? /\(tab\)\s*$/i : /shift\s*\+\s*tab/i;
       return !!asked && (asked.full ?? asked.options).some((o) => key.test(o));
     }
     if (!/^[0-9a-z]$/i.test(d)) return false;
-    const menu = readMenu(liveScreen(this, false)) ?? (this.agent === "claude" ? readSurvey(liveScreen(this, true, true)) : null);
+    const menu = readMenu(liveScreen(this, false), this.agent) ?? (this.agent === "claude" ? readSurvey(liveScreen(this, true, true)) : null);
     return !!menu && menuKeys(menu).includes(d.toLowerCase());
   }
   /** Cursor's question, if one shows, has its answer (Esc skips an approval). */
   private answeredCursor() {
     if (!this.cursorAsking) return;
     this.cursorAsking = false;
-    const asked = readMenu(liveScreen(this, false));
+    const asked = readMenu(liveScreen(this, false), this.agent);
     this.cursorAnswered = asked ? menuRev(asked) : undefined;
   }
   /** When Esc or Ctrl-C last went in, by anyone. Agents report no end for a
@@ -3807,7 +3807,7 @@ function liveScreen(p: Pane, joined = true, surveyOnly = false) {
 
 /** loomctl menu: the numbered question on a pane's screen, or Claude's survey, with the id choose --menu takes. */
 function paneMenu(p: Pane) {
-  const m = readMenu(liveScreen(p, false)) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
+  const m = readMenu(liveScreen(p, false), p.agent) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
   return m && { ...m, rev: menuRev(m) };
 }
 
@@ -3885,7 +3885,7 @@ function renderDashboard() {
     const age = stamp ? `${STATUS[state]} · ${ago(stamp)}` : STATUS[state];
     const cached = dashboardMessages.get(p.id);
     const messages = cached?.session === dashboardSession(p) ? cached : undefined;
-    const menu = state === "waiting" && p.agent !== "shell" ? readMenu(liveScreen(p, false)) : null;
+    const menu = state === "waiting" && p.agent !== "shell" ? readMenu(liveScreen(p, false), p.agent) : null;
     return { th, p, state, preview, age, messages, menu };
   }));
   const scoped = all.filter(({ th, p, preview, messages }) => (!dashboardProject.value || th.repo === dashboardProject.value)
@@ -4625,7 +4625,7 @@ async function pushNotice(t: Task, e: TaskEvent) {
   const ref = paneName(p), agent = AGENT_NAMES[p.agent] ?? p.agent;
   const mins = t.startedAt ? Math.round((e.at - t.startedAt) / 60_000) : 0;
   const took = mins < 1 ? "" : mins < 60 ? ` · ${mins} min` : ` · ${Math.floor(mins / 60)} h ${mins % 60} min`;
-  const menu = kind === "blocked" ? readMenu(liveScreen(p, false)) : null;
+  const menu = kind === "blocked" ? readMenu(liveScreen(p, false), p.agent) : null;
   const title = kind === "finish" ? `${ref} · ${agent} finished${took}` : kind === "blocked" ? `${ref} · ${agent} asks` : `${ref} · ${agent} failed`;
   const body = kind === "blocked"
     ? (menu ? [menu.question.join(" ").trim(), ...menu.options.map((o, i) => `${menu.keys?.[i] ?? i + 1}. ${o}`)].join("\n") : "It's waiting on you.")
@@ -4699,7 +4699,7 @@ function heldTask(p: Pane, id?: string): Task | undefined {
     : t.pane !== p.id ? `task ${t.id} is on another pane (${t.ref})`
     : t.gen !== p.generation ? `${paneName(p)} restarted since task ${t.id} was typed`
     : heldEnter.get(t.id)!.seq !== p.inputSeq ? `something else was written to ${paneName(p)} after task ${t.id}'s text`
-    : p.agent !== "shell" && readMenu(liveScreen(p, false)) ? `${paneName(p)} is asking a question, which Enter would answer`
+    : p.agent !== "shell" && readMenu(liveScreen(p, false), p.agent) ? `${paneName(p)} is asking a question, which Enter would answer`
     : kind && kind !== "draft" ? `${paneName(p)}'s input reads as ${kind}, not the task's text`
     : "";
   if (!why) return t;
@@ -4757,7 +4757,7 @@ const PLACEHOLDER = /\[Pasted text #\d+|\[Pasted Content \d+ chars\]|\[Image #\d
  * is a task now; anything else waits for the agent to report the turn
  * (adoptManual), so an Enter that sent nothing never becomes a task. */
 function manualEnter(p: Pane, text?: string): ManualEnter | Task | undefined {
-  if (p.agent === "shell" || p.dead || readMenu(liveScreen(p, false))) return;
+  if (p.agent === "shell" || p.dead || readMenu(liveScreen(p, false), p.agent)) return;
   // OMP sends a prompt only between turns: mid-turn it joins the turn that
   // runs (whose one done ends both), and while OMP asks, it answers.
   if (p.agent === "omp" && !(p.programState === "idle" || p.programState === "done" || p.programState === "error")) return;
@@ -5178,7 +5178,7 @@ function sweepTasks(closing = false) {
     // or not, takes its place and shows no hint either), and no numbered
     // question. An asking task holds none: an approval clears it (taskSignal),
     // and route gives it no Stop.
-    const idleInput = () => readInput(screenCells(p), "claude").kind !== "unknown" && !readMenu(liveScreen(p, false));
+    const idleInput = () => readInput(screenCells(p), "claude").kind !== "unknown" && !readMenu(liveScreen(p, false), p.agent);
     if (w.stopAt !== undefined && !busy && (closing || now - w.stopAt >= 500) && !(escNew && w.escSeen !== esc) && idleInput()) {
       moveTask(t, unproven(t, { state: "completed", signal: "turn-end", ...(w.response ? { response: w.response } : {}) }));
       continue;
@@ -5196,7 +5196,7 @@ function sweepTasks(closing = false) {
       // for its answer. Each approval, by the event that began it, starts unseen.
       const seq = t.events[t.events.length - 1]?.seq ?? 0;
       const ask = w.ask?.seq === seq ? w.ask : (w.ask = { seq });
-      if (p.agent !== "opencode" && readMenu(liveScreen(p, false))) Object.assign(ask, { seen: true, gone: undefined });
+      if (p.agent !== "opencode" && readMenu(liveScreen(p, false), p.agent)) Object.assign(ask, { seen: true, gone: undefined });
       else if (ask.seen && now - (ask.gone ??= now) >= 2000) moveTask(t, { state: "working", signal: "answered", detail: null });
       continue;
     }
@@ -5279,7 +5279,7 @@ function choose(p: Pane, menu: AgentMenu, i: number, gen?: number) {
     for (let step = 0; step <= menu.options.length; step++) {
       live(step > 0);
       const screen = liveScreen(p, false);
-      const now = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
+      const now = readMenu(screen, p.agent) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
       if (!now || menuRev(now) !== want) throw new Error(`The question on ${p.agent}'s screen changed, so nothing was chosen.`);
       if (now.keys) return keys(p, now.keys[i]);
       if (now.selected === i) return submit(p);
@@ -5610,7 +5610,7 @@ function syncOverlay() {
       waiting: state === "waiting",
       name: th.panes.length > 1 ? `${th.name} · ${th.panes.indexOf(p) + 1}` : th.name,
       time: ago(state === "waiting" ? p.waitingSince : p.busySince),
-      ask: state === "waiting" && p.agent !== "shell" ? asking(readMenu(liveScreen(p, false))) : "",
+      ask: state === "waiting" && p.agent !== "shell" ? asking(readMenu(liveScreen(p, false), p.agent)) : "",
     }));
   const show = wanted && (rows.length > 0 || overlayMode === "always");
   if (show) {
@@ -8766,7 +8766,7 @@ async function waitReceipt(token: string, seconds: number, signal?: AbortSignal)
   if (!result) throw new Error(`${r.ref} ${!p ? "was closed" : p.dead ? "exited" : "restarted"} before it finished, so there's no outcome; it may have run partway.`);
   if ("turn" in result) {
     // Whether it stopped on a question can only be read off this launch's screen.
-    const asking = !p || lost() ? null : !!readMenu(liveScreen(p, false));
+    const asking = !p || lost() ? null : !!readMenu(liveScreen(p, false), p.agent);
     return { data: { receipt: token, pane: r.pane, done: true, turn: result.turn, asking }, text: `${r.ref} finished its turn${asking ? " with a question: loomctl menu reads it" : ""}` };
   }
   const { failed, exit } = result;
@@ -8826,7 +8826,7 @@ async function sendText(a: Args, ctx: CliContext, submit?: { task?: Task }) {
   let correlationWarning: string | undefined;
   const guard = () => {
     // A question takes keys as answers, and Enter picks its highlighted option.
-    if (submit && p.agent !== "shell" && readMenu(liveScreen(p, false))) {
+    if (submit && p.agent !== "shell" && readMenu(liveScreen(p, false), p.agent)) {
       throw new NotSubmitted(`${ref} is asking a question, so submit typed nothing: Enter there would answer it. loomctl menu ${ref} reads it and loomctl choose answers it.`, false);
     }
     if (expect === undefined && !replace && !tracked) return;
@@ -9610,7 +9610,7 @@ const CLI: Record<string, CliCommand> = {
       const p = cliPane(cliWord(a, 0, "a pane (. for the one in front)"));
       const n = Number(cliWord(a, 1, "an option number"));
       const screen = liveScreen(p, false);
-      const m = readMenu(screen) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
+      const m = readMenu(screen, p.agent) ?? (p.agent === "claude" ? readSurvey(liveScreen(p, true, true)) : null);
       if (!m) throw new Error(`${paneName(p)} isn't showing a numbered question.`);
       const rev = menuRev(m), expect = str(a, "menu");
       if (expect !== undefined && expect !== rev) throw new Error(`${paneName(p)} shows another question now (menu ${rev}, not ${expect}), so nothing was chosen. loomctl menu ${paneName(p)} reads it.`);

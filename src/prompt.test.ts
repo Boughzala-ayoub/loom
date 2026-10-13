@@ -456,6 +456,11 @@ writeOptions.forEach((o, i) => {
   check(`Cursor's Write approval, highlight on option ${i + 1}`, [readMenu(moved)?.selected, readMenu(moved)?.options], [i, writeOptions]);
 });
 check("Cursor's Write approval, its keys", menuKeys(readMenu(cursorWrite)!), ["y"]);
+// Only Cursor draws these menus: in another agent's pane one is quoted, whatever input it draws below.
+for (const agent of ["claude", "codex", "opencode", "omp", "shell"]) {
+  check(`Cursor's approval on ${agent}'s screen is no question`, [readMenu(cursorAsk, agent), readMenu(cursorWrite, agent), readMenu(`${cursorAsk}\n  ┃ Ask anything\n`, agent)], [null, null, null]);
+}
+check("Cursor's approval in Cursor's pane", readMenu(cursorAsk, "cursor")?.options.length, 4);
 check("Cursor's Write approval quoted above Codex's input is no question", readMenu(`${cursorWrite}• Done.\n\n› Ask Codex to do anything\n\n  100% context left`), null);
 const cursorTrust = `  ╭──────────────────────────────────────────────╮
   │  Do you trust the contents of this directory? │
