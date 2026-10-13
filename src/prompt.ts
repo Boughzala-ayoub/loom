@@ -105,6 +105,17 @@ function cursorMenu(raw: string[]): Menu | null {
   return { question, options: said, selected: options.findIndex((o) => o.first === pick), multi: false, prompt, full: said, unnumbered: true };
 }
 
+/** What `key` (a letter, or "esc") does to Cursor's question `menu`, as its
+ * decision-logic has it (2026.10.01): it picks the option that names it,
+ * "(esc or n or p)" or "[a] ...", and undefined when none does. True when that
+ * option settles the question, false when it proposes instead ("Skip & tell
+ * the agent what to do instead", "Reject & propose changes"), which asks for
+ * feedback. */
+export function cursorKey(menu: Menu, key: string): boolean | undefined {
+  const named = (menu.full ?? menu.options).find((o) => new RegExp(`\\((?:\\S+ or )*${key}(?: or \\S+)*\\)\\s*$|^\\[${key}\\]\\s`, "i").test(o));
+  return named === undefined ? undefined : !/^(?:Skip & tell the agent|Reject & propose)/i.test(named);
+}
+
 /** Whether an agent's live input sits below row `end` of the unboxed `lines`:
  * then a menu above it is one in the transcript, a sent prompt drawn with the
  * same glyph or a question quoted, since a question takes the input's place.

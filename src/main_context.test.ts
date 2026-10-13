@@ -8,7 +8,7 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
 import { pruneSettled } from "./cli.ts";
-import { readMenu, readFeedback, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
+import { readMenu, readFeedback, cursorKey, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "turnsSeen", "turnTasks"]);
@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorPrompted", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -385,7 +385,7 @@ const CURSOR_ASK = ` $  echo hi in .
     Skip & tell the agent what to do instead (esc or n)
 `;
 const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {}) => {
-  const c = claudePane({ readMenu, readFeedback, menuRev, menuKeys, readSurvey, interruptHint, screenCells: () => [], liveScreen: () => view.text, turnReceipts() {}, ...extra });
+  const c = claudePane({ readMenu, readFeedback, cursorKey, menuRev, menuKeys, readSurvey, interruptHint, screenCells: () => [], liveScreen: () => view.text, turnReceipts() {}, ...extra });
   c.p.agent = "cursor";
   return c;
 };
@@ -410,8 +410,7 @@ const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {})
   p.activity();
   assert.equal(p.turns, 1, "one question, one alert");
   clock.at = p.lastIn = 3500; // Enter on "Run (once)"
-  p.answeredCursor();
-  f.taskSignal(p, { kind: "resume", at: 3500 });
+  p.wrote("\r", true, p.sending("\r"));
   p.seen();
   assert.deepEqual([p.busy, p.waiting, t.state, p.turns], [true, false, "working", 1], "answered, its menu still drawn");
   view.text = " ⠰⠳ Working\n\n  → Add a follow-up        ctrl+c to stop\n";
@@ -446,7 +445,7 @@ for (const order of [["aborted", "error"], ["error", "aborted"]]) {
   clock.at = 1000;
   const t = cursorPrompt(c, "A", "gA");
   clock.at = 2000;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2100;
   for (const end of order) cursorStop(c, end, "gA");
   await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
@@ -472,7 +471,7 @@ for (const late of [null, "aborted", "error"]) {
   clock.at = 60_000;
   const a = cursorPrompt(c, "A", "gA");
   clock.at = 61_000;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 61_100;
   for (const end of ["aborted", "error"]) if (end !== late) cursorStop(c, end, "gA");
   clock.at = 62_000;
@@ -496,7 +495,7 @@ for (const late of [null, "aborted", "error"]) {
   clock.at = 5000;
   cursorStop(c, "completed", "gA");
   clock.at = 6000;
-  p.wrote("\x03", true, false);
+  p.wrote("\x03", true, p.sending("\x03"));
   clock.at = 7000;
   const b = cursorPrompt(c, "B", "gB");
   clock.at = 8000;
@@ -516,10 +515,10 @@ for (const late of [null, "aborted", "error"]) {
   view.text = CURSOR_ASK;
   p.activity();
   clock.at = p.lastIn = 3000;
-  const answer = p.answers("\t");
-  p.wrote("\t", true, answer);
+  const sent = p.sending("\t");
+  p.wrote("\t", true, sent);
   p.seen();
-  assert.deepEqual([answer, p.waiting, t.state], [true, false, "working"], "Tab answered the approval");
+  assert.deepEqual([sent.answer, p.waiting, t.state], [true, false, "working"], "Tab answered the approval");
   view.text = CURSOR_ASK.replace("echo hi", "echo next").replace("Not in allowlist: echo", "Not in allowlist: next");
   p.activity();
   assert.deepEqual([p.waiting, t.state, t.detail], [true, "approval", "$  echo next in . Run this command? Not in allowlist: next"], "the next approval asks");
@@ -540,12 +539,12 @@ for (const key of ["\x1b", "\x03"]) {
   view.text = CURSOR_ASK;
   p.activity();
   clock.at = p.lastIn = 4000;
-  p.wrote(key, true, p.answers(key));
+  p.wrote(key, true, p.sending(key));
   p.seen();
   view.text = "  → Add a follow-up        ctrl+c to stop\n"; // its feedback, typed in the composer
   p.activity();
   clock.at = p.lastIn = 5000;
-  p.wrote("\r", true, p.answers("\r"));
+  p.wrote("\r", true, p.sending("\r"));
   p.seen();
   clock.at = 60_000;
   cursorStop(c, "error", "gA");
@@ -587,10 +586,10 @@ for (const [how, steps, stopped] of [
   p.activity();
   for (const [key, after] of steps) {
     clock.at = p.lastIn = clock.at + 1000;
-    const answer = p.answers(key);
+    const sent = p.sending(key);
     const redraw = () => ((view.text = after), p.activity());
     if (redrawFirst) redraw();
-    p.wrote(key, true, answer);
+    p.wrote(key, true, sent);
     p.seen();
     if (!redrawFirst) redraw();
   }
@@ -600,6 +599,68 @@ for (const [how, steps, stopped] of [
   for (const end of stopped ? ["aborted", "error"] : ["error"]) cursorStop(c, end, "gA");
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([t.state, p.waiting, pushed], stopped ? ["cancelled", false, ["approval"]] : ["failed", true, ["approval", "failed"]], what);
+}
+for (const key of ["y", "\t", "\r", "\x03"]) {
+  // The answer to approval 1 goes in, and Cursor draws approval 2 before the
+  // write is acknowledged. Approval 1 is the one answered: approval 2 still
+  // asks, with its own notice, and the pane waits on it.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
+  clock.at = 3000;
+  view.text = CURSOR_ASK;
+  p.activity();
+  clock.at = p.lastIn = 4000;
+  const sent = p.sending(key);
+  view.text = CURSOR_ASK.replace("echo hi", "echo next").replace("Not in allowlist: echo", "Not in allowlist: next");
+  p.activity();
+  clock.at = 4001;
+  // As the pane's writer does: an alert raised during the write stays.
+  const since = p.waitingSince;
+  p.wrote(key, true, sent);
+  if (p.waitingSince === since) p.seen();
+  p.activity();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([p.cursorAsking, p.busy, p.waiting, t.state, t.detail, pushed], [true, false, true, "approval", "$  echo next in . Run this command? Not in allowlist: next", ["approval", "approval"]], JSON.stringify(key));
+}
+// Cursor's approvals by kind (2026.10.01 decision-logic), each option ending
+// in the keys that pick it. Shell's and Write's Esc and n propose, which asks
+// for feedback, and so does p. MCP's, Read's, a web search's and fetch's Esc
+// and n pick "Skip", which rejects, and Delete's Esc rejects too ("Keep").
+const cursorMenuOf = (question: string, options: string[]) => ` ${question}\n${options.map((o, i) => `${i ? "    " : "  → "}${o}`).join("\n")}\n`;
+const CURSOR_MCP = cursorMenuOf("Run this MCP tool?", ["Run (once) (y)", "Allowlist MCP Tool (tab)", "Reject & propose changes (p)", "Skip (esc or n)"]);
+for (const [kind, menu, key, settles] of [
+  ["shell", CURSOR_ASK, "\x1b", false],
+  ["shell", CURSOR_ASK, "n", false],
+  ["write", cursorMenuOf("Write to this file?", ["Proceed (y)", "Reject & propose changes (esc or n or p)", "Add to allowlist (tab)"]), "p", false],
+  ["MCP", CURSOR_MCP, "p", false],
+  ["MCP", CURSOR_MCP, "\x1b", true],
+  ["read", cursorMenuOf("Read this file?", ["Allow once (y)", "Skip (esc or n)"]), "n", true],
+  ["delete", cursorMenuOf("Delete this file?", ["Delete (y)", "Keep (n)"]), "\x1b", true],
+] as const) {
+  // One that settles the question resumes the task, and one that asks for
+  // feedback leaves it asking. Neither stops the turn: its genuine error fails it.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
+  clock.at = 3000;
+  view.text = menu;
+  p.activity();
+  clock.at = p.lastIn = 4000;
+  p.wrote(key, true, p.sending(key));
+  p.seen();
+  view.text = settles ? CURSOR_WORKING : CURSOR_FEEDBACK;
+  p.activity();
+  const what = `${JSON.stringify(key)} on ${kind}'s approval`;
+  assert.equal(t.state, settles ? "working" : "approval", what);
+  clock.at = 60_000;
+  cursorStop(c, "error", "gA");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.waiting, pushed], ["failed", true, ["approval", "failed"]], what);
 }
 for (const screen of [CURSOR_ASK, CURSOR_FEEDBACK]) {
   // A Ctrl-C whose write failed may or may not have gone in: the task still
@@ -615,7 +676,7 @@ for (const screen of [CURSOR_ASK, CURSOR_FEEDBACK]) {
   view.text = screen;
   p.activity();
   clock.at = p.lastIn = 4000;
-  p.wrote("\x03", false, p.answers("\x03"));
+  p.wrote("\x03", false, p.sending("\x03"));
   assert.deepEqual([t.state, t.answerInDoubt], ["approval", true], screen === CURSOR_ASK ? "the approval" : "its feedback");
 }
 for (const order of [["aborted", "error"], ["error", "aborted"]]) {
@@ -626,7 +687,7 @@ for (const order of [["aborted", "error"], ["error", "aborted"]]) {
   clock.at = 1000;
   const a = cursorPrompt(c, "A", "gA");
   clock.at = 2000;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2100;
   const b = cursorPrompt(c, "B", "gB");
   clock.at = 2300;
@@ -665,7 +726,7 @@ for (const order of [["error", "aborted"], ["aborted", "error"]]) for (const one
   const t = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
   f.enterTurn(t, 1000);
   clock.at = 1100;
-  p.wrote("\x1b", true, p.answers("\x1b"));
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 1300;
   const start = () => f.agentReport(p, { kind: "start", at: 1050, launch: 1, match: t.match, turn: "gA" });
   const report = (end: string) => f.agentReport(p, end === "aborted" ? { kind: "interrupt", at: 1200, launch: 1, turn: "gA" } : { kind: "fail", at: 1200, launch: 1, detail: "Cursor reported an error", turn: "gA" });
@@ -746,7 +807,7 @@ for (const end of ["error", "completed"]) {
   clock.at = 1000;
   const a = cursorPrompt(c, "A", "gA");
   clock.at = 2000;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2100;
   const b = f.turnTask(p, "submit", model.promptMatch("B"), 2100);
   f.enterTurn(b, 2100);
@@ -786,11 +847,11 @@ for (const [first, second] of [["error", "aborted"], ["aborted", "error"]]) for 
   clock.at = 1000;
   const a = cursorPrompt(c, "A", "gA");
   clock.at = 2000;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2100;
   const b = cursorPrompt(c, "B", "gB");
   clock.at = 2200;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2300;
   const stops: [string, string][] = interleaved ? [[first, "gA"], [first, "gB"], [second, "gA"], [second, "gB"]] : [[first, "gA"], [second, "gA"], [first, "gB"], [second, "gB"]];
   for (const [end, gen] of stops) cursorStop(c, end, gen);
@@ -817,7 +878,7 @@ for (const order of [["error", "aborted"], ["aborted", "error"]]) {
   const b = f.turnTask(p, "submit", model.promptMatch("B"), 2050);
   f.enterTurn(b, 2050);
   clock.at = 2150;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2200;
   cursorStop(c, "error", "gA", 2000);
   f.agentReport(p, { kind: "start", at: 2100, launch: 1, match: b.match, turn: "gB" });
@@ -836,12 +897,12 @@ for (const escA of [false, true]) for (const order of [["error", "aborted"], ["a
   clock.at = 2000;
   const a = f.turnTask(p, "submit", model.promptMatch("A"), 2000);
   f.enterTurn(a, 2000);
-  if (escA) (clock.at = 2050), p.wrote("\x1b", true, false);
+  if (escA) (clock.at = 2050), p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2090;
   const b = f.turnTask(p, "submit", model.promptMatch("B"), 2090);
   f.enterTurn(b, 2090);
   clock.at = 2150;
-  p.wrote("\x1b", true, false);
+  p.wrote("\x1b", true, p.sending("\x1b"));
   clock.at = 2200;
   f.agentReport(p, { kind: "start", at: 2020, launch: 1, match: a.match, turn: "gA" });
   if (escA) order.forEach((end, i) => cursorStop(c, end, "gA", 2070 + 10 * i));
@@ -874,7 +935,7 @@ for (const seen of [false, true]) {
   assert.deepEqual([p.cursorAsking, p.busy, p.waiting, t.state, t.detail, pushed], [true, false, !seen, "approval", "$  echo hi in . Run this command? Not in allowlist: echo", ["approval"]], `seen ${seen}`);
   // Answered, the turn works on and ends as any turn does.
   clock.at = p.lastIn = 3000;
-  p.wrote("y", true, p.answers("y"));
+  p.wrote("y", true, p.sending("y"));
   p.seen();
   view.text = "  → Add a follow-up        ctrl+c to stop\n";
   p.activity();

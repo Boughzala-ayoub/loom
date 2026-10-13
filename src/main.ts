@@ -19,7 +19,7 @@ import { applyStash, listStashes, stashCommit } from "./stash";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { claudeDivider, claudeComposer, readMenu, readFeedback, menuKeys, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
+import { claudeDivider, claudeComposer, readMenu, readFeedback, cursorKey, menuKeys, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
@@ -2246,16 +2246,16 @@ class Pane {
       const release = holdForEnter(this, mark);
       this.inputSeq++;
       this.usePrompt(d);
-      const waitingSince = this.waitingSince, answer = this.answers(d);
+      const waitingSince = this.waitingSince, sent = this.sending(d);
       void invoke("pty_write", { id: this.id, data: d }).then(() => {
-        this.wrote(d, true, answer);
+        this.wrote(d, true, sent);
         release();
         if (this.waitingSince === waitingSince) this.seen(); // A failed write must leave the attention signal intact.
         if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint());
       }, e => {
         if (mark) manualFailed(mark);
         release();
-        this.wrote(d, false, answer);
+        this.wrote(d, false, sent);
         toast(`Could not write to ${this.agent}: ${String(e)}`);
       });
     });
@@ -2969,12 +2969,17 @@ class Pane {
   answers(d: string) {
     if (d.startsWith("\x1b[200~")) return false;
     if (d.includes("\r")) return true;
-    // Cursor's question and its rejection feedback take Esc and Ctrl-C, and
-    // the turn goes on. Ctrl-C rejects the question or skips the feedback, as
-    // an empty Enter does. Esc picks the question's "Skip & tell the agent ..."
-    // or goes from the feedback back to the question, so it's still asked
-    // (wrote). Read now: Cursor can redraw before the write is acknowledged.
-    if (d === "\x1b" || d === "\x03") return this.agent === "cursor" && (this.cursorAsking || this.cursorFeedback);
+    // Cursor's question takes the keys its options name and Ctrl-C, which
+    // rejects it, as Esc does where no option names Esc (Delete's "Keep"). An
+    // option that proposes asks for feedback instead, so it's still asked
+    // (cursorKey). In the feedback, Ctrl-C skips it, as an empty Enter does,
+    // and Esc goes back to the question.
+    if (this.agent === "cursor" && (d === "\x1b" || d === "\x03" || /^[a-z]$/i.test(d))) {
+      if (!this.cursorAsking) return d === "\x03" && this.cursorFeedback;
+      if (d === "\x03") return true;
+      const menu = readMenu(liveScreen(this, false), this.agent);
+      return !!menu && (cursorKey(menu, d === "\x1b" ? "esc" : d.toLowerCase()) ?? d === "\x1b");
+    }
     // Shift+Tab and Tab pick the option that names them ("allow all edits ...
     // (shift+tab)", Cursor's "Add Shell(echo) to allowlist? (tab)").
     if (d === "\x1b[Z" || d === "\t") {
@@ -2985,7 +2990,6 @@ class Pane {
     const menu = readMenu(liveScreen(this, false), this.agent) ?? (this.agent === "claude" ? readSurvey(liveScreen(this, true, true)) : null);
     return !!menu && menuKeys(menu).includes(d.toLowerCase());
   }
-  /** Cursor's question, if one shows, has its answer (Esc skips an approval). */
   /** A Cursor turn started (`running`) or the pane's current one stopped, as
    * its reports say in order (agentReport). A question Cursor drew before Loom
    * read the start still waits for its answer. */
@@ -2997,11 +3001,23 @@ class Pane {
     this.paint();
     if (dashboardOpen) renderDashboard();
   }
-  private answeredCursor() {
+  /** What writing `d` means, read off the screen as it's typed: the agent can
+   * redraw for it before the write is acknowledged (wrote). `answer`: it
+   * settles the question on screen (answers), and `menu`, which of Cursor's
+   * (menuRev). `stop`: an Esc or Ctrl-C with neither Cursor's question nor
+   * its feedback open, which stops the turn running. */
+  sending(d: string): Meant {
+    const answer = this.answers(d), cursor = this.agent === "cursor";
+    const menu = answer && cursor && this.cursorAsking ? readMenu(liveScreen(this, false), this.agent) : null;
+    return { answer, ...(menu ? { menu: menuRev(menu) } : {}), stop: cursor && (d === "\x1b" || d === "\x03") && !this.cursorAsking && !this.cursorFeedback };
+  }
+  /** Cursor's question `rev` is answered, the one on screen as the answer was
+   * typed: drawn on until Cursor redraws, it isn't asked again, while one
+   * Cursor drew since asks (wrote). */
+  private answeredCursor(rev: string | undefined) {
     if (!this.cursorAsking) return;
     this.cursorAsking = false;
-    const asked = readMenu(liveScreen(this, false), this.agent);
-    this.cursorAnswered = asked ? menuRev(asked) : undefined;
+    this.cursorAnswered = rev;
   }
   /** When Esc or Ctrl-C last went in, by anyone. Agents report no end for a
    * turn they were interrupted in (Claude Code runs no Stop hook), so a task
@@ -3009,21 +3025,21 @@ class Pane {
   interruptAt = 0;
   /** A write to the process finished: `delivered`, or it failed and may or
    * may not have gone in. Only what went in moves a task. Esc or Ctrl-C may
-   * have interrupted a turn (sweepTasks judges it). An answer (`answer`, what
-   * answers() said as it was typed, never the screen now: the agent may have
+   * have interrupted a turn (sweepTasks judges it). An answer (`sent`, what
+   * sending() read as it was typed, never the screen now: the agent may have
    * redrawn for it already) answers a question, which neither Claude nor
    * Codex reports, so a task asking here works again. An answer that
    * failed leaves the question asked, and the task says the answer is in
    * doubt (`answerInDoubt`, not `uncertain`: an answer says nothing about the
    * task's own Enter). */
-  wrote(data: string, delivered: boolean, answer: boolean) {
+  wrote(data: string, delivered: boolean, sent: Meant) {
     if (delivered && (data === "\x1b" || data === "\x03")) {
       this.interruptAt = Date.now();
       this.codexAsking = false;
-      // Cursor's: one typed with its question or feedback open answered that
-      // (answers). Only one typed with neither stops the turn: the one
-      // running, or one Loom hasn't heard of yet (agentReport).
-      if (this.agent === "cursor" && !answer) {
+      // Cursor's: only one typed with neither its question nor its feedback
+      // open stops the turn: the one running, or one Loom hasn't heard of yet
+      // (agentReport).
+      if (sent.stop) {
         const at = Date.now();
         // ponytail: the last 16 only; one 250 ms poll's starts need far fewer.
         if (this.cursorEscs.push(at) > 16) this.cursorEscs.shift();
@@ -3036,17 +3052,18 @@ class Pane {
       // Cursor's redraw still reads as the skip; one more draw tells them apart.
       if (data === "\x03") this.cursorFeedback = false;
     }
-    // Esc on Cursor's question asks for its feedback, and in the feedback goes
-    // back to the question: still asked either way.
-    if (!answer || (this.agent === "cursor" && data === "\x1b")) return;
+    if (!sent.answer) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
     this.codexAsking = false;
-    this.answeredCursor();
+    this.answeredCursor(sent.menu);
     taskSignal(this, { kind: "resume", at: Date.now() });
     // An answer went in, to a tracked task's question or a turn Loom hasn't
     // adopted yet; an alert the write itself raised stays.
     if (this.waitingSince <= this.lastIn) this.seen();
+    // Cursor may have drawn its next question before this write was
+    // acknowledged: that one asks now, with an alert of its own.
+    if (this.agent === "cursor") this.cursorQuestion();
   }
 }
 
@@ -4210,9 +4227,9 @@ function keys(p: Pane, data: string) {
   if (data === "\r") (p.typed = null), (p.manual = p.manual.filter((m) => m.match !== null));
   p.inputSeq++;
   p.usePrompt(data);
-  const answer = p.answers(data);
-  return invoke("pty_write", { id: p.id, data }).then(() => p.wrote(data, true, answer), (e) => {
-    p.wrote(data, false, answer);
+  const sent = p.sending(data);
+  return invoke("pty_write", { id: p.id, data }).then(() => p.wrote(data, true, sent), (e) => {
+    p.wrote(data, false, sent);
     throw e;
   });
 }
@@ -5077,6 +5094,9 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
     }
   }
 }
+
+/** What a write means to the process, read as it's typed (Pane.sending). */
+type Meant = { answer: boolean; menu?: string; stop: boolean };
 
 /** Turns whose stop already counted, by pane, launch and the agent's own
  * turn id: Codex's end, which can come twice, and Cursor's first stop of a

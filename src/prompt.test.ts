@@ -1,7 +1,7 @@
 import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
 const claudeComposer = claudeCapture.lines.join("\n");
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, readFeedback, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import { readMenu, readFeedback, cursorKey, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 import codexQuestion from "./fixtures/codex-question.json" with { type: "json" };
 
@@ -479,6 +479,17 @@ const cursorTrust = `  ╭──────────────────
   ╰──────────────────────────────────────────────╯`;
 check("Cursor's trust box", shape(readMenu(cursorTrust)), { question: ["Do you trust the contents of this directory?", "C:\\projects\\new"], options: ["[a] Trust this workspace", "[q] Quit"], selected: 0, multi: false });
 check("Cursor's trust keys", menuKeys(readMenu(cursorTrust)!), ["a", "q"]);
+// What a key picks on Cursor's question (cursorKey): its option settles it, or proposes and asks for feedback.
+const cursorMcp = ` Run this MCP tool?
+  → Run (once) (y)
+    Allowlist MCP Tool (tab)
+    Reject & propose changes (p)
+    Skip (esc or n)
+`;
+check("Cursor's shell approval: Esc and n propose, y runs, q names nothing", ["esc", "n", "y", "q"].map((k) => cursorKey(readMenu(cursorAsk)!, k)), [false, false, true, undefined]);
+check("Cursor's MCP approval: Esc and n skip it, p proposes", ["esc", "n", "p"].map((k) => cursorKey(readMenu(cursorMcp)!, k)), [true, true, false]);
+check("Cursor's Write approval: Esc, n and p propose", ["esc", "n", "p"].map((k) => cursorKey(readMenu(cursorWrite)!, k)), [false, false, false]);
+check("Cursor's trust box: [a] and [q] settle it", ["a", "q"].map((k) => cursorKey(readMenu(cursorTrust)!, k)), [true, true]);
 // Cursor's menus quoted in another agent's transcript, that agent idle at its input below.
 for (const [agent, input] of [["Claude", ["", ruled, "❯ ", ruled, "  ? for shortcuts"]], ["Codex", ["", "› Ask Codex to do anything", "", "  100% context left"]]] as const) {
   check(`Cursor's approval quoted above ${agent}'s input is no question`, readMenu([cursorAsk, "● It asked that. Want me to allow it?", ...input].join("\n")), null);
