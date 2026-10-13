@@ -8,7 +8,7 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
 import { pruneSettled } from "./cli.ts";
-import { readMenu, menuRev, menuKeys, readSurvey } from "./prompt.ts";
+import { readMenu, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "turnsSeen", "turnTasks"]);
@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorQuestion", "cursorAsks", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -385,7 +385,7 @@ const CURSOR_ASK = ` $  echo hi in .
     Skip & tell the agent what to do instead (esc or n)
 `;
 const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {}) => {
-  const c = claudePane({ readMenu, menuRev, menuKeys, readSurvey, liveScreen: () => view.text, turnReceipts() {}, ...extra });
+  const c = claudePane({ readMenu, menuRev, menuKeys, readSurvey, interruptHint, screenCells: () => [], liveScreen: () => view.text, turnReceipts() {}, ...extra });
   c.p.agent = "cursor";
   return c;
 };
@@ -785,6 +785,38 @@ for (const escA of [false, true]) for (const order of [["error", "aborted"], ["a
   await new Promise((r) => setTimeout(r, 0));
   const what = `${escA ? "Esc on A and on B" : "A's error, Esc on B"}, ${order.join(" then ")}`;
   assert.deepEqual([a.state, b.state, p.busy, p.waiting, pushed], escA ? ["cancelled", "cancelled", false, false, []] : ["failed", "cancelled", false, false, ["failed"]], what);
+}
+for (const seen of [false, true]) {
+  // A's Enter goes in at 2000, its start is stamped 2020, and Cursor draws its
+  // approval at 2140, before the poll at 2200 that reads the start. The
+  // approval then asks in the task the start moves, with one notice, and the
+  // pane still waits (`seen`: unless the alert was read before the poll).
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, pushed, clock, f } = c;
+  clock.at = p.lastIn = 2000;
+  const t = f.turnTask(p, "submit", model.promptMatch("A"), 2000);
+  f.enterTurn(t, 2000);
+  clock.at = 2140;
+  view.text = CURSOR_ASK;
+  p.activity();
+  if (seen) p.seen();
+  clock.at = 2200;
+  f.agentReport(p, { kind: "start", at: 2020, launch: 1, match: t.match, turn: "gA" });
+  p.activity();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([p.cursorAsking, p.busy, p.waiting, t.state, t.detail, pushed], [true, false, !seen, "approval", "$  echo hi in . Run this command? Not in allowlist: echo", ["approval"]], `seen ${seen}`);
+  // Answered, the turn works on and ends as any turn does.
+  clock.at = p.lastIn = 3000;
+  p.wrote("y", true, p.answers("y"));
+  p.seen();
+  view.text = "  → Add a follow-up        ctrl+c to stop\n";
+  p.activity();
+  assert.deepEqual([p.busy, p.waiting, t.state], [true, false, "working"], `answered, seen ${seen}`);
+  clock.at = 4000;
+  cursorStop(c, "completed", "gA");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.waiting, pushed], ["completed", true, ["approval", "completed"]], `done, seen ${seen}`);
 }
 for (const end of ["completed", "error", "aborted"]) {
   // An open Overview redraws when a Cursor turn stops. Done or failed, the

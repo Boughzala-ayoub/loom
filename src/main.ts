@@ -2575,9 +2575,15 @@ class Pane {
     if (!!menu === this.cursorAsking) return;
     this.cursorAsking = !!menu;
     if (!menu) return;
-    taskSignal(this, { kind: "approval", at: Date.now(), detail: menu.question.join(" ").slice(0, 200) || undefined });
+    this.cursorAsks(menu);
     // The hook's source: one source counts a launch's turns (wake), and an approval counts as Codex's does.
     this.wake(undefined, "hook");
+  }
+  /** Cursor's question asks in the pane's task. One drawn before Loom read its
+   * turn's start (the hooks are read every 250 ms) asks again once the start
+   * has moved that task (agentReport). */
+  cursorAsks(menu = readMenu(liveScreen(this, false), this.agent)) {
+    if (menu) taskSignal(this, { kind: "approval", at: Date.now(), detail: menu.question.join(" ").slice(0, 200) || undefined });
   }
 
   /** GPU rendering. A page gets ~16 WebGL contexts, so they are budgeted:
@@ -2954,10 +2960,11 @@ class Pane {
   }
   /** Cursor's question, if one shows, has its answer (Esc skips an approval). */
   /** A Cursor turn started (`running`) or the pane's current one stopped, as
-   * its reports say in order (agentReport). */
+   * its reports say in order (agentReport). A question Cursor drew before Loom
+   * read the start still waits for its answer. */
   cursorRuns(running: boolean) {
     if (this.dead) return;
-    if (running) this.waiting = false;
+    if (running && !this.cursorAsking) this.waiting = false;
     this.cursorTurn = running;
     this.busy = running && !this.cursorAsking;
     this.paint();
@@ -5119,6 +5126,9 @@ function agentReport(p: Pane, s: Signal) {
     }
   }
   taskSignal(p, s);
+  // A question Cursor drew before Loom read this start asked in no task: the
+  // task was still submitted. It asks in the one the start moved.
+  if (p.agent === "cursor" && s.kind === "start" && p.cursorAsking && (s.launch ?? p.generation) === p.generation) p.cursorAsks();
 }
 
 /** How long an agent may look idle, with a task working and no end reported,
