@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorStarted", "cursorEnded", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -398,8 +398,8 @@ const cursorPane = (view: { text: string }) => {
   const { p, tasks, pushed, clock, later, f } = cursorPane(view);
   clock.at = p.lastIn = 1000;
   p.manual = [{ at: 1000, launch: 1, match: null }]; // manualEnter, at the Enter
-  p.wake("cursor:busy", "hook");
-  f.agentReport(p, { kind: "start", at: 1200, launch: 1, match: model.promptMatch("run echo hi") });
+  p.wake("cursor:busy", "hook", "g1");
+  f.agentReport(p, { kind: "start", at: 1200, launch: 1, match: model.promptMatch("run echo hi"), turn: "g1" });
   const [t, ...more] = [...tasks.values()];
   assert.equal(more.length, 0);
   assert.deepEqual([p.busy, p.waiting, t.source, t.state, t.startedAt], [true, false, "manual", "working", 1200], "working");
@@ -417,39 +417,92 @@ const cursorPane = (view: { text: string }) => {
   view.text = " ⠰⠳ Working\n\n  → Add a follow-up        ctrl+c to stop\n";
   p.activity();
   later(9000);
-  p.wake("cursor:done", "hook");
+  p.wake("cursor:done", "hook", "g1");
   f.agentReport(p, { kind: "end", at: 9000, launch: 1, turn: "g1" });
   f.agentReport(p, { kind: "end", at: 9000, launch: 1, turn: "g1" });
   assert.deepEqual([p.busy, p.waiting, t.state, t.endedAt, p.turns], [false, true, "completed", 9000, 2], "done");
   await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
   assert.deepEqual(pushed, ["approval", "completed"]);
 }
+// What Cursor's hooks say of turn `gen` when it stops: the marker the pane
+// wakes on, then the report its task moves on (stop: aborted, error or completed).
+const cursorStop = (c: ReturnType<typeof cursorPane>, end: string, gen: string) => {
+  c.p.wake(`cursor:${end}`, "hook", gen);
+  const at = c.clock.at;
+  c.f.agentReport(c.p, end === "aborted" ? { kind: "interrupt", at, launch: 1, turn: gen }
+    : end === "error" ? { kind: "fail", at, launch: 1, detail: "Cursor reported an error", turn: gen } : { kind: "end", at, launch: 1, turn: gen });
+};
+const cursorPrompt = (c: ReturnType<typeof cursorPane>, prompt: string, gen: string) => {
+  const t = c.f.turnTask(c.p, "submit", model.promptMatch(prompt), c.clock.at);
+  c.f.enterTurn(t, c.clock.at);
+  c.p.wake("cursor:busy", "hook", gen);
+  c.f.agentReport(c.p, { kind: "start", at: c.clock.at + 100, launch: 1, match: t.match, turn: gen });
+  return t;
+};
 for (const order of [["aborted", "error"], ["error", "aborted"]]) {
-  // Esc: Cursor reports the turn aborted and failed, either first. It's cancelled, and raises no alert.
-  const { p, tasks, pushed, clock, f } = cursorPane({ text: "" });
-  const t = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
-  f.enterTurn(t, 1000);
-  p.wake("cursor:busy", "hook");
-  f.agentReport(p, { kind: "start", at: 1100, launch: 1, match: t.match });
-  clock.at = p.interruptAt = 2000;
-  for (const end of order) {
-    p.wake(`cursor:${end}`, "hook");
-    f.agentReport(p, end === "aborted" ? { kind: "interrupt", at: 2100, launch: 1 } : { kind: "fail", at: 2100, launch: 1, detail: "Cursor reported an error" });
-  }
+  // Esc: Cursor reports the turn it stopped aborted and failed, either first,
+  // both naming it. It's cancelled, and raises no alert.
+  const c = cursorPane({ text: "" });
+  const { p, tasks, pushed, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
+  clock.at = 2000;
+  p.wrote("\x1b", true, false);
+  clock.at = 2100;
+  for (const end of order) cursorStop(c, end, "gA");
   await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
   assert.deepEqual([t.state, p.busy, p.waiting, pushed, tasks.size], ["cancelled", false, false, [], 1], order.join(" then "));
 }
 {
   // An error with no Esc before it fails the turn, and raises the alert.
-  const { p, pushed, clock, f } = cursorPane({ text: "" });
-  const t = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
-  f.enterTurn(t, 1000);
-  p.wake("cursor:busy", "hook");
-  f.agentReport(p, { kind: "start", at: 1100, launch: 1, match: t.match });
+  const c = cursorPane({ text: "" });
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
   clock.at = 60_000;
-  p.wake("cursor:error", "hook");
-  f.agentReport(p, { kind: "fail", at: 60_000, launch: 1, detail: "Cursor reported an error" });
+  cursorStop(c, "error", "gA");
   await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
   assert.deepEqual([t.state, p.busy, p.waiting, pushed], ["failed", false, true, ["failed"]]);
+}
+for (const late of [null, "aborted", "error"]) {
+  // Esc stops turn A, and B, sent a second later, fails for real 2 s after
+  // the Esc: B fails and raises the alert. With `late`, one of A's two stops
+  // lands only after B started: A ends on the other, and B runs on.
+  const c = cursorPane({ text: "" });
+  const { p, tasks, pushed, clock } = c;
+  clock.at = 60_000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = 61_000;
+  p.wrote("\x1b", true, false);
+  clock.at = 61_100;
+  for (const end of ["aborted", "error"]) if (end !== late) cursorStop(c, end, "gA");
+  clock.at = 62_000;
+  const b = cursorPrompt(c, "B", "gB");
+  if (late) {
+    clock.at = 62_500;
+    cursorStop(c, late, "gA");
+    assert.deepEqual([a.state, b.state, p.busy, p.waiting], ["cancelled", "working", true, false], `A's late ${late} leaves B working`);
+  }
+  clock.at = 63_000;
+  cursorStop(c, "error", "gB");
+  await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
+  assert.deepEqual([a.state, b.state, p.busy, p.waiting, pushed, tasks.size], ["cancelled", "failed", false, true, ["failed"], 2], `late ${late}`);
+}
+{
+  // Ctrl-C between turns interrupts nothing: the next turn's error is its own.
+  const c = cursorPane({ text: "" });
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  cursorPrompt(c, "A", "gA");
+  clock.at = 5000;
+  cursorStop(c, "completed", "gA");
+  clock.at = 6000;
+  p.wrote("\x03", true, false);
+  clock.at = 7000;
+  const b = cursorPrompt(c, "B", "gB");
+  clock.at = 8000;
+  cursorStop(c, "error", "gB");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([b.state, p.waiting, pushed], ["failed", true, ["completed", "failed"]]);
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");

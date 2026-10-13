@@ -1520,9 +1520,9 @@ try {
     assert.ok(await page.evaluate(() => [...document.querySelectorAll('.agent .agent-name')].some(n => n.textContent === 'cursor')), `The sidebar names Cursor, ${width}px`);
     let cursorBatch = 0;
     const cursorOut = d => page.evaluate(([id, d]) => window.qa.panes.find(p => p.id === id).onOut.onmessage(d), [cursor.id, d]);
-    const cursorWake = state => page.evaluate(([id, m]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, m]] }), [cursor.id, `cursor:${state}\n${cursor.launch}`]);
+    const cursorWake = state => page.evaluate(([id, m]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, m]] }), [cursor.id, `cursor:${state}\n${cursor.launch}\ng1`]);
     const cursorReport = ev => page.evaluate(([id, ev, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: [[id, ev]] } }),
-      [cursor.id, { ...ev, launch: cursor.launch, t: Date.now(), src: 'cursor' }, ++cursorBatch]);
+      [cursor.id, { ...ev, launch: cursor.launch, t: Date.now(), src: 'cursor', turn: 'g1' }, ++cursorBatch]);
     const cursorState = async () => (await cli('panes')).data.find(p => p.id === cursor.id).state;
     const until = async (ok, what) => { for (const end = Date.now() + 8000; !(await ok()); await page.waitForTimeout(100)) if (Date.now() > end) throw new Error(`Timed out: ${what}`); };
     await cursorOut('\x1b[2J\x1b[H  Cursor Agent\r\n\r\n  → Plan, search, build anything\r\n');

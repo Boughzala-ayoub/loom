@@ -204,11 +204,11 @@ pub fn cursor_hook() -> i32 {
     task_event(&pane, "cursor", event);
     let launch = std::env::var("LOOM_LAUNCH").ok().filter(|l| l.parse::<u64>().is_ok());
     let line = |text: String| launch.as_ref().map_or_else(|| text.clone(), |l| format!("{text}\n{l}"));
+    // What agent.ts validSessionId takes: it lands on --resume's command line.
+    let id = |key: &str| p[key].as_str()
+        .filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
     if state == "busy" {
-        // What agent.ts validSessionId takes: it lands on --resume's command line.
-        let id = p["conversation_id"].as_str()
-            .filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
-        if let (Some(id), Some(file)) = (id, std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from)) {
+        if let (Some(id), Some(file)) = (id("conversation_id"), std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from)) {
             if let Some(dir) = file.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
@@ -217,19 +217,27 @@ pub fn cursor_hook() -> i32 {
     }
     let dir = std::env::temp_dir().join("loom-wait");
     let _ = std::fs::create_dir_all(&dir);
-    publish(&dir.join(&pane), &line(format!("cursor:{state}")));
+    // "cursor:<state>\n<launch>\n<turn>": the turn its generation_id, which
+    // tells an Esc's two stops from the next turn's (main.ts wake).
+    let mut marker = line(format!("cursor:{state}"));
+    if let (Some(_), Some(turn)) = (&launch, id("generation_id")) {
+        marker = format!("{marker}\n{turn}");
+    }
+    publish(&dir.join(&pane), &marker);
     0
 }
 
-/// A Cursor hook's report as a task event, and the pane's state after it.
-/// An interrupted turn reports stop twice, aborted and error, in either order;
-/// the pane, which saw the Esc, tells them apart (main.ts agentReport).
+/// A Cursor hook's report as a task event, and the pane's state after it,
+/// each naming its turn (generation_id, the same in a turn's prompt and stop
+/// hooks). An interrupted turn reports stop twice, aborted and error, in either
+/// order; the pane, which saw the Esc, tells them apart (main.ts agentReport).
 fn cursor_event(p: &serde_json::Value) -> Option<(serde_json::Value, &'static str)> {
+    let turn = &p["generation_id"];
     Some(match (p["hook_event_name"].as_str()?, p["status"].as_str()) {
-        ("beforeSubmitPrompt", _) => (serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?) }), "busy"),
-        ("stop", Some("completed")) => (serde_json::json!({ "kind": "end", "turn": p["generation_id"] }), "done"),
-        ("stop", Some("aborted")) => (serde_json::json!({ "kind": "interrupt" }), "aborted"),
-        ("stop", _) => (serde_json::json!({ "kind": "fail", "detail": "Cursor reported an error" }), "error"),
+        ("beforeSubmitPrompt", _) => (serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?), "turn": turn }), "busy"),
+        ("stop", Some("completed")) => (serde_json::json!({ "kind": "end", "turn": turn }), "done"),
+        ("stop", Some("aborted")) => (serde_json::json!({ "kind": "interrupt", "turn": turn }), "aborted"),
+        ("stop", _) => (serde_json::json!({ "kind": "fail", "detail": "Cursor reported an error", "turn": turn }), "error"),
         _ => return None,
     })
 }
@@ -540,10 +548,11 @@ mod tests {
         let ev = |v: serde_json::Value| cursor_event(&v);
         // Payload shapes as Cursor's CLI 2026.10.01 sends them (its "status" on stop).
         let prompt = json!({ "conversation_id": "b138b315-3d59-435d-8f85-295395398782", "generation_id": "b127b9b4", "prompt": "run the tests", "hook_event_name": "beforeSubmitPrompt" });
-        assert_eq!(ev(prompt), Some((json!({ "kind": "start", "match": prompt_match("run the tests") }), "busy")));
+        assert_eq!(ev(prompt), Some((json!({ "kind": "start", "match": prompt_match("run the tests"), "turn": "b127b9b4" }), "busy")));
         assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "completed", "generation_id": "b127b9b4" })), Some((json!({ "kind": "end", "turn": "b127b9b4" }), "done")));
-        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "aborted" })), Some((json!({ "kind": "interrupt" }), "aborted")));
-        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "error" })), Some((json!({ "kind": "fail", "detail": "Cursor reported an error" }), "error")));
+        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "aborted", "generation_id": "b127b9b4" })), Some((json!({ "kind": "interrupt", "turn": "b127b9b4" }), "aborted")));
+        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "error", "generation_id": "b127b9b4" })), Some((json!({ "kind": "fail", "detail": "Cursor reported an error", "turn": "b127b9b4" }), "error")));
+        assert_eq!(ev(json!({ "hook_event_name": "stop", "status": "error" })), Some((json!({ "kind": "fail", "detail": "Cursor reported an error", "turn": null }), "error")), "no turn: the pane reads none");
         assert_eq!(ev(json!({ "hook_event_name": "sessionStart" })), None);
         assert_eq!(ev(json!({ "hook_event_name": "beforeSubmitPrompt" })), None, "no prompt, no start");
         assert!(!ev(json!({ "hook_event_name": "beforeSubmitPrompt", "prompt": "secret-token-123" })).unwrap().0.to_string().contains("secret"));

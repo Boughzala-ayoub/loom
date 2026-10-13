@@ -208,14 +208,15 @@ export type Task = {
  * from a process that has since been replaced must not move the next one's
  * tasks. The pane's own marks come from its running launch. A turn's end or
  * Claude's Stop names its final message as `response` (TaskEvent). */
+/** `turn`: the agent's own id for the turn, Codex's turn-id or Cursor's generation_id. */
 export type Signal = { at: number; launch?: number } & (
-  | { kind: "start"; match?: string; token?: string }
+  | { kind: "start"; match?: string; token?: string; turn?: string }
   | { kind: "end"; matches?: string[]; turn?: string; token?: string; failed?: boolean | null; exit?: number | null; response?: string }
   | { kind: "stop"; response?: string }
-  | { kind: "fail"; detail?: string }
+  | { kind: "fail"; detail?: string; turn?: string }
   | { kind: "approval"; detail?: string }
   | { kind: "resume" }
-  | { kind: "interrupt" }
+  | { kind: "interrupt"; turn?: string }
 );
 
 /** `proof`: the change rests on evidence that names this task, the only
@@ -381,24 +382,27 @@ export function parseSignal(ev: unknown): Signal | null {
   const base = { at, launch: e.launch };
   const detail = typeof e.detail === "string" && e.detail ? { detail: e.detail.slice(0, 200) } : {};
   const response = typeof e.response === "string" && /^[0-9a-f]{16}$/.test(e.response) ? { response: e.response } : {};
+  const turn = typeof e.turn === "string" && e.turn ? { turn: e.turn } : {};
   switch (e.kind) {
     case "start":
-      return { ...base, kind: "start", ...(typeof e.match === "string" ? { match: e.match } : {}) };
+      return { ...base, kind: "start", ...(typeof e.match === "string" ? { match: e.match } : {}), ...turn };
     case "end":
       return {
         ...base, kind: "end",
         ...(Array.isArray(e.matches) ? { matches: e.matches.filter((m): m is string => typeof m === "string") } : {}),
-        ...(typeof e.turn === "string" && e.turn ? { turn: e.turn } : {}),
+        ...turn,
         ...response,
       };
     case "fail":
+      return { ...base, kind: "fail", ...detail, ...turn };
     case "approval":
-      return { ...base, kind: e.kind, ...detail };
+      return { ...base, kind: "approval", ...detail };
     case "stop":
       return { ...base, kind: "stop", ...response };
     case "resume":
+      return { ...base, kind: "resume" };
     case "interrupt":
-      return { ...base, kind: e.kind };
+      return { ...base, kind: "interrupt", ...turn };
   }
   return null;
 }

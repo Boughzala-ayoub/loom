@@ -544,8 +544,9 @@ Each agent says "done" its own way, and Loom listens to all of them:
   runs them there too, a process start each time, for nothing. A file that
   isn't plain JSON (comments) is left alone, and its panes run without
   reports. `stop` says whether the turn completed, was aborted (Esc) or
-  failed. An Esc reports both aborted and an error, and Loom reads that as
-  the interrupt. Cursor's approvals and its folder-trust question have no
+  failed. An Esc reports both aborted and an error, each naming the turn it
+  stopped (its `generation_id`), and Loom reads that turn's error as the
+  interrupt. Another turn's error is a failure. Cursor's approvals and its folder-trust question have no
   hook: Loom reads them off the screen, raises the alert, and the overview
   offers their options as buttons. Cursor wraps each hook command in
   PowerShell code, then runs it through Git Bash when `MSYSTEM` or `SHELL`

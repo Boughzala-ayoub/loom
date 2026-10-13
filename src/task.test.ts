@@ -238,6 +238,8 @@ eq("a start", parseSignal({ kind: "start", t: 7, launch: 3, match: "abc" }), { a
 eq("no launch, no signal (review P1: a replaced process's report)", [parseSignal({ kind: "stop", t: 7 }), parseSignal({ kind: "stop", t: 7, launch: "3" })], [null, null]);
 eq("a token in a file is ignored", parseSignal({ kind: "end", t: 7, launch: 3, token: "x", failed: false }), { at: 7, launch: 3, kind: "end" });
 eq("Codex's prompts and turn", parseSignal({ kind: "end", t: 7, launch: 3, matches: ["a", 3, "b"], turn: "u1", thread: "th" }), { at: 7, launch: 3, kind: "end", matches: ["a", "b"], turn: "u1" });
+eq("Cursor's turn on its start, interrupt and error", ["start", "interrupt", "fail", "approval"].map((kind) => parseSignal({ kind, t: 7, launch: 3, turn: "g1" })),
+  [{ at: 7, launch: 3, kind: "start", turn: "g1" }, { at: 7, launch: 3, kind: "interrupt", turn: "g1" }, { at: 7, launch: 3, kind: "fail", turn: "g1" }, { at: 7, launch: 3, kind: "approval" }]);
 eq("Claude's Stop", parseSignal({ kind: "stop", t: 7, launch: 3 }), { at: 7, launch: 3, kind: "stop" });
 eq("Claude's Stop naming its final message", parseSignal({ kind: "stop", t: 7, launch: 3, response: "0123456789abcdef" }), { at: 7, launch: 3, kind: "stop", response: "0123456789abcdef" });
 eq("a turn's end naming its final message", parseSignal({ kind: "end", t: 7, launch: 3, matches: ["a"], response: "0123456789abcdef" }), { at: 7, launch: 3, kind: "end", matches: ["a"], response: "0123456789abcdef" });

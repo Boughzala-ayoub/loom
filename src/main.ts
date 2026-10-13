@@ -1924,6 +1924,14 @@ class Pane {
    * cursor:done, aborted or error). Unset until this launch's first, as when
    * Loom couldn't add its hooks: then its "ctrl+c to stop" alone says busy. */
   cursorTurn: boolean | undefined;
+  /** Cursor's turns by their generation_id, which its hooks name: the one
+   * the wakes last said runs (cursorGen), and the one an Esc or Ctrl-C went
+   * into (cursorEsc), whose error is that interrupt. Its reports (agentReport)
+   * keep their own: the last that started, and the last whose stop counted. */
+  cursorGen: string | undefined;
+  cursorEsc: string | undefined;
+  cursorStarted: string | undefined;
+  cursorEnded: string | undefined;
   /** Cursor shows a question (an approval, trusting its folder), read off the
    * screen: no hook reports one. Raised once per question (cursorQuestion). */
   cursorAsking = false;
@@ -2364,6 +2372,7 @@ class Pane {
     this.codexState = undefined;
     this.codexAsking = false;
     this.cursorTurn = undefined;
+    this.cursorGen = this.cursorEsc = this.cursorStarted = this.cursorEnded = undefined;
     this.cursorAsking = false;
     this.cursorAnswered = undefined;
     this.programState = undefined;
@@ -2646,8 +2655,9 @@ class Pane {
 
   /** Turn finished: flag the pane yellow and blip, until you look at it.
    * The marker carries the session's effort level — keep the last-known one
-   * (letters only: it lands on a command line at next boot). */
-  wake(effort: string | undefined, source: WakeSource) {
+   * (letters only: it lands on a command line at next boot). `turn`: the
+   * turn a Cursor marker names. */
+  wake(effort: string | undefined, source: WakeSource, turn?: string) {
     if (this.agent === "opencode" && (effort === "opencode:busy" || effort === "opencode:waiting")) {
       this.opencodeStatus = true;
       if (this.dead) return;
@@ -2664,10 +2674,14 @@ class Pane {
       const state = effort.slice("cursor:".length);
       effort = undefined;
       if (this.dead) return;
+      // A stop for another turn than the one running: a slow hook's, for one that ended.
+      if (state !== "busy" && turn && this.cursorTurn && turn !== this.cursorGen) return;
+      if (state === "busy") this.cursorGen = turn;
       this.cursorTurn = state === "busy";
-      // Esc ends a turn twice, aborted and error in either order, and neither
-      // raises the alert: you stopped it (OMP's idle after Esc raises none either).
-      if (state === "busy" || state === "aborted" || (state === "error" && Date.now() - this.interruptAt < 5000)) {
+      // Esc ends a turn twice, aborted and error in either order, both naming
+      // it, and neither raises the alert: you stopped it (OMP's idle after Esc
+      // raises none either). Another turn's error is its own.
+      if (state === "busy" || state === "aborted" || (state === "error" && turn !== undefined && turn === this.cursorEsc)) {
         if (state === "busy") this.waiting = false;
         this.busy = state === "busy" && !this.cursorAsking;
         this.paint();
@@ -2965,7 +2979,12 @@ class Pane {
    * doubt (`answerInDoubt`, not `uncertain`: an answer says nothing about the
    * task's own Enter). */
   wrote(data: string, delivered: boolean, answer: boolean) {
-    if (delivered && (data === "\x1b" || data === "\x03")) (this.interruptAt = Date.now()), (this.codexAsking = false), this.answeredCursor();
+    if (delivered && (data === "\x1b" || data === "\x03")) {
+      this.interruptAt = Date.now();
+      this.codexAsking = false;
+      if (this.cursorTurn) this.cursorEsc = this.cursorGen;
+      this.answeredCursor();
+    }
     if (!answer) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
@@ -5020,9 +5039,20 @@ function agentEvents(events: [string, unknown][]) {
   }
 }
 function agentReport(p: Pane, s: Signal) {
-  // Cursor reports an interrupted turn as aborted and as an error, in either
-  // order: after an Esc or Ctrl-C, its error is that interrupt.
-  if (p.agent === "cursor" && s.kind === "fail" && s.at - p.interruptAt < 5000 && s.at >= p.interruptAt) s = { at: s.at, launch: s.launch, kind: "interrupt" };
+  if (p.agent === "cursor" && (s.launch ?? p.generation) === p.generation) {
+    if (s.kind === "start" && s.turn) p.cursorStarted = s.turn;
+    else if ((s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") && s.turn) {
+      // Cursor stops a turn once, or twice after an Esc or Ctrl-C: aborted and
+      // an error, in either order, both naming it. The first counts. A stop
+      // for another turn than one still running (a slow hook's, for a turn
+      // that ended) ends nothing: that one runs on.
+      const running = p.cursorStarted !== p.cursorEnded;
+      if (s.turn === p.cursorEnded || (running && s.turn !== p.cursorStarted)) return;
+      p.cursorEnded = s.turn;
+      // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
+      if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
+    }
+  }
   if (s.kind === "end" && s.turn) {
     const key = `${p.id}:${s.launch ?? p.generation}:${s.turn}`;
     if (turnsSeen.has(key)) return;
@@ -10465,8 +10495,9 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       const marker = effortById.get(p.id);
       if (marker === undefined) continue;
       // "effort", or "effort\nlaunch" from a writer that knows its launch: a replaced one's wakes nothing.
-      const [effort, launch] = marker.split("\n");
-      if (launch === undefined || Number(launch) === p.launched) p.wake(effort, "hook");
+      // Cursor's adds the turn: "effort\nlaunch\nturn".
+      const [effort, launch, turn] = marker.split("\n");
+      if (launch === undefined || Number(launch) === p.launched) p.wake(effort, "hook", turn);
     }
   });
 
