@@ -439,6 +439,24 @@ check("Cursor's options wrapped in a narrow pane", shape(readMenu(cursorAsk.repl
   selected: 0, multi: false,
 });
 check("Cursor's wrapped options, the highlight on the last", readMenu(cursorAsk.replace("  → Run (once) (y)", "    Run (once) (y)").replace("    Skip & tell the agent what to do instead (esc or n)", "  → Skip & tell the agent what to do\n    instead (esc or n)").replace("    Add Shell(echo) to allowlist? (tab)", "    Add Shell(echo) to\n    allowlist? (tab)"))?.options.length, 4);
+// Cursor's Write approval (2026.10.01's decision-logic): a key hint can name three keys.
+const cursorWrite = `────────────────────────────────────────────────────────────
+ Write to this file?
+  → Proceed (y)
+    Reject & propose changes (esc or n or p)
+    Add Write(test.txt) to allowlist? (tab)
+    Run Everything (shift+tab)
+
+`;
+const writeOptions = ["Proceed (y)", "Reject & propose changes (esc or n or p)", "Add Write(test.txt) to allowlist? (tab)", "Run Everything (shift+tab)"];
+check("Cursor's Write approval, four options", shape(readMenu(cursorWrite)), { question: ["Write to this file?"], options: writeOptions, selected: 0, multi: false });
+writeOptions.forEach((o, i) => {
+  // The highlight moved to option i, as Down and Up move it.
+  const moved = cursorWrite.replace("  → Proceed (y)", "    Proceed (y)").replace(`    ${o}`, `  → ${o}`);
+  check(`Cursor's Write approval, highlight on option ${i + 1}`, [readMenu(moved)?.selected, readMenu(moved)?.options], [i, writeOptions]);
+});
+check("Cursor's Write approval, its keys", menuKeys(readMenu(cursorWrite)!), ["y"]);
+check("Cursor's Write approval quoted above Codex's input is no question", readMenu(`${cursorWrite}• Done.\n\n› Ask Codex to do anything\n\n  100% context left`), null);
 const cursorTrust = `  ╭──────────────────────────────────────────────╮
   │  Do you trust the contents of this directory? │
   │                                               │

@@ -47,10 +47,11 @@ export const menuKeys = (menu: Menu) => [
 
 // Cursor's menus have no numbers. An approval marks its highlighted option
 // "→ Run (once) (y)", each option ending in its key ("(tab)", "(shift+tab)",
-// "(esc or n)"); its trust box, "▶ [a] Trust this workspace", each starting
-// with it. Up and Down move the highlight, as in the numbered ones.
+// "(esc or n)", a Write approval's "(esc or n or p)"); its trust box, "▶ [a]
+// Trust this workspace", each starting with it. Up and Down move the highlight,
+// as in the numbered ones.
 const CURSOR_PICK = /^[→▶]\s+/;
-const CURSOR_KEY = /\([a-z]+(?:\+[a-z]+)?(?: or [a-z]+)?\)$/i;
+const CURSOR_KEY = /\([a-z]+(?:\+[a-z]+)?(?: or [a-z]+(?:\+[a-z]+)?)*\)$/i;
 const CURSOR_LETTER = /^\[[a-z]\]\s+\S/i;
 
 /** Cursor's question on the screen's `raw` rows, or null. Its options sit
