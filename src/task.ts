@@ -214,7 +214,7 @@ export type Signal = { at: number; launch?: number } & (
   | { kind: "end"; matches?: string[]; turn?: string; token?: string; failed?: boolean | null; exit?: number | null; response?: string }
   | { kind: "stop"; response?: string }
   | { kind: "fail"; detail?: string; turn?: string }
-  | { kind: "approval"; detail?: string }
+  | { kind: "approval"; detail?: string; turn?: string }
   | { kind: "resume" }
   | { kind: "interrupt"; turn?: string }
 );

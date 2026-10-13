@@ -11,7 +11,7 @@ import { pruneSettled } from "./cli.ts";
 import { readMenu, readFeedback, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "turnsSeen", "turnTasks"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "turnsSeen", "turnTasks"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -26,7 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
     journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -843,7 +843,7 @@ for (const seen of [false, true]) {
   p.activity();
   if (seen) p.seen();
   clock.at = 2200;
-  f.agentReport(p, { kind: "start", at: 2020, launch: 1, match: t.match, turn: "gA" });
+  f.agentEvents([[p.id, { kind: "start", t: 2020, launch: 1, match: t.match, turn: "gA" }]]); // the poll's batch, as Rust sends it
   p.activity();
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([p.cursorAsking, p.busy, p.waiting, t.state, t.detail, pushed], [true, false, !seen, "approval", "$  echo hi in . Run this command? Not in allowlist: echo", ["approval"]], `seen ${seen}`);
@@ -858,6 +858,32 @@ for (const seen of [false, true]) {
   cursorStop(c, "completed", "gA");
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([t.state, p.waiting, pushed], ["completed", true, ["approval", "completed"]], `done, seen ${seen}`);
+}
+for (const lateEnd of [false, true]) {
+  // One poll at 2200 reads A's start (2020) and end (2060), then B's start
+  // (2110), after Cursor drew B's approval at 2140. The approval asks in B's
+  // task alone, once the batch has said B's turn runs. `lateEnd`: A's slow stop
+  // hook lands in the next poll, after B's start, and A still never asks.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, pushed, clock, f } = c;
+  clock.at = p.lastIn = 2000;
+  const a = f.turnTask(p, "submit", model.promptMatch("A"), 2000);
+  f.enterTurn(a, 2000);
+  clock.at = p.lastIn = 2090;
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 2090);
+  f.enterTurn(b, 2090);
+  clock.at = 2140;
+  view.text = CURSOR_ASK;
+  p.activity();
+  clock.at = 2200;
+  const endA = [p.id, { kind: "end", t: 2060, launch: 1, turn: "gA" }];
+  f.agentEvents([[p.id, { kind: "start", t: 2020, launch: 1, match: a.match, turn: "gA" }], ...(lateEnd ? [] : [endA]), [p.id, { kind: "start", t: 2110, launch: 1, match: b.match, turn: "gB" }]]);
+  if (lateEnd) (clock.at = 2450), f.agentEvents([endA]);
+  p.activity();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([a.state, a.detail, [...a.events].map((e: any) => e.state), b.state, [...b.events].filter((e: any) => e.state === "approval").length, p.waiting, pushed],
+    ["completed", null, ["accepted", "submitted", "working", "completed"], "approval", 1, true, lateEnd ? ["approval", "completed"] : ["completed", "approval"]], `A's end ${lateEnd ? "a poll later" : "in the same poll"}`);
 }
 for (const end of ["completed", "error", "aborted"]) {
   // An open Overview redraws when a Cursor turn stops. Done or failed, the

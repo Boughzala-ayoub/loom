@@ -2587,11 +2587,12 @@ class Pane {
     // The hook's source: one source counts a launch's turns (wake), and an approval counts as Codex's does.
     this.wake(undefined, "hook");
   }
-  /** Cursor's question asks in the pane's task. One drawn before Loom read its
-   * turn's start (the hooks are read every 250 ms) asks again once the start
-   * has moved that task (agentReport). */
+  /** Cursor's question asks in the task of the turn running now (cursorGen),
+   * never in an older one whose stop Loom hasn't read yet. One drawn before
+   * Loom read its turn's start (the hooks are read every 250 ms) asks again
+   * once that poll's batch has moved the task (agentEvents). */
   cursorAsks(menu = readMenu(liveScreen(this, false), this.agent)) {
-    if (menu) taskSignal(this, { kind: "approval", at: Date.now(), detail: menu.question.join(" ").slice(0, 200) || undefined });
+    if (menu) taskSignal(this, { kind: "approval", at: Date.now(), detail: menu.question.join(" ").slice(0, 200) || undefined, turn: this.cursorGen });
   }
 
   /** GPU rendering. A page gets ~16 WebGL contexts, so they are budgeted:
@@ -5025,8 +5026,9 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
   const launch = s.launch ?? p.generation;
   let open = [...tasks.values()].filter((t) => t.pane === p.id && t.gen === launch && t.events.length && !isFinal(t.state));
   // A report naming its turn goes to the task that turn's start moved, however
-  // late, and never to a task another turn's start moved (turnTasks).
-  const turn = s.kind === "end" || s.kind === "fail" || s.kind === "interrupt" ? s.turn : undefined;
+  // late, and never to a task another turn's start moved (turnTasks). Cursor's
+  // question names the turn running when it shows (cursorAsks).
+  const turn = s.kind === "end" || s.kind === "fail" || s.kind === "interrupt" || s.kind === "approval" ? s.turn : undefined;
   if (turn) {
     const own = turnTasks.get(`${p.id}:${launch}:${turn}`), tied = new Set(turnTasks.values());
     open = open.filter((t) => (own ? t.id === own : !tied.has(t.id)));
@@ -5086,10 +5088,16 @@ function routeAgentBatches(skipTo: number) {
 /** An agent's report from its event file (lib.rs send_task_events). */
 /** Reports from the agents, as Rust hands them over (send_task_events, pty_shutdown). */
 function agentEvents(events: [string, unknown][]) {
+  const started = new Set<Pane>();
   for (const [id, ev] of events) {
     const p = paneById(id), s = parseSignal(ev);
     if (p && s) agentReport(p, s);
+    if (p && s?.kind === "start") started.add(p);
   }
+  // A question Cursor drew before Loom read its turn's start asked in no task:
+  // the task was still submitted. It asks once the whole batch has said which
+  // turn runs now, never after an older start the batch replays.
+  for (const p of started) if (p.agent === "cursor" && p.cursorAsking) p.cursorAsks();
 }
 function agentReport(p: Pane, s: Signal) {
   const stopped = s.kind === "end" || (p.agent === "cursor" && (s.kind === "fail" || s.kind === "interrupt")) ? s.turn : undefined;
@@ -5136,9 +5144,6 @@ function agentReport(p: Pane, s: Signal) {
     }
   }
   taskSignal(p, s);
-  // A question Cursor drew before Loom read this start asked in no task: the
-  // task was still submitted. It asks in the one the start moved.
-  if (p.agent === "cursor" && s.kind === "start" && p.cursorAsking && (s.launch ?? p.generation) === p.generation) p.cursorAsks();
 }
 
 /** How long an agent may look idle, with a task working and no end reported,
