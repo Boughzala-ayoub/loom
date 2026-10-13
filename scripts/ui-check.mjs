@@ -1588,6 +1588,50 @@ try {
     assert.deepEqual([await cursorState(), await cursorCard.locator('.dashboard-choices button').count()], ['waiting', 4], `The late start leaves Cursor's approval waiting with its options, ${width}px`);
     await audit('cursor-early-approval');
     await page.click('#dashboard-btn');
+    const cursorKey = async (key, data) => {
+      const from = await page.evaluate(() => window.qa.calls.length);
+      await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+      await page.keyboard.press(key);
+      await page.waitForFunction(([id, from, data]) => window.qa.calls.slice(from).some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data === data), [cursor.id, from, data]);
+    };
+    await cursorKey('y', 'y');
+    await cursorOut('\x1b[2J\x1b[H  run echo hi again\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
+    await cursorReport({ kind: 'end', turn: 'g2' });
+    await until(async () => (await earlyTask())?.state === 'completed', `Answered, the early approval's turn completes, ${width}px`);
+    // Cursor ends A and asks for B before one poll reads A's start, A's end and B's start. The
+    // approval asks in B's task alone: A ends with no approval in its history.
+    const cursorTasksBefore = new Set((await cli('tasks')).data.map(t => t.task));
+    await page.keyboard.type('run A');
+    await cursorKey('Enter', '\r');
+    const aStart = Date.now();
+    await cursorOut('\x1b[2J\x1b[H  A is done.\r\n\r\n  → Add a follow-up\r\n');
+    const aEnd = Date.now();
+    await page.keyboard.type('run B');
+    await cursorKey('Enter', '\r');
+    const bStart = Date.now();
+    await page.evaluate(() => ((window.qa.cursorSel = 0), window.qa.drawCursorAsk()));
+    await until(async () => (await cursorState()) === 'waiting', `B's approval waits on you, ${width}px`);
+    await page.evaluate(([id, events, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: events.map(e => [id, e]) } }),
+      [cursor.id, [{ kind: 'start', t: aStart, turn: 'gA', match: '0123456789abcdef' }, { kind: 'end', t: aEnd, turn: 'gA' }, { kind: 'start', t: bStart, turn: 'gB', match: '0123456789abcdef' }].map(e => ({ ...e, launch: cursor.launch, src: 'cursor' })), ++cursorBatch]);
+    const turnTasks = async () => (await cli('tasks')).data.filter(t => t.agent === 'cursor' && !cursorTasksBefore.has(t.task));
+    await until(async () => (await turnTasks()).map(t => t.state).join() === 'completed,approval', `One poll ends A and starts B, ${width}px`);
+    const [taskA, taskB] = await turnTasks();
+    assert.deepEqual([taskA.events.map(e => e.state), taskA.detail, taskB.events.filter(e => e.state === 'approval').length, await cursorState()],
+      [['accepted', 'submitted', 'working', 'completed'], null, 1, 'waiting'], `B's approval asks in B's task alone, ${width}px`);
+    // Esc asks for feedback, and Ctrl-C skips it. Cursor redraws before the Ctrl-C's write is
+    // acknowledged. The task works on, and the turn's genuine error fails it, with its alert.
+    await cursorKey('Escape', '\x1b');
+    await cursorOut('\x1b[2J\x1b[H  → Tell the agent what to do instead (Enter to send, empty to skip, Esc to cancel)   ctrl+c to stop\r\n');
+    await page.evaluate(id => ((window.qa.pendingWrites = []), (window.qa.holdWrites = id)), cursor.id);
+    await page.keyboard.press('Control+c');
+    await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+    await cursorOut('\x1b[2J\x1b[H  ⬢ Rejected echo hi\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
+    await page.evaluate(() => ((window.qa.holdWrites = null), window.qa.pendingWrites.splice(0).forEach(done => done())));
+    await until(async () => (await cli('task', taskB.task)).data.state === 'working', `Skipping the feedback resumes B, ${width}px`);
+    await cursorReport({ kind: 'fail', turn: 'gB', detail: 'Cursor reported an error' });
+    await until(async () => (await cli('task', taskB.task)).data.state === 'failed', `B's genuine error fails it, ${width}px`);
+    assert.equal(await cursorState(), 'waiting', `B's failure raises its alert, ${width}px`);
+    await audit('cursor-feedback-failed');
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');
