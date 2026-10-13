@@ -384,8 +384,8 @@ const CURSOR_ASK = ` $  echo hi in .
     Run Everything (shift+tab)
     Skip & tell the agent what to do instead (esc or n)
 `;
-const cursorPane = (view: { text: string }) => {
-  const c = claudePane({ readMenu, menuRev, menuKeys, readSurvey, liveScreen: () => view.text, turnReceipts() {} });
+const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {}) => {
+  const c = claudePane({ readMenu, menuRev, menuKeys, readSurvey, liveScreen: () => view.text, turnReceipts() {}, ...extra });
   c.p.agent = "cursor";
   return c;
 };
@@ -622,5 +622,29 @@ for (const order of [["error", "aborted"], ["aborted", "error"]]) for (const one
   cursorStop(c, "error", "gB");
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([b.state, p.waiting, pushed], ["failed", true, ["failed"]], `then B's own error, ${what}`);
+}
+// loomctl send --receipt's receipts, finished by the production finishReceipt and turnReceipts.
+const receiptCode = ts.transpileModule(source.statements.filter((n) => ts.isFunctionDeclaration(n) && ["finishReceipt", "turnReceipts"].includes(n.name!.text)).map((n) => n.getText(source)).join("\n")
+  + "\nglobalThis.turnReceipts = turnReceipts;", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+for (const end of ["error", "completed"]) {
+  // A's stop lands after B started. It ends A's task, which notifies, and
+  // leaves B's pane working and B's receipt waiting until B's own end.
+  const receipts = new Map<string, any>([["B", { pane: "pane-1", gen: 1, turnsAt: 0 }]]);
+  const scope = createContext({ receipts, settlings: 0, keepReceipts() {} });
+  runInContext(receiptCode, scope);
+  const c = cursorPane({ text: "" }, { turnReceipts: scope.turnReceipts });
+  const { p, pushed, clock } = c;
+  clock.at = p.lastIn = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = p.lastIn = 2100;
+  const b = cursorPrompt(c, "B", "gB");
+  clock.at = 2300;
+  cursorStop(c, end, "gA");
+  await new Promise((r) => setTimeout(r, 0));
+  const ended = end === "error" ? "failed" : "completed";
+  assert.deepEqual([a.state, b.state, p.busy, p.waiting, p.turns, receipts.get("B").result?.turn ?? null, pushed], [ended, "working", true, false, 0, null, [ended]], `A's late ${end}`);
+  clock.at = 5000;
+  cursorStop(c, "completed", "gB");
+  assert.deepEqual([b.state, p.busy, p.waiting, p.turns, receipts.get("B").result?.turn], ["completed", false, true, 1, 1], `then B's end, after A's ${end}`);
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");

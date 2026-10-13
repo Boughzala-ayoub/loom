@@ -5077,8 +5077,11 @@ function agentReport(p: Pane, s: Signal) {
         // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
         if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
       }
-      // Done or failed raises the alert (its wake marker doesn't); stopped raises none.
-      if (s.kind !== "interrupt" && !p.dead) p.wake(undefined, "hook");
+      // Done or failed raises the alert (its wake marker doesn't); stopped
+      // raises none. Only the pane's current turn's: an older one's stop ends
+      // its own task, which notifies, while the pane and its receipts wait
+      // for the newer turn's end.
+      if (s.kind !== "interrupt" && !p.dead && (!s.turn || s.turn === p.cursorGen)) p.wake(undefined, "hook");
     }
   }
   if (s.kind === "end" && s.turn) {
