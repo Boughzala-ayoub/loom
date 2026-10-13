@@ -1927,10 +1927,13 @@ class Pane {
   /** Cursor's turns by their generation_id, which its hooks name: the one
    * the wakes last said runs (cursorGen), and the one an Esc or Ctrl-C went
    * into (cursorEsc), whose error is that interrupt, and the last whose stop
-   * counted (agentReport). */
+   * counted (agentReport). cursorEscAt: when the last Esc or Ctrl-C that
+   * answered no question went in, which a turn that started before it (its
+   * start report says when) takes as its own, once Loom hears of that turn. */
   cursorGen: string | undefined;
   cursorEsc: string | undefined;
   cursorEnded: string | undefined;
+  cursorEscAt = 0;
   /** Cursor shows a question (an approval, trusting its folder), read off the
    * screen: no hook reports one. Raised once per question (cursorQuestion). */
   cursorAsking = false;
@@ -2372,6 +2375,7 @@ class Pane {
     this.codexAsking = false;
     this.cursorTurn = undefined;
     this.cursorGen = this.cursorEsc = this.cursorEnded = undefined;
+    this.cursorEscAt = 0;
     this.cursorAsking = false;
     this.cursorAnswered = undefined;
     this.programState = undefined;
@@ -2675,18 +2679,16 @@ class Pane {
       if (this.dead) return;
       // A stop for another turn than the one running: a slow hook's, for one that ended.
       if (state !== "busy" && turn && this.cursorTurn && turn !== this.cursorGen) return;
-      if (state === "busy") this.cursorGen = turn;
+      if (state === "busy") (this.cursorGen = turn), (this.waiting = false);
       this.cursorTurn = state === "busy";
-      // Esc ends a turn twice, aborted and error in either order, both naming
-      // it, and neither raises the alert: you stopped it (OMP's idle after Esc
-      // raises none either). Another turn's error is its own.
-      if (state === "busy" || state === "aborted" || (state === "error" && turn !== undefined && turn === this.cursorEsc)) {
-        if (state === "busy") this.waiting = false;
-        this.busy = state === "busy" && !this.cursorAsking;
-        this.paint();
-        if (dashboardOpen) renderDashboard();
-        return;
-      }
+      this.busy = state === "busy" && !this.cursorAsking;
+      this.paint();
+      if (dashboardOpen) renderDashboard();
+      // A stop's alert comes with its report (agentReport): only that says,
+      // in order, whether an Esc or Ctrl-C stopped the turn, and then none
+      // comes (OMP's idle after Esc raises none either). Its marker can land
+      // first, in the same poll as the turn's start.
+      return;
     }
     if (effort && /^[a-z]+$/.test(effort) && effort !== this.effort) {
       this.effort = effort;
@@ -2983,8 +2985,12 @@ class Pane {
       this.interruptAt = Date.now();
       this.codexAsking = false;
       // On Cursor's question, Esc and Ctrl-C answer it (propose or reject:
-      // the turn goes on), so only one with none on screen stops the turn.
-      if (this.cursorTurn && !this.cursorAsking) this.cursorEsc = this.cursorGen;
+      // the turn goes on), so only one with none on screen stops the turn:
+      // the one running, or one Loom hasn't heard of yet (agentReport).
+      if (this.agent === "cursor" && !this.cursorAsking) {
+        this.cursorEscAt = Date.now();
+        if (this.cursorTurn) this.cursorEsc = this.cursorGen;
+      }
       this.answeredCursor();
     }
     if (!answer) return;
@@ -5057,14 +5063,23 @@ function agentEvents(events: [string, unknown][]) {
   }
 }
 function agentReport(p: Pane, s: Signal) {
-  if (p.agent === "cursor" && (s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") && s.turn && (s.launch ?? p.generation) === p.generation) {
-    // Cursor stops a turn once, or twice after an Esc or Ctrl-C: aborted and
-    // an error, in either order, both naming it. The first counts, and goes
-    // to that turn's task (taskSignal), even after a newer turn started.
-    if (s.turn === p.cursorEnded) return;
-    p.cursorEnded = s.turn;
-    // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
-    if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
+  if (p.agent === "cursor" && (s.launch ?? p.generation) === p.generation) {
+    // An Esc or Ctrl-C that went in after this turn's prompt hook stopped it,
+    // even one Loom sent before it heard of the turn (the hooks are read every 250 ms).
+    if (s.kind === "start" && s.turn && p.cursorEscAt >= s.at) p.cursorEsc = s.turn;
+    if (s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") {
+      if (s.turn) {
+        // Cursor stops a turn once, or twice after an Esc or Ctrl-C: aborted and
+        // an error, in either order, both naming it. The first counts, and goes
+        // to that turn's task (taskSignal), even after a newer turn started.
+        if (s.turn === p.cursorEnded) return;
+        p.cursorEnded = s.turn;
+        // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
+        if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
+      }
+      // Done or failed raises the alert (its wake marker doesn't); stopped raises none.
+      if (s.kind !== "interrupt" && !p.dead) p.wake(undefined, "hook");
+    }
   }
   if (s.kind === "end" && s.turn) {
     const key = `${p.id}:${s.launch ?? p.generation}:${s.turn}`;

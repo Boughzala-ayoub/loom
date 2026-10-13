@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEnded", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEnded", "cursorEscAt", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -586,5 +586,41 @@ for (const order of [["aborted", "error"], ["error", "aborted"]]) {
   clock.at = 3000;
   cursorStop(c, "completed", "gB");
   assert.deepEqual([a.state, b.state], ["failed", "completed"]);
+}
+for (const order of [["error", "aborted"], ["aborted", "error"]]) for (const onePoll of [false, true]) {
+  // Esc goes in before Loom has read the turn's first hooks (no cursorTurn or
+  // cursorGen yet). Its start, stamped before the Esc, ties the Esc to it, so
+  // both stops read as the interrupt, in either order. `onePoll`: all of it
+  // lands in one 250 ms poll, so the wake marker (the last stop's: each
+  // replaces the one before) comes before any report. A later turn's
+  // genuine error is its own.
+  const c = cursorPane({ text: "" });
+  const { p, tasks, pushed, clock, f } = c;
+  clock.at = 1000;
+  const t = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(t, 1000);
+  clock.at = 1100;
+  p.wrote("\x1b", true, p.answers("\x1b"));
+  clock.at = 1300;
+  const start = () => f.agentReport(p, { kind: "start", at: 1050, launch: 1, match: t.match, turn: "gA" });
+  const report = (end: string) => f.agentReport(p, end === "aborted" ? { kind: "interrupt", at: 1200, launch: 1, turn: "gA" } : { kind: "fail", at: 1200, launch: 1, detail: "Cursor reported an error", turn: "gA" });
+  if (onePoll) {
+    p.wake(`cursor:${order[1]}`, "hook", "gA");
+    start();
+    order.forEach(report);
+  } else {
+    p.wake("cursor:busy", "hook", "gA");
+    start();
+    for (const end of order) (p.wake(`cursor:${end}`, "hook", "gA"), report(end));
+  }
+  await new Promise((r) => setTimeout(r, 0));
+  const what = `${order.join(" then ")}${onePoll ? ", in one poll" : ""}`;
+  assert.deepEqual([t.state, p.busy, p.waiting, pushed, tasks.size], ["cancelled", false, false, [], 1], what);
+  clock.at = 2000;
+  const b = cursorPrompt(c, "B", "gB");
+  clock.at = 3000;
+  cursorStop(c, "error", "gB");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([b.state, p.waiting, pushed], ["failed", true, ["failed"]], `then B's own error, ${what}`);
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");
