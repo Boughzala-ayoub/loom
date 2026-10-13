@@ -11,7 +11,7 @@ import { pruneSettled } from "./cli.ts";
 import { readMenu, menuRev, menuKeys, readSurvey } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "turnsSeen"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "turnsSeen", "turnTasks"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorStarted", "cursorEnded", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEnded", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -552,5 +552,39 @@ for (const key of ["\x1b", "\x03"]) {
   cursorStop(c, "error", "gA");
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([t.state, p.waiting, pushed], ["failed", true, ["approval", "failed"]], JSON.stringify(key));
+}
+for (const order of [["aborted", "error"], ["error", "aborted"]]) {
+  // Esc stops A, and B starts before either of A's stops lands. They end A,
+  // the task A's start moved, and leave B working; B's end completes B alone.
+  const c = cursorPane({ text: "" });
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = 2000;
+  p.wrote("\x1b", true, false);
+  clock.at = 2100;
+  const b = cursorPrompt(c, "B", "gB");
+  clock.at = 2300;
+  for (const end of order) cursorStop(c, end, "gA");
+  assert.deepEqual([a.state, b.state, p.busy, p.waiting], ["cancelled", "working", true, false], `A's ${order.join(" then ")} after B started`);
+  clock.at = 3000;
+  cursorStop(c, "completed", "gB");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([a.state, b.state, p.waiting, pushed], ["cancelled", "completed", true, ["completed"]], `then B's end, ${order.join(" then ")}`);
+}
+{
+  // A fails for real, its report landing after B started: A fails, B works on and completes.
+  const c = cursorPane({ text: "" });
+  const { clock } = c;
+  clock.at = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = 2100;
+  const b = cursorPrompt(c, "B", "gB");
+  clock.at = 2300;
+  cursorStop(c, "error", "gA");
+  assert.deepEqual([a.state, b.state], ["failed", "working"]);
+  clock.at = 3000;
+  cursorStop(c, "completed", "gB");
+  assert.deepEqual([a.state, b.state], ["failed", "completed"]);
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");

@@ -1926,11 +1926,10 @@ class Pane {
   cursorTurn: boolean | undefined;
   /** Cursor's turns by their generation_id, which its hooks name: the one
    * the wakes last said runs (cursorGen), and the one an Esc or Ctrl-C went
-   * into (cursorEsc), whose error is that interrupt. Its reports (agentReport)
-   * keep their own: the last that started, and the last whose stop counted. */
+   * into (cursorEsc), whose error is that interrupt, and the last whose stop
+   * counted (agentReport). */
   cursorGen: string | undefined;
   cursorEsc: string | undefined;
-  cursorStarted: string | undefined;
   cursorEnded: string | undefined;
   /** Cursor shows a question (an approval, trusting its folder), read off the
    * screen: no hook reports one. Raised once per question (cursorQuestion). */
@@ -2372,7 +2371,7 @@ class Pane {
     this.codexState = undefined;
     this.codexAsking = false;
     this.cursorTurn = undefined;
-    this.cursorGen = this.cursorEsc = this.cursorStarted = this.cursorEnded = undefined;
+    this.cursorGen = this.cursorEsc = this.cursorEnded = undefined;
     this.cursorAsking = false;
     this.cursorAnswered = undefined;
     this.programState = undefined;
@@ -4991,13 +4990,24 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
     return void startupTurns.push(() => taskSignal(p, signal, now));
   }
   const launch = s.launch ?? p.generation;
-  const open = [...tasks.values()].filter((t) => t.pane === p.id && t.gen === launch && t.events.length && !isFinal(t.state));
+  let open = [...tasks.values()].filter((t) => t.pane === p.id && t.gen === launch && t.events.length && !isFinal(t.state));
+  // A report naming its turn goes to the task that turn's start moved, however
+  // late, and never to a task another turn's start moved (turnTasks).
+  const turn = s.kind === "end" || s.kind === "fail" || s.kind === "interrupt" ? s.turn : undefined;
+  if (turn) {
+    const own = turnTasks.get(`${p.id}:${launch}:${turn}`), tied = new Set(turnTasks.values());
+    open = open.filter((t) => (own ? t.id === own : !tied.has(t.id)));
+  }
   // An agent's start names a prompt by its text alone, never by the Enter
   // that sent it, so it can't prove a doubted Enter went in: an earlier prompt
   // of the same text, its report written late, looks the same (task.ts
   // changeFields keeps the doubt; only a shell's token, which is this task's
   // own, clears it).
   const moved = route(open, s);
+  if (s.kind === "start" && s.turn) {
+    for (const [t, c] of moved) if (c.state === "working") turnTasks.set(`${p.id}:${launch}:${s.turn}`, t.id);
+    if (turnTasks.size > 1000) turnTasks.delete(turnTasks.keys().next().value!);
+  }
   if (adoptManual(p, s, launch, moved, ctx) || (!moved.length && agentTurn(p, s, launch, open, ctx))) return;
   for (const [t, c] of moved) {
     // The latest Stop's final message is the one its completion names.
@@ -5013,6 +5023,11 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
 /** Codex turns already counted, by pane and turn id: a turn reported twice
  * completes nothing the second time. */
 const turnsSeen = new Set<string>();
+/** The task each turn's start moved, by pane, launch and the turn's own id
+ * (Cursor's generation_id), kept after the task ends. A report naming the
+ * turn goes to that task alone (taskSignal): a slow hook's stop for a turn
+ * that a newer one followed still ends its own, and never the newer one's. */
+const turnTasks = new Map<string, string>();
 /** The last numbered batch of reports handled: closing waits for every one Rust sent before it shut the panes down. */
 let agentBatch = 0;
 const agentBatches = new Map<number, [string, unknown][]>();
@@ -5042,19 +5057,14 @@ function agentEvents(events: [string, unknown][]) {
   }
 }
 function agentReport(p: Pane, s: Signal) {
-  if (p.agent === "cursor" && (s.launch ?? p.generation) === p.generation) {
-    if (s.kind === "start" && s.turn) p.cursorStarted = s.turn;
-    else if ((s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") && s.turn) {
-      // Cursor stops a turn once, or twice after an Esc or Ctrl-C: aborted and
-      // an error, in either order, both naming it. The first counts. A stop
-      // for another turn than one still running (a slow hook's, for a turn
-      // that ended) ends nothing: that one runs on.
-      const running = p.cursorStarted !== p.cursorEnded;
-      if (s.turn === p.cursorEnded || (running && s.turn !== p.cursorStarted)) return;
-      p.cursorEnded = s.turn;
-      // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
-      if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
-    }
+  if (p.agent === "cursor" && (s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") && s.turn && (s.launch ?? p.generation) === p.generation) {
+    // Cursor stops a turn once, or twice after an Esc or Ctrl-C: aborted and
+    // an error, in either order, both naming it. The first counts, and goes
+    // to that turn's task (taskSignal), even after a newer turn started.
+    if (s.turn === p.cursorEnded) return;
+    p.cursorEnded = s.turn;
+    // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
+    if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
   }
   if (s.kind === "end" && s.turn) {
     const key = `${p.id}:${s.launch ?? p.generation}:${s.turn}`;
