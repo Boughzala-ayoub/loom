@@ -35,8 +35,9 @@ const CLAUDE_HOOKS: &str = include_str!("claude-hooks.json");
 /// global config directory; inert outside a Loom pane.
 const OPENCODE_PLUGIN: &str = include_str!("loom-opencode.js");
 
-/// One `pty_write`: the bytes, and where the pane's writer thread reports the result.
-type Input = (String, tauri::async_runtime::Sender<Result<(), String>>);
+/// One `pty_write`: the bytes, and where the pane's writer thread reports
+/// when it began writing them (ms since the epoch), or why it couldn't.
+type Input = (String, tauri::async_runtime::Sender<Result<u64, String>>);
 
 #[derive(Default)]
 struct Resizes {
@@ -576,7 +577,10 @@ fn pty_spawn(
             let result = match pipe.upgrade() {
                 Some(writer) => {
                     let mut writer = writer.lock().unwrap();
-                    writer.write_all(data.as_bytes()).and_then(|_| writer.flush()).map_err(|e| e.to_string())
+                    // Not before: a key queued behind a slow write goes in later than it
+                    // was sent, and a Cursor stop it caused is stamped after this (main.ts wrote).
+                    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                    writer.write_all(data.as_bytes()).and_then(|_| writer.flush()).map(|_| at).map_err(|e| e.to_string())
                 }
                 None => Err("no such pty".to_string()),
             };
@@ -660,8 +664,9 @@ fn pty_spawn(
 
 /// Hands the bytes to the pane's writer thread and waits for its result, so a
 /// failed write still rejects. A full input pipe holds no worker while it waits.
+/// Resolves to when the writer began writing them.
 #[tauri::command]
-async fn pty_write(ptys: State<'_, Ptys>, id: String, data: String) -> Result<(), String> {
+async fn pty_write(ptys: State<'_, Ptys>, id: String, data: String) -> Result<u64, String> {
     let (reply, mut result) = tauri::async_runtime::channel(1);
     ptys.0.lock().unwrap().get(&id).ok_or("no such pty")?.input.send((data, reply)).map_err(|_| "no such pty")?;
     result.recv().await.unwrap_or_else(|| Err("no such pty".into()))

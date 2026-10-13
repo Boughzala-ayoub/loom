@@ -2247,8 +2247,8 @@ class Pane {
       this.inputSeq++;
       this.usePrompt(d);
       const waitingSince = this.waitingSince, sent = this.sending(d);
-      void invoke("pty_write", { id: this.id, data: d }).then(() => {
-        this.wrote(d, true, sent);
+      void invoke<number>("pty_write", { id: this.id, data: d }).then((began) => {
+        this.wrote(d, true, sent, began || undefined);
         release();
         if (this.waitingSince === waitingSince) this.seen(); // A failed write must leave the attention signal intact.
         if (d === "\x1b" && this.agent === "codex" && this.busy) ((this.busy = false), this.paint());
@@ -3005,11 +3005,14 @@ class Pane {
    * redraw for it before the write is acknowledged (wrote). `answer`: it
    * settles the question on screen (answers), and `menu`, which of Cursor's
    * (menuRev). `stop`: an Esc or Ctrl-C with neither Cursor's question nor
-   * its feedback open, which stops the turn running. */
+   * its feedback open, which stops the turn running: that turn, when it was
+   * typed, and a hold on the pane's reports until its write's outcome is in
+   * (holdReports). */
   sending(d: string): Meant {
     const answer = this.answers(d), cursor = this.agent === "cursor";
     const menu = answer && cursor && this.cursorAsking ? readMenu(liveScreen(this, false), this.agent) : null;
-    return { answer, ...(menu ? { menu: menuRev(menu) } : {}), stop: cursor && (d === "\x1b" || d === "\x03") && !this.cursorAsking && !this.cursorFeedback };
+    const stop = cursor && (d === "\x1b" || d === "\x03") && !this.cursorAsking && !this.cursorFeedback;
+    return { answer, ...(menu ? { menu: menuRev(menu) } : {}), ...(stop ? { stop: { turn: this.cursorTurn ? this.cursorGen : undefined, at: Date.now(), release: holdReports(this) } } : {}) };
   }
   /** Cursor's question `rev` is answered, the one on screen as the answer was
    * typed: drawn on until Cursor redraws, it isn't asked again, while one
@@ -3032,19 +3035,22 @@ class Pane {
    * failed leaves the question asked, and the task says the answer is in
    * doubt (`answerInDoubt`, not `uncertain`: an answer says nothing about the
    * task's own Enter). */
-  wrote(data: string, delivered: boolean, sent: Meant) {
+  wrote(data: string, delivered: boolean, sent: Meant, began?: number) {
+    const stop = sent.stop;
     if (delivered && (data === "\x1b" || data === "\x03")) {
       this.interruptAt = Date.now();
       this.codexAsking = false;
       // Cursor's: only one typed with neither its question nor its feedback
-      // open stops the turn: the one running, or one Loom hasn't heard of yet
-      // (agentReport).
-      if (sent.stop) {
-        const at = Date.now();
+      // open stops the turn: the one running as it was typed, or one Loom
+      // hasn't heard of yet (agentReport). It counts from when the pane's
+      // writer began writing it (`began`), or else when it was typed. An error
+      // Cursor wrote before that is the turn's own.
+      if (stop) {
+        const at = began ?? stop.at;
         // ponytail: the last 16 only; one 250 ms poll's starts need far fewer.
         if (this.cursorEscs.push(at) > 16) this.cursorEscs.shift();
         // The first Esc into a turn stopped it.
-        if (this.cursorTurn && this.cursorGen && !this.cursorEsc.has(this.cursorGen)) this.cursorEsc.set(this.cursorGen, at);
+        if (stop.turn && !this.cursorEsc.has(stop.turn)) this.cursorEsc.set(stop.turn, at);
       }
       // Ctrl-C ends Cursor's feedback, if it was open. Esc can open it or end
       // it, so only the screen says (cursorQuestion).
@@ -3052,6 +3058,8 @@ class Pane {
       // Cursor's redraw still reads as the skip; one more draw tells them apart.
       if (data === "\x03") this.cursorFeedback = false;
     }
+    // The reports held while it went in are judged now, with its outcome in.
+    stop?.release();
     if (!sent.answer) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
@@ -4228,7 +4236,7 @@ function keys(p: Pane, data: string) {
   p.inputSeq++;
   p.usePrompt(data);
   const sent = p.sending(data);
-  return invoke("pty_write", { id: p.id, data }).then(() => p.wrote(data, true, sent), (e) => {
+  return invoke<number>("pty_write", { id: p.id, data }).then((began) => p.wrote(data, true, sent, began || undefined), (e) => {
     p.wrote(data, false, sent);
     throw e;
   });
@@ -5096,7 +5104,31 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
 }
 
 /** What a write means to the process, read as it's typed (Pane.sending). */
-type Meant = { answer: boolean; menu?: string; stop: boolean };
+type Meant = { answer: boolean; menu?: string; stop?: { turn?: string; at: number; release: () => void } };
+
+/** A Cursor pane's reports, held unjudged while an Esc or Ctrl-C that stops
+ * its turn is written (Pane.sending). Cursor's stop reports can arrive before
+ * the write is acknowledged, and its error is that interrupt only if the key
+ * went in, and before Cursor wrote it (Pane.wrote, agentReport): judged at
+ * once, a real Esc's error would fail the turn, and its aborted would then be
+ * a duplicate. Judged in order once every such write's outcome is in.
+ * ponytail: as with an Enter's hold (holdSignals), a write returns once the
+ * process reads its input or the pane is killed. */
+const reportsHeld = new Map<string, { events: [string, unknown][]; holds: number }>();
+/** Holds a pane's reports for one write. Returns its release; a second call does nothing. */
+function holdReports(p: Pane): () => void {
+  const held = reportsHeld.get(p.id) ?? { events: [], holds: 0 };
+  held.holds++;
+  reportsHeld.set(p.id, held);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    if (--held.holds > 0) return;
+    reportsHeld.delete(p.id);
+    agentEvents(held.events);
+  };
+}
 
 /** Turns whose stop already counted, by pane, launch and the agent's own
  * turn id: Codex's end, which can come twice, and Cursor's first stop of a
@@ -5133,6 +5165,11 @@ function routeAgentBatches(skipTo: number) {
 function agentEvents(events: [string, unknown][]) {
   const started = new Set<Pane>();
   for (const [id, ev] of events) {
+    const held = reportsHeld.get(id);
+    if (held) {
+      held.events.push([id, ev]);
+      continue;
+    }
     const p = paneById(id), s = parseSignal(ev);
     if (p && s) agentReport(p, s);
     if (p && s?.kind === "start") started.add(p);
@@ -10327,7 +10364,11 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
         if (!expired) { expired = true; throw new Error(`Timed out waiting for agent report batch ${agentBatch + 1} of ${shut.emitted}; closing again goes on without it`); }
         routeAgentBatches(shut.emitted);
       }
-      agentEvents(shut.events.splice(0));
+      // A write still out won't be acknowledged now: the reports it held go in
+      // as they are (holdReports), and its late release replays nothing.
+      const stalled = [...reportsHeld.values()].flatMap((h) => h.events.splice(0));
+      reportsHeld.clear();
+      agentEvents([...stalled, ...shut.events.splice(0)]);
       sweepTasks(true);
       await drainJournal();
 

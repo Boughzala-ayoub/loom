@@ -11,7 +11,7 @@ import { pruneSettled } from "./cli.ts";
 import { readMenu, readFeedback, cursorKey, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "turnsSeen", "turnTasks"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "reportsHeld", "holdReports", "turnsSeen", "turnTasks"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -26,7 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
     journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, moveTask };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, holdReports, moveTask };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -180,7 +180,7 @@ const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting"
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, moveTask: fx.f.moveTask, tasks: fx.tasks, ...extra,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, tasks: fx.tasks, ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
   const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
@@ -885,6 +885,36 @@ for (const order of [["error", "aborted"], ["aborted", "error"]]) {
   order.forEach((end, i) => cursorStop(c, end, "gB", 2170 + 10 * i));
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([a.state, b.state, pushed], ["failed", "cancelled", ["failed"]], `A's error, then B's ${order.join(" then ")}`);
+}
+for (const [how, began, stops, delivered, end] of [
+  // Esc goes in at 2000 while A works. Cursor writes its error and aborted for
+  // gA, either first, and the poll at 2250 reads both before the write's
+  // acknowledgement at 2300. The reports wait for that outcome, then A ends
+  // cancelled, with no alert.
+  ["error first", undefined, [["fail", 2010], ["interrupt", 2020]], true, "cancelled"],
+  ["aborted first", undefined, [["interrupt", 2010], ["fail", 2020]], true, "cancelled"],
+  // A's genuine error, written before the Esc went in, is its own: before the
+  // key was typed, or while the pane's writer still wrote what came before it
+  // (it began writing the Esc at 2100).
+  ["error before the Esc", undefined, [["fail", 1990]], true, "failed"],
+  ["error before the writer began", 2100, [["fail", 2050]], true, "failed"],
+  // An Esc whose write failed may not have gone in: the error stays A's own.
+  ["write failed", undefined, [["fail", 2010]], false, "failed"],
+] as const) {
+  const c = cursorPane({ text: "" });
+  const { p, pushed, clock, f } = c;
+  clock.at = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = p.lastIn = 2000;
+  const sent = p.sending("\x1b");
+  clock.at = 2250;
+  f.agentEvents(stops.map(([kind, t]) => [p.id, { kind, t, launch: 1, turn: "gA", ...(kind === "fail" ? { detail: "Cursor reported an error" } : {}) }]));
+  assert.equal(a.state, "working", `${how}: the reports wait for the write`);
+  clock.at = 2300;
+  p.wrote("\x1b", delivered, sent, began);
+  await new Promise((r) => setTimeout(r, 0));
+  const failed = end === "failed";
+  assert.deepEqual([a.state, p.waiting, pushed], [end, failed, failed ? ["failed"] : []], how);
 }
 for (const escA of [false, true]) for (const order of [["error", "aborted"], ["aborted", "error"]]) {
   // One poll at 2200 reads both turns' hooks, neither start heard before it.

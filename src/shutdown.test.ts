@@ -20,7 +20,7 @@ let closeHandler: () => Promise<void>;
 const pendingWrites = ["final report"];
 let diskFull = true;
 class TestError extends Error {}
-const sandbox = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false,
+const sandbox = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false, reportsHeld: new Map(),
   document: { body: { inert: false } }, threads: [{ panes: [p] }], MAX_PANES: 8,
   pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(),
   drainJournal: async () => { if (++drains > 1 && diskFull) throw new Error("disk full"); if (!diskFull) pendingWrites.length = 0; },
@@ -68,7 +68,7 @@ async function page(sentBefore: number, emitted: number) {
   let clock = 0, onBatch = (_: { payload: unknown }) => {}, request = async () => {};
   const routed: string[] = [], toasts: string[] = [];
   const sandbox = createContext({ console, Date: { now: () => clock }, setTimeout: (f: () => void, ms: number) => { clock += ms; setTimeout(f, 0); },
-    agentBatch: 0, agentBatches: new Map(), shuttingDown: false, relaunching: false, document: { body: { inert: false } }, threads: [{ panes: [{ id: "p", paint() {} }] }],
+    agentBatch: 0, agentBatches: new Map(), reportsHeld: new Map(), shuttingDown: false, relaunching: false, document: { body: { inert: false } }, threads: [{ panes: [{ id: "p", paint() {} }] }],
     pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
     invoke: async (cmd: string) => cmd === "agent_batch_base" ? sentBefore : { events: [["p", "final"]], emitted },
     listen: async (_: string, f: typeof onBatch) => { onBatch = f; return () => {}; },
@@ -103,7 +103,7 @@ console.log("ok   R16-5 a batch that never lands is given up on by the second cl
 for (const fails of [false, true]) {
   const order: string[] = [];
   let request = async () => {};
-  const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: true, document: { body: { inert: false } },
+  const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: true, reportsHeld: new Map(), document: { body: { inert: false } },
     threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(),
     drainJournal: async () => { order.push("journal"); },
     invoke: async (cmd: string) => { order.push(cmd); if (cmd === "relaunch" && fails) throw new Error("no exe"); return { events: [], emitted: 0 }; },
@@ -122,7 +122,7 @@ console.log("ok   a restart closes safely and starts the new Loom only before th
 for (const answer of [false, true]) {
   const asked: string[] = [];
   let request = async () => {}, destroyed = false;
-  const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false, document: { body: { inert: false } },
+  const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false, reportsHeld: new Map(), document: { body: { inert: false } },
     threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
     flushSave: async () => { throw new Error("couldn't keep a backup"); },
     invoke: async () => ({ events: [], emitted: 0 }), agentEvents: () => {}, sweepTasks: () => {}, toast: () => {},
@@ -138,3 +138,20 @@ for (const answer of [false, true]) {
   assert.equal(s.windowClosing, false, "a refused close lets a restart be asked for again");
 }
 console.log("ok   a close that keeps failing asks to close without saving the second time");
+{
+  // A Cursor pane's reports held while an Esc that stops its turn was written
+  // (holdReports): at close no acknowledgement comes, so they go in before the
+  // final ones, and the write's late release replays nothing.
+  const routed: unknown[] = [], held = { events: [["p", "held"]] as [string, unknown][], holds: 1 };
+  let request = async () => {};
+  const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false, reportsHeld: new Map([["p", held]]), document: { body: { inert: false } },
+    threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
+    invoke: async () => ({ events: [["p", "final"]], emitted: 0 }), agentEvents: (events: [string, unknown][]) => routed.push(...events.map((e) => e[1])), sweepTasks: () => {}, toast: () => {},
+    getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => {} }),
+  });
+  await runInContext(ts.transpileModule(`(async () => {\n${close}\n})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  await new Promise(r => setTimeout(r, 0));
+  await request();
+  assert.deepEqual([routed, held.events, s.reportsHeld.size], [["held", "final"], [], 0]);
+}
+console.log("ok   a Cursor stop's write still out at close: the reports it held go in first, once");
