@@ -26,7 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
     journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, moveTask };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -180,7 +180,7 @@ const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting"
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, tasks: fx.tasks, ...extra,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, moveTask: fx.f.moveTask, tasks: fx.tasks, ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
   const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
@@ -557,16 +557,21 @@ for (const key of ["\x1b", "\x03"]) {
 const CURSOR_FEEDBACK = "  → Tell the agent what to do instead (Enter to send, empty to skip, Esc to cancel)   ctrl+c to stop\n";
 const CURSOR_WORKING = "  → Add a follow-up        ctrl+c to stop\n";
 for (const [how, steps, stopped] of [
-  // Ctrl-C there skips the feedback (onSkipRejectionReason), typed or not, and
-  // Esc goes back to the approval (onCancelRejectionReason), still asked: the
-  // task asks on with no new notice. Neither stops the turn, so its genuine
-  // error later fails it.
-  ["skipped", [["\x03", CURSOR_WORKING]], false],
-  ["typed, then skipped", [["use ls", "  → use ls\n"], ["\x03", CURSOR_WORKING]], false],
-  ["back to the approval", [["\x1b", CURSOR_ASK], ["y", CURSOR_WORKING]], false],
-  // Skipped or sent, the feedback is over: the next Ctrl-C or Esc stops the turn.
-  ["skipped, then stopped", [["\x03", CURSOR_WORKING], ["\x03", CURSOR_WORKING]], true],
-  ["sent, then stopped", [["use ls", "  → use ls\n"], ["\r", CURSOR_WORKING], ["\x1b", CURSOR_WORKING]], true],
+  // Esc on the approval asks for feedback (Cursor's propose). Ctrl-C there
+  // skips the feedback (onSkipRejectionReason), typed or not, as an empty
+  // Enter does, and Esc goes back to the approval (onCancelRejectionReason),
+  // still asked: the task asks on with no new notice. Ctrl-C on the approval
+  // rejects it. None of these stops the turn: Cursor and the task work on, and
+  // the turn's genuine error later fails it.
+  ["skipped", [["\x1b", CURSOR_FEEDBACK], ["\x03", CURSOR_WORKING]], false],
+  ["typed, then skipped", [["\x1b", CURSOR_FEEDBACK], ["use ls", "  → use ls\n"], ["\x03", CURSOR_WORKING]], false],
+  ["skipped with Enter", [["\x1b", CURSOR_FEEDBACK], ["\r", CURSOR_WORKING]], false],
+  ["back to the approval", [["\x1b", CURSOR_FEEDBACK], ["\x1b", CURSOR_ASK], ["y", CURSOR_WORKING]], false],
+  ["rejected", [["\x03", CURSOR_WORKING]], false],
+  // Skipped, sent or rejected, the question is over: the next Ctrl-C or Esc stops the turn.
+  ["skipped, then stopped", [["\x1b", CURSOR_FEEDBACK], ["\x03", CURSOR_WORKING], ["\x03", CURSOR_WORKING]], true],
+  ["sent, then stopped", [["\x1b", CURSOR_FEEDBACK], ["use ls", "  → use ls\n"], ["\r", CURSOR_WORKING], ["\x1b", CURSOR_WORKING]], true],
+  ["rejected, then stopped", [["\x03", CURSOR_WORKING], ["\x1b", CURSOR_WORKING]], true],
 ] as const) {
   const view = { text: "" };
   const c = cursorPane(view);
@@ -576,11 +581,6 @@ for (const [how, steps, stopped] of [
   clock.at = 3000;
   view.text = CURSOR_ASK;
   p.activity();
-  clock.at = p.lastIn = 4000;
-  p.wrote("\x1b", true, p.answers("\x1b"));
-  p.seen();
-  view.text = CURSOR_FEEDBACK;
-  p.activity();
   for (const [key, after] of steps) {
     clock.at = p.lastIn = clock.at + 1000;
     p.wrote(key, true, p.answers(key));
@@ -588,10 +588,28 @@ for (const [how, steps, stopped] of [
     view.text = after;
     p.activity();
   }
+  assert.deepEqual([t.state, p.busy, p.waiting], ["working", true, false], `${how}: Cursor works on`);
   clock.at = 60_000;
   for (const end of stopped ? ["aborted", "error"] : ["error"]) cursorStop(c, end, "gA");
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([t.state, p.waiting, pushed], stopped ? ["cancelled", false, ["approval"]] : ["failed", true, ["approval", "failed"]], how);
+}
+for (const screen of [CURSOR_ASK, CURSOR_FEEDBACK]) {
+  // A Ctrl-C whose write failed may or may not have gone in: the task still
+  // asks, its answer in doubt.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
+  clock.at = 3000;
+  view.text = CURSOR_ASK;
+  p.activity();
+  view.text = screen;
+  p.activity();
+  clock.at = p.lastIn = 4000;
+  p.wrote("\x03", false, p.answers("\x03"));
+  assert.deepEqual([t.state, t.answerInDoubt], ["approval", true], screen === CURSOR_ASK ? "the approval" : "its feedback");
 }
 for (const order of [["aborted", "error"], ["error", "aborted"]]) {
   // Esc stops A, and B starts before either of A's stops lands. They end A,

@@ -2957,6 +2957,9 @@ class Pane {
   answers(d: string) {
     if (d.startsWith("\x1b[200~")) return false;
     if (d.includes("\r")) return true;
+    // Ctrl-C on Cursor's question rejects it, and on its rejection feedback
+    // skips that, as an empty Enter does: the turn goes on without it.
+    if (d === "\x03") return this.agent === "cursor" && (this.cursorAsking || this.cursorFeedback);
     // Shift+Tab and Tab pick the option that names them ("allow all edits ...
     // (shift+tab)", Cursor's "Add Shell(echo) to allowlist? (tab)").
     if (d === "\x1b[Z" || d === "\t") {
