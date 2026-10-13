@@ -191,8 +191,9 @@ pub fn claude_hook() -> i32 {
 /// is the pane's session from then on (LOOM_SESSION_FILE, as Codex's notify
 /// writes it): a chat with a prompt in it is one `--resume` can open. stop
 /// ends the turn: completed, aborted (Esc) or error. The pane learns both
-/// through a wake marker (OpenCode's form: `cursor:busy`, `cursor:done`,
-/// `cursor:aborted`, `cursor:error`), since Cursor rings no bell in Loom.
+/// from these task reports, every one kept and read in order (main.ts
+/// agentReport), since Cursor rings no bell in Loom. No wake marker: each
+/// hook would replace the last, and one poll could leave an older turn's stop.
 /// Prints `{}`, which asks nothing of Cursor, and always exits 0.
 pub fn cursor_hook() -> i32 {
     print!("{{}}");
@@ -204,26 +205,17 @@ pub fn cursor_hook() -> i32 {
     task_event(&pane, "cursor", event);
     let launch = std::env::var("LOOM_LAUNCH").ok().filter(|l| l.parse::<u64>().is_ok());
     let line = |text: String| launch.as_ref().map_or_else(|| text.clone(), |l| format!("{text}\n{l}"));
-    // What agent.ts validSessionId takes: it lands on --resume's command line.
-    let id = |key: &str| p[key].as_str()
-        .filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
     if state == "busy" {
-        if let (Some(id), Some(file)) = (id("conversation_id"), std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from)) {
+        // What agent.ts validSessionId takes: it lands on --resume's command line.
+        let id = p["conversation_id"].as_str()
+            .filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
+        if let (Some(id), Some(file)) = (id, std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from)) {
             if let Some(dir) = file.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
             publish(&file, &line(id.to_string()));
         }
     }
-    let dir = std::env::temp_dir().join("loom-wait");
-    let _ = std::fs::create_dir_all(&dir);
-    // "cursor:<state>\n<launch>\n<turn>": the turn its generation_id, which
-    // tells an Esc's two stops from the next turn's (main.ts wake).
-    let mut marker = line(format!("cursor:{state}"));
-    if let (Some(_), Some(turn)) = (&launch, id("generation_id")) {
-        marker = format!("{marker}\n{turn}");
-    }
-    publish(&dir.join(&pane), &marker);
     0
 }
 

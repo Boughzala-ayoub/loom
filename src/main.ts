@@ -1920,12 +1920,13 @@ class Pane {
   /** Codex asked (an approval or a question, OSC 9) and no answer went in
    * since. Its title says Working all through one, but nothing runs. */
   codexAsking = false;
-  /** Whether a Cursor turn runs, as its hooks say (wake: cursor:busy until
-   * cursor:done, aborted or error). Unset until this launch's first, as when
-   * Loom couldn't add its hooks: then its "ctrl+c to stop" alone says busy. */
+  /** Whether a Cursor turn runs, as its hooks' reports say, in order: from a
+   * turn's start to its stop (agentReport, cursorRuns). Unset until this
+   * launch's first, as when Loom couldn't add its hooks: then its "ctrl+c to
+   * stop" alone says busy. */
   cursorTurn: boolean | undefined;
   /** Cursor's turns by their generation_id, which its hooks name: the one
-   * the wakes last said runs (cursorGen), and the one an Esc or Ctrl-C went
+   * whose start came last (cursorGen), and the one an Esc or Ctrl-C went
    * into (cursorEsc), whose error is that interrupt, and the last whose stop
    * counted (agentReport). cursorEscAt: when the last Esc or Ctrl-C that
    * answered no question went in, which a turn that started before it (its
@@ -2658,9 +2659,8 @@ class Pane {
 
   /** Turn finished: flag the pane yellow and blip, until you look at it.
    * The marker carries the session's effort level — keep the last-known one
-   * (letters only: it lands on a command line at next boot). `turn`: the
-   * turn a Cursor marker names. */
-  wake(effort: string | undefined, source: WakeSource, turn?: string) {
+   * (letters only: it lands on a command line at next boot). */
+  wake(effort: string | undefined, source: WakeSource) {
     if (this.agent === "opencode" && (effort === "opencode:busy" || effort === "opencode:waiting")) {
       this.opencodeStatus = true;
       if (this.dead) return;
@@ -2673,23 +2673,11 @@ class Pane {
       }
       effort = undefined;
     }
-    if (this.agent === "cursor" && effort?.startsWith("cursor:")) {
-      const state = effort.slice("cursor:".length);
-      effort = undefined;
-      if (this.dead) return;
-      // A stop for another turn than the one running: a slow hook's, for one that ended.
-      if (state !== "busy" && turn && this.cursorTurn && turn !== this.cursorGen) return;
-      if (state === "busy") (this.cursorGen = turn), (this.waiting = false);
-      this.cursorTurn = state === "busy";
-      this.busy = state === "busy" && !this.cursorAsking;
-      this.paint();
-      if (dashboardOpen) renderDashboard();
-      // A stop's alert comes with its report (agentReport): only that says,
-      // in order, whether an Esc or Ctrl-C stopped the turn, and then none
-      // comes (OMP's idle after Esc raises none either). Its marker can land
-      // first, in the same poll as the turn's start.
-      return;
-    }
+    // A Cursor hook's marker moves nothing. Each hook replaces the pane's one
+    // marker, so a poll can leave an older turn's stop after a newer turn's
+    // start. Its reports, every one kept and read in order in the same poll,
+    // move the pane instead (agentReport). An older helper.rs still writes them.
+    if (this.agent === "cursor" && effort?.startsWith("cursor:")) return;
     if (effort && /^[a-z]+$/.test(effort) && effort !== this.effort) {
       this.effort = effort;
       save();
@@ -2962,6 +2950,16 @@ class Pane {
     return !!menu && menuKeys(menu).includes(d.toLowerCase());
   }
   /** Cursor's question, if one shows, has its answer (Esc skips an approval). */
+  /** A Cursor turn started (`running`) or the pane's current one stopped, as
+   * its reports say in order (agentReport). */
+  cursorRuns(running: boolean) {
+    if (this.dead) return;
+    if (running) this.waiting = false;
+    this.cursorTurn = running;
+    this.busy = running && !this.cursorAsking;
+    this.paint();
+    if (dashboardOpen) renderDashboard();
+  }
   private answeredCursor() {
     if (!this.cursorAsking) return;
     this.cursorAsking = false;
@@ -5067,6 +5065,8 @@ function agentReport(p: Pane, s: Signal) {
     // An Esc or Ctrl-C that went in after this turn's prompt hook stopped it,
     // even one Loom sent before it heard of the turn (the hooks are read every 250 ms).
     if (s.kind === "start" && s.turn && p.cursorEscAt >= s.at) p.cursorEsc = s.turn;
+    // The newest start is the pane's current turn, and it runs.
+    if (s.kind === "start") (p.cursorGen = s.turn), p.cursorRuns(true);
     if (s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") {
       if (s.turn) {
         // Cursor stops a turn once, or twice after an Esc or Ctrl-C: aborted and
@@ -5077,11 +5077,14 @@ function agentReport(p: Pane, s: Signal) {
         // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
         if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
       }
-      // Done or failed raises the alert (its wake marker doesn't); stopped
-      // raises none. Only the pane's current turn's: an older one's stop ends
-      // its own task, which notifies, while the pane and its receipts wait
-      // for the newer turn's end.
-      if (s.kind !== "interrupt" && !p.dead && (!s.turn || s.turn === p.cursorGen)) p.wake(undefined, "hook");
+      // The current turn's stop ends it on the pane. Done or failed raises the
+      // alert, and stopped raises none (OMP's idle after Esc raises none
+      // either). An older turn's stop ends its own task, which notifies, while
+      // the pane and its receipts wait for the newer turn's end.
+      if (!s.turn || s.turn === p.cursorGen) {
+        p.cursorRuns(false);
+        if (s.kind !== "interrupt" && !p.dead) p.wake(undefined, "hook");
+      }
     }
   }
   if (s.kind === "end" && s.turn) {
@@ -10526,9 +10529,8 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       const marker = effortById.get(p.id);
       if (marker === undefined) continue;
       // "effort", or "effort\nlaunch" from a writer that knows its launch: a replaced one's wakes nothing.
-      // Cursor's adds the turn: "effort\nlaunch\nturn".
-      const [effort, launch, turn] = marker.split("\n");
-      if (launch === undefined || Number(launch) === p.launched) p.wake(effort, "hook", turn);
+      const [effort, launch] = marker.split("\n");
+      if (launch === undefined || Number(launch) === p.launched) p.wake(effort, "hook");
     }
   });
 

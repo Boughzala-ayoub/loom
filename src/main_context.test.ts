@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEnded", "cursorEscAt", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEnded", "cursorEscAt", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -646,5 +646,44 @@ for (const end of ["error", "completed"]) {
   clock.at = 5000;
   cursorStop(c, "completed", "gB");
   assert.deepEqual([b.state, p.busy, p.waiting, p.turns, receipts.get("B").result?.turn], ["completed", false, true, 1, 1], `then B's end, after A's ${end}`);
+}
+{
+  // One poll reads B's start and A's late stops: every hook keeps its report,
+  // but each replaces the pane's one wake marker, and Rust sends that marker
+  // (A's error) before the reports. The reports, in order, say B runs.
+  const c = cursorPane({ text: "" });
+  const { p, clock, f, sweep } = c;
+  clock.at = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = 2000;
+  p.wrote("\x1b", true, false);
+  clock.at = 2100;
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 2100);
+  f.enterTurn(b, 2100);
+  clock.at = 2300;
+  p.wake("cursor:error", "hook", "gA");
+  f.agentReport(p, { kind: "start", at: 2150, launch: 1, match: b.match, turn: "gB" });
+  f.agentReport(p, { kind: "interrupt", at: 2200, launch: 1, turn: "gA" });
+  f.agentReport(p, { kind: "fail", at: 2250, launch: 1, detail: "Cursor reported an error", turn: "gA" });
+  assert.deepEqual([a.state, b.state, p.cursorTurn, p.cursorGen, p.busy, p.waiting], ["cancelled", "working", true, "gB", true, false], "B runs");
+  p.activity();
+  await sweep(2400);
+  await sweep(32_400);
+  assert.deepEqual([b.state, b.reason, p.busy], ["working", null, true], "still running 30 s on");
+  // A start from a launch before this one moves neither the pane nor its turn.
+  f.agentReport(p, { kind: "start", at: 32_500, launch: 0, match: b.match, turn: "gOld" });
+  assert.deepEqual([p.cursorGen, p.cursorTurn], ["gB", true], "a replaced launch's start");
+  // C's start and its own end in one poll, with only C's done marker left.
+  clock.at = 40_000;
+  cursorStop(c, "completed", "gB");
+  clock.at = p.lastIn = 41_000;
+  const t = f.turnTask(p, "submit", model.promptMatch("C"), 41_000);
+  f.enterTurn(t, 41_000);
+  clock.at = 41_300;
+  p.seen();
+  p.wake("cursor:done", "hook", "gC");
+  f.agentReport(p, { kind: "start", at: 41_050, launch: 1, match: t.match, turn: "gC" });
+  f.agentReport(p, { kind: "end", at: 41_200, launch: 1, turn: "gC" });
+  assert.deepEqual([t.state, p.cursorTurn, p.cursorGen, p.busy, p.waiting], ["completed", false, "gC", false, true], "a start and its own end in one poll");
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");
