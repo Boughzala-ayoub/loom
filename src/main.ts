@@ -1926,14 +1926,13 @@ class Pane {
    * stop" alone says busy. */
   cursorTurn: boolean | undefined;
   /** Cursor's turns by their generation_id, which its hooks name: the one
-   * whose start came last (cursorGen), and the one an Esc or Ctrl-C went
-   * into (cursorEsc), whose error is that interrupt, and the last whose stop
-   * counted (agentReport). cursorEscAt: when the last Esc or Ctrl-C that
+   * whose start came last (cursorGen), and each one an Esc or Ctrl-C went
+   * into (cursorEsc), whose error is that interrupt, kept until its first
+   * stop counts (agentReport). cursorEscAt: when the last Esc or Ctrl-C that
    * answered no question went in, which a turn that started before it (its
    * start report says when) takes as its own, once Loom hears of that turn. */
   cursorGen: string | undefined;
-  cursorEsc: string | undefined;
-  cursorEnded: string | undefined;
+  cursorEsc = new Set<string>();
   cursorEscAt = 0;
   /** Cursor shows a question (an approval, trusting its folder), read off the
    * screen: no hook reports one. Raised once per question (cursorQuestion). */
@@ -2375,7 +2374,8 @@ class Pane {
     this.codexState = undefined;
     this.codexAsking = false;
     this.cursorTurn = undefined;
-    this.cursorGen = this.cursorEsc = this.cursorEnded = undefined;
+    this.cursorGen = undefined;
+    this.cursorEsc = new Set();
     this.cursorEscAt = 0;
     this.cursorAsking = false;
     this.cursorAnswered = undefined;
@@ -2987,7 +2987,7 @@ class Pane {
       // the one running, or one Loom hasn't heard of yet (agentReport).
       if (this.agent === "cursor" && !this.cursorAsking) {
         this.cursorEscAt = Date.now();
-        if (this.cursorTurn) this.cursorEsc = this.cursorGen;
+        if (this.cursorTurn && this.cursorGen) this.cursorEsc.add(this.cursorGen);
       }
       this.answeredCursor();
     }
@@ -5024,8 +5024,10 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
   }
 }
 
-/** Codex turns already counted, by pane and turn id: a turn reported twice
- * completes nothing the second time. */
+/** Turns whose stop already counted, by pane, launch and the agent's own
+ * turn id: Codex's end, which can come twice, and Cursor's first stop of a
+ * turn, which an Esc or Ctrl-C makes two (aborted and an error, in either
+ * order, both naming it). A turn reported again moves nothing. */
 const turnsSeen = new Set<string>();
 /** The task each turn's start moved, by pane, launch and the turn's own id
  * (Cursor's generation_id), kept after the task ends. A report naming the
@@ -5061,21 +5063,27 @@ function agentEvents(events: [string, unknown][]) {
   }
 }
 function agentReport(p: Pane, s: Signal) {
+  const stopped = s.kind === "end" || (p.agent === "cursor" && (s.kind === "fail" || s.kind === "interrupt")) ? s.turn : undefined;
+  if (stopped) {
+    const key = `${p.id}:${s.launch ?? p.generation}:${stopped}`;
+    if (turnsSeen.has(key)) return;
+    turnsSeen.add(key);
+    if (turnsSeen.size > 1000) turnsSeen.delete(turnsSeen.values().next().value!);
+  }
   if (p.agent === "cursor" && (s.launch ?? p.generation) === p.generation) {
     // An Esc or Ctrl-C that went in after this turn's prompt hook stopped it,
     // even one Loom sent before it heard of the turn (the hooks are read every 250 ms).
-    if (s.kind === "start" && s.turn && p.cursorEscAt >= s.at) p.cursorEsc = s.turn;
+    if (s.kind === "start" && s.turn && p.cursorEscAt >= s.at) p.cursorEsc.add(s.turn);
     // The newest start is the pane's current turn, and it runs.
     if (s.kind === "start") (p.cursorGen = s.turn), p.cursorRuns(true);
     if (s.kind === "end" || s.kind === "fail" || s.kind === "interrupt") {
-      if (s.turn) {
-        // Cursor stops a turn once, or twice after an Esc or Ctrl-C: aborted and
-        // an error, in either order, both naming it. The first counts, and goes
-        // to that turn's task (taskSignal), even after a newer turn started.
-        if (s.turn === p.cursorEnded) return;
-        p.cursorEnded = s.turn;
-        // The error of the turn an Esc or Ctrl-C went into is that interrupt; any other turn's is its own.
-        if (s.kind === "fail" && s.turn === p.cursorEsc) s = { at: s.at, launch: s.launch, kind: "interrupt", turn: s.turn };
+      // A turn's first stop (turnsSeen) goes to that turn's task (taskSignal),
+      // even after a newer turn started. The error of a turn an Esc or Ctrl-C
+      // went into is that interrupt; any other turn's is its own.
+      const turn = s.turn;
+      if (turn) {
+        if (s.kind === "fail" && p.cursorEsc.has(turn)) s = { at: s.at, launch: s.launch, kind: "interrupt", turn };
+        p.cursorEsc.delete(turn);
       }
       // The current turn's stop ends it on the pane. Done or failed raises the
       // alert, and stopped raises none (OMP's idle after Esc raises none
@@ -5086,12 +5094,6 @@ function agentReport(p: Pane, s: Signal) {
         if (s.kind !== "interrupt" && !p.dead) p.wake(undefined, "hook");
       }
     }
-  }
-  if (s.kind === "end" && s.turn) {
-    const key = `${p.id}:${s.launch ?? p.generation}:${s.turn}`;
-    if (turnsSeen.has(key)) return;
-    turnsSeen.add(key);
-    if (turnsSeen.size > 1000) turnsSeen.delete(turnsSeen.values().next().value!);
   }
   taskSignal(p, s);
 }

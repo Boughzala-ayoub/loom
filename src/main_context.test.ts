@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEnded", "cursorEscAt", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscAt", "cursorAsking", "cursorAnswered", "cursorQuestion", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -685,5 +685,33 @@ for (const end of ["error", "completed"]) {
   f.agentReport(p, { kind: "start", at: 41_050, launch: 1, match: t.match, turn: "gC" });
   f.agentReport(p, { kind: "end", at: 41_200, launch: 1, turn: "gC" });
   assert.deepEqual([t.state, p.cursorTurn, p.cursorGen, p.busy, p.waiting], ["completed", false, "gC", false, true], "a start and its own end in one poll");
+}
+for (const [first, second] of [["error", "aborted"], ["aborted", "error"]]) for (const interleaved of [false, true]) {
+  // Esc stops A, then B, before either's stops land. Each keeps its own
+  // interruption, so both end cancelled with no alert, whichever stop comes
+  // first and however the two turns' stops mix. A third turn that nobody
+  // stopped still fails for real.
+  const c = cursorPane({ text: "" });
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = 2000;
+  p.wrote("\x1b", true, false);
+  clock.at = 2100;
+  const b = cursorPrompt(c, "B", "gB");
+  clock.at = 2200;
+  p.wrote("\x1b", true, false);
+  clock.at = 2300;
+  const stops: [string, string][] = interleaved ? [[first, "gA"], [first, "gB"], [second, "gA"], [second, "gB"]] : [[first, "gA"], [second, "gA"], [first, "gB"], [second, "gB"]];
+  for (const [end, gen] of stops) cursorStop(c, end, gen);
+  await new Promise((r) => setTimeout(r, 0));
+  const what = `${first} then ${second}${interleaved ? ", interleaved" : ""}`;
+  assert.deepEqual([a.state, b.state, p.busy, p.waiting, pushed], ["cancelled", "cancelled", false, false, []], what);
+  clock.at = 3000;
+  const t = cursorPrompt(c, "C", "gC");
+  clock.at = 4000;
+  cursorStop(c, "error", "gC");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.waiting, pushed], ["failed", true, ["failed"]], `then C's own error, ${what}`);
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");
