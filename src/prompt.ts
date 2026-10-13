@@ -59,7 +59,8 @@ const CURSOR_LETTER = /^\[[a-z]\]\s+\S/i;
  * pane wrapped goes on at that column to the row with its key (xterm's own
  * wraps come joined: liveScreen). Its composer, "→ Add a follow-up", is a
  * "→" row too, which takes a question's place: one under the options makes
- * them an answered question left in the transcript. */
+ * them an answered question left in the transcript. So does Claude's or
+ * Codex's input under them: options quoted in its transcript (inputBelow). */
 function cursorMenu(raw: string[]): Menu | null {
   const rows = raw.map((l) => {
     const inner = l.replace(/^\s*[│┃║]/, "").replace(/[\s│┃║]+$/, ""), text = inner.trimStart();
@@ -92,14 +93,23 @@ function cursorMenu(raw: string[]): Menu | null {
   }
   const first = options[0].first, last = options[options.length - 1].last;
   if (options.length < 2 || rows.slice(last + 1).some((r) => CURSOR_PICK.test(r.text))) return null;
+  const lines = raw.map(unbox);
+  if (inputBelow(lines, last)) return null;
   const said = options.map((o) => [text(o.first), ...rows.slice(o.first + 1, o.last + 1).map((r) => r.text)].join(" "));
-  const lines = raw.map(unbox), question: string[] = [];
+  const question: string[] = [];
   for (let i = first - 1; i >= 0 && question.length < 4 && !isRule(lines[i]); i--) if (lines[i].trim()) question.unshift(lines[i].trim());
   let top = first;
   while (top > 0 && !isRule(lines[top - 1])) top--;
   const prompt = lines.slice(top, last + 1).map((l) => l.replace(CURSOR_PICK, "").trim()).filter(Boolean);
   return { question, options: said, selected: options.findIndex((o) => o.first === pick), multi: false, prompt, full: said, unnumbered: true };
 }
+
+/** Whether an agent's live input sits below row `end` of the unboxed `lines`:
+ * then a menu above it is one in the transcript, a sent prompt drawn with the
+ * same glyph or a question quoted, since a question takes the input's place.
+ * Claude's input row sits under a rule; Codex's is a "›" row that isn't an option. */
+const inputBelow = (lines: string[], end: number) =>
+  lines.some((l, i) => i > end && ((PROMPT.test(l) && isRule(lines[i - 1])) || (CODEX_PROMPT.test(l) && !OPTION.test(l))));
 
 export function readMenu(screen: string): Menu | null {
   const lines = screen.split("\n").map(unbox);
@@ -144,12 +154,7 @@ export function readMenu(screen: string): Menu | null {
   let top = options[0].line, end = options[options.length - 1].line;
   while (top > start && !isRule(lines[top - 1])) top--;
   while (end + 1 < lines.length && lines[end + 1].trim() && !isRule(lines[end + 1])) end++;
-  // A live input below it makes it a sent prompt in the transcript, drawn with the
-  // same glyph: a question takes the input's place. Claude's input row sits under a
-  // rule; Codex's is a "›" row that isn't an option.
-  for (let i = end + 1; i < lines.length; i++) {
-    if ((PROMPT.test(lines[i]) && isRule(lines[i - 1])) || (CODEX_PROMPT.test(lines[i]) && !OPTION.test(lines[i]))) return null;
-  }
+  if (inputBelow(lines, end)) return null;
   const prompt = lines.slice(top, end + 1).map(l => (OPTION.test(l) ? l.replace(CURSOR, "") : l).trim()).filter(Boolean);
   // Each option through the rows before the next one (the last: to the prompt's end).
   const full = options.map((o, k) => [o.text, ...lines.slice(o.line + 1, options[k + 1]?.line ?? end + 1).map(l => l.trim())].filter(Boolean).join(" "));

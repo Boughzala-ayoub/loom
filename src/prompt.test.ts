@@ -451,6 +451,11 @@ const cursorTrust = `  ╭──────────────────
   ╰──────────────────────────────────────────────╯`;
 check("Cursor's trust box", shape(readMenu(cursorTrust)), { question: ["Do you trust the contents of this directory?", "C:\\projects\\new"], options: ["[a] Trust this workspace", "[q] Quit"], selected: 0, multi: false });
 check("Cursor's trust keys", menuKeys(readMenu(cursorTrust)!), ["a", "q"]);
+// Cursor's menus quoted in another agent's transcript, that agent idle at its input below.
+for (const [agent, input] of [["Claude", ["", ruled, "❯ ", ruled, "  ? for shortcuts"]], ["Codex", ["", "› Ask Codex to do anything", "", "  100% context left"]]] as const) {
+  check(`Cursor's approval quoted above ${agent}'s input is no question`, readMenu([cursorAsk, "● It asked that. Want me to allow it?", ...input].join("\n")), null);
+  check(`Cursor's trust box quoted above ${agent}'s input is no question`, readMenu([cursorTrust, ...input].join("\n")), null);
+}
 for (const prefix of ["? Documentation\n", "  tool output\n", "> quote\n", "```text\n"]) {
   check("quoted surveys lack an active footer", readSurvey(prefix + "How is Claude doing this session? 1: Bad 2: Fine 3: Good 0: Dismiss"), null);
 }
