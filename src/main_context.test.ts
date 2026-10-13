@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorPrompted", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -909,6 +909,51 @@ for (const lateEnd of [false, true]) {
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([a.state, a.detail, [...a.events].map((e: any) => e.state), b.state, [...b.events].filter((e: any) => e.state === "approval").length, p.waiting, pushed],
     ["completed", null, ["accepted", "submitted", "working", "completed"], "approval", 1, true, lateEnd ? ["approval", "completed"] : ["completed", "approval"]], `A's end ${lateEnd ? "a poll later" : "in the same poll"}`);
+}
+for (const pending of ["task", "manual"]) {
+  // Loom knows A runs (gA). Cursor ends A at 2060, B's Enter goes in at 2090,
+  // B's start is written at 2110, and B's approval draws at 2140, before the
+  // poll at 2200 reads A's end and B's start. With a prompt waiting for its
+  // start (a task's Enter, or a person's noted one), the approval asks in no
+  // task until that poll, then in B's. The pane waits at once.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, tasks, pushed, clock, f, later } = c;
+  clock.at = p.lastIn = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = p.lastIn = 2090;
+  const match = model.promptMatch("B");
+  if (pending === "task") f.enterTurn(f.turnTask(p, "submit", match, 2090), 2090);
+  else p.manual = [{ at: 2090, launch: 1, match: null }];
+  clock.at = 2140;
+  view.text = CURSOR_ASK;
+  p.activity();
+  assert.deepEqual([a.state, p.waiting], ["working", true], `${pending}: B's approval, before the poll`);
+  clock.at = 2200;
+  f.agentEvents([[p.id, { kind: "end", t: 2060, launch: 1, turn: "gA" }], [p.id, { kind: "start", t: 2110, launch: 1, turn: "gB", match }]]);
+  later(4000);
+  await new Promise((r) => setTimeout(r, 0));
+  const b = [...tasks.values()].find((t: any) => t !== a);
+  assert.deepEqual([[...a.events].map((e: any) => e.state), a.detail, b.state, b.detail, p.waiting, pushed],
+    [["accepted", "submitted", "working", "completed"], null, "approval", "$  echo hi in . Run this command? Not in allowlist: echo", true, ["completed", "approval"]], pending);
+}
+{
+  // A follow-up queued while A runs waits for A's end, and A asks meanwhile:
+  // no start comes, so a second on the approval asks in A.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, pushed, clock, f, later } = c;
+  clock.at = p.lastIn = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = p.lastIn = 2090;
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 2090);
+  f.enterTurn(b, 2090);
+  clock.at = 2140;
+  view.text = CURSOR_ASK;
+  p.activity();
+  later(3140);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([a.state, a.detail, b.state, p.waiting, pushed], ["approval", "$  echo hi in . Run this command? Not in allowlist: echo", "submitted", true, ["approval"]]);
 }
 for (const end of ["completed", "error", "aborted"]) {
   // An open Overview redraws when a Cursor turn stops. Done or failed, the

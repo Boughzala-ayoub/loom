@@ -2583,9 +2583,21 @@ class Pane {
     if (!!menu === this.cursorAsking) return;
     this.cursorAsking = !!menu;
     if (!menu) return;
-    this.cursorAsks(menu);
+    // A prompt that went in since the turn Loom knows of may be what asks. Its
+    // start was written before it could ask, so the next poll brings it, and
+    // the question asks in that turn's task once the batch is in (agentEvents).
+    // With no start by then, it was the known turn's (a queued follow-up waits).
+    // ponytail: a second covers one 250 ms poll; a page stalled longer asks in the known turn.
+    if (!this.cursorPrompted()) this.cursorAsks(menu);
+    else (clearTimeout(this.cursorAskLater), (this.cursorAskLater = window.setTimeout(() => this.cursorAsking && this.cursorAsks(), 1000)));
     // The hook's source: one source counts a launch's turns (wake), and an approval counts as Codex's does.
     this.wake(undefined, "hook");
+  }
+  private cursorAskLater = 0;
+  /** A prompt went in that no start Loom has read explains yet: a task's
+   * Enter, or a person's noted one (manualEnter). */
+  private cursorPrompted() {
+    return this.manual.some((m) => m.launch === this.generation) || [...tasks.values()].some((t) => t.pane === this.id && t.gen === this.generation && t.state === "submitted");
   }
   /** Cursor's question asks in the task of the turn running now (cursorGen),
    * never in an older one whose stop Loom hasn't read yet. One drawn before
