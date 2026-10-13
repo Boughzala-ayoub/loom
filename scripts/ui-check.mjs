@@ -1632,6 +1632,66 @@ try {
     await until(async () => (await cli('task', taskB.task)).data.state === 'failed', `B's genuine error fails it, ${width}px`);
     assert.equal(await cursorState(), 'waiting', `B's failure raises its alert, ${width}px`);
     await audit('cursor-feedback-failed');
+    // Loom knows C runs. Cursor ends C and asks for D, the person's next prompt, before one poll
+    // reads C's end and D's start. The approval waits for that batch, then asks in D alone.
+    const cursorAskWith = (command) => page.evaluate(([id, command]) => window.qa.panes.find(p => p.id === id).onOut.onmessage('\x1b[2J\x1b[H────────────────────────\r\n $  echo ' + command + ' in .\r\n\r\n Run this command?\r\n Not in allowlist: echo\r\n'
+      + ['Run (once) (y)', 'Add Shell(echo) to allowlist? (tab)', 'Run Everything (shift+tab)', 'Skip & tell the agent what to do instead (esc or n)'].map((o, i) => `${i ? '    ' : '  → '}${o}`).join('\r\n') + '\r\n'), [cursor.id, command]);
+    const cursorHeldKey = async (key) => {
+      await page.evaluate(id => ((window.qa.pendingWrites = []), (window.qa.holdWrites = id)), cursor.id);
+      await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+      await page.keyboard.press(key);
+      await page.waitForFunction(() => window.qa.pendingWrites.length === 1);
+    };
+    const cursorAck = () => page.evaluate(() => ((window.qa.holdWrites = null), window.qa.pendingWrites.splice(0).forEach(done => done())));
+    const cursorBatchOf = (events) => page.evaluate(([id, events, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: events.map(e => [id, e]) } }),
+      [cursor.id, events.map(e => ({ ...e, launch: cursor.launch, src: 'cursor' })), ++cursorBatch]);
+    const knownBefore = new Set((await cli('tasks')).data.map(t => t.task));
+    await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('run C');
+    await cursorKey('Enter', '\r');
+    await cursorBatchOf([{ kind: 'start', t: Date.now(), turn: 'gC', match: '0123456789abcdef' }]);
+    await cursorOut('\x1b[2J\x1b[H  run C\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
+    const knownTasks = async () => (await cli('tasks')).data.filter(t => t.agent === 'cursor' && !knownBefore.has(t.task));
+    await until(async () => (await knownTasks()).map(t => t.state).join() === 'working', `Loom knows C runs, ${width}px`);
+    const cEnd = Date.now();
+    await cursorOut('\x1b[2J\x1b[H  C is done.\r\n\r\n  → Add a follow-up\r\n');
+    await page.keyboard.type('run D');
+    await cursorKey('Enter', '\r');
+    const dStart = Date.now();
+    await cursorAskWith('hi');
+    await until(async () => (await cursorState()) === 'waiting', `D's approval waits on you at once, ${width}px`);
+    assert.deepEqual((await knownTasks()).map(t => t.state), ['working'], `D's approval asks in no task before its start is read, ${width}px`);
+    await cursorBatchOf([{ kind: 'end', t: cEnd, turn: 'gC' }, { kind: 'start', t: dStart, turn: 'gD', match: '0123456789abcdef' }]);
+    await until(async () => (await knownTasks()).map(t => t.state).join() === 'completed,approval', `One poll ends C and starts D, ${width}px`);
+    const [taskC, taskD] = await knownTasks();
+    assert.deepEqual([taskC.events.map(e => e.state), taskC.detail, taskD.events.filter(e => e.state === 'approval').length],
+      [['accepted', 'submitted', 'working', 'completed'], null, 1], `D's approval asks in D alone, ${width}px`);
+    // y answers D's approval, and Cursor draws its next before the write is acknowledged. That one
+    // still asks: the pane waits, the Overview offers its options, and D asks with its question.
+    await cursorHeldKey('y');
+    await cursorAskWith('next');
+    await cursorAck();
+    await until(async () => (await cli('task', taskD.task)).data.detail?.includes('echo next'), `The next approval asks in D, ${width}px`);
+    await page.click('#dashboard-btn');
+    await cursorCard.locator('.dashboard-choices button').first().waitFor();
+    assert.deepEqual([await cursorState(), (await cli('task', taskD.task)).data.state, await cursorCard.locator('.dashboard-choices button').count()], ['waiting', 'approval', 4],
+      `The next approval keeps its options and alert, ${width}px`);
+    assert.match(await cursorCard.locator('.dashboard-question').textContent(), /echo next/, `The card shows the next question, ${width}px`);
+    await audit('cursor-replacement-approval');
+    await page.click('#dashboard-btn');
+    // Answered, D works on. A real Esc stops it: Cursor's error and aborted for D arrive before
+    // the write is acknowledged. They wait for it, and D ends cancelled, with no alert.
+    await cursorKey('y', 'y');
+    await cursorOut('\x1b[2J\x1b[H  run D\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
+    await until(async () => (await cli('task', taskD.task)).data.state === 'working', `Answered, D works on, ${width}px`);
+    await cursorHeldKey('Escape');
+    await cursorReport({ kind: 'fail', turn: 'gD', detail: 'Cursor reported an error' });
+    await cursorReport({ kind: 'interrupt', turn: 'gD' });
+    assert.equal((await cli('task', taskD.task)).data.state, 'working', `D's stop waits for its Esc's write, ${width}px`);
+    await cursorAck();
+    await until(async () => (await cli('task', taskD.task)).data.state === 'cancelled', `A real Esc cancels D, ${width}px`);
+    assert.equal(await cursorState(), 'idle', `D's cancellation raises no alert, ${width}px`);
+    await audit('cursor-esc-cancelled');
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');
