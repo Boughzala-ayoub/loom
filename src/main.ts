@@ -2659,8 +2659,9 @@ class Pane {
 
   /** Turn finished: flag the pane yellow and blip, until you look at it.
    * The marker carries the session's effort level — keep the last-known one
-   * (letters only: it lands on a command line at next boot). */
-  wake(effort: string | undefined, source: WakeSource) {
+   * (letters only: it lands on a command line at next boot). `at`: when the
+   * turn ended, earlier than now for a report Loom reads late. */
+  wake(effort: string | undefined, source: WakeSource, at = Date.now()) {
     if (this.agent === "opencode" && (effort === "opencode:busy" || effort === "opencode:waiting")) {
       this.opencodeStatus = true;
       if (this.dead) return;
@@ -2691,8 +2692,8 @@ class Pane {
     // others still raise the alert.
     if (this.agent !== "shell" && this.lastIn > this.lastTurnAt && (this.turnSource ??= source) === source) {
       this.turns++;
-      this.lastTurnAt = Date.now();
-      turnReceipts(this);
+      this.lastTurnAt = at;
+      turnReceipts(this, at);
     }
     if (this.waiting) return;
     this.waiting = true;
@@ -4324,9 +4325,15 @@ function keepReceipts() {
   for (const r of receipts.values()) if (r.settledAt === undefined && receiptSettled(r)) r.settledAt = ++settlings;
   pruneSettled(receipts, (r) => r.settledAt, 500);
 }
-/** An agent's turn just came in: it completes that launch's receipts sent before it. */
-function turnReceipts(p: Pane) {
-  for (const [token, r] of receipts) if (r.turnsAt !== undefined && p.turns > r.turnsAt) finishReceipt(token, p, { turn: r.turnsAt + 1 });
+/** An agent's turn just came in, ended `at`: it completes that launch's
+ * receipts whose Enter went in before then. One whose Enter came after (Loom
+ * read the turn's end late) waits for the next turn. */
+function turnReceipts(p: Pane, at: number) {
+  for (const [token, r] of receipts) {
+    if (r.turnsAt === undefined || p.turns <= r.turnsAt || r.pane !== p.id || r.gen !== p.generation) continue;
+    if ((r.steps.entering ?? 0) > at) r.turnsAt = p.turns;
+    else finishReceipt(token, p, { turn: r.turnsAt + 1 });
+  }
 }
 
 /** loomctl submit's tasks (task.ts), oldest first. A task's id is also its
@@ -5088,10 +5095,12 @@ function agentReport(p: Pane, s: Signal) {
       // The current turn's stop ends it on the pane. Done or failed raises the
       // alert, and stopped raises none (OMP's idle after Esc raises none
       // either). An older turn's stop ends its own task, which notifies, while
-      // the pane and its receipts wait for the newer turn's end.
+      // the pane and its receipts wait for the newer turn's end. The stop's
+      // own time counts the turn: a send whose Enter went in after it, before
+      // Loom read it, waits for its own turn (turnReceipts).
       if (!s.turn || s.turn === p.cursorGen) {
         p.cursorRuns(false);
-        if (s.kind !== "interrupt" && !p.dead) p.wake(undefined, "hook");
+        if (s.kind !== "interrupt" && !p.dead) p.wake(undefined, "hook", s.at);
       }
     }
   }

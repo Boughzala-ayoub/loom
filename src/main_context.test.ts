@@ -398,7 +398,7 @@ const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {})
   const { p, tasks, pushed, clock, later, f } = cursorPane(view);
   clock.at = p.lastIn = 1000;
   p.manual = [{ at: 1000, launch: 1, match: null }]; // manualEnter, at the Enter
-  p.wake("cursor:busy", "hook", "g1");
+  p.wake("cursor:busy", "hook");
   f.agentReport(p, { kind: "start", at: 1200, launch: 1, match: model.promptMatch("run echo hi"), turn: "g1" });
   const [t, ...more] = [...tasks.values()];
   assert.equal(more.length, 0);
@@ -417,7 +417,7 @@ const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {})
   view.text = " ⠰⠳ Working\n\n  → Add a follow-up        ctrl+c to stop\n";
   p.activity();
   later(9000);
-  p.wake("cursor:done", "hook", "g1");
+  p.wake("cursor:done", "hook");
   f.agentReport(p, { kind: "end", at: 9000, launch: 1, turn: "g1" });
   f.agentReport(p, { kind: "end", at: 9000, launch: 1, turn: "g1" });
   assert.deepEqual([p.busy, p.waiting, t.state, t.endedAt, p.turns], [false, true, "completed", 9000, 2], "done");
@@ -426,16 +426,15 @@ const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {})
 }
 // What Cursor's hooks say of turn `gen` when it stops: the marker the pane
 // wakes on, then the report its task moves on (stop: aborted, error or completed).
-const cursorStop = (c: ReturnType<typeof cursorPane>, end: string, gen: string) => {
-  c.p.wake(`cursor:${end}`, "hook", gen);
-  const at = c.clock.at;
+const cursorStop = (c: ReturnType<typeof cursorPane>, end: string, gen: string, at = c.clock.at) => {
+  c.p.wake(`cursor:${end}`, "hook");
   c.f.agentReport(c.p, end === "aborted" ? { kind: "interrupt", at, launch: 1, turn: gen }
     : end === "error" ? { kind: "fail", at, launch: 1, detail: "Cursor reported an error", turn: gen } : { kind: "end", at, launch: 1, turn: gen });
 };
 const cursorPrompt = (c: ReturnType<typeof cursorPane>, prompt: string, gen: string) => {
   const t = c.f.turnTask(c.p, "submit", model.promptMatch(prompt), c.clock.at);
   c.f.enterTurn(t, c.clock.at);
-  c.p.wake("cursor:busy", "hook", gen);
+  c.p.wake("cursor:busy", "hook");
   c.f.agentReport(c.p, { kind: "start", at: c.clock.at + 100, launch: 1, match: t.match, turn: gen });
   return t;
 };
@@ -605,13 +604,13 @@ for (const order of [["error", "aborted"], ["aborted", "error"]]) for (const one
   const start = () => f.agentReport(p, { kind: "start", at: 1050, launch: 1, match: t.match, turn: "gA" });
   const report = (end: string) => f.agentReport(p, end === "aborted" ? { kind: "interrupt", at: 1200, launch: 1, turn: "gA" } : { kind: "fail", at: 1200, launch: 1, detail: "Cursor reported an error", turn: "gA" });
   if (onePoll) {
-    p.wake(`cursor:${order[1]}`, "hook", "gA");
+    p.wake(`cursor:${order[1]}`, "hook");
     start();
     order.forEach(report);
   } else {
-    p.wake("cursor:busy", "hook", "gA");
+    p.wake("cursor:busy", "hook");
     start();
-    for (const end of order) (p.wake(`cursor:${end}`, "hook", "gA"), report(end));
+    for (const end of order) (p.wake(`cursor:${end}`, "hook"), report(end));
   }
   await new Promise((r) => setTimeout(r, 0));
   const what = `${order.join(" then ")}${onePoll ? ", in one poll" : ""}`;
@@ -629,7 +628,7 @@ const receiptCode = ts.transpileModule(source.statements.filter((n) => ts.isFunc
 for (const end of ["error", "completed"]) {
   // A's stop lands after B started. It ends A's task, which notifies, and
   // leaves B's pane working and B's receipt waiting until B's own end.
-  const receipts = new Map<string, any>([["B", { pane: "pane-1", gen: 1, turnsAt: 0 }]]);
+  const receipts = new Map<string, any>([["B", { pane: "pane-1", gen: 1, turnsAt: 0, acceptedAt: 2100, steps: { entering: 2100, submitted: 2100 } }]]);
   const scope = createContext({ receipts, settlings: 0, keepReceipts() {} });
   runInContext(receiptCode, scope);
   const c = cursorPane({ text: "" }, { turnReceipts: scope.turnReceipts });
@@ -647,6 +646,31 @@ for (const end of ["error", "completed"]) {
   cursorStop(c, "completed", "gB");
   assert.deepEqual([b.state, p.busy, p.waiting, p.turns, receipts.get("B").result?.turn], ["completed", false, true, 1, 1], `then B's end, after A's ${end}`);
 }
+for (const end of ["error", "completed"]) {
+  // A stops at 2000 and B's Enter goes in at 2050, both before the poll at
+  // 2200 that reads A's stop, then B's start. A's stop ends A and counts its
+  // turn, but B's receipt waits for a turn that stopped after its Enter: B's own.
+  const receipts = new Map<string, any>([["B", { pane: "pane-1", gen: 1, acceptedAt: 2050, steps: { entering: 2050, submitted: 2050 } }]]);
+  const scope = createContext({ receipts, settlings: 0, keepReceipts() {} });
+  runInContext(receiptCode, scope);
+  const c = cursorPane({ text: "" }, { turnReceipts: scope.turnReceipts });
+  const { p, pushed, clock, f } = c;
+  clock.at = p.lastIn = 1000;
+  const a = cursorPrompt(c, "A", "gA");
+  clock.at = p.lastIn = 2050;
+  receipts.get("B").turnsAt = p.turns;
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 2050);
+  f.enterTurn(b, 2050);
+  clock.at = 2200;
+  cursorStop(c, end, "gA", 2000);
+  f.agentReport(p, { kind: "start", at: 2100, launch: 1, match: b.match, turn: "gB" });
+  await new Promise((r) => setTimeout(r, 0));
+  const ended = end === "error" ? "failed" : "completed";
+  assert.deepEqual([a.state, b.state, p.busy, p.waiting, p.turns, receipts.get("B").result?.turn ?? null, pushed], [ended, "working", true, false, 1, null, [ended]], `A's ${end} before B's Enter`);
+  clock.at = 5000;
+  cursorStop(c, "completed", "gB");
+  assert.deepEqual([b.state, p.busy, p.waiting, p.turns, receipts.get("B").result?.turn], ["completed", false, true, 2, 2], `then B's end, after A's ${end}`);
+}
 {
   // One poll reads B's start and A's late stops: every hook keeps its report,
   // but each replaces the pane's one wake marker, and Rust sends that marker
@@ -661,7 +685,7 @@ for (const end of ["error", "completed"]) {
   const b = f.turnTask(p, "submit", model.promptMatch("B"), 2100);
   f.enterTurn(b, 2100);
   clock.at = 2300;
-  p.wake("cursor:error", "hook", "gA");
+  p.wake("cursor:error", "hook");
   f.agentReport(p, { kind: "start", at: 2150, launch: 1, match: b.match, turn: "gB" });
   f.agentReport(p, { kind: "interrupt", at: 2200, launch: 1, turn: "gA" });
   f.agentReport(p, { kind: "fail", at: 2250, launch: 1, detail: "Cursor reported an error", turn: "gA" });
@@ -681,7 +705,7 @@ for (const end of ["error", "completed"]) {
   f.enterTurn(t, 41_000);
   clock.at = 41_300;
   p.seen();
-  p.wake("cursor:done", "hook", "gC");
+  p.wake("cursor:done", "hook");
   f.agentReport(p, { kind: "start", at: 41_050, launch: 1, match: t.match, turn: "gC" });
   f.agentReport(p, { kind: "end", at: 41_200, launch: 1, turn: "gC" });
   assert.deepEqual([t.state, p.cursorTurn, p.cursorGen, p.busy, p.waiting], ["completed", false, "gC", false, true], "a start and its own end in one poll");
