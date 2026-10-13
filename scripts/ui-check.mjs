@@ -1522,7 +1522,7 @@ try {
     const cursorOut = d => page.evaluate(([id, d]) => window.qa.panes.find(p => p.id === id).onOut.onmessage(d), [cursor.id, d]);
     const cursorWake = state => page.evaluate(([id, m]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, m]] }), [cursor.id, `cursor:${state}\n${cursor.launch}\ng1`]);
     const cursorReport = ev => page.evaluate(([id, ev, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: [[id, ev]] } }),
-      [cursor.id, { ...ev, launch: cursor.launch, t: Date.now(), src: 'cursor', turn: 'g1' }, ++cursorBatch]);
+      [cursor.id, { turn: 'g1', ...ev, launch: cursor.launch, t: Date.now(), src: 'cursor' }, ++cursorBatch]);
     const cursorState = async () => (await cli('panes')).data.find(p => p.id === cursor.id).state;
     const until = async (ok, what) => { for (const end = Date.now() + 8000; !(await ok()); await page.waitForTimeout(100)) if (Date.now() > end) throw new Error(`Timed out: ${what}`); };
     await cursorOut('\x1b[2J\x1b[H  Cursor Agent\r\n\r\n  → Plan, search, build anything\r\n');
@@ -1568,6 +1568,25 @@ try {
     await until(async () => (await cursorState()) === 'waiting', `Cursor's done waits on you, ${width}px`);
     assert.equal((await cli('task', cursorTask[0].task)).data.state, 'completed', `Cursor's done completes its task, ${width}px`);
     await audit('cursor-done-overview');
+    await page.click('#dashboard-btn');
+    // Cursor can draw a turn's approval before Loom reads that turn's start (its hooks are read
+    // every 250 ms). The start then leaves the pane waiting, its options still offered, and the
+    // task it starts asks.
+    await cursorOut('\x1b[2J\x1b[H  Cursor Agent\r\n\r\n  → Add a follow-up\r\n');
+    await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('run echo hi again');
+    const enterFrom = await page.evaluate(() => window.qa.calls.length);
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(([id, from]) => window.qa.calls.slice(from).some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data === '\r'), [cursor.id, enterFrom]);
+    await page.evaluate(() => ((window.qa.cursorSel = 0), window.qa.drawCursorAsk()));
+    await until(async () => (await cursorState()) === 'waiting', `Cursor's approval before its start waits on you, ${width}px`);
+    await page.click('#dashboard-btn');
+    await cursorCard.locator('.dashboard-choices button').first().waitFor();
+    await cursorReport({ kind: 'start', match: '0123456789abcdef', turn: 'g2' });
+    const earlyTask = async () => (await cli('tasks')).data.find(t => t.agent === 'cursor' && t.task !== cursorTask[0].task);
+    await until(async () => (await earlyTask())?.state === 'approval', `Its start moves the task on to ask, ${width}px`);
+    assert.deepEqual([await cursorState(), await cursorCard.locator('.dashboard-choices button').count()], ['waiting', 4], `The late start leaves Cursor's approval waiting with its options, ${width}px`);
+    await audit('cursor-early-approval');
     await page.click('#dashboard-btn');
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
