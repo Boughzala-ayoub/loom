@@ -384,6 +384,19 @@ export function interruptHint(screen: string, agent: string, cells?: () => Cell[
   return from(end - 3);
 }
 
+// Cursor's rejection feedback, asked after an approval's "Skip & tell the
+// agent what to do instead": its composer's placeholder (2026.10.01's
+// rejection-reason input), and the follow-up one it goes back to.
+const CURSOR_FEEDBACK = /^\s*→\s+Tell the agent what to do\b/;
+const CURSOR_FOLLOW_UP = /^\s*→\s+Add a follow-up\b/;
+/** Cursor's composer, its last "→" row: true while it asks for rejection
+ * feedback, false at its follow-up placeholder, undefined when it holds text
+ * (which hides either placeholder) or isn't drawn. */
+export function readFeedback(screen: string): boolean | undefined {
+  const row = screen.split("\n").filter((l) => /^\s*→\s/.test(l)).pop() ?? "";
+  return CURSOR_FEEDBACK.test(row) ? true : CURSOR_FOLLOW_UP.test(row) ? false : undefined;
+}
+
 // Long pastes show as one of these instead of the text: Claude's and Codex's.
 const PASTED = /\[Pastedtext#\d+(?:\+\d+lines)?\]|\[PastedContent\d+chars\]|\[Image#\d+\]/g;
 

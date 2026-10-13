@@ -1,7 +1,7 @@
 import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
 const claudeComposer = claudeCapture.lines.join("\n");
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import { readMenu, readFeedback, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 import codexQuestion from "./fixtures/codex-question.json" with { type: "json" };
 
@@ -424,6 +424,11 @@ check("Cursor: working, by its spinner where a narrow pane drops the hint", inte
 check("Cursor: idle at its composer", interruptHint(cursorIdle, "cursor"), false);
 check("Cursor: the hint quoted in its transcript isn't work", interruptHint(`  Press ctrl+c to stop\n${cursorIdle}`, "cursor"), false);
 check("Cursor: asking isn't working", interruptHint(cursorAsk, "cursor"), false);
+// Its rejection feedback: the composer's placeholder while a turn waits on it.
+const cursorFeedback = cursorWorking.replace("Add a follow-up                 ", "Tell the agent what to do instead (Enter to send, empty to skip, Esc to cancel)");
+check("Cursor asks for feedback", [readFeedback(cursorFeedback), readFeedback(cursorWorking), readFeedback(cursorIdle)], [true, false, false]);
+check("Cursor's feedback, typed or asking, can't be told", [readFeedback(cursorFeedback.replace(/Tell the agent.*Esc to cancel\)/, "use ls")), readFeedback(cursorAsk)], [undefined, undefined]);
+check("Cursor's feedback placeholder quoted in its transcript", readFeedback(`  → Tell the agent what to do instead\n${cursorIdle}`), false);
 check("Cursor's approval, unnumbered", shape(readMenu(cursorAsk)), {
   question: ["$  echo loomprobe in .", "Run this command?", "Not in allowlist: echo"],
   options: ["Run (once) (y)", "Add Shell(echo) to allowlist? (tab)", "Run Everything (shift+tab)", "Skip & tell the agent what to do instead (esc or n)"],

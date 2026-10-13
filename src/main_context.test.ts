@@ -8,7 +8,7 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
 import { pruneSettled } from "./cli.ts";
-import { readMenu, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
+import { readMenu, readFeedback, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "turnsSeen", "turnTasks"]);
@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorQuestion", "cursorAsks", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "answeredCursor", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -385,7 +385,7 @@ const CURSOR_ASK = ` $  echo hi in .
     Skip & tell the agent what to do instead (esc or n)
 `;
 const cursorPane = (view: { text: string }, extra: Record<string, unknown> = {}) => {
-  const c = claudePane({ readMenu, menuRev, menuKeys, readSurvey, interruptHint, screenCells: () => [], liveScreen: () => view.text, turnReceipts() {}, ...extra });
+  const c = claudePane({ readMenu, readFeedback, menuRev, menuKeys, readSurvey, interruptHint, screenCells: () => [], liveScreen: () => view.text, turnReceipts() {}, ...extra });
   c.p.agent = "cursor";
   return c;
 };
@@ -551,6 +551,47 @@ for (const key of ["\x1b", "\x03"]) {
   cursorStop(c, "error", "gA");
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([t.state, p.waiting, pushed], ["failed", true, ["approval", "failed"]], JSON.stringify(key));
+}
+// Cursor's rejection feedback, asked after Esc picks an approval's "Skip &
+// tell the agent what to do instead": its composer's placeholder (2026.10.01).
+const CURSOR_FEEDBACK = "  → Tell the agent what to do instead (Enter to send, empty to skip, Esc to cancel)   ctrl+c to stop\n";
+const CURSOR_WORKING = "  → Add a follow-up        ctrl+c to stop\n";
+for (const [how, steps, stopped] of [
+  // Ctrl-C there skips the feedback (onSkipRejectionReason), typed or not, and
+  // Esc goes back to the approval (onCancelRejectionReason), still asked: the
+  // task asks on with no new notice. Neither stops the turn, so its genuine
+  // error later fails it.
+  ["skipped", [["\x03", CURSOR_WORKING]], false],
+  ["typed, then skipped", [["use ls", "  → use ls\n"], ["\x03", CURSOR_WORKING]], false],
+  ["back to the approval", [["\x1b", CURSOR_ASK], ["y", CURSOR_WORKING]], false],
+  // Skipped or sent, the feedback is over: the next Ctrl-C or Esc stops the turn.
+  ["skipped, then stopped", [["\x03", CURSOR_WORKING], ["\x03", CURSOR_WORKING]], true],
+  ["sent, then stopped", [["use ls", "  → use ls\n"], ["\r", CURSOR_WORKING], ["\x1b", CURSOR_WORKING]], true],
+] as const) {
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
+  clock.at = 3000;
+  view.text = CURSOR_ASK;
+  p.activity();
+  clock.at = p.lastIn = 4000;
+  p.wrote("\x1b", true, p.answers("\x1b"));
+  p.seen();
+  view.text = CURSOR_FEEDBACK;
+  p.activity();
+  for (const [key, after] of steps) {
+    clock.at = p.lastIn = clock.at + 1000;
+    p.wrote(key, true, p.answers(key));
+    p.seen();
+    view.text = after;
+    p.activity();
+  }
+  clock.at = 60_000;
+  for (const end of stopped ? ["aborted", "error"] : ["error"]) cursorStop(c, end, "gA");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.waiting, pushed], stopped ? ["cancelled", false, ["approval"]] : ["failed", true, ["approval", "failed"]], how);
 }
 for (const order of [["aborted", "error"], ["error", "aborted"]]) {
   // Esc stops A, and B starts before either of A's stops lands. They end A,

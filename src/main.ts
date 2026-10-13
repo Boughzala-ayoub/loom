@@ -19,7 +19,7 @@ import { applyStash, listStashes, stashCommit } from "./stash";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { claudeDivider, claudeComposer, readMenu, menuKeys, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
+import { claudeDivider, claudeComposer, readMenu, readFeedback, menuKeys, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
@@ -1942,6 +1942,12 @@ class Pane {
   /** The question an answer went to (menuRev), still drawn until Cursor
    * redraws: not asked again. */
   private cursorAnswered: string | undefined;
+  /** Cursor asks for rejection feedback, after an approval's "Skip & tell the
+   * agent what to do instead" (readFeedback). Its Ctrl-C skips the feedback
+   * and its Esc goes back to the approval, and the turn goes on (wrote). Text
+   * typed there hides its placeholder, so it holds until Cursor draws its
+   * follow-up composer or a question, or an answer, Esc or Ctrl-C goes in. */
+  private cursorFeedback = false;
   /** What OMP last said of itself (OSC 7501, programStatus): working,
    * blocked, done, error or idle. Unset until this launch says one, and again
    * once OMP quits (clear) and its shell's prompt has the pane. */
@@ -2381,6 +2387,7 @@ class Pane {
     this.cursorEscs = [];
     this.cursorAsking = false;
     this.cursorAnswered = undefined;
+    this.cursorFeedback = false;
     this.programState = undefined;
     this.providerUsage = null;
     this.startupStarted = Date.now();
@@ -2567,7 +2574,8 @@ class Pane {
    * alert, as Codex's OSC 9 does for its own. Gone, the pane works on (an
    * answer in Loom also says so: wrote). */
   private cursorQuestion() {
-    const menu = readMenu(liveScreen(this, false), this.agent);
+    const screen = liveScreen(this, false), menu = readMenu(screen, this.agent);
+    this.cursorFeedback = !menu && (readFeedback(screen) ?? this.cursorFeedback);
     if (this.cursorAnswered !== undefined) {
       if (menu && menuRev(menu) === this.cursorAnswered) return;
       this.cursorAnswered = undefined;
@@ -2971,6 +2979,7 @@ class Pane {
     if (dashboardOpen) renderDashboard();
   }
   private answeredCursor() {
+    this.cursorFeedback = false;
     if (!this.cursorAsking) return;
     this.cursorAsking = false;
     const asked = readMenu(liveScreen(this, false), this.agent);
@@ -2993,9 +3002,10 @@ class Pane {
       this.interruptAt = Date.now();
       this.codexAsking = false;
       // On Cursor's question, Esc and Ctrl-C answer it (propose or reject:
-      // the turn goes on), so only one with none on screen stops the turn:
-      // the one running, or one Loom hasn't heard of yet (agentReport).
-      if (this.agent === "cursor" && !this.cursorAsking) {
+      // the turn goes on), and on its rejection feedback they go back to the
+      // question or skip the feedback. Only one with neither on screen stops
+      // the turn: the one running, or one Loom hasn't heard of yet (agentReport).
+      if (this.agent === "cursor" && !this.cursorAsking && !this.cursorFeedback) {
         const at = Date.now();
         // ponytail: the last 16 only; one 250 ms poll's starts need far fewer.
         if (this.cursorEscs.push(at) > 16) this.cursorEscs.shift();
