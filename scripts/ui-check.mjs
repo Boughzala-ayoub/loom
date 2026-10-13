@@ -1519,7 +1519,8 @@ try {
       [1, 1, 1, 1], `Cursor's mark, ${width}px`);
     assert.ok(await page.evaluate(() => [...document.querySelectorAll('.agent .agent-name')].some(n => n.textContent === 'cursor')), `The sidebar names Cursor, ${width}px`);
     let cursorBatch = 0;
-    const cursorOut = d => page.evaluate(([id, d]) => window.qa.panes.find(p => p.id === id).onOut.onmessage(d), [cursor.id, d]);
+    // The pane's latest launch: a restart adds one, and output to the one before goes nowhere.
+    const cursorOut = d => page.evaluate(([id, d]) => window.qa.panes.filter(p => p.id === id).at(-1).onOut.onmessage(d), [cursor.id, d]);
     const cursorWake = state => page.evaluate(([id, m]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'wakes', payload: [[id, m]] }), [cursor.id, `cursor:${state}\n${cursor.launch}\ng1`]);
     const cursorReport = ev => page.evaluate(([id, ev, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: [[id, ev]] } }),
       [cursor.id, { turn: 'g1', ...ev, launch: cursor.launch, t: Date.now(), src: 'cursor' }, ++cursorBatch]);
@@ -1634,7 +1635,7 @@ try {
     await audit('cursor-feedback-failed');
     // Loom knows C runs. Cursor ends C and asks for D, the person's next prompt, before one poll
     // reads C's end and D's start. The approval waits for that batch, then asks in D alone.
-    const cursorAskWith = (command) => page.evaluate(([id, command]) => window.qa.panes.find(p => p.id === id).onOut.onmessage('\x1b[2J\x1b[H────────────────────────\r\n $  echo ' + command + ' in .\r\n\r\n Run this command?\r\n Not in allowlist: echo\r\n'
+    const cursorAskWith = (command) => page.evaluate(([id, command]) => window.qa.panes.filter(p => p.id === id).at(-1).onOut.onmessage('\x1b[2J\x1b[H────────────────────────\r\n $  echo ' + command + ' in .\r\n\r\n Run this command?\r\n Not in allowlist: echo\r\n'
       + ['Run (once) (y)', 'Add Shell(echo) to allowlist? (tab)', 'Run Everything (shift+tab)', 'Skip & tell the agent what to do instead (esc or n)'].map((o, i) => `${i ? '    ' : '  → '}${o}`).join('\r\n') + '\r\n'), [cursor.id, command]);
     const cursorHeldKey = async (key) => {
       await page.evaluate(id => ((window.qa.pendingWrites = []), (window.qa.holdWrites = id)), cursor.id);
@@ -1644,7 +1645,7 @@ try {
     };
     const cursorAck = () => page.evaluate(() => ((window.qa.holdWrites = null), window.qa.pendingWrites.splice(0).forEach(done => done())));
     const cursorBatchOf = (events) => page.evaluate(([id, events, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: events.map(e => [id, e]) } }),
-      [cursor.id, events.map(e => ({ ...e, launch: cursor.launch, src: 'cursor' })), ++cursorBatch]);
+      [cursor.id, events.map(e => ({ launch: cursor.launch, ...e, src: 'cursor' })), ++cursorBatch]);
     const knownBefore = new Set((await cli('tasks')).data.map(t => t.task));
     await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
     await page.keyboard.type('run C');
@@ -1692,6 +1693,60 @@ try {
     await until(async () => (await cli('task', taskD.task)).data.state === 'cancelled', `A real Esc cancels D, ${width}px`);
     assert.equal(await cursorState(), 'idle', `D's cancellation raises no alert, ${width}px`);
     await audit('cursor-esc-cancelled');
+    // E runs, and a real Esc goes in with its acknowledgement held (qa.gateWrite). F, sent next,
+    // asks, and one poll brings E's interrupt and F's start, held behind that write for over a
+    // second while the page runs on. Nothing asks until the write's outcome is in, then F does.
+    const gateWrite = data => page.evaluate(data => ((window.qa.gated = []), (window.qa.gateWrite = d => d === data)), data);
+    const gateRelease = () => page.evaluate(() => ((window.qa.gateWrite = null), window.qa.gated.splice(0).forEach(go => go())));
+    const turnBefore = new Set((await cli('tasks')).data.map(t => t.task));
+    const turnTasksNow = async () => (await cli('tasks')).data.filter(t => t.agent === 'cursor' && !turnBefore.has(t.task));
+    await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('run E');
+    await cursorKey('Enter', '\r');
+    await cursorBatchOf([{ kind: 'start', t: Date.now(), turn: 'gE', match: '0123456789abcdef' }]);
+    await cursorOut('\x1b[2J\x1b[H  run E\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
+    await until(async () => (await turnTasksNow()).map(t => t.state).join() === 'working', `Loom knows E runs, ${width}px`);
+    await gateWrite('\x1b');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => window.qa.gated.length === 1);
+    await cursorOut('\x1b[2J\x1b[H  E stopped.\r\n\r\n  → Add a follow-up\r\n');
+    await page.keyboard.type('run F');
+    await cursorKey('Enter', '\r');
+    await cursorAskWith('f');
+    await until(async () => (await cursorState()) === 'waiting', `F's approval waits on you at once, ${width}px`);
+    await cursorBatchOf([{ kind: 'interrupt', t: Date.now(), turn: 'gE' }, { kind: 'start', t: Date.now(), turn: 'gF', match: '0123456789abcdef' }]);
+    await page.waitForTimeout(1200);
+    assert.deepEqual((await turnTasksNow()).map(t => [t.state, t.events.some(e => e.state === 'approval')]), [['working', false]], `Nothing asks while E's interrupt and F's start are held, ${width}px`);
+    await gateRelease();
+    await until(async () => (await turnTasksNow()).map(t => t.state).join() === 'cancelled,approval', `The Esc's outcome in, E ends and F asks, ${width}px`);
+    const [taskE, taskF] = await turnTasksNow();
+    assert.deepEqual([taskE.events.some(e => e.state === 'approval'), taskE.detail, taskF.events.filter(e => e.state === 'approval').length], [false, null, 1], `F's approval asks in F alone, ${width}px`);
+    // y answers F's approval with its acknowledgement held, and the pane restarts. G asks the very
+    // same question in the new launch. The old acknowledgement is the old launch's: G still asks.
+    await gateWrite('y');
+    await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.press('y');
+    await page.waitForFunction(() => window.qa.gated.length === 1);
+    assert.equal((await cli('restart', 'fix-settings:1', '--yes')).ok, true, `Cursor's pane restarts, ${width}px`);
+    const relaunched = await page.evaluate(id => window.qa.panes.filter(p => p.id === id).at(-1).launch, cursor.id);
+    assert.notEqual(relaunched, cursor.launch, `The restart is a new launch, ${width}px`);
+    await cursorOut('\x1b[2J\x1b[H  Cursor Agent\r\n\r\n  → Plan, search, build anything\r\n');
+    await page.locator(`.pane[data-id="${cursor.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('run G');
+    await cursorKey('Enter', '\r');
+    await cursorBatchOf([{ kind: 'start', t: Date.now(), turn: 'gG', match: '0123456789abcdef', launch: relaunched }]);
+    await cursorAskWith('f');
+    const taskG = async () => (await cli('tasks')).data.find(t => t.agent === 'cursor' && t.generation !== taskF.generation && !turnBefore.has(t.task));
+    await until(async () => (await taskG())?.state === 'approval', `G asks in the new launch, ${width}px`);
+    await gateRelease();
+    await page.waitForTimeout(200);
+    const g = await taskG();
+    assert.deepEqual([g.state, g.events.at(-1).state, g.answerInDoubt, await cursorState()], ['approval', 'approval', false, 'waiting'], `The old launch's answer leaves G asking, ${width}px`);
+    await page.click('#dashboard-btn');
+    await cursorCard.locator('.dashboard-choices button').first().waitFor();
+    assert.equal(await cursorCard.locator('.dashboard-choices button').count(), 4, `G's options stay on the Overview, ${width}px`);
+    await audit('cursor-relaunch-answer');
+    await page.click('#dashboard-btn');
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');
