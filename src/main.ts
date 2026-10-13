@@ -2983,7 +2983,9 @@ class Pane {
     if (delivered && (data === "\x1b" || data === "\x03")) {
       this.interruptAt = Date.now();
       this.codexAsking = false;
-      if (this.cursorTurn) this.cursorEsc = this.cursorGen;
+      // On Cursor's question, Esc and Ctrl-C answer it (propose or reject:
+      // the turn goes on), so only one with none on screen stops the turn.
+      if (this.cursorTurn && !this.cursorAsking) this.cursorEsc = this.cursorGen;
       this.answeredCursor();
     }
     if (!answer) return;

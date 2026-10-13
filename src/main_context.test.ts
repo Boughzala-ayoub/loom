@@ -527,4 +527,30 @@ for (const late of [null, "aborted", "error"]) {
   view.text = "  → Add a follow-up\n";
   assert.equal(p.answers("\t"), false, "Tab in the composer answers nothing");
 }
+for (const key of ["\x1b", "\x03"]) {
+  // Esc on an approval is its "Skip & tell the agent what to do instead"
+  // (Cursor's propose), and Ctrl-C there rejects it: an answer to that one
+  // question, after which the turn goes on. A genuine error later in that
+  // turn fails it, and raises the alert.
+  const view = { text: "" };
+  const c = cursorPane(view);
+  const { p, pushed, clock } = c;
+  clock.at = 1000;
+  const t = cursorPrompt(c, "A", "gA");
+  clock.at = 3000;
+  view.text = CURSOR_ASK;
+  p.activity();
+  clock.at = p.lastIn = 4000;
+  p.wrote(key, true, p.answers(key));
+  p.seen();
+  view.text = "  → Add a follow-up        ctrl+c to stop\n"; // its feedback, typed in the composer
+  p.activity();
+  clock.at = p.lastIn = 5000;
+  p.wrote("\r", true, p.answers("\r"));
+  p.seen();
+  clock.at = 60_000;
+  cursorStop(c, "error", "gA");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.waiting, pushed], ["failed", true, ["approval", "failed"]], JSON.stringify(key));
+}
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");
