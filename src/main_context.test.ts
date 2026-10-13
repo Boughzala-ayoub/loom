@@ -786,4 +786,15 @@ for (const escA of [false, true]) for (const order of [["error", "aborted"], ["a
   const what = `${escA ? "Esc on A and on B" : "A's error, Esc on B"}, ${order.join(" then ")}`;
   assert.deepEqual([a.state, b.state, p.busy, p.waiting, pushed], escA ? ["cancelled", "cancelled", false, false, []] : ["failed", "cancelled", false, false, ["failed"]], what);
 }
+for (const end of ["completed", "error", "aborted"]) {
+  // An open Overview redraws when a Cursor turn stops. Done or failed, the
+  // pane already waits then, so its card never reads idle until the next tick.
+  const drawn: boolean[][] = [];
+  const c = cursorPane({ text: "" }, { dashboardOpen: true, renderDashboard: () => drawn.push([c.p.busy, c.p.waiting]) });
+  c.clock.at = 1000;
+  cursorPrompt(c, "A", "gA");
+  c.clock.at = 2000;
+  cursorStop(c, end, "gA");
+  assert.deepEqual(drawn[drawn.length - 1], [false, end !== "aborted"], `the Overview after ${end}`);
+}
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");

@@ -5110,10 +5110,11 @@ function agentReport(p: Pane, s: Signal) {
       // either). An older turn's stop ends its own task, which notifies, while
       // the pane and its receipts wait for the newer turn's end. The stop's
       // own time counts the turn: a send whose Enter went in after it, before
-      // Loom read it, waits for its own turn (turnReceipts).
+      // Loom read it, waits for its own turn (turnReceipts). The alert goes
+      // first: cursorRuns redraws an open Overview, which then shows it.
       if (!s.turn || s.turn === p.cursorGen) {
-        p.cursorRuns(false);
         if (s.kind !== "interrupt" && !p.dead) p.wake(undefined, "hook", s.at);
+        p.cursorRuns(false);
       }
     }
   }
