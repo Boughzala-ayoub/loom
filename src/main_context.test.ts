@@ -567,12 +567,16 @@ for (const [how, steps, stopped] of [
   ["typed, then skipped", [["\x1b", CURSOR_FEEDBACK], ["use ls", "  → use ls\n"], ["\x03", CURSOR_WORKING]], false],
   ["skipped with Enter", [["\x1b", CURSOR_FEEDBACK], ["\r", CURSOR_WORKING]], false],
   ["back to the approval", [["\x1b", CURSOR_FEEDBACK], ["\x1b", CURSOR_ASK], ["y", CURSOR_WORKING]], false],
+  ["back, then rejected", [["\x1b", CURSOR_FEEDBACK], ["\x1b", CURSOR_ASK], ["\x03", CURSOR_WORKING]], false],
   ["rejected", [["\x03", CURSOR_WORKING]], false],
   // Skipped, sent or rejected, the question is over: the next Ctrl-C or Esc stops the turn.
   ["skipped, then stopped", [["\x1b", CURSOR_FEEDBACK], ["\x03", CURSOR_WORKING], ["\x03", CURSOR_WORKING]], true],
   ["sent, then stopped", [["\x1b", CURSOR_FEEDBACK], ["use ls", "  → use ls\n"], ["\r", CURSOR_WORKING], ["\x1b", CURSOR_WORKING]], true],
   ["rejected, then stopped", [["\x03", CURSOR_WORKING], ["\x1b", CURSOR_WORKING]], true],
-] as const) {
+] as const) for (const redrawFirst of [false, true]) {
+  // `redrawFirst`: Cursor's redraw after each key lands before the write's
+  // acknowledgement (two native threads, no order between them). What a key
+  // means is read as it's typed (answers), before either.
   const view = { text: "" };
   const c = cursorPane(view);
   const { p, pushed, clock } = c;
@@ -583,16 +587,19 @@ for (const [how, steps, stopped] of [
   p.activity();
   for (const [key, after] of steps) {
     clock.at = p.lastIn = clock.at + 1000;
-    p.wrote(key, true, p.answers(key));
+    const answer = p.answers(key);
+    const redraw = () => ((view.text = after), p.activity());
+    if (redrawFirst) redraw();
+    p.wrote(key, true, answer);
     p.seen();
-    view.text = after;
-    p.activity();
+    if (!redrawFirst) redraw();
   }
-  assert.deepEqual([t.state, p.busy, p.waiting], ["working", true, false], `${how}: Cursor works on`);
+  const what = `${how}${redrawFirst ? ", redrawn before the write's acknowledgement" : ""}`;
+  assert.deepEqual([t.state, p.busy, p.waiting], ["working", true, false], `${what}: Cursor works on`);
   clock.at = 60_000;
   for (const end of stopped ? ["aborted", "error"] : ["error"]) cursorStop(c, end, "gA");
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual([t.state, p.waiting, pushed], stopped ? ["cancelled", false, ["approval"]] : ["failed", true, ["approval", "failed"]], how);
+  assert.deepEqual([t.state, p.waiting, pushed], stopped ? ["cancelled", false, ["approval"]] : ["failed", true, ["approval", "failed"]], what);
 }
 for (const screen of [CURSOR_ASK, CURSOR_FEEDBACK]) {
   // A Ctrl-C whose write failed may or may not have gone in: the task still

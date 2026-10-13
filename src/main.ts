@@ -1944,9 +1944,9 @@ class Pane {
   private cursorAnswered: string | undefined;
   /** Cursor asks for rejection feedback, after an approval's "Skip & tell the
    * agent what to do instead" (readFeedback). Its Ctrl-C skips the feedback
-   * and its Esc goes back to the approval, and the turn goes on (wrote). Text
-   * typed there hides its placeholder, so it holds until Cursor draws its
-   * follow-up composer or a question, or an answer, Esc or Ctrl-C goes in. */
+   * and its Esc goes back to the approval, and the turn goes on (answers,
+   * wrote). Text typed there hides its placeholder, so it holds until Cursor
+   * draws its follow-up composer or a question, or a Ctrl-C goes in. */
   private cursorFeedback = false;
   /** What OMP last said of itself (OSC 7501, programStatus): working,
    * blocked, done, error or idle. Unset until this launch says one, and again
@@ -2957,9 +2957,12 @@ class Pane {
   answers(d: string) {
     if (d.startsWith("\x1b[200~")) return false;
     if (d.includes("\r")) return true;
-    // Ctrl-C on Cursor's question rejects it, and on its rejection feedback
-    // skips that, as an empty Enter does: the turn goes on without it.
-    if (d === "\x03") return this.agent === "cursor" && (this.cursorAsking || this.cursorFeedback);
+    // Cursor's question and its rejection feedback take Esc and Ctrl-C, and
+    // the turn goes on. Ctrl-C rejects the question or skips the feedback, as
+    // an empty Enter does. Esc picks the question's "Skip & tell the agent ..."
+    // or goes from the feedback back to the question, so it's still asked
+    // (wrote). Read now: Cursor can redraw before the write is acknowledged.
+    if (d === "\x1b" || d === "\x03") return this.agent === "cursor" && (this.cursorAsking || this.cursorFeedback);
     // Shift+Tab and Tab pick the option that names them ("allow all edits ...
     // (shift+tab)", Cursor's "Add Shell(echo) to allowlist? (tab)").
     if (d === "\x1b[Z" || d === "\t") {
@@ -2983,7 +2986,6 @@ class Pane {
     if (dashboardOpen) renderDashboard();
   }
   private answeredCursor() {
-    this.cursorFeedback = false;
     if (!this.cursorAsking) return;
     this.cursorAsking = false;
     const asked = readMenu(liveScreen(this, false), this.agent);
@@ -2996,8 +2998,9 @@ class Pane {
   /** A write to the process finished: `delivered`, or it failed and may or
    * may not have gone in. Only what went in moves a task. Esc or Ctrl-C may
    * have interrupted a turn (sweepTasks judges it). An answer (`answer`, what
-   * answers() said as it was typed) answers a question, which neither Claude
-   * nor Codex reports, so a task asking here works again. An answer that
+   * answers() said as it was typed, never the screen now: the agent may have
+   * redrawn for it already) answers a question, which neither Claude nor
+   * Codex reports, so a task asking here works again. An answer that
    * failed leaves the question asked, and the task says the answer is in
    * doubt (`answerInDoubt`, not `uncertain`: an answer says nothing about the
    * task's own Enter). */
@@ -3005,20 +3008,25 @@ class Pane {
     if (delivered && (data === "\x1b" || data === "\x03")) {
       this.interruptAt = Date.now();
       this.codexAsking = false;
-      // On Cursor's question, Esc and Ctrl-C answer it (propose or reject:
-      // the turn goes on), and on its rejection feedback they go back to the
-      // question or skip the feedback. Only one with neither on screen stops
-      // the turn: the one running, or one Loom hasn't heard of yet (agentReport).
-      if (this.agent === "cursor" && !this.cursorAsking && !this.cursorFeedback) {
+      // Cursor's: one typed with its question or feedback open answered that
+      // (answers). Only one typed with neither stops the turn: the one
+      // running, or one Loom hasn't heard of yet (agentReport).
+      if (this.agent === "cursor" && !answer) {
         const at = Date.now();
         // ponytail: the last 16 only; one 250 ms poll's starts need far fewer.
         if (this.cursorEscs.push(at) > 16) this.cursorEscs.shift();
         // The first Esc into a turn stopped it.
         if (this.cursorTurn && this.cursorGen && !this.cursorEsc.has(this.cursorGen)) this.cursorEsc.set(this.cursorGen, at);
       }
-      this.answeredCursor();
+      // Ctrl-C ends Cursor's feedback, if it was open. Esc can open it or end
+      // it, so only the screen says (cursorQuestion).
+      // ponytail: a second Ctrl-C typed before this one's acknowledgement or
+      // Cursor's redraw still reads as the skip; one more draw tells them apart.
+      if (data === "\x03") this.cursorFeedback = false;
     }
-    if (!answer) return;
+    // Esc on Cursor's question asks for its feedback, and in the feedback goes
+    // back to the question: still asked either way.
+    if (!answer || (this.agent === "cursor" && data === "\x1b")) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
     this.codexAsking = false;
