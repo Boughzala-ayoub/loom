@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokIdleSince", "grokTimer", "grokBusy", "grokReport", "grokSettle", "grokEnd", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokIdleSince", "grokTimer", "grokBusy", "grokReport", "grokSettle", "grokEnd", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -1200,8 +1200,8 @@ const [GROK_IDLE, GROK_WORKING, GROK_ASK] = ["idle", "working", "approval"].map(
   assert.equal(f.watched(t).stopAt, 4000, "Claude's own Stop counts");
 }
 console.log("ok   Reports from another agent's hooks don't move a pane's tasks");
-const grokTurn = (view: { text: string }) => {
-  const c = cursorPane(view);
+const grokTurn = (view: { text: string }, extra: Record<string, unknown> = {}) => {
+  const c = cursorPane(view, extra);
   c.p.agent = "grok";
   const report = (ev: Record<string, unknown>) => c.f.agentEvents([[c.p.id, { launch: 1, turn: "pA", src: "grok", ...ev }]]);
   c.clock.at = c.p.lastIn = 1000;
@@ -1410,6 +1410,22 @@ console.log("ok   A Grok prompt typed into the last turn's Stop gate never compl
   }
 }
 console.log("ok   Closing judges a held Grok Stop on the screen its pane left");
+{
+  // Grok second review 3: a Grok pane closed while its Stop gate runs stops polling.
+  const view = { text: GROK_IDLE };
+  const { p, clock, later, report } = grokTurn(view, { dashboardMessages: new Map(), dashboardDrafts: new Map(), recording: null, outs: new Map(), cancelAnimationFrame() {}, ackOutput() {}, invoke: async () => {} });
+  clock.at = 3000;
+  report({ kind: "stop", t: 3000 });
+  later(3600);
+  let polls = 0;
+  const settle = p.grokSettle;
+  p.grokSettle = function (...a: unknown[]) { polls++; return settle.apply(this, a); };
+  Object.assign(p, { observer: { disconnect() {} }, unlisten: [], out: { id: 1 }, gpu() {}, term: { dispose() {} }, el: { remove() {} }, row: { remove() {} }, pip: { remove() {} } });
+  await p.dispose();
+  later(10_000);
+  assert.equal(polls, 0, "a closed pane's held Stop polled on");
+}
+console.log("ok   A closed Grok pane stops polling for its Stop");
 {
   // Grok review 3: another UserPromptSubmit hook blocks the prompt after Loom's reported
   // it. No turn runs, and Grok shows the blocked prompt's card (Edit, Resend, Discard).

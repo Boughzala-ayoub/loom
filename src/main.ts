@@ -2894,6 +2894,7 @@ class Pane {
       mic(() => invoke("dictate_stop").then(() => {}, () => {}));
     }
     clearTimeout(this.idle);
+    clearTimeout(this.grokTimer);
     this.observer.disconnect();
     cancelAnimationFrame(this.raf);
     this.resizeRender?.dispose();
@@ -3070,11 +3071,12 @@ class Pane {
    * which Grok reports late: then that report or Grok's idle notice says, as
    * the notice does where the bar can't. Closing, once, on the screen the
    * pane was left with: shutdown has marked it dead by then, and a Stop that
-   * screen doesn't confirm ends unknown (sweepTasks). A dead pane polls no more. */
+   * screen doesn't confirm ends unknown (sweepTasks). A dead pane polls no
+   * more, and a closed one says nothing (dispose). */
   grokSettle(why?: "idle" | "closing") {
     clearTimeout(this.grokTimer);
     const s = this.grokStop;
-    if (!s || (this.dead && why !== "closing")) return;
+    if (!s || this.disposed || (this.dead && why !== "closing")) return;
     const seen = grokRunning(liveScreen(this, false));
     if (seen === true || this.cursorAsking) this.grokIdleSince = undefined;
     else if (why === "idle" || (seen === false && this.interruptAt <= s.at && (why === "closing" || Date.now() - (this.grokIdleSince ??= Date.now()) >= 500))) return this.grokEnd();

@@ -173,8 +173,13 @@ const setup = () => {
   const repo = 'C:\\projects\\loom';
   const state = { repos: [repo], threads: [{ repo, dir: `${repo}\\work`, branch: 'loom/work', name: 'work', panes: [{ cmd: 'claude' }, { cmd: 'codex' }, { cmd: 'claude' }] }], ui: { thread: 0 } };
   const qa = window.qa = { calls: [], panes: [], agents: {}, batch: Number(localStorage.getItem('qa-batch-kept')), prompts: [], journalHeld: [], heldWrites: [], failWriteIf: null, noEcho: false, ignoreEsc: false, idleAfterEnter: false, shellHang: false };
-  // ?grok: a Grok pane too (work:4).
-  if (location.search.includes('grok')) state.threads[0].panes.push({ cmd: 'grok' });
+  // ?grok: a Grok pane too (work:4), and a count of the Stop polls its timer runs (Pane.grokSettle).
+  if (location.search.includes('grok')) {
+    state.threads[0].panes.push({ cmd: 'grok' });
+    const timeout = window.setTimeout;
+    qa.grokPolls = 0;
+    window.setTimeout = (run, ms, ...args) => timeout(typeof run === 'function' && String(run).includes('grokSettle') ? () => (qa.grokPolls++, run()) : run, ms, ...args);
+  }
   const out = (id) => qa.panes.filter((a) => a.id === id).at(-1).onOut;
   qa.out = (id, data) => out(id).onmessage(data);
   // An agent's screen: transcript line, a rule, its input, a rule, a footer that says busy.
@@ -892,6 +897,19 @@ try {
       if (want === 'unknown') assert.ok(t.detail.startsWith('Grok reported the end of its turn as Loom closed') && t.detail.endsWith(`(final message ${response})`), `${how}: ${t.detail}`);
     }
     ok('Closing judges a held Grok Stop on the screen its pane left, and journals it before the window goes');
+  }
+  if (review('grok-dispose')) {
+    // Grok second review 3: a Grok pane closed while its Stop gate runs stops polling for that Stop.
+    const g = await grokPane();
+    const a = await g.prompt('close the pane mid-gate', 'pA');
+    await g.say({ kind: 'stop', turn: 'pA', response: promptMatch('the gate goes on') });
+    await page.waitForFunction(() => window.qa.grokPolls >= 2);
+    assert.equal((await cli('close', g.id, '--yes')).ok, true);
+    await until(a.task, 'cancelled');
+    const before = await page.evaluate(() => window.qa.grokPolls);
+    await page.waitForTimeout(1200);
+    assert.equal(await page.evaluate(() => window.qa.grokPolls) - before, 0, 'A closed pane polled on for its Stop');
+    ok('A closed Grok pane stops polling for its Stop');
   }
   if (review('shutdown-reload')) {
     // Review R16-5: Ctrl+R reloads the page while Loom runs on, so Rust's batch
