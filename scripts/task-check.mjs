@@ -173,6 +173,8 @@ const setup = () => {
   const repo = 'C:\\projects\\loom';
   const state = { repos: [repo], threads: [{ repo, dir: `${repo}\\work`, branch: 'loom/work', name: 'work', panes: [{ cmd: 'claude' }, { cmd: 'codex' }, { cmd: 'claude' }] }], ui: { thread: 0 } };
   const qa = window.qa = { calls: [], panes: [], agents: {}, batch: Number(localStorage.getItem('qa-batch-kept')), prompts: [], journalHeld: [], heldWrites: [], failWriteIf: null, noEcho: false, ignoreEsc: false, idleAfterEnter: false, shellHang: false };
+  // ?grok: a Grok pane too (work:4).
+  if (location.search.includes('grok')) state.threads[0].panes.push({ cmd: 'grok' });
   const out = (id) => qa.panes.filter((a) => a.id === id).at(-1).onOut;
   qa.out = (id, data) => out(id).onmessage(data);
   // An agent's screen: transcript line, a rule, its input, a rule, a footer that says busy.
@@ -786,6 +788,78 @@ try {
     await qa({ lateBatch: [[codex, { t: Date.now(), kind: 'end', matches: [promptMatch(text)], turn: 'late-turn', launch: await gen(codex) }]] });
     assert.equal((await closeNow()).tasks.get(sent.data.task)?.state, 'completed', 'A report sent before shutdown, landing after it, was lost');
     ok('Reports sent before shutdown or returned by it, Claude\'s Stop too, are judged and journaled before the window goes');
+  }
+  /** Loom with a Grok pane (work:4): its screen as given, its hooks' reports, and keys typed into it. */
+  const grokPane = async () => {
+    await page.evaluate(() => localStorage.clear());
+    await page.goto(`${base}?grok`);
+    await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'cli_ready') && window.qa.panes.length >= 4);
+    await page.waitForTimeout(300);
+    const id = await paneId('work:4');
+    const g = {
+      id,
+      draw: (busy) => agent(id, { codexRaw: `\x1b[2J\x1b[H  Grok\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  ${busy ? 'Ctrl+c:cancel  │  ' : ''}Ctrl+x:shortcuts\r\n` }),
+      say: (...events) => report(id, ...events.map((e) => ({ src: 'grok', ...e }))),
+      key: async (key) => {
+        const from = await page.evaluate(() => window.qa.calls.length);
+        await page.locator(`.pane[data-id="${id}"] .xterm-helper-textarea`).focus();
+        await page.keyboard.press(key);
+        await page.waitForFunction(([id, from]) => window.qa.calls.slice(from).some((c) => c.cmd === 'pty_write' && c.args.id === id), [id, from]);
+      },
+      type: async (text) => { await page.locator(`.pane[data-id="${id}"] .xterm-helper-textarea`).focus(); await page.keyboard.type(text); await g.key('Enter'); },
+      tasks: async () => (await cli('tasks')).data.filter((t) => t.pane === id),
+      /** A prompt typed, Grok's bar working, and its prompt hook's start: its task, working. */
+      prompt: async (text, turn) => {
+        const before = (await g.tasks()).length;
+        await g.type(text);
+        await g.draw(true);
+        await g.say({ kind: 'start', turn, match: promptMatch(text) });
+        return g.next(before);
+      },
+      /** The pane's task after its first `n`, once it works. */
+      next: async (n) => {
+        for (const end = Date.now() + 4000; (await g.tasks()).length <= n; await page.waitForTimeout(50)) if (Date.now() > end) assert.fail(`no Grok task after ${n}`);
+        return until((await g.tasks())[n].task, 'working');
+      },
+    };
+    await g.draw(false);
+    return g;
+  };
+  if (review('grok-gate')) {
+    // Grok second review 1: the next turn starting proves the held one over, not that it
+    // succeeded. Ctrl+C in its Stop gate cancels it, which Grok can report after that start,
+    // and a cancel-and-send (Enter on the emptied composer sends the queued prompt now)
+    // replaces it unreported. A prompt queued while it ran still follows a completed turn.
+    let g = await grokPane();
+    const a = await g.prompt('turn A', 'pA');
+    await g.say({ kind: 'stop', turn: 'pA', response: promptMatch('A, before its gate') });
+    await g.key('Control+c');
+    const b = await g.prompt('turn B', 'pB');
+    await page.waitForTimeout(600);
+    assert.equal((await state(a.task)).state, 'working', 'The next start completed a turn Ctrl+C went into');
+    await g.say({ kind: 'interrupt', turn: 'pA' });
+    const cancelled = await until(a.task, 'cancelled');
+    assert.deepEqual([cancelled.events.some((e) => e.state === 'completed'), (await state(b.task)).state], [false, 'working'], 'Its late cancel ends it, and the next turn runs on');
+
+    g = await grokPane();
+    const c = await g.prompt('turn C', 'pC');
+    await g.type('turn D'); // queued behind C
+    await g.say({ kind: 'stop', turn: 'pC', response: promptMatch('C, replaced') });
+    await g.key('Enter'); // on the emptied composer: send D now
+    await g.say({ kind: 'start', turn: 'pD', match: promptMatch('turn D') });
+    const d = await g.next(1);
+    await g.say({ kind: 'stop', turn: 'pD', response: promptMatch('D, done') });
+    await g.draw(false);
+    assert.equal((await until(d.task, 'completed')).events.at(-1).response, promptMatch('D, done'));
+    assert.equal((await state(c.task)).state, 'working', 'A send-now completed the turn it replaced');
+
+    g = await grokPane();
+    const e = await g.prompt('turn E', 'pE');
+    await g.type('turn F'); // queued behind E
+    await page.waitForTimeout(100);
+    await g.say({ kind: 'stop', turn: 'pE', response: promptMatch('E, done') }, { kind: 'start', turn: 'pF', match: promptMatch('turn F') });
+    assert.equal((await until(e.task, 'completed')).events.at(-1).response, promptMatch('E, done'), 'A prompt queued while the turn ran follows its completion');
+    ok('A Grok prompt typed into the last turn\'s Stop gate never completes that turn');
   }
   if (review('shutdown-reload')) {
     // Review R16-5: Ctrl+R reloads the page while Loom runs on, so Rust's batch

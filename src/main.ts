@@ -3038,10 +3038,15 @@ class Pane {
   }
   /** A Grok report as agentReport takes it, or undefined while it waits.
    * Its Stop waits for the screen (grokSettle), and its idle notice settles
-   * that Stop, or the turn its hooks said ran. Another turn starting ends the
-   * held Stop's: Grok starts one only once the last is over. That turn's own
-   * cancel or failure, Ctrl+C in its Stop gate or an error after a block, is
-   * how it ended. An older launch's Stop has no screen left to wait on. */
+   * that Stop, or the turn its hooks said ran. That turn's own cancel or
+   * failure, Ctrl+C in its Stop gate or an error after a block, is how it
+   * ended. Another turn starting proves the held Stop's over, as Grok starts
+   * one only once the last is over, but not how: Ctrl+C, a click or the
+   * palette may have cancelled it in its gate, which Grok can report after
+   * this start, and a cancel-and-send replaces it unreported (Grok's hooks
+   * guide). Only with nothing typed since the Stop did it end as that Stop
+   * said; else its own report decides, or the sweep's quiet. An older
+   * launch's Stop has no screen left to wait on. */
   grokReport(s: Signal): Signal | undefined {
     if ((s.launch ?? this.generation) !== this.generation) return s.kind === "stop" ? { ...s, kind: "end" } : s.kind === "idle" ? undefined : s;
     const held = this.grokStop;
@@ -3053,8 +3058,9 @@ class Pane {
       if (held) this.grokSettle("idle");
       else if (this.cursorTurn) this.cursorRuns(false);
     } else {
-      if (held && s.kind === "start" && s.turn !== held.turn) this.grokEnd();
-      else if (held && (s.kind === "fail" || s.kind === "interrupt") && s.turn === held.turn) (this.grokStop = undefined), clearTimeout(this.grokTimer);
+      const over = held && (s.kind === "start" ? s.turn !== held.turn : (s.kind === "fail" || s.kind === "interrupt") && s.turn === held.turn);
+      if (over && s.kind === "start" && this.lastIn <= held.at) this.grokEnd();
+      else if (over) (this.grokStop = undefined), clearTimeout(this.grokTimer);
       return s;
     }
   }

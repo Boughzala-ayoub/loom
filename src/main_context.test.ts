@@ -1316,19 +1316,65 @@ for (const [how, after, state, response, notices] of [
   report({ kind: "idle", t: 63_000 });
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([t.state, pushed], ["completed", ["completed"]], "idle notice");
-  // The next prompt starting ends a held Stop's turn: Grok starts one only once the last is over.
+  // A prompt queued while the turn ran starts once it's over. With nothing typed
+  // since the Stop, that Stop was the turn's last.
   const v2 = { text: GROK_IDLE };
   const c = grokTurn(v2);
+  c.clock.at = c.p.lastIn = 2500;
+  const next = c.f.turnTask(c.p, "submit", model.promptMatch("B"), 2500);
+  c.f.enterTurn(next, 2500);
   c.clock.at = 3000;
   c.report({ kind: "stop", t: 3000, response: "00000000000000f1" });
-  c.clock.at = c.p.lastIn = 3100;
-  const next = c.f.turnTask(c.p, "submit", model.promptMatch("B"), 3100);
-  c.f.enterTurn(next, 3100);
   c.report({ kind: "start", t: 3200, turn: "pB", match: next.match });
   await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([c.t.state, c.t.events.at(-1).response, next.state, c.pushed], ["completed", "00000000000000f1", "working", ["completed"]], "a queued prompt");
 }
 console.log("ok   Grok's Stop holds until its screen shows the turn over");
+{
+  // Grok second review 1: the next turn starting proves the held one over, not that it
+  // succeeded. Ctrl+C in its Stop gate cancels it, and Grok's guide lets that report
+  // come after the next prompt's start.
+  const view = { text: GROK_IDLE };
+  const { p, f, t, clock, report, pushed } = grokTurn(view);
+  clock.at = 3000;
+  report({ kind: "stop", t: 3000, response: "00000000000000f1" });
+  clock.at = p.lastIn = 3200;
+  p.wrote("\x03", true, p.sending("\x03"));
+  clock.at = p.lastIn = 3400;
+  const next = f.turnTask(p, "submit", model.promptMatch("B"), 3400);
+  f.enterTurn(next, 3400);
+  report({ kind: "start", t: 3500, turn: "pB", match: next.match });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, next.state, pushed], ["working", "working", []], "the next start completed a turn Ctrl+C went into");
+  clock.at = 5000;
+  report({ kind: "interrupt", t: 5000, turn: "pA" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, t.reason, next.state, p.busy, pushed], ["cancelled", "interrupted", "working", true, []], "its late cancel");
+}
+{
+  // Cancel-and-send replaces a turn and reports nothing for it. In a Loom pane
+  // Ctrl+Enter arrives as a bare Enter, and Enter on the emptied composer sends the
+  // queued prompt now. Typed after the Stop, it leaves the turn's outcome unknown.
+  const view = { text: GROK_IDLE };
+  const { p, f, t, clock, later, report, pushed, sweep } = grokTurn(view);
+  clock.at = p.lastIn = 2000;
+  const next = f.turnTask(p, "submit", model.promptMatch("B"), 2000);
+  f.enterTurn(next, 2000);
+  clock.at = 3000;
+  report({ kind: "stop", t: 3000, response: "00000000000000f1" });
+  clock.at = p.lastIn = 3200;
+  p.wrote("\r", true, p.sending("\r"));
+  report({ kind: "start", t: 3300, turn: "pB", match: next.match });
+  await sweep(9000);
+  assert.deepEqual([t.state, next.state, pushed], ["working", "working", []], "send-now completed the turn it replaced");
+  report({ kind: "stop", t: 9000, turn: "pB", response: "00000000000000f2" });
+  view.text = GROK_IDLE;
+  later(10_000);
+  await sweep(10_100);
+  await sweep(41_000);
+  assert.deepEqual([t.state, t.reason, next.state, next.events.at(-1).response, pushed], ["unknown", "no-end-signal", "completed", "00000000000000f2", ["completed"]], "send-now");
+}
+console.log("ok   A Grok prompt typed into the last turn's Stop gate never completes that turn");
 {
   // Grok review 3: another UserPromptSubmit hook blocks the prompt after Loom's reported
   // it. No turn runs, and Grok shows the blocked prompt's card (Edit, Resend, Discard).
