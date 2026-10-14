@@ -282,7 +282,11 @@ const setup = () => {
     // Codex's notify and OpenCode's plugin hand a pane its session id (lib.rs take_sessions): qa.sessions, once.
     if (cmd === 'take_sessions') return (qa.sessions ?? []).splice(0).filter(([id]) => args.ids.includes(id));
     // Grok's session log, as grok.rs turn_end reads it: each turn's turn_completed stop_reason (qa.grokEnds), once Grok writes it.
-    if (cmd === 'grok_turn_end') return (qa.grokEnds ?? {})[args.turn] ?? null;
+    // qa.holdGrokEnds: each read waits in qa.grokReplies until the test answers it.
+    if (cmd === 'grok_turn_end') {
+      const end = () => (qa.grokEnds ?? {})[args.turn] ?? null;
+      return qa.holdGrokEnds ? new Promise((resolve) => qa.grokReplies.push(() => resolve(end()))) : end();
+    }
     // The last batch Rust sent (lib.rs agent_batch_base). qa-batch-kept: a reload that kept Loom running, and its count.
     if (cmd === 'agent_batch_base') return qa.batch;
     // What the stopped panes reported as they went (lib.rs pty_shutdown): qa.shutdownEvents, once.
@@ -943,6 +947,35 @@ try {
       if (want === 'unknown') assert.ok(t.detail.startsWith('Grok reported the end of its turn as Loom closed') && t.detail.endsWith(`(final message ${response})`), `${how}: ${t.detail}`);
     }
     ok('Closing asks a held Grok Stop\'s session log how its turn ended, and journals it before the window goes');
+  }
+  if (review('grok-close-read')) {
+    // Grok fourth review: shutdown returns A's Stop, then the queued B's start or Grok's idle
+    // notice. Either asks A's session log how its turn ended, and holds no Stop after. The
+    // window goes only once that read is back, with A's end journaled: completed on the
+    // log's end_turn, and still working on anything else.
+    for (const [how, queued, ended, want] of [
+      ['the queued turn starts, the log has A\'s end', true, 'end_turn', 'completed'],
+      ['Grok\'s idle notice, the log has A\'s end', false, 'end_turn', 'completed'],
+      ['the queued turn starts, the log has A cancelled', true, 'cancelled', 'working'],
+    ]) {
+      const g = await grokPane();
+      const a = await g.prompt('turn A', 'pA');
+      if (queued) await g.type('turn B');
+      await g.ended('pA', ended);
+      const launch = await gen(g.id), response = promptMatch(`A, ${how}`), t = Date.now();
+      const after = queued ? { src: 'grok', kind: 'start', turn: 'pB', match: promptMatch('turn B'), launch, t: t + 1 } : { src: 'grok', kind: 'idle', launch, t: t + 1 };
+      await qa({ holdGrokEnds: true, grokReplies: [], shutdownEvents: [[g.id, { src: 'grok', session: 'grok-session', kind: 'stop', turn: 'pA', response, launch, t }], [g.id, after]] });
+      await page.waitForTimeout(400);
+      await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+      await page.waitForFunction(() => window.qa.grokReplies.length > 0);
+      await page.waitForTimeout(200);
+      assert.equal(await page.evaluate(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy')), false, `${how}: the window went with A's read out`);
+      await page.evaluate(() => window.qa.grokReplies.splice(0).forEach((reply) => reply()));
+      await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
+      const tasks = [...readJournal(await page.evaluate(() => window.qa.journalAtDestroy)).tasks.values()].filter((t) => t.pane === g.id);
+      assert.deepEqual(tasks.map((t) => [t.id === a.task, t.state, t.events.at(-1).response]), [[true, want, want === 'completed' ? response : undefined], ...(queued ? [[false, 'working', undefined]] : [])], how);
+    }
+    ok('Closing waits for a Grok session log read already out, and journals its end before the window goes');
   }
   if (review('grok-dispose')) {
     // Grok second review 3: a Grok pane closed while its Stop gate runs stops polling for that Stop.

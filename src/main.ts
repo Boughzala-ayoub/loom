@@ -1937,6 +1937,8 @@ class Pane {
    * is true for both). */
   grokStop: GrokStop | undefined;
   grokTimer = 0;
+  /** Every read of Grok's session log grokOver started, done once all are: closing waits for them (closeTasks). */
+  grokReads: Promise<unknown> = Promise.resolve();
   /** Cursor's turns by their generation_id, which its hooks name: the one
    * whose start came last (cursorGen), and each one an Esc or Ctrl-C went
    * into, with when (cursorEsc), kept until its first stop counts
@@ -3046,12 +3048,12 @@ class Pane {
     const old = (s.launch ?? this.generation) !== this.generation, held = this.grokStop;
     if (s.kind === "stop") return void (old ? this.grokOver(s) : ((this.grokStop = s), this.grokSettle()));
     if (s.kind === "idle") {
-      if (!old && held) void this.grokOver(held);
+      if (!old && held) this.grokOver(held);
       else if (!old && this.cursorTurn) this.cursorRuns(false);
       return;
     }
     if (!old && held && (s.kind === "start" ? s.turn !== held.turn : (s.kind === "fail" || s.kind === "interrupt") && s.turn === held.turn)) {
-      if (s.kind === "start") void this.grokOver(held);
+      if (s.kind === "start") this.grokOver(held);
       else this.grokDrop();
     }
     return s;
@@ -3081,9 +3083,9 @@ class Pane {
    * launch's, or Loom is closing. Grok's session log says whether it
    * succeeded. Anything else leaves it to Grok's own report, or the sweep's
    * quiet ends it unknown. `keep`: closing keeps it held for the sweep. */
-  async grokOver(s: GrokStop, keep = false) {
+  grokOver(s: GrokStop, keep = false) {
     if (this.grokStop === s) keep ? clearTimeout(this.grokTimer) : this.grokDrop();
-    if ((await this.grokOutcome(s)) === "end_turn") this.grokEnd(s);
+    this.grokReads = Promise.all([this.grokReads, this.grokOutcome(s).then((end) => end === "end_turn" && this.grokEnd(s))]);
   }
   /** How Grok's session log says Stop `s`'s turn ended (grok.rs turn_end): "end_turn" alone is success. */
   private grokOutcome(s: GrokStop) {
@@ -5364,11 +5366,13 @@ function sweepSoon() {
  * Stop is judged on the screen they left now, and one it can't confirm ends
  * unknown rather than wait for a next sweep that won't come. */
 /** Closing, once shutdown's reports are in: each Grok Stop still held asks
- * Grok's session log how its turn ended (Pane.grokOver), then the sweep ends
- * what's left. */
+ * Grok's session log how its turn ended (Pane.grokOver), and every read of it
+ * still out, the ones routing those reports started too, comes back before
+ * the sweep ends what's left. */
 async function closeTasks() {
-  const held = new Set([...tasks.values()].filter((t) => !isFinal(t.state)).map((t) => paneById(t.pane)).filter((p) => p?.grokStop));
-  await Promise.all([...held].map((p) => p!.grokOver(p!.grokStop!, true)));
+  const panes = new Set([...tasks.values()].filter((t) => !isFinal(t.state)).map((t) => paneById(t.pane)));
+  for (const p of panes) if (p?.grokStop) p.grokOver(p.grokStop, true);
+  await Promise.all([...panes].map((p) => p?.grokReads));
   sweepTasks(true);
 }
 function sweepTasks(closing = false) {

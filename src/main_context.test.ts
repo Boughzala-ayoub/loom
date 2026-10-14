@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -1487,6 +1487,44 @@ console.log("ok   A held Grok Stop succeeds only on its session log's word");
   }
 }
 console.log("ok   Closing asks a held Grok Stop's session log how its turn ended");
+{
+  // Grok fourth review: shutdown returns A's Stop, then the queued B's start or Grok's idle
+  // notice. Either says A's turn is over and asks its session log how, with no Stop held
+  // after. Closing waits for that read, so A's end is in before the journal's last write.
+  // Only "end_turn" completes A.
+  const got = [];
+  for (const [how, queued, end] of [
+    ["the queued turn starts, the log has A's end", true, "end_turn"],
+    ["Grok's idle notice, the log has A's end", false, "end_turn"],
+    ["the queued turn starts, the log has A cancelled", true, "cancelled"],
+    ["Grok's idle notice, no end in the log", false, null],
+  ] as const) {
+    const view = { text: GROK_IDLE };
+    const replies: ((end: string | null) => void)[] = [];
+    const { p, f, t, clock, report, pushed } = grokTurn(view, { invoke: (cmd: string) => (cmd === "grok_turn_end" ? new Promise((r) => replies.push(r)) : Promise.resolve()) });
+    let next: any;
+    if (queued) (clock.at = p.lastIn = 2500), (next = f.turnTask(p, "submit", model.promptMatch("B"), 2500)), f.enterTurn(next, 2500);
+    clock.at = 3200;
+    Object.assign(p, { dead: true, busy: false, waiting: false });
+    report({ kind: "stop", t: 3000, response: "00000000000000f1" });
+    report(queued ? { kind: "start", t: 3100, turn: "pB", match: next.match } : { kind: "idle", t: 3100 });
+    let closed = false;
+    const close = f.closeTasks().then(() => (closed = true));
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    const out = [closed, replies.length, t.state];
+    replies.forEach((r) => r(end));
+    await close;
+    await new Promise((r) => setTimeout(r, 0)); // notices go out once the journal has the event
+    got.push([how, out, t.state, t.events.at(-1).response, next?.state, [...pushed]]);
+  }
+  assert.deepEqual(got, [
+    ["the queued turn starts, the log has A's end", [false, 1, "working"], "completed", "00000000000000f1", "working", ["completed"]],
+    ["Grok's idle notice, the log has A's end", [false, 1, "working"], "completed", "00000000000000f1", undefined, ["completed"]],
+    ["the queued turn starts, the log has A cancelled", [false, 1, "working"], "working", undefined, "working", []],
+    ["Grok's idle notice, no end in the log", [false, 1, "working"], "working", undefined, undefined, []],
+  ]);
+}
+console.log("ok   Closing waits for a Grok session log read already out");
 {
   // Grok second review 3: a Grok pane closed while its Stop gate runs stops polling.
   const view = { text: GROK_IDLE };

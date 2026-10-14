@@ -583,7 +583,9 @@ Each agent says "done" its own way, and Loom listens to all of them:
   which can come late, even after the next prompt has started, and with none
   the task ends unknown. The bar, the next prompt, Grok's `idle_prompt` notice
   and Loom closing only say when to look. A held `Stop` whose log shows no
-  success when Loom closes ends unknown. The pane reads Working off Grok's
+  success when Loom closes ends unknown. Closing waits for every read of the
+  log already started, so a success the log records is saved before the
+  window goes. The pane reads Working off Grok's
   shortcuts bar, which offers `Ctrl+c:cancel` from the Enter to the turn's
   real end, the gate included, so a prompt another prompt hook blocks, which
   runs no turn, never shows Working.
