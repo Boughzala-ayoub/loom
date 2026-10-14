@@ -1802,8 +1802,9 @@ try {
     const grokCard = page.locator('.dashboard-card').filter({ hasText: 'fix-settings / grok' });
     await grokCard.locator('.dashboard-choices button').first().waitFor();
     const grokCols = await page.evaluate(id => window.qa.calls.filter(c => ['pty_spawn', 'pty_resize'].includes(c.cmd) && c.args.id === id).at(-1).args.cols, grok.id);
-    assert.deepEqual(await grokCard.locator('.dashboard-choices button').allTextContents(), grokOptions.map((o, i) => `  │  ${i + 1} (○) ${o}`.slice(0, grokCols).slice(11).trimEnd()),
-      `Grok's card becomes its options, as far as its ${grokCols} columns show them, ${width}px`);
+    // Grok review 4: the first option turns always-approve on for good, so it shows in full however narrow the pane.
+    assert.deepEqual(await grokCard.locator('.dashboard-choices button').allTextContents(), grokOptions.map((o, i) => i === 0 ? o : `  │  ${i + 1} (○) ${o}`.slice(0, grokCols).slice(11).trimEnd()),
+      `Grok's card becomes its options, as far as its ${grokCols} columns show them, the first in full, ${width}px`);
     assert.match(await grokCard.locator('.dashboard-question').textContent(), /Remove the del1/, `The card shows what Grok asks, ${width}px`);
     await audit('grok-approval');
     assert.ok((await cli('read', grok.id)).data.text.split('\n').some(l => l.trim().startsWith('↑/↓:choose')), `loomctl read keeps Grok's rows apart, ${width}px`);
@@ -1831,8 +1832,11 @@ try {
     // Grok review 3: another prompt hook blocks the next prompt after Loom's hook reported it. No
     // turn runs: Grok draws the blocked prompt's card, and 1.0.52 reports the turn cancelled.
     await page.locator(`.pane[data-id="${grok.id}"] .xterm-helper-textarea`).focus();
+    const typedAt = await page.evaluate(() => window.qa.calls.length);
     await page.keyboard.type('blocked prompt');
     await page.keyboard.press('Enter');
+    await page.waitForFunction(([id, from]) => window.qa.calls.slice(from).some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data.includes('\r')), [grok.id, typedAt]);
+    await grokOut(grokWorking);
     await grokReport({ kind: 'start', turn: 'p2', match: '0123456789abcdee' });
     await grokOut('\x1b[2J\x1b[H  │  Prompt blocked by global/verify\r\n  │\r\n  │  Run the tests first.\r\n  │\r\n  │  1 (○) Edit     Fix your prompt\r\n  │  2 (○) Resend   Send it unchanged.\r\n  │  3 (○) Discard  Remove it from the queue\r\n  │\r\n\r\n  Tab:next answer  │  Esc:scrollback\r\n');
     const another = async () => (await cli('tasks')).data.slice(grokTasks).find(t => t.task !== grokTask[0].task);

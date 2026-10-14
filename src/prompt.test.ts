@@ -506,11 +506,22 @@ check("Grok's keys are its digits", menuKeys(readMenu(grok("approval"), "grok")!
 // At 56 columns Grok cuts an option and its shortcuts bar short rather than wrap them.
 check("Grok's permission card in a narrow pane", shape(readMenu(grok("approvalNarrow"), "grok")), {
   question: ["Remove the del1 directory recursively", "rm -r del1"],
-  options: ["Yes, and don't ask again for anything (al", ...grokOptions.slice(1)], selected: 0, multi: false });
+  options: grokOptions, selected: 0, multi: false });
 // After a focus-in report the same card reads ↑/↓:choose, and digits pick nothing there.
 check("Grok's focused card: the same question, no digit keys, not working",
   [shape(readMenu(grok("approvalFocused"), "grok")), menuKeys(readMenu(grok("approvalFocused"), "grok")!), menuRev(readMenu(grok("approvalFocused"), "grok")!) === menuRev(readMenu(grok("approval"), "grok")!), interruptHint(grok("approvalFocused"), "grok")],
   [{ question: ["Remove the del1 directory recursively", "rm -r del1"], options: grokOptions, selected: 0, multi: false }, [], true, false]);
+// Grok review 4: a narrow pane cuts the first option, and choosing it turns always-approve on for
+// every later session: it shows in full. The rest stay as drawn, and every key stays its own.
+{
+  const clipped = (cols: number) => readMenu(grokScreens.approvalNarrow.map((l) => [...l].slice(0, cols).join("")).join("\n"), "grok")!;
+  check("Grok's always-approve option, cut at 34 and 56 columns, shows its scope", [34, 56].map((cols) => clipped(cols).options[0]), [grokOptions[0], grokOptions[0]]);
+  check("Its full option too", clipped(34).full?.[0], grokOptions[0]);
+  check("The rest at 34 columns stay as drawn, the keys as Grok's", [clipped(34).options.slice(1), clipped(34).selected, menuKeys(clipped(34))],
+    [["Always allow: rm -r del", "Yes, proceed", "No, reject (type to add", "Never allow: rm -r"], 0, ["1", "2", "3", "4", "5"]]);
+  const yes = grok("approval").replace("Yes, and don't ask again for anything (always-approve mode)", "Yes, and allow this command");
+  check("Another option starting the same is left alone", readMenu(yes, "grok")?.options[0], "Yes, and allow this command");
+}
 const grokMoved = grok("approval").replace("1 (•) Yes, and", "1 (○) Yes, and").replace("3 (○) Yes, proceed", "3 (•) Yes, proceed");
 check("Grok's focus moved: the same question", [readMenu(grokMoved, "grok")?.selected, menuRev(readMenu(grokMoved, "grok")!) === menuRev(readMenu(grok("approval"), "grok")!)], [2, true]);
 check("No card on Grok's idle, typing or working screens", ["idle", "typing", "working"].map((s) => readMenu(grok(s), "grok")), [null, null, null]);

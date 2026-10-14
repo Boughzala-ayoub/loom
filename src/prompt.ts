@@ -126,6 +126,10 @@ export function cursorKey(menu: Menu, key: string): boolean | undefined {
 const GROK_OPTION = /^(\d) \(([•○])\) (\S.*)$/;
 const GROK_BAR = /^(\d\/\d:select|↑\/↓:choose)\b/;
 const GROK_CARD = /^\s*│/;
+// Its first option. Choosing it turns always-approve on for every later session
+// (~/.grok/config.toml), and a narrow pane cuts it to "Yes, and don't ask agai".
+// ponytail: cut shorter than "Yes, and", it can't be told from "Yes, proceed" and stays as drawn.
+const GROK_ALWAYS = "Yes, and don't ask again for anything (always-approve mode)";
 
 /** Grok's permission card on the screen's rows, or null. Its digits pick an
  * option once the card takes keys, unless it reads ↑/↓:choose, and Enter the focused one. */
@@ -145,7 +149,8 @@ function grokMenu(raw: string[]): Menu | null {
   let top = first;
   while (top > 0 && GROK_CARD.test(raw[top - 1])) top--;
   const question = lines.slice(top, first).filter((l) => l && !/^←\s*→/.test(l)).map((l) => l.replace(/^>\s+/, ""));
-  const said = options.map((m) => m[3]);
+  // Grok's always-approve option, however much of it shows, says so in full.
+  const said = options.map((m) => (m[3].startsWith("Yes, and") && GROK_ALWAYS.startsWith(m[3]) ? GROK_ALWAYS : m[3]));
   return { question, options: said, selected: options.findIndex((m) => m[2] === "•"), multi: false, prompt: [...question, ...said], full: said, ...(unnumbered && { unnumbered }) };
 }
 
