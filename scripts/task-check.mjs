@@ -113,6 +113,57 @@ if (!process.env.TASK_REVIEW || ['journal-history', 'all'].includes(process.env.
   console.log('ok   A long task history is journaled, and a write that fails before reaching disk is marked unsaved');
   if (process.env.TASK_REVIEW === 'journal-history') process.exit(0);
 }
+// Grok review 1: Grok's hook file is global, so every grok runs it, one another agent started
+// in a pane too. Only the grok the pane runs itself, started by its Loom (LOOM_PID), reports
+// into the pane and names its session. Real process chains, the native helper last: this
+// process stands for Loom, a copy of node named grok.exe for Grok.
+if (!process.env.TASK_REVIEW || ['grok-owner', 'all'].includes(process.env.TASK_REVIEW)) {
+  const exe = resolve(process.env.LOOM_TEST_EXE || 'src-tauri/target/debug/loom.exe');
+  if (!existsSync(exe)) console.log(`skip the native Grok owner case: no ${exe} (build it, or set LOOM_TEST_EXE)`);
+  else {
+    const { copyFileSync, writeFileSync } = await import('node:fs');
+    const { spawnSync } = await import('node:child_process');
+    const temp = mkdtempSync(join(tmpdir(), 'loom-grok-owner-'));
+    const grok = join(temp, 'grok.exe'), hop = join(temp, 'hop.cjs');
+    copyFileSync(process.execPath, grok);
+    // Each hop runs the next with this file, and the last runs the helper with the payload on stdin.
+    writeFileSync(hop, `const [next, ...rest] = process.argv.slice(2);
+const r = require('node:child_process').spawnSync(next, rest.length ? [__filename, ...rest] : ['--grok-hook'], { input: process.env.HOP_INPUT, stdio: ['pipe', 'inherit', 'inherit'] });
+process.exit(r.status ?? 1);`);
+    const payloads = [
+      { hook_event_name: 'UserPromptSubmit', sessionId: 'child-session', promptId: 'pChild', prompt: 'Give a second opinion' },
+      { hook_event_name: 'Stop', sessionId: 'child-session', promptId: 'pChild', reason: 'end_turn', lastAssistantMessage: 'The second opinion is ready' },
+    ];
+    const run = (name, chain) => {
+      const dir = join(temp, name), marker = join(dir, 'session-marker');
+      mkdirSync(dir);
+      writeFileSync(marker, 'parent-session\n1');
+      const env = { ...process.env, TEMP: dir, TMP: dir, LOOM_PANE: `owner-${name}`, LOOM_LAUNCH: '1', LOOM_SESSION_FILE: marker, LOOM_PID: String(process.pid) };
+      for (const p of payloads) {
+        const [first, ...rest] = [...chain, exe];
+        const r = spawnSync(first, first === exe ? ['--grok-hook'] : [hop, ...rest], { env: { ...env, HOP_INPUT: JSON.stringify(p) }, input: JSON.stringify(p), encoding: 'utf8', timeout: 30000, windowsHide: true });
+        assert.equal(r.status, 0, `${name}: ${r.stderr}`);
+      }
+      const events = existsSync(join(dir, 'loom-task')) ? readdirSync(join(dir, 'loom-task')).filter((f) => f.endsWith('.json')) : [];
+      return { events: events.length, marker: readFileSync(marker, 'utf8') };
+    };
+    const results = {
+      root: run('root', [grok]),
+      'under another agent': run('nested', [process.execPath, grok]),
+      'in a grok it started': run('grok-in-grok', [grok, grok]),
+      'with no grok': run('direct', []),
+    };
+    rmSync(temp, { recursive: true, force: true });
+    assert.deepEqual(results, {
+      root: { events: 2, marker: 'child-session\n1' },
+      'under another agent': { events: 0, marker: 'parent-session\n1' },
+      'in a grok it started': { events: 0, marker: 'parent-session\n1' },
+      'with no grok': { events: 0, marker: 'parent-session\n1' },
+    });
+    console.log("ok   Only the grok a pane's Loom started reports into the pane and names its session");
+  }
+  if (process.env.TASK_REVIEW === 'grok-owner') process.exit(0);
+}
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const base = process.env.RESP_BASE || 'http://localhost:4273';
 assert.equal((await fetch(base)).status, 200, 'The preview must be serving');

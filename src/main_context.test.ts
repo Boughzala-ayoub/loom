@@ -26,7 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
     journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, holdReports, reportsHeld, reportsTurns, moveTask };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, holdReports, reportsHeld, reportsTurns, moveTask, turnTasks, watched };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -1176,10 +1176,34 @@ console.log("ok   Cursor's hooks move its pane and its tasks, and its questions 
 // and its permission card shows on its screen (fixtures/grok-screens.json).
 const grokScreens = JSON.parse(readFileSync("src/fixtures/grok-screens.json", "utf8")) as Record<string, string[]>;
 const [GROK_IDLE, GROK_WORKING, GROK_ASK] = ["idle", "working", "approval"].map((s) => grokScreens[s].join("\n"));
+{
+  // Grok review 1: a grok Claude started for a second opinion runs Grok's global hooks
+  // in Claude's pane. Its reports name their source, and none of them is this pane's.
+  const { p, f, clock, pushed, tasks } = claudePane();
+  clock.at = p.lastIn = 1000;
+  const t = f.turnTask(p, "submit", model.promptMatch("Implement the feature and consult Grok"), 1000);
+  f.enterTurn(t, 1000);
+  f.taskSignal(p, { kind: "start", launch: 1, at: 1100, match: t.match });
+  clock.at = 3000;
+  f.agentEvents([
+    { kind: "start", match: model.promptMatch("Give a second opinion"), turn: "pChild", t: 2000 },
+    { kind: "stop", response: "7a93ff464303fbf5", turn: "pChild", t: 2500 },
+    { kind: "end", response: "7a93ff464303fbf5", turn: "pChild", t: 2600 },
+    { kind: "fail", detail: "rate_limit", turn: "pChild", t: 2700 },
+    { kind: "interrupt", turn: "pChild", t: 2800 },
+  ].map((ev) => [p.id, { ...ev, launch: 1, src: "grok" }]));
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, tasks.size, pushed, f.turnTasks.size], ["working", 1, [], 0], "a child grok's reports moved the Claude pane's task");
+  // Claude's own, then: its task still ends on them.
+  clock.at = 4000;
+  f.agentEvents([[p.id, { kind: "stop", launch: 1, src: "claude", t: 4000 }]]);
+  assert.equal(f.watched(t).stopAt, 4000, "Claude's own Stop counts");
+}
+console.log("ok   Reports from another agent's hooks don't move a pane's tasks");
 const grokTurn = (view: { text: string }) => {
   const c = cursorPane(view);
   c.p.agent = "grok";
-  const report = (ev: Record<string, unknown>) => c.f.agentEvents([[c.p.id, { launch: 1, turn: "pA", ...ev }]]);
+  const report = (ev: Record<string, unknown>) => c.f.agentEvents([[c.p.id, { launch: 1, turn: "pA", src: "grok", ...ev }]]);
   c.clock.at = c.p.lastIn = 1000;
   const t = c.f.turnTask(c.p, "submit", model.promptMatch("A"), 1000);
   c.f.enterTurn(t, 1000);

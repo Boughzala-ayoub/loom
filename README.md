@@ -568,7 +568,11 @@ Each agent says "done" its own way, and Loom listens to all of them:
   `~\.grok\hooks\loom.json`, written when a Grok pane starts. Grok trusts
   every file in that folder without asking, so yours stay in files of their
   own. `UserPromptSubmit`, `Stop`, `StopFailure` and `StopCancelled` run
-  `loom.exe --grok-hook`, which does nothing outside a Loom pane. Ctrl-C stops
+  `loom.exe --grok-hook`, which does nothing outside a Loom pane. Every grok
+  runs that file, a grok another agent starts in a pane too, with the pane's
+  variables. Only the grok Loom started itself (its parent is the Loom in
+  `LOOM_PID`) reports into the pane or names its session, and the pane ignores
+  a report from another agent's hooks. Ctrl-C stops
   a turn and Esc doesn't. A stop says whether you cancelled the turn or Grok
   gave up on it. Grok's permission card has no hook: Loom reads it off the
   screen, raises the alert, and the overview offers its options as buttons,

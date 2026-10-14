@@ -184,6 +184,32 @@ fn current_dir(pid: u32) -> Option<Option<std::path::PathBuf>> {
     }
 }
 
+/// Whether this process, a hook, belongs to an agent the Loom `app` started
+/// itself in a pane: the nearest of its ancestors named `image` (grok.exe) is
+/// `app`'s child. A grok another agent started there (Claude asking it for a
+/// second opinion), or one Grok started, has another parent. None when
+/// Windows wouldn't list the processes.
+/// ponytail: by image name, so a pane whose grok runs through a shim (grok.cmd) reports nothing.
+pub(crate) fn agent_of(app: u32, image: &str) -> Option<bool> {
+    let all = read_list()?;
+    Some(started_by(&all.iter().map(|p| (p.pid, (p.parent, p.created, p.name.as_str()))).collect(), std::process::id(), app, image))
+}
+
+/// The walk `agent_of` takes over `tree` (pid: parent, creation time, image), up from `me`.
+fn started_by(tree: &HashMap<u32, (u32, u64, &str)>, me: u32, app: u32, image: &str) -> bool {
+    let mut pid = me;
+    for _ in 0..64 {
+        let Some(&(parent, created, _)) = tree.get(&pid) else { return false };
+        // A parent pid that isn't older than its child went to another process after the parent ended.
+        let Some(&(grand, parent_created, name)) = tree.get(&parent).filter(|p| p.1 < created) else { return false };
+        if name.eq_ignore_ascii_case(image) {
+            return grand == app && tree.get(&app).is_some_and(|a| a.1 < parent_created);
+        }
+        pid = parent;
+    }
+    false
+}
+
 /// Each process's parent and creation time, by pid. A parent pid that isn't
 /// older than its child went to another process after the parent ended.
 pub(crate) fn parents() -> HashMap<u32, (u32, u64)> {
@@ -226,6 +252,27 @@ mod tests {
         assert_eq!(share(total / 3, total), 33.3, "to a tenth");
         assert_eq!(share(total + 1, total), 100.0, "a late process reading never passes 100%");
         assert_eq!(share(5, 0), 0.0, "no time passed");
+    }
+
+    #[test]
+    fn a_hook_is_the_panes_only_under_the_grok_its_loom_started() {
+        // pid: parent, creation time, image. Loom is 10, Claude's pane 20, the hooks run through PowerShell.
+        let tree: HashMap<u32, (u32, u64, &str)> = HashMap::from([
+            (10, (1, 100, "loom.exe")),
+            (11, (10, 110, "grok.exe")), (12, (11, 120, "powershell.exe")), (13, (12, 130, "loom.exe")),
+            (20, (10, 200, "claude.exe")), (21, (20, 210, "bash.exe")), (22, (21, 220, "grok.exe")), (23, (22, 230, "powershell.exe")), (24, (23, 240, "loom.exe")),
+            (30, (11, 300, "pwsh.exe")), (31, (30, 310, "grok.exe")), (32, (31, 320, "powershell.exe")), (33, (32, 330, "loom.exe")),
+            (40, (39, 400, "loom.exe")),
+            (50, (70, 500, "GROK.EXE")), (51, (50, 510, "loom.exe")), (70, (1, 700, "loom.exe")),
+        ]);
+        assert!(started_by(&tree, 13, 10, "grok.exe"), "the pane's own grok");
+        assert!(!started_by(&tree, 24, 10, "grok.exe"), "a grok Claude started in its pane");
+        assert!(!started_by(&tree, 33, 10, "grok.exe"), "a grok the pane's grok started");
+        assert!(!started_by(&tree, 40, 10, "grok.exe"), "no grok above it");
+        assert!(!started_by(&tree, 13, 20, "grok.exe"), "another Loom's grok");
+        assert!(!started_by(&tree, 51, 70, "grok.exe"), "a grok whose parent's pid a newer Loom has now");
+        assert!(started_by(&tree, 13, 10, "GROK.EXE"), "an image name matches in any case");
+        assert!(!started_by(&tree, 99, 10, "grok.exe"), "a process Windows didn't list");
     }
 
     #[test]

@@ -234,8 +234,17 @@ fn save_session(id: Option<&str>) {
 /// fails it when Grok gave up (max_turns, no_progress). Each names its turn
 /// (promptId), and the pane reads them in order (main.ts agentReport). Prints
 /// nothing and always exits 0: Grok reads a reply as a decision.
+///
+/// Grok's hook file is global, so every grok runs these hooks, one another
+/// agent started in a pane too (Claude asking it for a second opinion), and it
+/// inherits that pane's variables. Only the grok the pane's Loom started
+/// itself (LOOM_PID) reports into the pane or names its session.
 pub fn grok_hook() -> i32 {
     let Some(pane) = loom_pane() else { return 0 };
+    let app = std::env::var("LOOM_PID").ok().and_then(|p| p.parse().ok());
+    if !app.is_some_and(|app| crate::procs::agent_of(app, "grok.exe") == Some(true)) {
+        return 0;
+    }
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let Ok(p) = serde_json::from_str::<serde_json::Value>(input.trim_start_matches('\u{feff}')) else { return 0 };

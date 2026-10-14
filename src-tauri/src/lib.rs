@@ -497,6 +497,9 @@ fn pty_spawn(
         None => cmd.env_remove("LOOM_LAUNCH"),
     }
     cmd.env("LOOM_SESSION_FILE", data_dir(&app).join("session-marks").join(&id));
+    // This Loom: a hook tells by it the agent the pane runs from one that agent,
+    // or another, started there, which inherits the rest (helper.rs grok_hook).
+    cmd.env("LOOM_PID", std::process::id().to_string());
     // loomctl from inside a pane reaches the Loom that owns it (control.rs),
     // and finds loomctl.exe beside loom.exe without a PATH of its own.
     cmd.env("LOOM_PIPE", pipe::instance_pipe());

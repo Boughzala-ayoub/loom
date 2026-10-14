@@ -5194,8 +5194,13 @@ function agentEvents(events: [string, unknown][]) {
       continue;
     }
     const p = paneById(id), s = parseSignal(ev);
-    if (p && s) agentReport(p, s);
-    if (p && s?.kind === "start") started.add(p);
+    if (!p || !s) continue;
+    // A report names the agent whose hooks wrote it. Another agent's isn't this
+    // pane's: Grok's hooks are global, so a grok Claude starts runs them here too.
+    const src = (ev as { src?: unknown }).src;
+    if (typeof src === "string" && ["claude", "codex", "cursor", "grok", "opencode"].includes(src) && src !== p.agent) continue;
+    agentReport(p, s);
+    if (s.kind === "start") started.add(p);
   }
   // A question Cursor drew before Loom read its turn's start asked in no task:
   // the task was still submitted. It asks once the whole batch has said which
