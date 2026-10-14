@@ -861,6 +861,38 @@ try {
     assert.equal((await until(e.task, 'completed')).events.at(-1).response, promptMatch('E, done'), 'A prompt queued while the turn ran follows its completion');
     ok('A Grok prompt typed into the last turn\'s Stop gate never completes that turn');
   }
+  if (review('grok-close')) {
+    // Grok second review 2: Loom closes with a Grok Stop held, or one shutdown returns. The
+    // close handler marks the panes dead before it routes what shutdown returned, yet each
+    // pane's last screen still says whether its turn was over. An idle one completes the
+    // task with the Stop's response, a working one leaves it unknown, and so does a Ctrl+C
+    // after the Stop, unless its cancel came back too. Each is journaled before the window goes.
+    for (const [how, held, idle, ctrlC, cancel, want] of [
+      ['held, idle', true, true, false, false, 'completed'],
+      ['returned by shutdown, idle', false, true, false, false, 'completed'],
+      ['held, still working', true, false, false, false, 'unknown'],
+      ['returned by shutdown, still working', false, false, false, false, 'unknown'],
+      ['Ctrl+C after it, its cancel returned by shutdown', true, true, true, true, 'cancelled'],
+      ['Ctrl+C after it, no report', true, true, true, false, 'unknown'],
+    ]) {
+      const g = await grokPane();
+      const a = await g.prompt('close with a Stop', 'pA');
+      const launch = await gen(g.id), response = promptMatch(`final answer ${how}`);
+      const stop = { src: 'grok', kind: 'stop', turn: 'pA', response, launch, t: Date.now() };
+      if (held) await g.say(stop);
+      if (ctrlC) await g.key('Control+c');
+      await qa({ shutdownEvents: [...(held ? [] : [[g.id, stop]]), ...(cancel ? [[g.id, { src: 'grok', kind: 'interrupt', turn: 'pA', launch, t: Date.now() }]] : [])] });
+      // Loom closes once the pane shows its last screen, inside the half-second settle that would end the turn first.
+      if (idle) await g.draw(false);
+      while ((await cli('read', g.id)).data.text.includes('Ctrl+c:cancel') === idle) await page.waitForTimeout(10);
+      await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
+      await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
+      const t = readJournal(await page.evaluate(() => window.qa.journalAtDestroy)).tasks.get(a.task);
+      assert.deepEqual([t?.state, t?.reason ?? null, t?.events.at(-1).response], [want, { completed: null, unknown: 'loom-closed', cancelled: 'interrupted' }[want], want === 'completed' ? response : undefined], how);
+      if (want === 'unknown') assert.ok(t.detail.startsWith('Grok reported the end of its turn as Loom closed') && t.detail.endsWith(`(final message ${response})`), `${how}: ${t.detail}`);
+    }
+    ok('Closing judges a held Grok Stop on the screen its pane left, and journals it before the window goes');
+  }
   if (review('shutdown-reload')) {
     // Review R16-5: Ctrl+R reloads the page while Loom runs on, so Rust's batch
     // count goes on from the batches the page before it had.

@@ -3068,11 +3068,13 @@ class Pane {
    * half a second: a Stop hook that blocks sends Grok on with its bar
    * unchanged. A Ctrl-C since may have cancelled the turn in its Stop gate,
    * which Grok reports late: then that report or Grok's idle notice says, as
-   * the notice does where the bar can't. Closing, the screen as it was left. */
+   * the notice does where the bar can't. Closing, once, on the screen the
+   * pane was left with: shutdown has marked it dead by then, and a Stop that
+   * screen doesn't confirm ends unknown (sweepTasks). A dead pane polls no more. */
   grokSettle(why?: "idle" | "closing") {
     clearTimeout(this.grokTimer);
     const s = this.grokStop;
-    if (!s || this.dead) return;
+    if (!s || (this.dead && why !== "closing")) return;
     const seen = grokRunning(liveScreen(this, false));
     if (seen === true || this.cursorAsking) this.grokIdleSince = undefined;
     else if (why === "idle" || (seen === false && this.interruptAt <= s.at && (why === "closing" || Date.now() - (this.grokIdleSince ??= Date.now()) >= 500))) return this.grokEnd();
@@ -5422,9 +5424,13 @@ function sweepTasks(closing = false) {
       moveTask(t, unproven(t, { state: "completed", signal: "turn-end", ...(w.response ? { response: w.response } : {}) }));
       continue;
     }
-    if (closing && w.stopAt !== undefined) {
+    // Grok's Stop for this task's turn, still held: closing didn't confirm it (grokSettle).
+    const grok = p.agent === "grok" && p.grokStop && (!p.grokStop.turn || turnTasks.get(`${p.id}:${t.gen}:${p.grokStop.turn}`) === t.id) ? p.grokStop : undefined;
+    if (closing && (w.stopAt !== undefined || grok)) {
       // Only a completed event names a final message (loomctl watch --metadata): this one keeps it in its detail.
-      moveTask(t, { state: "unknown", signal: "stop", reason: "loom-closed", detail: `Claude reported the end of its turn as Loom closed, but its screen never showed it idle${w.response ? ` (final message ${w.response})` : ""}` });
+      const response = grok ? grok.response : w.response;
+      const why = grok ? "neither its screen nor its reports confirmed the turn was over" : "its screen never showed it idle";
+      moveTask(t, { state: "unknown", signal: "stop", reason: "loom-closed", detail: `${grok ? "Grok" : "Claude"} reported the end of its turn as Loom closed, but ${why}${response ? ` (final message ${response})` : ""}` });
       continue;
     }
     if (t.state === "approval") {

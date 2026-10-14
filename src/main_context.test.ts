@@ -1376,6 +1376,41 @@ console.log("ok   Grok's Stop holds until its screen shows the turn over");
 }
 console.log("ok   A Grok prompt typed into the last turn's Stop gate never completes that turn");
 {
+  // Grok second review 2: Loom closes with a Stop held. The close handler marks every
+  // pane dead before it routes what shutdown returned, but each pane's last screen
+  // still says whether its turn was over. One that can't ends unknown.
+  for (const [how, screen, returned, ctrlC, late, state, reason, response, notices] of [
+    ["held, idle", GROK_IDLE, false, false, [], "completed", null, "00000000000000f1", ["completed"]],
+    ["returned by shutdown, idle", GROK_IDLE, true, false, [], "completed", null, "00000000000000f1", ["completed"]],
+    ["held, still working", GROK_WORKING, false, false, [], "unknown", "loom-closed", undefined, []],
+    ["returned by shutdown, still working", GROK_WORKING, true, false, [], "unknown", "loom-closed", undefined, []],
+    ["Ctrl+C after it, its cancel returned by shutdown", GROK_IDLE, false, true, [{ kind: "interrupt" }], "cancelled", "interrupted", undefined, []],
+    ["Ctrl+C after it, no report", GROK_IDLE, false, true, [], "unknown", "loom-closed", undefined, []],
+  ] as const) {
+    const view = { text: GROK_IDLE };
+    const { p, f, t, clock, later, report, pushed } = grokTurn(view);
+    let polls = 0;
+    const settle = p.grokSettle;
+    p.grokSettle = function (...a: unknown[]) { polls++; return settle.apply(this, a); };
+    clock.at = 3000;
+    const stop = { kind: "stop", t: 3000, response: "00000000000000f1" };
+    if (!returned) report(stop);
+    if (ctrlC) (clock.at = p.lastIn = 3100), p.wrote("\x03", true, p.sending("\x03"));
+    view.text = screen;
+    clock.at = 3200;
+    Object.assign(p, { dead: true, busy: false, waiting: false });
+    for (const s of returned ? [stop] : late) report({ ...s, t: 3150 });
+    f.sweepTasks(true);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.deepEqual([t.state, t.reason, t.events.at(-1).response, pushed], [state, reason, response, notices], how);
+    if (state === "unknown") assert.match(t.detail, /^Grok reported the end of its turn as Loom closed/, how);
+    polls = 0;
+    later(10_000);
+    assert.equal(polls, 0, `${how}: a dead pane's Stop polled on`);
+  }
+}
+console.log("ok   Closing judges a held Grok Stop on the screen its pane left");
+{
   // Grok review 3: another UserPromptSubmit hook blocks the prompt after Loom's reported
   // it. No turn runs, and Grok shows the blocked prompt's card (Edit, Resend, Discard).
   // 1.0.52 then reports a StopCancelled the guide doesn't promise.
