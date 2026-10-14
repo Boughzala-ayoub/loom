@@ -11,8 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-/// The events Loom's file answers: a prompt going in, and each way a turn ends.
-const EVENTS: [&str; 4] = ["UserPromptSubmit", "Stop", "StopFailure", "StopCancelled"];
+/// The events Loom's file answers: a prompt going in, each way a turn ends,
+/// and Grok's notices, for the one it sends once it has settled (idle_prompt).
+const EVENTS: [&str; 5] = ["UserPromptSubmit", "Stop", "StopFailure", "StopCancelled", "Notification"];
 
 /// Whether a pane's program is Grok's CLI (agent.ts launches it bare).
 pub fn is_grok(program: &str) -> bool {

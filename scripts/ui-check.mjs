@@ -1771,8 +1771,9 @@ try {
     await page.locator(`.pane[data-id="${grok.id}"] .xterm-helper-textarea`).focus();
     await page.keyboard.type('run rm -r del1');
     await page.keyboard.press('Enter');
-    await grokReport({ kind: 'start', match: '0123456789abcdef' });
+    // In this order, as Grok does it: its bar says it works the moment the prompt goes in, before its prompt hook runs.
     await grokOut(grokWorking);
+    await grokReport({ kind: 'start', match: '0123456789abcdef' });
     await until(async () => (await grokState()) === 'working', `Grok's prompt hook reads as working, ${width}px`);
     const grokTask = (await cli('tasks')).data.slice(grokTasks);
     assert.deepEqual(grokTask.map(t => [t.agent, t.source, t.state]), [['grok', 'manual', 'working']], `The prompt is Grok's task, ${width}px`);
@@ -1814,12 +1815,33 @@ try {
     await page.evaluate(() => { window.qa.onWrite = null; });
     await grokOut(grokWorking);
     await until(async () => (await grokState()) === 'working', `Answered, Grok works on, ${width}px`);
-    await grokReport({ kind: 'end' });
+    // Grok review 2: its Stop, which another Stop hook blocks ("Run the tests first"). Grok goes on
+    // under the same prompt with its bar unchanged, and its next Stop is the turn's last.
+    await grokReport({ kind: 'stop', response: '00000000000000f1' });
+    await grokOut(grokWorking);
+    await page.waitForTimeout(1200);
+    assert.deepEqual([await grokState(), (await cli('task', grokTask[0].task)).data.state], ['working', 'working'], `A Stop another hook blocked ends nothing, ${width}px`);
+    await grokReport({ kind: 'stop', response: '00000000000000f2' });
     await grokOut('\x1b[2J\x1b[H  > run rm -r del1\r\n\r\n  Removed del1.\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\r\n');
     await until(async () => (await grokState()) === 'waiting', `Grok's end waits on you, ${width}px`);
-    assert.equal((await cli('task', grokTask[0].task)).data.state, 'completed', `Grok's end completes its task, ${width}px`);
+    const grokDone = (await cli('task', grokTask[0].task)).data;
+    assert.deepEqual([grokDone.state, grokDone.events.at(-1).response], ['completed', '00000000000000f2'], `The turn's last Stop completes its task, ${width}px`);
     await audit('grok-done-overview');
     await page.click('#dashboard-btn');
+    // Grok review 3: another prompt hook blocks the next prompt after Loom's hook reported it. No
+    // turn runs: Grok draws the blocked prompt's card, and 1.0.52 reports the turn cancelled.
+    await page.locator(`.pane[data-id="${grok.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('blocked prompt');
+    await page.keyboard.press('Enter');
+    await grokReport({ kind: 'start', turn: 'p2', match: '0123456789abcdee' });
+    await grokOut('\x1b[2J\x1b[H  │  Prompt blocked by global/verify\r\n  │\r\n  │  Run the tests first.\r\n  │\r\n  │  1 (○) Edit     Fix your prompt\r\n  │  2 (○) Resend   Send it unchanged.\r\n  │  3 (○) Discard  Remove it from the queue\r\n  │\r\n\r\n  Tab:next answer  │  Esc:scrollback\r\n');
+    const another = async () => (await cli('tasks')).data.slice(grokTasks).find(t => t.task !== grokTask[0].task);
+    await until(another, `The blocked prompt is a task, ${width}px`);
+    const blocked = await another();
+    await page.waitForTimeout(800);
+    assert.notEqual(await grokState(), 'working', `No turn runs on a blocked prompt's card, ${width}px`);
+    await grokReport({ kind: 'interrupt', turn: 'p2' });
+    await until(async () => (await cli('task', blocked.task)).data.state === 'cancelled', `The blocked prompt ends cancelled, ${width}px`);
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
     await audit('workspace');

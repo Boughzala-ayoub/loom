@@ -149,6 +149,24 @@ function grokMenu(raw: string[]): Menu | null {
   return { question, options: said, selected: options.findIndex((m) => m[2] === "•"), multi: false, prompt: [...question, ...said], full: said, ...(unnumbered && { unnumbered }) };
 }
 
+/** Whether Grok runs a turn, by its shortcuts bar, the screen's last row. It
+ * offers Ctrl+c:cancel from the Enter until the turn is over, its Stop gate
+ * and the prompt hooks included (Grok Build 1.0.52, seen live 2026-10-14).
+ * False on a bar that shows it isn't: idle or a draft ("… │ Shift+Tab:mode │
+ * Ctrl+x:shortcuts"), or the card of a prompt a hook blocked ("Tab:next answer
+ * │ Esc:scrollback"). Undefined where the bar can't say: a permission card's,
+ * which offers Ctrl+c:cancel too while its turn waits on the answer, or one a
+ * narrow pane cut too short. */
+export function grokRunning(screen: string): boolean | undefined {
+  const lines = screen.split("\n");
+  let end = lines.length;
+  while (end > 0 && !lines[end - 1].trim()) end--;
+  const bar = unbox(lines[end - 1] ?? "");
+  if (GROK_BAR.test(bar)) return undefined;
+  if (/\bCtrl\+c:cancel\b/.test(bar)) return true;
+  return /Shift\+Tab:mode\s+│\s+Ctrl\+x\b|^Tab:next answer\b/.test(bar) ? false : undefined;
+}
+
 /** Whether an agent's live input sits below row `end` of the unboxed `lines`:
  * then a menu above it is one in the transcript, a sent prompt drawn with the
  * same glyph or a question quoted, since a question takes the input's place.
@@ -415,12 +433,7 @@ export function interruptHint(screen: string, agent: string, cells?: () => Cell[
     // Codex's run-state title (Pane.codexState) can say then, and it wins when present.
     return from(j) || lines.slice(Math.max(0, i - 4), i).some((l) => CODEX_STATUS.test(l) && codexOwn(l, cells));
   }
-  if (agent === "grok") {
-    // Its shortcuts bar, the last row, offers Ctrl+c:cancel while a turn runs,
-    // and so does a waiting permission card's, which isn't working.
-    const bar = lines[end - 1] ?? "";
-    return /\bCtrl\+c:cancel\b/.test(bar) && !GROK_BAR.test(bar.trim());
-  }
+  if (agent === "grok") return grokRunning(screen) === true;
   if (agent === "cursor") {
     // Its composer, the last "→" row: the hint at its end, or the spinner in
     // the rows above it (a narrow pane may leave the hint out). A question's

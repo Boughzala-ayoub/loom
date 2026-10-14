@@ -227,9 +227,10 @@ fn save_session(id: Option<&str>) {
 
 /// `loom.exe --grok-hook`, Grok's prompt and turn-end hooks (grok.rs).
 /// UserPromptSubmit starts a prompt, named by `prompt_match`, never by its
-/// text, and its session is the pane's from then on. Stop ends the turn, but
-/// only a turn's own ("end_turn"): Grok fires one more as a session closes.
-/// StopFailure fails it with Grok's error. StopCancelled cancels it when a
+/// text, and its session is the pane's from then on. Stop says the turn is
+/// about to end, which another Stop hook may overrule, and only a turn's own
+/// ("end_turn") counts: Grok fires one more as a session closes. Its
+/// idle_prompt notice says it has settled. StopFailure fails it with Grok's error. StopCancelled cancels it when a
 /// person stopped it (Ctrl+C, a dismissed or rejected permission prompt) and
 /// fails it when Grok gave up (max_turns, no_progress). Each names its turn
 /// (promptId), and the pane reads them in order (main.ts agentReport). Prints
@@ -266,7 +267,11 @@ fn grok_event(p: &serde_json::Value) -> Option<serde_json::Value> {
     let text = |v: &serde_json::Value| v.as_str().map(|s| s.chars().take(200).collect::<String>());
     Some(match p["hook_event_name"].as_str()? {
         "UserPromptSubmit" => serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?), "turn": turn }),
-        "Stop" if p["reason"] == "end_turn" => response(serde_json::json!({ "kind": "end", "turn": turn }), &p["lastAssistantMessage"]),
+        // Grok's Stop is a gate another Stop hook can send it on from, under the
+        // same prompt: the pane waits to see the turn over (main.ts grokSettle).
+        "Stop" if p["reason"] == "end_turn" => response(serde_json::json!({ "kind": "stop", "turn": turn }), &p["lastAssistantMessage"]),
+        // About a minute after the session settles: no turn runs.
+        "Notification" if p["notificationType"] == "idle_prompt" => serde_json::json!({ "kind": "idle" }),
         "StopFailure" => {
             let error = text(&p["error"]).unwrap_or_else(|| "unknown".into());
             let detail = match text(&p["errorDetails"]) {
@@ -606,7 +611,9 @@ mod tests {
         let prompt = json!({ "hook_event_name": "UserPromptSubmit", "promptId": "7a97b1c3", "sessionId": "01a13766-164e", "prompt": "run the tests" });
         assert_eq!(grok_event(&prompt), Some(json!({ "kind": "start", "match": prompt_match("run the tests"), "turn": "7a97b1c3" })));
         assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "promptId": "7a97b1c3", "reason": "end_turn", "lastAssistantMessage": "done" })),
-            Some(json!({ "kind": "end", "turn": "7a97b1c3", "response": prompt_match("done") })));
+            Some(json!({ "kind": "stop", "turn": "7a97b1c3", "response": prompt_match("done") })), "a Stop another Stop hook may overrule");
+        assert_eq!(grok_event(&json!({ "hook_event_name": "Notification", "notificationType": "idle_prompt", "sessionId": "01a13766-164e" })), Some(json!({ "kind": "idle" })));
+        assert_eq!(grok_event(&json!({ "hook_event_name": "Notification", "notificationType": "permission_prompt" })), None);
         assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "reason": "channel_closed" })), None, "the session closing ends no turn");
         assert_eq!(grok_event(&json!({ "hook_event_name": "StopFailure", "promptId": "7a97b1c3", "error": "rate_limit", "errorDetails": "429" })),
             Some(json!({ "kind": "fail", "detail": "rate_limit: 429", "turn": "7a97b1c3" })));

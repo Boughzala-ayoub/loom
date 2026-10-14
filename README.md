@@ -574,7 +574,15 @@ Each agent says "done" its own way, and Loom listens to all of them:
   `LOOM_PID`) reports into the pane or names its session, and the pane ignores
   a report from another agent's hooks. Ctrl-C stops
   a turn and Esc doesn't. A stop says whether you cancelled the turn or Grok
-  gave up on it. Grok's permission card has no hook: Loom reads it off the
+  gave up on it. Grok's `Stop` is a gate: another Stop hook can send the turn
+  on under the same prompt, and nothing in the hook tells that `Stop` from the
+  last. So the pane holds each one until Grok's shortcuts bar shows the turn
+  over. The bar offers `Ctrl+c:cancel` from the Enter to the turn's real end,
+  the gate included. A Ctrl-C after the `Stop` waits for Grok's own report of
+  it. Where the bar can't be read, Grok's `idle_prompt` notice, about a minute
+  later, ends the turn. The pane also reads Working off that bar, so a prompt
+  another prompt hook blocks, which runs no turn, never shows Working.
+  Grok's permission card has no hook: Loom reads it off the
   screen, raises the alert, and the overview offers its options as buttons,
   picked with the arrows and Enter. Once the pane has had focus, the card
   ignores digits. Its first option, "Yes, and don't ask again for anything",

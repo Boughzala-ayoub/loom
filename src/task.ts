@@ -212,11 +212,13 @@ export type Task = {
 export type Signal = { at: number; launch?: number } & (
   | { kind: "start"; match?: string; token?: string; turn?: string }
   | { kind: "end"; matches?: string[]; turn?: string; token?: string; failed?: boolean | null; exit?: number | null; response?: string }
-  | { kind: "stop"; response?: string }
+  | { kind: "stop"; response?: string; turn?: string }
   | { kind: "fail"; detail?: string; turn?: string }
   | { kind: "approval"; detail?: string; turn?: string }
   | { kind: "resume" }
   | { kind: "interrupt"; turn?: string }
+  // Grok settled: idle about a minute after its last turn (its idle_prompt notice). The pane's alone: no task moves on it.
+  | { kind: "idle" }
 );
 
 /** `proof`: the change rests on evidence that names this task, the only
@@ -398,7 +400,9 @@ export function parseSignal(ev: unknown): Signal | null {
     case "approval":
       return { ...base, kind: "approval", ...detail };
     case "stop":
-      return { ...base, kind: "stop", ...response };
+      return { ...base, kind: "stop", ...response, ...turn };
+    case "idle":
+      return { ...base, kind: "idle" };
     case "resume":
       return { ...base, kind: "resume" };
     case "interrupt":

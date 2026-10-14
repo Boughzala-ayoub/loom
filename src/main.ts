@@ -19,7 +19,7 @@ import { applyStash, listStashes, stashCommit } from "./stash";
 import { LINES, wheelInit } from "./scroll";
 import { dropText } from "./drop";
 import { fileLinks, imageMime } from "./links";
-import { claudeDivider, claudeComposer, readMenu, readFeedback, cursorKey, menuKeys, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Menu as AgentMenu } from "./prompt";
+import { claudeDivider, claudeComposer, readMenu, readFeedback, cursorKey, menuKeys, readSurvey, readInput, hash32, echoes, echoed, menuRev, claudeWorking, interruptHint, grokRunning, type Cell, type Menu as AgentMenu } from "./prompt";
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
@@ -1931,6 +1931,13 @@ class Pane {
    * launch's first, as when Loom couldn't add its hooks: then its "ctrl+c to
    * stop" alone says busy. */
   cursorTurn: boolean | undefined;
+  /** Grok's last Stop, held until its screen shows the turn over (grokSettle):
+   * a Stop hook that blocks sends Grok on under the same prompt, and its
+   * hooks can't tell that Stop from the last (stopHookActive is true for
+   * both). grokIdleSince: when its bar first showed no turn running since. */
+  grokStop: Extract<Signal, { kind: "stop" }> | undefined;
+  grokIdleSince: number | undefined;
+  grokTimer = 0;
   /** Cursor's turns by their generation_id, which its hooks name: the one
    * whose start came last (cursorGen), and each one an Esc or Ctrl-C went
    * into, with when (cursorEsc), kept until its first stop counts
@@ -2391,6 +2398,7 @@ class Pane {
     this.codexState = undefined;
     this.codexAsking = false;
     this.cursorTurn = undefined;
+    this.grokStop = this.grokIdleSince = undefined; // its settle timer finds nothing held
     this.cursorGen = undefined;
     this.cursorEsc = new Map();
     this.cursorEscs = [];
@@ -2558,6 +2566,7 @@ class Pane {
       // after xterm joins PTY chunks, not scrolled history. An unanswered
       // approval runs nothing, whatever the title says.
       const running = this.agent === "omp" ? this.programState === "working"
+        : this.agent === "grok" ? this.grokBusy()
         : reportsTurns(this.agent) && this.cursorTurn !== undefined ? this.cursorTurn
         : this.agent === "codex" && this.codexState !== undefined ? codexRunning(this.codexState) : interruptHint(this.screen(true, true), this.agent, () => screenCells(this));
       const status = running && !this.codexAsking && !this.cursorAsking;
@@ -3014,9 +3023,61 @@ class Pane {
     if (this.dead) return;
     if (running && !this.cursorAsking) this.waiting = false;
     this.cursorTurn = running;
-    this.busy = running && !this.cursorAsking;
+    this.busy = (this.agent === "grok" ? this.grokBusy() : running) && !this.cursorAsking;
     this.paint();
     if (dashboardOpen) renderDashboard();
+  }
+  /** Whether Grok runs a turn: its bar says where it can (grokRunning), its
+   * hooks where it can't. A bar showing none running ends the hooks' word,
+   * but for a held Stop's: a prompt another hook blocked ran no turn, and no
+   * report of its end is owed. */
+  grokBusy() {
+    const seen = grokRunning(liveScreen(this, false));
+    if (seen === false && !this.grokStop) this.cursorTurn = false;
+    return seen ?? this.cursorTurn ?? false;
+  }
+  /** A Grok report as agentReport takes it, or undefined while it waits.
+   * Its Stop waits for the screen (grokSettle), and its idle notice settles
+   * that Stop, or the turn its hooks said ran. Another turn starting ends the
+   * held Stop's: Grok starts one only once the last is over. That turn's own
+   * cancel or failure, Ctrl+C in its Stop gate or an error after a block, is
+   * how it ended. An older launch's Stop has no screen left to wait on. */
+  grokReport(s: Signal): Signal | undefined {
+    if ((s.launch ?? this.generation) !== this.generation) return s.kind === "stop" ? { ...s, kind: "end" } : s.kind === "idle" ? undefined : s;
+    const held = this.grokStop;
+    if (s.kind === "stop") {
+      this.grokStop = s;
+      this.grokIdleSince = undefined;
+      this.grokSettle();
+    } else if (s.kind === "idle") {
+      if (held) this.grokSettle("idle");
+      else if (this.cursorTurn) this.cursorRuns(false);
+    } else {
+      if (held && s.kind === "start" && s.turn !== held.turn) this.grokEnd();
+      else if (held && (s.kind === "fail" || s.kind === "interrupt") && s.turn === held.turn) (this.grokStop = undefined), clearTimeout(this.grokTimer);
+      return s;
+    }
+  }
+  /** Ends the held Stop's turn once Grok's bar has shown no turn running for
+   * half a second: a Stop hook that blocks sends Grok on with its bar
+   * unchanged. A Ctrl-C since may have cancelled the turn in its Stop gate,
+   * which Grok reports late: then that report or Grok's idle notice says, as
+   * the notice does where the bar can't. Closing, the screen as it was left. */
+  grokSettle(why?: "idle" | "closing") {
+    clearTimeout(this.grokTimer);
+    const s = this.grokStop;
+    if (!s || this.dead) return;
+    const seen = grokRunning(liveScreen(this, false));
+    if (seen === true || this.cursorAsking) this.grokIdleSince = undefined;
+    else if (why === "idle" || (seen === false && this.interruptAt <= s.at && (why === "closing" || Date.now() - (this.grokIdleSince ??= Date.now()) >= 500))) return this.grokEnd();
+    if (why !== "closing") this.grokTimer = window.setTimeout(() => this.grokSettle(), 250);
+  }
+  /** The held Stop's turn is over: it ends as that Stop said. */
+  private grokEnd() {
+    const s = this.grokStop!;
+    this.grokStop = this.grokIdleSince = undefined;
+    clearTimeout(this.grokTimer);
+    agentReport(this, { at: s.at, launch: s.launch, kind: "end", ...(s.turn ? { turn: s.turn } : {}), ...(s.response ? { response: s.response } : {}) });
   }
   /** What writing `d` means, read off the screen as it's typed: the agent can
    * redraw for it before the write is acknowledged (wrote). `gen`: the launch
@@ -5208,6 +5269,11 @@ function agentEvents(events: [string, unknown][]) {
   for (const p of started) if (reportsTurns(p.agent) && p.cursorAsking) p.cursorAsks();
 }
 function agentReport(p: Pane, s: Signal) {
+  if (p.agent === "grok") {
+    const now = p.grokReport(s);
+    if (!now) return;
+    s = now;
+  }
   const stopped = s.kind === "end" || (reportsTurns(p.agent) && (s.kind === "fail" || s.kind === "interrupt")) ? s.turn : undefined;
   if (stopped) {
     const key = `${p.id}:${s.launch ?? p.generation}:${stopped}`;
@@ -5275,6 +5341,8 @@ function sweepSoon() {
  * unknown rather than wait for a next sweep that won't come. */
 function sweepTasks(closing = false) {
   if (shuttingDown && !closing) return;
+  // A Grok Stop still held ends its turn now if the screen Grok left shows the turn over.
+  if (closing) for (const t of tasks.values()) if (!isFinal(t.state)) paneById(t.pane)?.grokSettle?.("closing");
   const now = Date.now();
   let open = 0;
   for (const t of tasks.values()) {
@@ -5323,6 +5391,7 @@ function sweepTasks(closing = false) {
     // alone does. A hint is read only where the agent draws it (interruptHint).
     const screen = p.screen(true);
     const busy = p.agent === "omp" ? p.programState === "working"
+      : p.agent === "grok" ? p.grokBusy()
       : reportsTurns(p.agent) && p.cursorTurn !== undefined ? p.cursorTurn
       : p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
       : (p.agent === "claude" && claudeWorking(screen)) || interruptHint(p.screen(true, true), p.agent, () => screenCells(p));

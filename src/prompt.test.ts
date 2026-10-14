@@ -1,7 +1,7 @@
 import claudeCapture from "./fixtures/claude-composer.json" with { type: "json" };
 const claudeComposer = claudeCapture.lines.join("\n");
 // Self-check for readMenu / echoes. Run: node src/prompt.test.ts
-import { readMenu, readFeedback, cursorKey, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
+import { readMenu, readFeedback, cursorKey, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, grokRunning, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 import codexQuestion from "./fixtures/codex-question.json" with { type: "json" };
 import grokScreens from "./fixtures/grok-screens.json" with { type: "json" };
@@ -496,6 +496,10 @@ const grok = (name: string) => (grokScreens as unknown as Record<string, string[
 check("Grok: working, by its shortcuts bar", interruptHint(grok("working"), "grok"), true);
 check("Grok: idle and typing aren't working", [interruptHint(grok("idle"), "grok"), interruptHint(grok("typing"), "grok")], [false, false]);
 check("Grok: asking isn't working", interruptHint(grok("approval"), "grok"), false);
+// Its bar says whether a turn runs, or that it can't say: a card waits on its answer, and a narrow pane cuts the bar.
+check("Grok's bar: working, idle, a draft, a blocked prompt's card", ["working", "idle", "typing", "blocked"].map((s) => grokRunning(grok(s))), [true, false, false, false]);
+check("Grok's bar on its permission cards says nothing", [grokRunning(grok("approval")), grokRunning(grok("approvalFocused"))], [undefined, undefined]);
+check("Grok's bar cut short says nothing", [grokRunning("  │ >\n\n  Shift+Tab:mode  │  Ct"), grokRunning("  │ >\n\n  Shift+Tab:mode  │  Ctrl+x:shortc"), grokRunning("")], [undefined, false, undefined]);
 const grokOptions = ["Yes, and don't ask again for anything (always-approve mode)", "Always allow: rm -r del1", "Yes, proceed", "No, reject (type to add feedback)", "Never allow: rm -r"];
 check("Grok's permission card", shape(readMenu(grok("approval"), "grok")), { question: ["Remove the del1 directory recursively", "rm -r del1"], options: grokOptions, selected: 0, multi: false });
 check("Grok's keys are its digits", menuKeys(readMenu(grok("approval"), "grok")!), ["1", "2", "3", "4", "5"]);
