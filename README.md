@@ -579,8 +579,13 @@ Each agent says "done" its own way, and Loom listens to all of them:
   last. So the pane holds each one until Grok's shortcuts bar shows the turn
   over. The bar offers `Ctrl+c:cancel` from the Enter to the turn's real end,
   the gate included. A Ctrl-C after the `Stop` waits for Grok's own report of
-  it. Where the bar can't be read, Grok's `idle_prompt` notice, about a minute
-  later, ends the turn. The pane also reads Working off that bar, so a prompt
+  it. So does a turn the next prompt follows when anything went into the pane
+  after its `Stop`. Grok can report a cancel after the next prompt starts, and
+  a send-now replaces a turn without any report, so such a turn ends unknown
+  if none comes. Where the bar can't be read, Grok's `idle_prompt` notice,
+  about a minute later, ends the turn. When Loom closes, it judges a held
+  `Stop` on the screen the pane was left with and ends one it can't confirm
+  unknown. The pane also reads Working off that bar, so a prompt
   another prompt hook blocks, which runs no turn, never shows Working.
   Grok's permission card has no hook: Loom reads it off the
   screen, raises the alert, and the overview offers its options as buttons,
