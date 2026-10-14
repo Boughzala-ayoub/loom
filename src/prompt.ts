@@ -5,7 +5,7 @@
  * one of those is not an answer, and the Enter after it picks whatever is
  * highlighted, so the overview offers the options as buttons instead. */
 /** `options` are each option's first row; `full`, each with the rows it wraps onto.
- * `unnumbered`: its numbers aren't keys (Cursor's), so only Loom counts them. */
+ * `unnumbered`: its numbers aren't keys (Cursor's, Grok's focused card), so only Loom counts them. */
 export type Menu = { question: string[]; options: string[]; selected: number; multi: boolean; prompt: string[]; keys?: string[]; full?: string[]; unnumbered?: boolean };
 
 export const claudeDivider = (line: string) => /^[ \t\u00a0]*[\u2500\u2501\u2550-]{3,}[ \t\u00a0]*$/.test(line);
@@ -116,6 +116,39 @@ export function cursorKey(menu: Menu, key: string): boolean | undefined {
   return named === undefined ? undefined : !/^(?:Skip & tell the agent|Reject & propose)/i.test(named);
 }
 
+// Grok's permission card (Grok Build 1.0.52): its options numbered, each with a
+// radio mark, (•) on the one the arrows focus, "│  3 (○) Yes, proceed", above
+// what the request is ("│  >  Remove the del1 directory recursively", "│  │ rm -r
+// del1"). While one waits, the shortcuts bar under it reads "1/5:select │ Tab:next
+// option │ …", and only then: a card in the transcript has none under it. A focus-in
+// report turns the bar into "↑/↓:choose │ Ctrl+c:cancel │ Esc:scrollback", where
+// digits pick nothing, until an arrow brings the first bar back.
+const GROK_OPTION = /^(\d) \(([•○])\) (\S.*)$/;
+const GROK_BAR = /^(\d\/\d:select|↑\/↓:choose)\b/;
+const GROK_CARD = /^\s*│/;
+
+/** Grok's permission card on the screen's rows, or null. Its digits pick an
+ * option once the card takes keys, unless it reads ↑/↓:choose, and Enter the focused one. */
+function grokMenu(raw: string[]): Menu | null {
+  const lines = raw.map(unbox);
+  let bar = lines.length - 1;
+  while (bar >= 0 && !lines[bar]) bar--;
+  if (bar < 0 || !GROK_BAR.test(lines[bar])) return null;
+  const unnumbered = lines[bar].startsWith("↑");
+  let last = bar - 1;
+  while (last >= 0 && !GROK_OPTION.test(lines[last])) last--;
+  let first = last;
+  while (first > 0 && GROK_OPTION.test(lines[first - 1])) first--;
+  if (last < 0 || last - first < 1) return null;
+  const options = lines.slice(first, last + 1).map((l) => GROK_OPTION.exec(l)!);
+  // What it asks: the card's rows above its options, but its scope hint.
+  let top = first;
+  while (top > 0 && GROK_CARD.test(raw[top - 1])) top--;
+  const question = lines.slice(top, first).filter((l) => l && !/^←\s*→/.test(l)).map((l) => l.replace(/^>\s+/, ""));
+  const said = options.map((m) => m[3]);
+  return { question, options: said, selected: options.findIndex((m) => m[2] === "•"), multi: false, prompt: [...question, ...said], full: said, ...(unnumbered && { unnumbered }) };
+}
+
 /** Whether an agent's live input sits below row `end` of the unboxed `lines`:
  * then a menu above it is one in the transcript, a sent prompt drawn with the
  * same glyph or a question quoted, since a question takes the input's place.
@@ -131,7 +164,7 @@ export function readMenu(screen: string, agent?: string): Menu | null {
   // The highlighted option nearest the bottom: menus sit under the transcript.
   let at = -1;
   for (let i = lines.length - 1; i >= 0 && at < 0; i--) if (CURSOR.test(lines[i]) && OPTION.test(lines[i])) at = i;
-  if (at < 0) return agent === undefined || agent === "cursor" ? cursorMenu(screen.split("\n")) : null;
+  if (at < 0) return agent === "grok" ? grokMenu(screen.split("\n")) : agent === undefined || agent === "cursor" ? cursorMenu(screen.split("\n")) : null;
   // Walk out from the cursor over consecutive numbers. Non-option lines between
   // them are wrapped text or per-option descriptions; three in a row end the list.
   const found = new Map<number, { line: number; text: string; cursor: boolean }>();
@@ -381,6 +414,12 @@ export function interruptHint(screen: string, agent: string, cells?: () => Cell[
     // Cut before its "(elapsed" in a pane that narrow, it reads idle: only
     // Codex's run-state title (Pane.codexState) can say then, and it wins when present.
     return from(j) || lines.slice(Math.max(0, i - 4), i).some((l) => CODEX_STATUS.test(l) && codexOwn(l, cells));
+  }
+  if (agent === "grok") {
+    // Its shortcuts bar, the last row, offers Ctrl+c:cancel while a turn runs,
+    // and so does a waiting permission card's, which isn't working.
+    const bar = lines[end - 1] ?? "";
+    return /\bCtrl\+c:cancel\b/.test(bar) && !GROK_BAR.test(bar.trim());
   }
   if (agent === "cursor") {
     // Its composer, the last "→" row: the hint at its end, or the spinner in

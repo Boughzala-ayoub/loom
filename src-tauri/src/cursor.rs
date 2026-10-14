@@ -46,7 +46,7 @@ pub fn install(home: &Path, exe: &Path) -> Result<(), String> {
 /// another's truncate and write (std::fs::write) took the empty file for none
 /// and saved Loom's entries alone. Now a read gets the old file or the new one,
 /// and a write that fails leaves the old one.
-fn replace(path: &Path, text: &str) -> std::io::Result<()> {
+pub(crate) fn replace(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

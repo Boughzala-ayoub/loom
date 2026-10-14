@@ -4,6 +4,7 @@ const claudeComposer = claudeCapture.lines.join("\n");
 import { readMenu, readFeedback, cursorKey, menuKeys, readSurvey, readInput, echoes, echoed, menuRev, claudeWorking, interruptHint, type Cell, type Cursor, type Menu } from "./prompt.ts";
 import codexCapture from "./fixtures/codex-composer.json" with { type: "json" };
 import codexQuestion from "./fixtures/codex-question.json" with { type: "json" };
+import grokScreens from "./fixtures/grok-screens.json" with { type: "json" };
 
 let fails = 0;
 // The summary fields; `prompt` gets checks of its own.
@@ -490,6 +491,27 @@ check("Cursor's shell approval: Esc and n propose, y runs, q names nothing", ["e
 check("Cursor's MCP approval: Esc and n skip it, p proposes", ["esc", "n", "p"].map((k) => cursorKey(readMenu(cursorMcp)!, k)), [true, true, false]);
 check("Cursor's Write approval: Esc, n and p propose", ["esc", "n", "p"].map((k) => cursorKey(readMenu(cursorWrite)!, k)), [false, false, false]);
 check("Cursor's trust box: [a] and [q] settle it", ["a", "q"].map((k) => cursorKey(readMenu(cursorTrust)!, k)), [true, true]);
+// Grok Build 1.0.52's screens, captured through ConPTY (fixtures/grok-screens.json).
+const grok = (name: string) => (grokScreens as unknown as Record<string, string[]>)[name].join("\n");
+check("Grok: working, by its shortcuts bar", interruptHint(grok("working"), "grok"), true);
+check("Grok: idle and typing aren't working", [interruptHint(grok("idle"), "grok"), interruptHint(grok("typing"), "grok")], [false, false]);
+check("Grok: asking isn't working", interruptHint(grok("approval"), "grok"), false);
+const grokOptions = ["Yes, and don't ask again for anything (always-approve mode)", "Always allow: rm -r del1", "Yes, proceed", "No, reject (type to add feedback)", "Never allow: rm -r"];
+check("Grok's permission card", shape(readMenu(grok("approval"), "grok")), { question: ["Remove the del1 directory recursively", "rm -r del1"], options: grokOptions, selected: 0, multi: false });
+check("Grok's keys are its digits", menuKeys(readMenu(grok("approval"), "grok")!), ["1", "2", "3", "4", "5"]);
+// At 56 columns Grok cuts an option and its shortcuts bar short rather than wrap them.
+check("Grok's permission card in a narrow pane", shape(readMenu(grok("approvalNarrow"), "grok")), {
+  question: ["Remove the del1 directory recursively", "rm -r del1"],
+  options: ["Yes, and don't ask again for anything (al", ...grokOptions.slice(1)], selected: 0, multi: false });
+// After a focus-in report the same card reads ↑/↓:choose, and digits pick nothing there.
+check("Grok's focused card: the same question, no digit keys, not working",
+  [shape(readMenu(grok("approvalFocused"), "grok")), menuKeys(readMenu(grok("approvalFocused"), "grok")!), menuRev(readMenu(grok("approvalFocused"), "grok")!) === menuRev(readMenu(grok("approval"), "grok")!), interruptHint(grok("approvalFocused"), "grok")],
+  [{ question: ["Remove the del1 directory recursively", "rm -r del1"], options: grokOptions, selected: 0, multi: false }, [], true, false]);
+const grokMoved = grok("approval").replace("1 (•) Yes, and", "1 (○) Yes, and").replace("3 (○) Yes, proceed", "3 (•) Yes, proceed");
+check("Grok's focus moved: the same question", [readMenu(grokMoved, "grok")?.selected, menuRev(readMenu(grokMoved, "grok")!) === menuRev(readMenu(grok("approval"), "grok")!)], [2, true]);
+check("No card on Grok's idle, typing or working screens", ["idle", "typing", "working"].map((s) => readMenu(grok(s), "grok")), [null, null, null]);
+check("Grok's card with no select bar under it is transcript", readMenu(grok("approval").replace(/1\/5:select.*$/m, "Shift+Tab:mode  │  Ctrl+x:shortcuts"), "grok"), null);
+check("Grok's card on another agent's screen is no question", [readMenu(grok("approval"), "claude"), readMenu(grok("approval"), "cursor")], [null, null]);
 // Cursor's menus quoted in another agent's transcript, that agent idle at its input below.
 for (const [agent, input] of [["Claude", ["", ruled, "❯ ", ruled, "  ? for shortcuts"]], ["Codex", ["", "› Ask Codex to do anything", "", "  100% context left"]]] as const) {
   check(`Cursor's approval quoted above ${agent}'s input is no question`, readMenu([cursorAsk, "● It asked that. Want me to allow it?", ...input].join("\n")), null);

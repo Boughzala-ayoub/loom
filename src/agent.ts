@@ -1,13 +1,13 @@
 /** Which agent a startup command runs, and the argv that boots it in a pane.
  *
- * Four agents get first-class treatment — a session pinned per pane so the
+ * Five agents get first-class treatment — a session pinned per pane so the
  * next launch resumes it, a "turn finished" signal, and no shell host under
- * them (Claude, Codex, OpenCode, Cursor): a PowerShell sitting behind an agent costs ~65 MB a pane for nothing
+ * them (Claude, Codex, OpenCode, Cursor, Grok): a PowerShell sitting behind an agent costs ~65 MB a pane for nothing
  * but the prompt you land on when the agent quits, and a dead pane relaunches
  * on Enter instead. OMP is an agent that keeps the shell (launch). Anything
  * else is a shell command and gets PowerShell with shell-init.ps1 dot-sourced
  * (OSC 133 command marks, the busy dot). */
-export type Agent = "claude" | "codex" | "opencode" | "omp" | "cursor" | "shell";
+export type Agent = "claude" | "codex" | "opencode" | "omp" | "cursor" | "grok" | "shell";
 
 export const opencodeCommand = (cmd: string) => /^(opencode[12]?)(?=\s|$)/.exec(cmd.trim())?.[1];
 const ompCommand = (cmd: string) => /^omp(\s|$)/.test(cmd.trim());
@@ -15,10 +15,14 @@ const ompCommand = (cmd: string) => /^omp(\s|$)/.test(cmd.trim());
  * `agent`, is other CLIs' too (Grok's agent.exe can come first on PATH), so a
  * startup of `agent` stays a shell command. */
 export const cursorCommand = (cmd: string) => /^(cursor-agent)(?=\s|$)/.exec(cmd.trim())?.[1];
+/** xAI's Grok CLI (Grok Build) by its own name, `grok`. Its `agent.exe` is the
+ * same program, but `agent` is Cursor's name too, so that stays a shell command. */
+const grokCommand = (cmd: string) => /^grok(\s|$)/.test(cmd.trim());
 
 export function agentOf(cmd: string): Agent {
   if (opencodeCommand(cmd)) return "opencode";
   if (cursorCommand(cmd)) return "cursor";
+  if (grokCommand(cmd)) return "grok";
   if (ompCommand(cmd)) return "omp";
   const m = /^(claude|codex|opencode)(\s|$)/.exec(cmd.trim());
   return (m?.[1] as Agent) ?? "shell";
@@ -54,6 +58,18 @@ export function codexTitle(title: string): { thread?: string; state?: string } |
   return thread || state ? { thread, state } : undefined;
 }
 export const codexThread = (title: string) => codexTitle(title)?.thread;
+/** Grok's title (Grok Build 1.0.52): "<session title> - grok" between turns,
+ * and "⠸ - <status> - <session title> - grok" while one runs, a braille
+ * spinner frame first, the status alone before the session has a title. The
+ * session title, or "". */
+export function grokTitle(title: string): string {
+  // A card waiting on you puts "⚠ Action Required - " first.
+  const t = title.replace(/ - grok$/, "").replace(/^⚠ [^-]* - /, "");
+  const running = /^[\u2800-\u28ff]+ - /.exec(t);
+  if (!running) return t;
+  const rest = t.slice(running[0].length), at = rest.indexOf(" - ");
+  return at < 0 ? "" : rest.slice(at + 3);
+}
 /** A Codex turn runs: its title's run state says so. */
 export const codexRunning = (state: string | undefined) => state === "Working" || state === "Thinking" || state === "Waiting";
 
@@ -82,6 +98,9 @@ export function ownSession(cmd: string): boolean {
       return /^(resume|ls)(\s|$)/.test(rest) || /(^|\s)(--resume|--continue|-p|--print)([=\s]|$)/.test(rest);
     case "codex":
       return /^(resume|fork)(\s|$)/.test(rest);
+    case "grok":
+      // --single prints one answer and quits: no session to keep.
+      return /(^|\s)(-r|--resume|-c|--continue|-s|--session-id|-p|--single)([=\s]|$)/.test(rest);
     case "opencode":
       return /(^|\s)(-s|--session|-c|--continue)([=\s]|$)/.test(rest);
     default:
@@ -132,6 +151,11 @@ export function launch(cmd: string, sid: string, resume: boolean, effort?: strin
       const select = resume && sessionId && !own ? ` --session ${sessionId}` : "";
       return cmdHost(`${opencodeCommand(c)}${select}${rest ? " " + rest : ""}`);
     }
+    case "grok":
+      // A real executable, run bare as claude is. Its session id arrives from
+      // its UserPromptSubmit hook (helper.rs), so a pane resumes the session it
+      // last sent a prompt in; without one, a new session.
+      return ["grok", ...(resume && sessionId && !own ? ["--resume", sessionId] : []), ...args];
     case "cursor": {
       // Its chat id arrives from its beforeSubmitPrompt hook (helper.rs), so a
       // pane resumes the chat it last sent a prompt in; without one, a new chat.

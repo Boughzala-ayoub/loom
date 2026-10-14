@@ -15,6 +15,7 @@ mod output;
 mod cache;
 mod opencode;
 mod cursor;
+mod grok;
 mod usage;
 mod pipe;
 mod control;
@@ -423,6 +424,15 @@ fn pty_spawn(
             eprintln!("pane {id}: {e}");
         }
     }
+    let is_grok = cmd_line.is_none() && grok::is_grok(&argv[0]);
+    if is_grok {
+        // Its turns are reported by Loom's own ~/.grok/hooks/loom.json. A pane
+        // whose file Loom can't write still runs, without the reports.
+        let home = app.path().home_dir().map_err(|e| e.to_string())?;
+        if let Err(e) = grok::install(&home, &exe) {
+            eprintln!("pane {id}: {e}");
+        }
+    }
     // Loom's PATH, then the pane's, as cmd finds a program below: one
     // installed since Loom started is only in the pane's.
     let pane_path = CommandBuilder::new("cmd.exe").get_env("PATH").map(|p| p.to_os_string());
@@ -527,7 +537,9 @@ fn pty_spawn(
     // Cursor runs its hooks with PowerShell's syntax, yet through Git Bash when
     // either of these says Git Bash (a Loom started from Git Bash), and then
     // every hook fails (2026.10.01). Without them it picks PowerShell.
-    if is_cursor {
+    // Grok picks the shell its hooks run in the same way, and Loom's hook
+    // command is plain enough for either; PowerShell keeps it like Cursor's.
+    if is_cursor || is_grok {
         cmd.env_remove("MSYSTEM");
         cmd.env_remove("SHELL");
     }
@@ -1522,12 +1534,15 @@ fn collect_message(last: &mut LastMessages, provider: &str, v: &serde_json::Valu
         "opencode" if v["type"] == "assistant" => ("assistant", &v["content"], "text"),
         "opencode" => (v["info"]["role"].as_str().unwrap_or(""), &v["parts"], "text"),
         "cursor" => (v["role"].as_str().unwrap_or(""), &v["message"]["content"], "text"),
+        // A prompt of the person's has a prompt_index; the other user rows are context Grok adds.
+        "grok" if v["type"] == "assistant" => ("assistant", &v["content"], "text"),
+        "grok" if v["type"] == "user" && !v["prompt_index"].is_null() => ("user", &v["content"], "text"),
         _ => return,
     };
     if role != "user" && role != "assistant" { return; }
     if role == "user" && !last.user.is_empty() || role == "assistant" && !last.agent.is_empty() { return; }
     let text = message_text(content, kind);
-    let text = if provider == "cursor" && role == "user" { cursor::prompt_text(&text).to_string() } else { text };
+    let text = if (provider == "cursor" || provider == "grok") && role == "user" { cursor::prompt_text(&text).to_string() } else { text };
     if text.is_empty() { return; }
     if role == "user" && (text.starts_with("<task-notification>") || text.starts_with("<system-reminder>")
         || text.starts_with("<environment_context>") || text.starts_with("<local-command")) { return; }
@@ -1633,6 +1648,7 @@ fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -
                 .map(|(_, path)| recent_messages(path, "codex")).unwrap_or_default(),
             "opencode" | "opencode1" | "opencode2" => opencode::messages(&dir, &sid, &agent).ok_or("OpenCode export failed or timed out")?,
             "cursor" => cursor::transcript(&home, &dir, &sid).map(|path| recent_messages(&path, "cursor")).unwrap_or_default(),
+            "grok" => grok::transcript(&home, &sid).map(|path| recent_messages(&path, "grok")).unwrap_or_default(),
             _ => continue,
         };
         messages.insert(id, last);
@@ -2069,6 +2085,7 @@ pub fn run() {
         Some("--codex-notify") => std::process::exit(helper::codex_notify(args.get(1).map(String::as_str))),
         Some("--claude-hook") => std::process::exit(helper::claude_hook()),
         Some("--cursor-hook") => std::process::exit(helper::cursor_hook()),
+        Some("--grok-hook") => std::process::exit(helper::grok_hook()),
         _ => {}
     }
     if args.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "--version" | "-V")) {

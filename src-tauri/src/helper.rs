@@ -203,20 +203,76 @@ pub fn cursor_hook() -> i32 {
     let Ok(p) = serde_json::from_str::<serde_json::Value>(input.trim_start_matches('\u{feff}')) else { return 0 };
     let Some((event, state)) = cursor_event(&p) else { return 0 };
     task_event(&pane, "cursor", event);
-    let launch = std::env::var("LOOM_LAUNCH").ok().filter(|l| l.parse::<u64>().is_ok());
-    let line = |text: String| launch.as_ref().map_or_else(|| text.clone(), |l| format!("{text}\n{l}"));
     if state == "busy" {
-        // What agent.ts validSessionId takes: it lands on --resume's command line.
-        let id = p["conversation_id"].as_str()
-            .filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'));
-        if let (Some(id), Some(file)) = (id, std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from)) {
-            if let Some(dir) = file.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            publish(&file, &line(id.to_string()));
-        }
+        save_session(p["conversation_id"].as_str());
     }
     0
+}
+
+/// `id` as the pane's session from now on (LOOM_SESSION_FILE, as Codex's
+/// notify writes it, with the launch that wrote it), when it is one agent.ts
+/// validSessionId takes: it lands on --resume's command line.
+fn save_session(id: Option<&str>) {
+    let Some(id) = id.filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')) else { return };
+    let Some(file) = std::env::var_os("LOOM_SESSION_FILE").map(PathBuf::from) else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text = match std::env::var("LOOM_LAUNCH").ok().filter(|l| l.parse::<u64>().is_ok()) {
+        Some(launch) => format!("{id}\n{launch}"),
+        None => id.to_string(),
+    };
+    publish(&file, &text);
+}
+
+/// `loom.exe --grok-hook`, Grok's prompt and turn-end hooks (grok.rs).
+/// UserPromptSubmit starts a prompt, named by `prompt_match`, never by its
+/// text, and its session is the pane's from then on. Stop ends the turn, but
+/// only a turn's own ("end_turn"): Grok fires one more as a session closes.
+/// StopFailure fails it with Grok's error. StopCancelled cancels it when a
+/// person stopped it (Ctrl+C, a dismissed or rejected permission prompt) and
+/// fails it when Grok gave up (max_turns, no_progress). Each names its turn
+/// (promptId), and the pane reads them in order (main.ts agentReport). Prints
+/// nothing and always exits 0: Grok reads a reply as a decision.
+pub fn grok_hook() -> i32 {
+    let Some(pane) = loom_pane() else { return 0 };
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    let Ok(p) = serde_json::from_str::<serde_json::Value>(input.trim_start_matches('\u{feff}')) else { return 0 };
+    let Some(event) = grok_event(&p) else { return 0 };
+    task_event(&pane, "grok", event);
+    if p["hook_event_name"] == "UserPromptSubmit" {
+        save_session(p["sessionId"].as_str());
+    }
+    0
+}
+
+/// A Grok hook's report as a task event, naming its turn (promptId). A
+/// subagent's turns are the session's business: they report nothing.
+fn grok_event(p: &serde_json::Value) -> Option<serde_json::Value> {
+    if !p["subagentType"].is_null() {
+        return None;
+    }
+    let turn = &p["promptId"];
+    let text = |v: &serde_json::Value| v.as_str().map(|s| s.chars().take(200).collect::<String>());
+    Some(match p["hook_event_name"].as_str()? {
+        "UserPromptSubmit" => serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?), "turn": turn }),
+        "Stop" if p["reason"] == "end_turn" => response(serde_json::json!({ "kind": "end", "turn": turn }), &p["lastAssistantMessage"]),
+        "StopFailure" => {
+            let error = text(&p["error"]).unwrap_or_else(|| "unknown".into());
+            let detail = match text(&p["errorDetails"]) {
+                Some(more) => format!("{error}: {more}"),
+                None => error,
+            };
+            serde_json::json!({ "kind": "fail", "detail": detail, "turn": turn })
+        }
+        "StopCancelled" if p["cancelledBy"] == "runtime" => {
+            let reason = text(&p["reason"]).unwrap_or_else(|| "unknown".into());
+            serde_json::json!({ "kind": "fail", "detail": format!("Grok stopped the turn: {reason}"), "turn": turn })
+        }
+        "StopCancelled" => serde_json::json!({ "kind": "interrupt", "turn": turn }),
+        _ => return None,
+    })
 }
 
 /// A Cursor hook's report as a task event, and the pane's state after it,
@@ -532,6 +588,28 @@ mod tests {
         // The prompt's text never leaves the hook: only its match does.
         assert!(!ev(json!({ "hook_event_name": "UserPromptSubmit", "prompt": "secret-token-123" })).unwrap().to_string().contains("secret"));
         assert!(!ev(json!({ "hook_event_name": "Stop", "last_assistant_message": "secret-answer-456" })).unwrap().to_string().contains("secret"), "nor the answer's");
+    }
+
+    #[test]
+    fn grok_hooks_become_task_events() {
+        use serde_json::json;
+        // Payload shapes as Grok Build 1.0.52 sends them (hook_event_name in Claude's spelling, the rest camelCase).
+        let prompt = json!({ "hook_event_name": "UserPromptSubmit", "promptId": "7a97b1c3", "sessionId": "01a13766-164e", "prompt": "run the tests" });
+        assert_eq!(grok_event(&prompt), Some(json!({ "kind": "start", "match": prompt_match("run the tests"), "turn": "7a97b1c3" })));
+        assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "promptId": "7a97b1c3", "reason": "end_turn", "lastAssistantMessage": "done" })),
+            Some(json!({ "kind": "end", "turn": "7a97b1c3", "response": prompt_match("done") })));
+        assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "reason": "channel_closed" })), None, "the session closing ends no turn");
+        assert_eq!(grok_event(&json!({ "hook_event_name": "StopFailure", "promptId": "7a97b1c3", "error": "rate_limit", "errorDetails": "429" })),
+            Some(json!({ "kind": "fail", "detail": "rate_limit: 429", "turn": "7a97b1c3" })));
+        for reason in ["user_interrupt", "permission_cancelled", "permission_rejected"] {
+            assert_eq!(grok_event(&json!({ "hook_event_name": "StopCancelled", "promptId": "7a97b1c3", "reason": reason, "cancelledBy": "user" })),
+                Some(json!({ "kind": "interrupt", "turn": "7a97b1c3" })), "{reason}");
+        }
+        assert_eq!(grok_event(&json!({ "hook_event_name": "StopCancelled", "promptId": "7a97b1c3", "reason": "max_turns", "cancelledBy": "runtime" })),
+            Some(json!({ "kind": "fail", "detail": "Grok stopped the turn: max_turns", "turn": "7a97b1c3" })));
+        assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "promptId": "7a97b1c3", "reason": "end_turn", "subagentType": "explore" })), None, "a subagent's");
+        assert_eq!(grok_event(&json!({ "hook_event_name": "SessionStart" })), None);
+        assert!(!grok_event(&json!({ "hook_event_name": "UserPromptSubmit", "prompt": "secret-token-123" })).unwrap().to_string().contains("secret"));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 import type { Agent } from "./agent";
 
 /** Provider marks, 24×24 paths. claude / openai / opencode / cursor are
- * simple-icons (CC0; cursor's from 16.35.0); omp is OMP's own block π
+ * simple-icons (CC0; cursor's from 16.35.0), which has no Grok mark: grok's
+ * is drawn here, a ring and a slash across it; omp is OMP's own block π
  * (PI_LOGO in omp.exe), its left leg shorter than the right; the shell
  * prompt is drawn here. Inline so nothing is fetched. */
 const PATHS: Record<Agent, string> = {
@@ -12,12 +13,14 @@ const PATHS: Record<Agent, string> = {
   opencode: "M22 24H2V0h20zM17 4.8H7v14.4h10z",
   cursor:
     "M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23",
+  // Ring and slash wind the same way, so the slash stays filled across the ring.
+  grok: "M12 2a10 10 0 1 0 0 20 10 10 0 1 0 0-20zm0 2.6a7.4 7.4 0 1 1 0 14.8 7.4 7.4 0 1 1 0-14.8zM20.4 2.2 2.2 20.4l1.4 1.4L21.8 3.6z",
   omp: "M0 1.5h24v4.5H0zM3 6h6v10.5H3zM13.5 6h6v16.5h-6z",
   // A prompt: chevron and underscore.
   shell: "M3 5l2-2 9 9-9 9-2-2 7-7zM12 19h9v2h-9z",
 };
 
-/** Brand colours, so a row reads at a glance. opencode, cursor and the shell take the text colour; omp has a gradient. */
+/** Brand colours, so a row reads at a glance. opencode, cursor, grok and the shell take the text colour; omp has a gradient. */
 const HUE: Partial<Record<Agent, string>> = { claude: "#d97757", codex: "#10a37f" }; // opencode and cursor are black-on-white: theme text
 
 /** OMP's π fades from pink at the top left to blue at the bottom right. */

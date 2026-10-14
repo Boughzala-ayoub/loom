@@ -2,7 +2,7 @@
 
 A thread-driven agentic terminal workspace for Windows, shaped like Orca. A
 **thread** is one branch of work in its own git worktree, with an agent running
-in it: `claude`, `codex`, `opencode` or Cursor's `cursor-agent`. Threads sit in a sidebar grouped by
+in it: `claude`, `codex`, `opencode`, Cursor's `cursor-agent` or xAI's `grok`. Threads sit in a sidebar grouped by
 repo; the current one shows its panes, real ConPTY terminals, in a grid. Cut
 as many threads as you like and every agent keeps running while you look at
 another one.
@@ -12,7 +12,7 @@ Tauri v2 (Rust backend, system WebView2) + xterm.js. No Electron, no Node at run
 ## Requirements
 
 - **Windows 10/11** — WebView2 ships with Windows 11.
-- **`claude`, `codex`, `opencode` and/or `cursor-agent` on PATH**, whichever
+- **`claude`, `codex`, `opencode`, `cursor-agent` and/or `grok` on PATH**, whichever
   you cut threads with. `git` on PATH for worktrees.
 - **VS Code (`code`)** on PATH for the `VS Code` button / `F5`. Optional.
 
@@ -87,7 +87,7 @@ The sidebar lists threads under the project they came from, one line each:
 the thread's name, a mark per agent, the lines it has changed, and how long
 since anything drew. The thread you are on also lists one row per pane, the way
 Orca lists agent sessions under a worktree: the provider's mark, the agent
-(`claude`, `codex`, `opencode`, `cursor`, `shell`) and whatever it titled itself. Other
+(`claude`, `codex`, `opencode`, `cursor`, `grok`, `shell`) and whatever it titled itself. Other
 threads fold their agents into the marks, and clicking a mark opens that pane,
 so thirty threads fit on one screen. A thread's chevron lists or folds its
 agents by hand, and that choice sticks. Projects fold on click; both orders
@@ -187,10 +187,11 @@ or away from Loom. `node scripts/overlay-check.mjs` tests it in the real app;
 it moves the mouse for about two seconds.
 
 Threads, branches, and panes come back on the next launch. Claude keeps its
-pinned session ID. Codex, OpenCode and Cursor report their actual session IDs, so two
+pinned session ID. Codex, OpenCode, Cursor and Grok report their actual session IDs, so two
 panes in the same folder resume separate conversations. Cursor's prompt hook
 names the chat each prompt goes to, and the pane comes back with
-`cursor-agent --resume <id>`. A Cursor pane that never got a prompt starts a new
+`cursor-agent --resume <id>`. Grok's names its session, and the pane comes back
+with `grok --resume <id>`. A Cursor or Grok pane that never got a prompt starts a new
 chat. An `omp` pane gets an
 id of its own, which OMP reads as `ZELLIJ_PANE_ID`, and comes back with
 `omp --continue`. That reopens the last session the pane ran. Loom never
@@ -563,10 +564,25 @@ Each agent says "done" its own way, and Loom listens to all of them:
   `cursor-agent` counts as Cursor. `agent`, Cursor's newer name, is also what
   Grok's CLI installs (`~\.grok\bin\agent.exe`), so a startup of `agent`
   stays a shell command.
+- **grok** (xAI's Grok Build) reports through Loom's own file,
+  `~\.grok\hooks\loom.json`, written when a Grok pane starts. Grok trusts
+  every file in that folder without asking, so yours stay in files of their
+  own. `UserPromptSubmit`, `Stop`, `StopFailure` and `StopCancelled` run
+  `loom.exe --grok-hook`, which does nothing outside a Loom pane. Ctrl-C stops
+  a turn and Esc doesn't. A stop says whether you cancelled the turn or Grok
+  gave up on it. Grok's permission card has no hook: Loom reads it off the
+  screen, raises the alert, and the overview offers its options as buttons,
+  picked with the arrows and Enter. Once the pane has had focus, the card
+  ignores digits. Its first option, "Yes, and don't ask again for anything",
+  saves always-approve in `~\.grok\config.toml` for every later session.
+  In a Loom pane xterm marks nearly every row Grok draws as the previous
+  one's wrap, so Loom never joins a Grok pane's rows. Grok also runs the hooks
+  in `~\.claude\settings.json`. Loom clears `MSYSTEM` and `SHELL` in Grok
+  panes as it does in Cursor's, so the hooks run under PowerShell.
 - **claude** uses hooks, below. Terminal BEL and OSC 99 (kitty notifications)
   count too, for anything else that rings.
 
-OpenCode's plugin, OMP and Cursor's hooks report Working and Waiting directly. Pending questions and
+OpenCode's plugin, OMP, and Cursor's and Grok's hooks report Working and Waiting directly. Pending questions and
 permissions stay Waiting until answered. Child-session completion cannot mark
 the parent done. Other agents use terminal notifications and activity detection;
 the echo right after a keystroke does not count as work.

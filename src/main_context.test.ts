@@ -11,7 +11,7 @@ import { pruneSettled } from "./cli.ts";
 import { readMenu, readFeedback, cursorKey, menuRev, menuKeys, readSurvey, interruptHint } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "reportsHeld", "holdReports", "turnsSeen", "turnTasks"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "reportsHeld", "holdReports", "turnsSeen", "turnTasks", "reportsTurns"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -26,7 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
     journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, holdReports, reportsHeld, moveTask };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, holdReports, reportsHeld, reportsTurns, moveTask };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -180,7 +180,7 @@ const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting"
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, reportsHeld: fx.f.reportsHeld, tasks: fx.tasks, ...extra,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, reportsHeld: fx.f.reportsHeld, reportsTurns: fx.f.reportsTurns, tasks: fx.tasks, ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
   const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
@@ -1172,3 +1172,68 @@ for (const end of ["completed", "error", "aborted"]) {
   assert.deepEqual(drawn[drawn.length - 1], [false, end !== "aborted"], `the Overview after ${end}`);
 }
 console.log("ok   Cursor's hooks move its pane and its tasks, and its questions are read off its screen");
+// Grok Build 1.0.52: its hooks report each turn (promptId) and how it ended,
+// and its permission card shows on its screen (fixtures/grok-screens.json).
+const grokScreens = JSON.parse(readFileSync("src/fixtures/grok-screens.json", "utf8")) as Record<string, string[]>;
+const [GROK_IDLE, GROK_WORKING, GROK_ASK] = ["idle", "working", "approval"].map((s) => grokScreens[s].join("\n"));
+const grokTurn = (view: { text: string }) => {
+  const c = cursorPane(view);
+  c.p.agent = "grok";
+  const report = (ev: Record<string, unknown>) => c.f.agentEvents([[c.p.id, { launch: 1, turn: "pA", ...ev }]]);
+  c.clock.at = c.p.lastIn = 1000;
+  const t = c.f.turnTask(c.p, "submit", model.promptMatch("A"), 1000);
+  c.f.enterTurn(t, 1000);
+  report({ kind: "start", t: 1100, match: t.match });
+  view.text = GROK_WORKING;
+  c.p.activity();
+  return { ...c, t, report };
+};
+{
+  // A prompt, its permission card, the answer "3" (Yes, proceed), and its end.
+  const view = { text: GROK_IDLE };
+  const { p, pushed, clock, t, report } = grokTurn(view);
+  assert.deepEqual([t.state, p.busy, p.waiting], ["working", true, false], "working");
+  clock.at = 3000;
+  view.text = GROK_ASK;
+  p.activity();
+  assert.deepEqual([t.state, t.detail, p.busy, p.waiting], ["approval", "Remove the del1 directory recursively rm -r del1", false, true], "asking");
+  clock.at = p.lastIn = 4000;
+  const sent = p.sending("3");
+  p.wrote("3", true, sent);
+  view.text = GROK_WORKING;
+  p.activity();
+  assert.deepEqual([sent.answer, t.state, p.busy, p.waiting], [true, "working", true, false], "answered");
+  clock.at = 9000;
+  report({ kind: "end", t: 9000 });
+  view.text = GROK_IDLE;
+  p.activity();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.busy, p.waiting, pushed], ["completed", false, true, ["approval", "completed"]], "done");
+}
+for (const [how, stops, state, notices] of [
+  // Ctrl+C, or a permission card dismissed or rejected: Grok reports the turn cancelled, and it raises no alert.
+  ["cancelled", [{ kind: "interrupt" }], "cancelled", []],
+  ["failed", [{ kind: "fail", detail: "rate_limit: 429" }], "failed", ["failed"]],
+  // Ctrl+C while its stop hooks run: Grok reports the end, then the cancel. The first counts.
+  ["ended, then cancelled", [{ kind: "end" }, { kind: "interrupt" }], "completed", ["completed"]],
+] as const) {
+  const view = { text: GROK_IDLE };
+  const { p, pushed, clock, t, report } = grokTurn(view);
+  clock.at = 9000;
+  for (const s of stops) report({ ...s, t: 9000 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.busy, p.waiting, pushed], [state, false, state !== "cancelled", notices], how);
+}
+{
+  // Esc doesn't stop a Grok turn ("Press Ctrl+c to cancel the turn"), and holds no reports: a later error is the turn's own.
+  const view = { text: GROK_IDLE };
+  const { p, pushed, clock, t, report } = grokTurn(view);
+  clock.at = p.lastIn = 2000;
+  const esc = p.sending("\x1b");
+  p.wrote("\x1b", true, esc);
+  clock.at = 9000;
+  report({ kind: "fail", t: 9000, detail: "server_error" });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([esc.stop, esc.answer, t.state, pushed], [undefined, false, "failed", ["failed"]]);
+}
+console.log("ok   Grok's hooks move its pane and its tasks, and its permission card is read off its screen");

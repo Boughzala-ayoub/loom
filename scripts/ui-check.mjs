@@ -31,6 +31,7 @@ try {
       if (location.search.includes('dashboard')) Object.assign(state.threads[0].panes[1], { sid: 'dashboard-codex-pane', sessionId: 'valid-session' });
       if (location.search.includes('omp-pane')) Object.assign(state, { overlay: 'always' }).threads[2].panes = [{ cmd: 'omp' }];
       if (location.search.includes('cursor-pane')) Object.assign(state, { overlay: 'always' }).threads[2].panes = [{ cmd: 'cursor-agent' }];
+      if (location.search.includes('grok-pane')) Object.assign(state, { overlay: 'always' }).threads[2].panes = [{ cmd: 'grok' }];
       if (location.search.includes('needs-session')) delete state.threads[0].panes[1].sessionId;
       if (location.search.includes('many')) state.threads = Array.from({ length: 40 }, (_, i) => thread(`thread-${i}-with-a-long-review-description`, ['claude']));
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
@@ -1746,6 +1747,78 @@ try {
     await cursorCard.locator('.dashboard-choices button').first().waitFor();
     assert.equal(await cursorCard.locator('.dashboard-choices button').count(), 4, `G's options stay on the Overview, ${width}px`);
     await audit('cursor-relaunch-answer');
+    await page.click('#dashboard-btn');
+    // A Grok pane (grok) shows its own mark. Its hooks report each turn (agent-events), and its
+    // permission card shows on its screen alone: the Overview offers the card's options and picks
+    // one with arrows and Enter. Its first option turns on always-approve for good, so the check
+    // picks "Yes, proceed".
+    await page.goto(base + '?grok-pane');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    const grok = await page.evaluate(() => { const p = window.qa.panes.find(p => p.argv[0] === 'grok'); return p && { id: p.id, argv: p.argv, launch: p.launch }; });
+    assert.deepEqual(grok?.argv, ['grok'], 'grok goes to Rust bare, a program of its own');
+    await cli('show', 'fix-settings');
+    await page.waitForFunction(() => document.querySelector('.panes')?.textContent.includes('grok'));
+    assert.deepEqual(await page.evaluate(() => ['.agent', '.pane-head', '.pip', '.panes'].map(s => [...document.querySelectorAll(`${s} svg.ico path`)].filter(p => p.getAttribute('d').startsWith('M12 2a10 10')).length)),
+      [1, 1, 1, 1], `Grok's mark, ${width}px`);
+    const grokOut = d => page.evaluate(([id, d]) => window.qa.panes.filter(p => p.id === id).at(-1).onOut.onmessage(d), [grok.id, d]);
+    let grokBatch = 0;
+    const grokReport = ev => page.evaluate(([id, ev, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: [[id, ev]] } }),
+      [grok.id, { turn: 'p1', ...ev, launch: grok.launch, t: Date.now(), src: 'grok' }, ++grokBatch]);
+    const grokState = async () => (await cli('panes')).data.find(p => p.id === grok.id).state;
+    const grokWorking = '\x1b[2J\x1b[H  > run rm -r del1\r\n\r\n   / Waiting for response… 0.4s          [stop]\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts\r\n';
+    await grokOut('\x1b[2J\x1b[H  Grok Build  1.0.52\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\r\n');
+    const grokTasks = (await cli('tasks')).data.length;
+    await page.locator(`.pane[data-id="${grok.id}"] .xterm-helper-textarea`).focus();
+    await page.keyboard.type('run rm -r del1');
+    await page.keyboard.press('Enter');
+    await grokReport({ kind: 'start', match: '0123456789abcdef' });
+    await grokOut(grokWorking);
+    await until(async () => (await grokState()) === 'working', `Grok's prompt hook reads as working, ${width}px`);
+    const grokTask = (await cli('tasks')).data.slice(grokTasks);
+    assert.deepEqual(grokTask.map(t => [t.agent, t.source, t.state]), [['grok', 'manual', 'working']], `The prompt is Grok's task, ${width}px`);
+    const grokOptions = ["Yes, and don't ask again for anything (always-approve mode)", 'Always allow: rm -r del1', 'Yes, proceed', 'No, reject (type to add feedback)', 'Never allow: rm -r'];
+    await page.evaluate(([id, options]) => {
+      const qa = window.qa, pane = qa.panes.filter(p => p.id === id).at(-1);
+      qa.grokSel = 0;
+      // A focused pane's card, as a focus-in leaves it: ↑/↓:choose, digits pick nothing, and the
+      // first arrow brings back 1/5:select. Rows as Loom gets them from a real Grok: each cut and
+      // padded to the width with no line breaks, so xterm flags each as the previous one's wrap.
+      qa.grokFocused = true;
+      qa.drawGrokAsk = () => {
+        const { cols } = qa.calls.filter(c => ['pty_spawn', 'pty_resize'].includes(c.cmd) && c.args.id === id).at(-1).args;
+        const rows = ['  > run rm -r del1', '', '   ♦ Remove the del1 directory recursively… 3s          [stop]', '', '  │',
+          '  │  >  Remove the del1 directory recursively', '  │  │ rm -r del1', qa.grokFocused ? '  │' : '  │  ← → narrow scope', '  │',
+          ...options.map((o, i) => `  │  ${i + 1} ${i === qa.grokSel ? '(•)' : '(○)'} ${o}`), '  │', '',
+          qa.grokFocused ? '  ↑/↓:choose  │  Ctrl+c:cancel  │  Esc:scrollback' : '  1/5:select  │  Tab:next option  │  ←/→:scope  │  Ctrl+o:always-approve  │  Ctrl+c:cancel  │  Esc:scrollback'];
+        pane.onOut.onmessage('\x1b[2J\x1b[H' + rows.map(r => r.slice(0, cols).padEnd(cols)).join(''));
+      };
+      qa.onWrite = ({ id: to, data }) => { if (to === id && /^\x1b[[O][AB]$/.test(data)) ((qa.grokSel += data.endsWith('B') ? 1 : -1), (qa.grokFocused = false), qa.drawGrokAsk()); };
+      qa.drawGrokAsk();
+    }, [grok.id, grokOptions]);
+    await until(async () => (await grokState()) === 'waiting', `Grok's permission card waits on you, ${width}px`);
+    assert.equal((await cli('tasks')).data.find(t => t.task === grokTask[0].task).state, 'approval', `Its task asks, ${width}px`);
+    await page.click('#dashboard-btn');
+    const grokCard = page.locator('.dashboard-card').filter({ hasText: 'fix-settings / grok' });
+    await grokCard.locator('.dashboard-choices button').first().waitFor();
+    const grokCols = await page.evaluate(id => window.qa.calls.filter(c => ['pty_spawn', 'pty_resize'].includes(c.cmd) && c.args.id === id).at(-1).args.cols, grok.id);
+    assert.deepEqual(await grokCard.locator('.dashboard-choices button').allTextContents(), grokOptions.map((o, i) => `  │  ${i + 1} (○) ${o}`.slice(0, grokCols).slice(11).trimEnd()),
+      `Grok's card becomes its options, as far as its ${grokCols} columns show them, ${width}px`);
+    assert.match(await grokCard.locator('.dashboard-question').textContent(), /Remove the del1/, `The card shows what Grok asks, ${width}px`);
+    await audit('grok-approval');
+    assert.ok((await cli('read', grok.id)).data.text.split('\n').some(l => l.trim().startsWith('↑/↓:choose')), `loomctl read keeps Grok's rows apart, ${width}px`);
+    await page.evaluate(() => { window.qa.chooseStart = window.qa.calls.length; });
+    await grokCard.locator('.dashboard-choices button').nth(2).click();
+    await page.waitForFunction(id => window.qa.calls.slice(window.qa.chooseStart).some(c => c.cmd === 'pty_write' && c.args.id === id && c.args.data === '\r'), grok.id);
+    assert.deepEqual(await page.evaluate(id => window.qa.calls.slice(window.qa.chooseStart).filter(c => c.cmd === 'pty_write' && c.args.id === id).map(c => c.args.data), grok.id),
+      ['\x1b[B', '\x1b[B', '\r'], `Two arrows and Enter pick Grok's "Yes, proceed", ${width}px`);
+    await page.evaluate(() => { window.qa.onWrite = null; });
+    await grokOut(grokWorking);
+    await until(async () => (await grokState()) === 'working', `Answered, Grok works on, ${width}px`);
+    await grokReport({ kind: 'end' });
+    await grokOut('\x1b[2J\x1b[H  > run rm -r del1\r\n\r\n  Removed del1.\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\r\n');
+    await until(async () => (await grokState()) === 'waiting', `Grok's end waits on you, ${width}px`);
+    assert.equal((await cli('task', grokTask[0].task)).data.state, 'completed', `Grok's end completes its task, ${width}px`);
+    await audit('grok-done-overview');
     await page.click('#dashboard-btn');
     await page.goto(base);
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);

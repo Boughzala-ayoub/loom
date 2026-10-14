@@ -1,5 +1,5 @@
 // Self-check for agentOf / launch. Run: node src/agent.test.ts
-import { agentOf, codexRunning, codexThread, codexTitle, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
+import { agentOf, codexRunning, codexThread, codexTitle, grokTitle, launch, CODEX_NOTIFY, ownSession, validSessionId } from "./agent.ts";
 
 let fails = 0;
 function check(label: string, got: unknown, want: unknown) {
@@ -41,6 +41,20 @@ check("new cursor pane starts a chat", launch("cursor-agent", S, false), ["cmd.e
 check("restored cursor pane resumes its chat", launch("cursor-agent --model gpt-5", S, true, undefined, "b138b315-3d59")[4], "cursor-agent --resume b138b315-3d59 --model gpt-5");
 check("no chat yet, a new one", launch("cursor-agent", S, true)[4], "cursor-agent");
 check("cursor's own chat choice wins", ["cursor-agent resume", "cursor-agent ls", "cursor-agent --resume=abc", "cursor-agent --continue", "cursor-agent -p hi", "cursor-agent --model gpt-5"].map(ownSession), [true, true, true, true, true, false]);
+// xAI's Grok CLI by its own name: `agent` is its agent.exe here but Cursor's elsewhere. Its session id comes from its prompt hook.
+check("agentOf grok", ["grok", " grok --model grok-4.7 ", "agent", "groker"].map(agentOf), ["grok", "grok", "shell", "shell"]);
+check("new grok pane starts a session, bare", launch("grok", S, false), ["grok"]);
+check("restored grok pane resumes its session", launch("grok --model grok-4.7", S, true, undefined, "01a13766-164e-7d00"), ["grok", "--resume", "01a13766-164e-7d00", "--model", "grok-4.7"]);
+check("no grok session yet, a new one", launch("grok", S, true), ["grok"]);
+check("grok's own session choice wins", ["grok -r abc", "grok --resume=abc", "grok -c", "grok --session-id abc", "grok -p hi", "grok --model grok-4.7"].map(ownSession), [true, true, true, true, true, false]);
+check("grok's titles name its session, not its spinner or status", [
+  "Run node timeout then reply PONG - grok",
+  "⠸ - Waiting for response… - Run node timeout then reply PONG - grok",
+  "⠼ - Running 4 stop hooks… - Fix the login form - grok",
+  "⠋ - Waiting for response… - grok",
+  "⚠ Action Required - ⠴ - Remove the del1 directory recursively… - Run Node setTimeout then reply PONG - grok",
+  "grok",
+].map(grokTitle), ["Run node timeout then reply PONG", "Run node timeout then reply PONG", "Fix the login form", "", "Run Node setTimeout then reply PONG", "grok"]);
 check("cursor's own --resume is left alone", launch("cursor-agent --resume abc", S, true, undefined, "saved")[4], "cursor-agent --resume abc");
 
 check("new claude pane pins an id", launch("claude", S, false), ["claude", "--session-id", S, ...H]);

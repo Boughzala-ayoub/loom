@@ -1,13 +1,17 @@
 // Build first: npm run build, then cargo build --features tauri/custom-protocol
 // Real agents, real API calls (two short turns each): Claude, Codex,
-// OpenCode and Cursor panes in the real app, read back through the overview.
-// HARNESS_AGENTS=cursor (comma-separated) runs only those.
+// OpenCode, Cursor and Grok panes in the real app, read back through the overview.
+// HARNESS_AGENTS=cursor,grok (comma-separated) runs only those.
 //  1. A first turn that runs ~20 s: while it works, each card says Working and
 //     shows the prompt; when it ends, Waiting and the reply.
 //  2. A question tool prompt: the card turns Waiting while the turn is still
 //     open, with the question on screen.
 // Cursor asks before it runs a shell command it hasn't been allowed: in 1 the
 // check answers that from the overview's own button, and 2 is such a question.
+// Grok asks only before a command on its dangerous list: 2 is an rm -r of a
+// folder the check makes, approved from the Overview with "Yes, proceed". Its
+// card's first option turns on always-approve for good (~/.grok/config.toml),
+// so the check never picks it.
 // The work folder is fixed so each agent's folder-trust answer sticks; the
 // first run answers those prompts with Enter. Screenshots go to SHOTS (default:
 // the check's folder).
@@ -25,7 +29,8 @@ const work = join(dir, 'work');
 const shots = process.env.SHOTS || dir;
 mkdirSync(work, { recursive: true });
 if (!existsSync(join(work, '.git'))) execFileSync('git', ['init', '-q', work]); // Restoring a thread asks git about it.
-const AGENTS = (process.env.HARNESS_AGENTS || 'claude,codex,opencode,cursor').split(',');
+mkdirSync(join(work, 'del1'), { recursive: true }); // Grok asks before its rm -r.
+const AGENTS = (process.env.HARNESS_AGENTS || 'claude,codex,opencode,cursor,grok').split(',');
 const CMDS = { cursor: 'cursor-agent' };
 const profile = join(dir, `p-${Date.now()}.json`);
 writeFileSync(profile, JSON.stringify({ repos: [work], threads: [{ repo: work, dir: work, name: 'harness', branch: '', panes: AGENTS.map(a => ({ cmd: CMDS[a] ?? a })), layout: 'cols' }], ui: { sideOpen: false, thread: 0 } }));
@@ -120,10 +125,10 @@ try {
   await overview(true);
   const history = Object.fromEntries(AGENTS.map(a => [a, []]));
   const seen = Object.fromEntries(AGENTS.map(a => [a, { workingWithPrompt: false, answeredInOverview: false }]));
-  // Cursor's approval of the shell command, answered as a person would from its card.
+  // Cursor's (or Grok's) approval of the shell command, answered as a person would from its card.
   const runOnce = agent => page.evaluate(agent => {
     const c = [...document.querySelectorAll('.dashboard-card')].find(c => c.textContent.includes(`harness / ${agent}`));
-    const b = [...(c?.querySelectorAll('.dashboard-choices button') ?? [])].find(b => /^Run \(once\)/.test(b.textContent));
+    const b = [...(c?.querySelectorAll('.dashboard-choices button') ?? [])].find(b => /^(Run \(once\)|Yes, proceed)/.test(b.textContent));
     b?.click();
     return !!b;
   }, agent);
@@ -134,7 +139,7 @@ try {
       const line = JSON.stringify(c);
       if (history[agent].at(-1)?.line !== line) history[agent].push({ t: Math.round(performance.now() / 1000), line });
       if (c?.status.startsWith('Working') && c.you?.includes('setTimeout')) seen[agent].workingWithPrompt = true;
-      if (agent === 'cursor' && c?.status.startsWith('Waiting') && /Run this command/.test(c.question) && await runOnce(agent)) seen[agent].answeredInOverview = true;
+      if ((agent === 'cursor' && /Run this command/.test(c?.question ?? '') || agent === 'grok' && c?.question) && c?.status.startsWith('Waiting') && await runOnce(agent)) seen[agent].answeredInOverview = true;
       if (c?.status.startsWith('Waiting') && c.reply?.includes('PONG')) done++;
     }
     await sampleTitles();
@@ -149,7 +154,7 @@ try {
   for (const agent of AGENTS) {
     const c = await card(agent);
     results[agent] = { workingWithPrompt: seen[agent].workingWithPrompt, endsWaitingWithReply: !!(c?.status.startsWith('Waiting') && c.reply?.includes('PONG') && c.you?.includes('setTimeout')) };
-    if (agent === 'cursor') results[agent].answeredInOverview = seen[agent].answeredInOverview;
+    if (agent === 'cursor' || agent === 'grok') results[agent].answeredInOverview = seen[agent].answeredInOverview;
   }
 
   // 2. A question tool while the turn stays open.
@@ -159,23 +164,45 @@ try {
     codex: 'Use the request_user_input tool to ask me whether I prefer tea or coffee. Do nothing else.',
     opencode: 'Use the question tool to ask me whether I prefer tea or coffee. Do nothing else.',
     cursor: 'Run this exact shell command: node -e "console.log(42)" -- then reply with the number it printed.',
+    grok: 'Run exactly this shell command and nothing else: rm -r del1',
   };
   for (const [i, agent] of AGENTS.entries()) await type(i, ASK[agent]);
   await overview(true);
   // Typing acknowledged the first turn's alert, so Waiting now is a new ring.
   // The card shows the question when it reads one, the new prompt otherwise.
-  const current = (agent, c) => c?.status.startsWith('Waiting') && (c.question || c.you?.includes(ASK[agent].slice(0, 40)));
-  await until('every card waits on its new prompt', async () => (await sampleTitles(), await Promise.all(AGENTS.map(card))).every((c, i) => current(AGENTS[i], c)), 180000, 1000)
-    .catch(e => console.log(e.message));
+  // Grok asks before any rm -r, so its card must show the question.
+  const current = (agent, c) => c?.status.startsWith('Waiting') && (c.question || agent !== 'grok' && c.you?.includes(ASK[agent].slice(0, 40)));
+  const later = [];
+  const cards = async () => {
+    const all = await Promise.all(AGENTS.map(card));
+    for (const [i, agent] of AGENTS.entries()) if (later.findLast(l => l.agent === agent)?.line !== JSON.stringify(all[i])) later.push({ agent, t: Math.round(performance.now() / 1000), line: JSON.stringify(all[i]) });
+    return all;
+  };
+  // Grok's card is answered from the Overview as soon as it shows ("Yes, proceed", never option 1:
+  // that one saves always-approve in ~/.grok/config.toml). Not later: showing the pane would
+  // acknowledge its alert, and an acknowledged card offers no answers.
+  const answered = {};
+  await until('every card waits on its new prompt', async () => {
+    await sampleTitles();
+    const all = await cards(), g = AGENTS.indexOf('grok');
+    if (g >= 0 && !answered.grok && current('grok', all[g]) && await runOnce('grok')) answered.grok = all[g];
+    return all.every((c, i) => answered[AGENTS[i]] || current(AGENTS[i], c));
+  }, 180000, 1000).catch(e => console.log(e.message));
+  if (answered.grok) results.grok.answerEnds = !!await until('grok ends the answered turn', async () => {
+    const c = (await cards())[AGENTS.indexOf('grok')];
+    return c?.status.startsWith('Waiting') && !c.question && !!c.reply && c.reply !== 'PONG';
+  }, 120000, 1000).catch(e => console.log(e.message));
   await pause(2000);
   await shot('question-overview');
   await overview(false);
   for (const [i, agent] of AGENTS.entries()) {
-    const c = await card(agent);
+    const c = answered[agent] ?? await card(agent);
     const s = await screen(i);
     results[agent].question = { current: !!current(agent, c), card: c, screenTail: s.split('\n').map(l => l.trimEnd()).filter(Boolean).slice(-14).join('\n') };
   }
+  if (AGENTS.includes('grok')) results.grok.answeredInOverview = !!answered.grok;
   await shot('question-panes');
+  for (const { agent, t, line } of later) console.log(`  ${t}s ${agent} ${line}`);
   for (const [i] of AGENTS.entries()) { await page.locator('.pane .xterm').nth(i).click(); await page.keyboard.press('Escape'); }
   const saved = JSON.parse(readFileSync(profile, 'utf8')).threads[0].panes;
   console.log('\nsaved panes:', JSON.stringify(saved.map(p => ({ cmd: p.cmd, sessionId: p.sessionId }))));
