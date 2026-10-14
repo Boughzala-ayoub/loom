@@ -212,7 +212,7 @@ export type Task = {
 export type Signal = { at: number; launch?: number } & (
   | { kind: "start"; match?: string; token?: string; turn?: string }
   | { kind: "end"; matches?: string[]; turn?: string; token?: string; failed?: boolean | null; exit?: number | null; response?: string }
-  | { kind: "stop"; response?: string; turn?: string }
+  | { kind: "stop"; response?: string; turn?: string; session?: string; from?: number }
   | { kind: "fail"; detail?: string; turn?: string }
   | { kind: "approval"; detail?: string; turn?: string }
   | { kind: "resume" }
@@ -400,7 +400,8 @@ export function parseSignal(ev: unknown): Signal | null {
     case "approval":
       return { ...base, kind: "approval", ...detail };
     case "stop":
-      return { ...base, kind: "stop", ...response, ...turn };
+      // Grok's: its session, and where its session log stood at the Stop (main.ts grokSettle).
+      return { ...base, kind: "stop", ...response, ...turn, ...(typeof e.session === "string" && e.session ? { session: e.session } : {}), ...(Number.isSafeInteger(e.from) && (e.from as number) >= 0 ? { from: e.from as number } : {}) };
     case "idle":
       return { ...base, kind: "idle" };
     case "resume":

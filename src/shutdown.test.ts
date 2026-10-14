@@ -25,7 +25,7 @@ const sandbox = createContext({ console, setTimeout, Date, agentBatch: 0, shutti
   pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(),
   drainJournal: async () => { if (++drains > 1 && diskFull) throw new Error("disk full"); if (!diskFull) pendingWrites.length = 0; },
   invoke: async (cmd: string) => { assert.equal(cmd, "pty_shutdown"); nativeClosed = true; shutdowns++; return { events: [["p", { kind: "end" }]], emitted: 0 }; },
-  agentEvents: () => {}, sweepTasks: () => {}, toast: () => {},
+  agentEvents: () => {}, sweepTasks: () => {}, closeTasks: async () => {}, toast: () => {},
   getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { closeHandler = () => cb({ preventDefault() {} }); }, destroy: async () => { destroyed = true; } }),
   CLI: { restart: { run: async () => { restart++; return { text: "restarted" }; } } }, parseArgs: () => ({ _: [] }),
   CliTimeout: TestError, CliError: TestError, NotSubmitted: TestError,
@@ -72,7 +72,7 @@ async function page(sentBefore: number, emitted: number) {
     pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
     invoke: async (cmd: string) => cmd === "agent_batch_base" ? sentBefore : { events: [["p", "final"]], emitted },
     listen: async (_: string, f: typeof onBatch) => { onBatch = f; return () => {}; },
-    agentEvents: (events: [string, unknown][]) => routed.push(...events.map(e => String(e[1]))), sweepTasks: () => {}, toast: (m: string) => toasts.push(m),
+    agentEvents: (events: [string, unknown][]) => routed.push(...events.map(e => String(e[1]))), sweepTasks: () => {}, closeTasks: async () => {}, toast: (m: string) => toasts.push(m),
     getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => { routed.push("destroyed"); } }),
   });
   await runInContext(ts.transpileModule(router + "\n(async () => {\n" + close + listening + "\n})();", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, sandbox);
@@ -107,7 +107,7 @@ for (const fails of [false, true]) {
     threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(),
     drainJournal: async () => { order.push("journal"); },
     invoke: async (cmd: string) => { order.push(cmd); if (cmd === "relaunch" && fails) throw new Error("no exe"); return { events: [], emitted: 0 }; },
-    agentEvents: () => {}, sweepTasks: () => {}, toast: () => { order.push("toast"); },
+    agentEvents: () => {}, sweepTasks: () => {}, closeTasks: async () => {}, toast: () => { order.push("toast"); },
     getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => { order.push("destroyed"); } }),
   });
   await runInContext(ts.transpileModule(`(async () => {\n${close}\n})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
@@ -125,7 +125,7 @@ for (const answer of [false, true]) {
   const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false, reportsHeld: new Map(), document: { body: { inert: false } },
     threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
     flushSave: async () => { throw new Error("couldn't keep a backup"); },
-    invoke: async () => ({ events: [], emitted: 0 }), agentEvents: () => {}, sweepTasks: () => {}, toast: () => {},
+    invoke: async () => ({ events: [], emitted: 0 }), agentEvents: () => {}, sweepTasks: () => {}, closeTasks: async () => {}, toast: () => {},
     confirm: async (title: string) => (asked.push(title), answer),
     getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => { destroyed = true; } }),
   });
@@ -146,7 +146,7 @@ console.log("ok   a close that keeps failing asks to close without saving the se
   let request = async () => {};
   const s = createContext({ console, setTimeout, Date, agentBatch: 0, shuttingDown: false, relaunching: false, reportsHeld: new Map([["p", held]]), document: { body: { inert: false } },
     threads: [{ panes: [{ id: "p", paint() {} }] }], pollSessions: async () => {}, flushSave: async () => {}, saveQueue: Promise.resolve(), drainJournal: async () => {},
-    invoke: async () => ({ events: [["p", "final"]], emitted: 0 }), agentEvents: (events: [string, unknown][]) => routed.push(...events.map((e) => e[1])), sweepTasks: () => {}, toast: () => {},
+    invoke: async () => ({ events: [["p", "final"]], emitted: 0 }), agentEvents: (events: [string, unknown][]) => routed.push(...events.map((e) => e[1])), sweepTasks: () => {}, closeTasks: async () => {}, toast: () => {},
     getCurrentWindow: () => ({ onCloseRequested: async (cb: (e: unknown) => Promise<void>) => { request = () => cb({ preventDefault() {} }); }, destroy: async () => {} }),
   });
   await runInContext(ts.transpileModule(`(async () => {\n${close}\n})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);

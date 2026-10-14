@@ -268,8 +268,12 @@ fn grok_event(p: &serde_json::Value) -> Option<serde_json::Value> {
     Some(match p["hook_event_name"].as_str()? {
         "UserPromptSubmit" => serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?), "turn": turn }),
         // Grok's Stop is a gate another Stop hook can send it on from, under the
-        // same prompt: the pane waits to see the turn over (main.ts grokSettle).
-        "Stop" if p["reason"] == "end_turn" => response(serde_json::json!({ "kind": "stop", "turn": turn }), &p["lastAssistantMessage"]),
+        // same prompt: the pane waits for its session log to say how the turn
+        // ended (main.ts grokSettle), read from where the log stands now (grok.rs turn_end).
+        "Stop" if p["reason"] == "end_turn" => {
+            let from = p["transcriptPath"].as_str().and_then(|log| std::fs::metadata(log).ok()).map_or(0, |m| m.len());
+            response(serde_json::json!({ "kind": "stop", "turn": turn, "session": p["sessionId"], "from": from }), &p["lastAssistantMessage"])
+        }
         // About a minute after the session settles: no turn runs.
         "Notification" if p["notificationType"] == "idle_prompt" => serde_json::json!({ "kind": "idle" }),
         "StopFailure" => {
@@ -610,8 +614,13 @@ mod tests {
         // Payload shapes as Grok Build 1.0.52 sends them (hook_event_name in Claude's spelling, the rest camelCase).
         let prompt = json!({ "hook_event_name": "UserPromptSubmit", "promptId": "7a97b1c3", "sessionId": "01a13766-164e", "prompt": "run the tests" });
         assert_eq!(grok_event(&prompt), Some(json!({ "kind": "start", "match": prompt_match("run the tests"), "turn": "7a97b1c3" })));
-        assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "promptId": "7a97b1c3", "reason": "end_turn", "lastAssistantMessage": "done" })),
-            Some(json!({ "kind": "stop", "turn": "7a97b1c3", "response": prompt_match("done") })), "a Stop another Stop hook may overrule");
+        let log = std::env::temp_dir().join(format!("loom-grok-updates-{}.jsonl", std::process::id()));
+        std::fs::write(&log, "0123456789").unwrap();
+        assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "promptId": "7a97b1c3", "sessionId": "01a1", "transcriptPath": log, "reason": "end_turn", "lastAssistantMessage": "done" })),
+            Some(json!({ "kind": "stop", "turn": "7a97b1c3", "session": "01a1", "from": 10, "response": prompt_match("done") })), "a Stop another Stop hook may overrule, and where its session log stood");
+        let _ = std::fs::remove_file(&log);
+        assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "promptId": "7a97b1c3", "reason": "end_turn" })),
+            Some(json!({ "kind": "stop", "turn": "7a97b1c3", "session": null, "from": 0 })), "no session log named");
         assert_eq!(grok_event(&json!({ "hook_event_name": "Notification", "notificationType": "idle_prompt", "sessionId": "01a13766-164e" })), Some(json!({ "kind": "idle" })));
         assert_eq!(grok_event(&json!({ "hook_event_name": "Notification", "notificationType": "permission_prompt" })), None);
         assert_eq!(grok_event(&json!({ "hook_event_name": "Stop", "reason": "channel_closed" })), None, "the session closing ends no turn");

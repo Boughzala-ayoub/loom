@@ -1931,12 +1931,11 @@ class Pane {
    * launch's first, as when Loom couldn't add its hooks: then its "ctrl+c to
    * stop" alone says busy. */
   cursorTurn: boolean | undefined;
-  /** Grok's last Stop, held until its screen shows the turn over (grokSettle):
-   * a Stop hook that blocks sends Grok on under the same prompt, and its
-   * hooks can't tell that Stop from the last (stopHookActive is true for
-   * both). grokIdleSince: when its bar first showed no turn running since. */
-  grokStop: Extract<Signal, { kind: "stop" }> | undefined;
-  grokIdleSince: number | undefined;
+  /** Grok's last Stop, held until Grok's session log says how its turn ended
+   * (grokSettle): a Stop hook that blocks sends Grok on under the same
+   * prompt, and its hooks can't tell that Stop from the last (stopHookActive
+   * is true for both). */
+  grokStop: GrokStop | undefined;
   grokTimer = 0;
   /** Cursor's turns by their generation_id, which its hooks name: the one
    * whose start came last (cursorGen), and each one an Esc or Ctrl-C went
@@ -2398,7 +2397,7 @@ class Pane {
     this.codexState = undefined;
     this.codexAsking = false;
     this.cursorTurn = undefined;
-    this.grokStop = this.grokIdleSince = undefined; // its settle timer finds nothing held
+    this.grokStop = undefined; // its settle timer finds nothing held
     this.cursorGen = undefined;
     this.cursorEsc = new Map();
     this.cursorEscs = [];
@@ -3038,56 +3037,69 @@ class Pane {
     return seen ?? this.cursorTurn ?? false;
   }
   /** A Grok report as agentReport takes it, or undefined while it waits.
-   * Its Stop waits for the screen (grokSettle), and its idle notice settles
-   * that Stop, or the turn its hooks said ran. That turn's own cancel or
-   * failure, Ctrl+C in its Stop gate or an error after a block, is how it
-   * ended. Another turn starting proves the held Stop's over, as Grok starts
-   * one only once the last is over, but not how: Ctrl+C, a click or the
-   * palette may have cancelled it in its gate, which Grok can report after
-   * this start, and a cancel-and-send replaces it unreported (Grok's hooks
-   * guide). Only with nothing typed since the Stop did it end as that Stop
-   * said; else its own report decides, or the sweep's quiet. An older
-   * launch's Stop has no screen left to wait on. */
+   * Its Stop waits for Grok's session log to say how the turn ended
+   * (grokSettle). That turn's own cancel or failure, Ctrl+C in its Stop gate
+   * or an error after a block, is how it ended. Grok's idle notice, another
+   * turn starting, or an older launch's Stop say the turn is over, but not
+   * how (grokOver). */
   grokReport(s: Signal): Signal | undefined {
-    if ((s.launch ?? this.generation) !== this.generation) return s.kind === "stop" ? { ...s, kind: "end" } : s.kind === "idle" ? undefined : s;
-    const held = this.grokStop;
-    if (s.kind === "stop") {
-      this.grokStop = s;
-      this.grokIdleSince = undefined;
-      this.grokSettle();
-    } else if (s.kind === "idle") {
-      if (held) this.grokSettle("idle");
-      else if (this.cursorTurn) this.cursorRuns(false);
-    } else {
-      const over = held && (s.kind === "start" ? s.turn !== held.turn : (s.kind === "fail" || s.kind === "interrupt") && s.turn === held.turn);
-      if (over && s.kind === "start" && this.lastIn <= held.at) this.grokEnd();
-      else if (over) (this.grokStop = undefined), clearTimeout(this.grokTimer);
-      return s;
+    const old = (s.launch ?? this.generation) !== this.generation, held = this.grokStop;
+    if (s.kind === "stop") return void (old ? this.grokOver(s) : ((this.grokStop = s), this.grokSettle()));
+    if (s.kind === "idle") {
+      if (!old && held) void this.grokOver(held);
+      else if (!old && this.cursorTurn) this.cursorRuns(false);
+      return;
     }
+    if (!old && held && (s.kind === "start" ? s.turn !== held.turn : (s.kind === "fail" || s.kind === "interrupt") && s.turn === held.turn)) {
+      if (s.kind === "start") void this.grokOver(held);
+      else this.grokDrop();
+    }
+    return s;
   }
-  /** Ends the held Stop's turn once Grok's bar has shown no turn running for
-   * half a second: a Stop hook that blocks sends Grok on with its bar
-   * unchanged. A Ctrl-C since may have cancelled the turn in its Stop gate,
-   * which Grok reports late: then that report or Grok's idle notice says, as
-   * the notice does where the bar can't. Closing, once, on the screen the
-   * pane was left with: shutdown has marked it dead by then, and a Stop that
-   * screen doesn't confirm ends unknown (sweepTasks). A dead pane polls no
-   * more, and a closed one says nothing (dispose). */
-  grokSettle(why?: "idle" | "closing") {
+  /** Reads how Grok's session log says the held Stop's turn ended, once the
+   * bar no longer shows it running, and every quarter second until it says.
+   * A Stop hook that blocks sends Grok on with its bar unchanged, and Grok can
+   * fail or cancel the turn after, a click on its stop button too, and report
+   * that off the turn, late (Grok's hooks guide). So the bar, a start, keys
+   * typed or the time it took prove the turn over at most, never how. Success
+   * ends it as its Stop said. Any other end leaves it to Grok's own report,
+   * still held but no longer read.
+   * A dead pane polls no more, and a closed one says nothing (dispose). */
+  async grokSettle() {
     clearTimeout(this.grokTimer);
     const s = this.grokStop;
-    if (!s || this.disposed || (this.dead && why !== "closing")) return;
-    const seen = grokRunning(liveScreen(this, false));
-    if (seen === true || this.cursorAsking) this.grokIdleSince = undefined;
-    else if (why === "idle" || (seen === false && this.interruptAt <= s.at && (why === "closing" || Date.now() - (this.grokIdleSince ??= Date.now()) >= 500))) return this.grokEnd();
-    if (why !== "closing") this.grokTimer = window.setTimeout(() => this.grokSettle(), 250);
+    if (!s || this.disposed || this.dead) return;
+    if (grokRunning(liveScreen(this, false)) !== true && !this.cursorAsking) {
+      const end = await this.grokOutcome(s);
+      if (this.grokStop !== s || this.disposed || this.dead) return;
+      if (end === "end_turn") return this.grokEnd(s);
+      if (end) return; // held unpolled: its own report clears it, and closing ends it unknown
+    }
+    this.grokTimer = window.setTimeout(() => void this.grokSettle(), 250);
   }
-  /** The held Stop's turn is over: it ends as that Stop said. */
-  private grokEnd() {
-    const s = this.grokStop!;
-    this.grokStop = this.grokIdleSince = undefined;
-    clearTimeout(this.grokTimer);
+  /** Stop `s`'s turn is over: the next turn started, Grok settled, an older
+   * launch's, or Loom is closing. Grok's session log says whether it
+   * succeeded. Anything else leaves it to Grok's own report, or the sweep's
+   * quiet ends it unknown. `keep`: closing keeps it held for the sweep. */
+  async grokOver(s: GrokStop, keep = false) {
+    if (this.grokStop === s) keep ? clearTimeout(this.grokTimer) : this.grokDrop();
+    if ((await this.grokOutcome(s)) === "end_turn") this.grokEnd(s);
+  }
+  /** How Grok's session log says Stop `s`'s turn ended (grok.rs turn_end): "end_turn" alone is success. */
+  private grokOutcome(s: GrokStop) {
+    if (!s.session || !s.turn) return Promise.resolve(null);
+    return invoke<string | null>("grok_turn_end", { session: s.session, turn: s.turn, from: s.from ?? 0 }).catch(() => null);
+  }
+  /** Stop `s`'s turn succeeded: it ends as that Stop, or the turn's later one still held, said. */
+  private grokEnd(s: GrokStop) {
+    const held = this.grokStop;
+    if (this.disposed) return;
+    if (held && held.turn === s.turn) (s = held), this.grokDrop();
     agentReport(this, { at: s.at, launch: s.launch, kind: "end", ...(s.turn ? { turn: s.turn } : {}), ...(s.response ? { response: s.response } : {}) });
+  }
+  private grokDrop() {
+    this.grokStop = undefined;
+    clearTimeout(this.grokTimer);
   }
   /** What writing `d` means, read off the screen as it's typed: the agent can
    * redraw for it before the write is acknowledged (wrote). `gen`: the launch
@@ -5199,6 +5211,8 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
 
 /** What a write means to the process, read as it's typed (Pane.sending). */
 type Meant = { gen: number; answer: boolean; menu?: string; stop?: { turn?: string; at: number; release: () => void } };
+/** A Grok Stop the pane holds (Pane.grokStop). */
+type GrokStop = Extract<Signal, { kind: "stop" }>;
 
 /** A Cursor pane's reports, held unjudged while an Esc or Ctrl-C that stops
  * its turn is written (Pane.sending). Cursor's stop reports can arrive before
@@ -5349,10 +5363,16 @@ function sweepSoon() {
  * completed). `closing`: Loom is shutting down and the panes are gone, so a
  * Stop is judged on the screen they left now, and one it can't confirm ends
  * unknown rather than wait for a next sweep that won't come. */
+/** Closing, once shutdown's reports are in: each Grok Stop still held asks
+ * Grok's session log how its turn ended (Pane.grokOver), then the sweep ends
+ * what's left. */
+async function closeTasks() {
+  const held = new Set([...tasks.values()].filter((t) => !isFinal(t.state)).map((t) => paneById(t.pane)).filter((p) => p?.grokStop));
+  await Promise.all([...held].map((p) => p!.grokOver(p!.grokStop!, true)));
+  sweepTasks(true);
+}
 function sweepTasks(closing = false) {
   if (shuttingDown && !closing) return;
-  // A Grok Stop still held ends its turn now if the screen Grok left shows the turn over.
-  if (closing) for (const t of tasks.values()) if (!isFinal(t.state)) paneById(t.pane)?.grokSettle?.("closing");
   const now = Date.now();
   let open = 0;
   for (const t of tasks.values()) {
@@ -5426,12 +5446,12 @@ function sweepTasks(closing = false) {
       moveTask(t, unproven(t, { state: "completed", signal: "turn-end", ...(w.response ? { response: w.response } : {}) }));
       continue;
     }
-    // Grok's Stop for this task's turn, still held: closing didn't confirm it (grokSettle).
+    // Grok's Stop for this task's turn, still held: its session log never said it succeeded (closeTasks).
     const grok = p.agent === "grok" && p.grokStop && (!p.grokStop.turn || turnTasks.get(`${p.id}:${t.gen}:${p.grokStop.turn}`) === t.id) ? p.grokStop : undefined;
     if (closing && (w.stopAt !== undefined || grok)) {
       // Only a completed event names a final message (loomctl watch --metadata): this one keeps it in its detail.
       const response = grok ? grok.response : w.response;
-      const why = grok ? "neither its screen nor its reports confirmed the turn was over" : "its screen never showed it idle";
+      const why = grok ? "its session log never recorded the turn succeeding, and no report said how it ended" : "its screen never showed it idle";
       moveTask(t, { state: "unknown", signal: "stop", reason: "loom-closed", detail: `${grok ? "Grok" : "Claude"} reported the end of its turn as Loom closed, but ${why}${response ? ` (final message ${response})` : ""}` });
       continue;
     }
@@ -10480,7 +10500,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
       const stalled = [...reportsHeld.values()].flatMap((h) => h.events.splice(0));
       reportsHeld.clear();
       agentEvents([...stalled, ...shut.events.splice(0)]);
-      sweepTasks(true);
+      await closeTasks();
       await drainJournal();
 
       // Armed, not started: the new Loom starts once this one has exited (lib.rs relaunch).

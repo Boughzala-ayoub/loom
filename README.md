@@ -576,17 +576,17 @@ Each agent says "done" its own way, and Loom listens to all of them:
   a turn and Esc doesn't. A stop says whether you cancelled the turn or Grok
   gave up on it. Grok's `Stop` is a gate: another Stop hook can send the turn
   on under the same prompt, and nothing in the hook tells that `Stop` from the
-  last. So the pane holds each one until Grok's shortcuts bar shows the turn
-  over. The bar offers `Ctrl+c:cancel` from the Enter to the turn's real end,
-  the gate included. A Ctrl-C after the `Stop` waits for Grok's own report of
-  it. So does a turn the next prompt follows when anything went into the pane
-  after its `Stop`. Grok can report a cancel after the next prompt starts, and
-  a send-now replaces a turn without any report, so such a turn ends unknown
-  if none comes. Where the bar can't be read, Grok's `idle_prompt` notice,
-  about a minute later, ends the turn. When Loom closes, it judges a held
-  `Stop` on the screen the pane was left with and ends one it can't confirm
-  unknown. The pane also reads Working off that bar, so a prompt
-  another prompt hook blocks, which runs no turn, never shows Working.
+  last. So the pane holds each one until Grok's session log (the
+  `updates.jsonl` its hooks name) records how the turn ended. Grok writes one
+  `turn_completed` per turn, as it really ends, and only `end_turn` completes
+  the task. Any other end waits for Grok's own report of a failure or cancel,
+  which can come late, even after the next prompt has started, and with none
+  the task ends unknown. The bar, the next prompt, Grok's `idle_prompt` notice
+  and Loom closing only say when to look. A held `Stop` whose log shows no
+  success when Loom closes ends unknown. The pane reads Working off Grok's
+  shortcuts bar, which offers `Ctrl+c:cancel` from the Enter to the turn's
+  real end, the gate included, so a prompt another prompt hook blocks, which
+  runs no turn, never shows Working.
   Grok's permission card has no hook: Loom reads it off the
   screen, raises the alert, and the overview offers its options as buttons,
   picked with the arrows and Enter. Once the pane has had focus, the card

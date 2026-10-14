@@ -11,7 +11,7 @@ import { pruneSettled } from "./cli.ts";
 import { readMenu, readFeedback, cursorKey, menuRev, menuKeys, readSurvey, interruptHint, grokRunning } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "reportsHeld", "holdReports", "turnsSeen", "turnTasks", "reportsTurns"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "reportsHeld", "holdReports", "turnsSeen", "turnTasks", "reportsTurns", "closeTasks"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -26,7 +26,7 @@ function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...model, crypto, console, tasks, taskSeq: 0, unsaved: new Set(), taskWatch, heldEnter: new Map(),
     paneById: (id: string) => th.panes.find((p) => p.id === id), paneTitle: () => "Agent session", paneName: () => "work:2",
     journal: async () => {}, sweepSoon() {}, pruneSettled, keepReceipts() {}, ...extra });
-  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, holdReports, reportsHeld, reportsTurns, moveTask, turnTasks, watched };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
+  runInContext(ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { turnTask, enterTurn, keepContext, finishTaskReplay, holdSignals, taskSignal, contextOf, sweepTasks, keepTasks, agentReport, agentEvents, holdReports, reportsHeld, reportsTurns, moveTask, turnTasks, watched, closeTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, s);
   return { th, p, tasks, taskWatch, f: s.f };
 }
 for (const held of [false, true]) {
@@ -176,7 +176,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokIdleSince", "grokTimer", "grokBusy", "grokReport", "grokSettle", "grokEnd", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -190,7 +190,7 @@ function claudePane(extra: Record<string, unknown> = {}) {
     fx.clock.at = to;
   };
   const out = (at: number) => (later(at), p.activity());
-  return { ...fx, p, later, out };
+  return { ...fx, p, later, out, timers };
 }
 {
   // A turn Claude begins under an alert nobody has read draws no work on the
@@ -1201,9 +1201,20 @@ const [GROK_IDLE, GROK_WORKING, GROK_ASK] = ["idle", "working", "approval"].map(
 }
 console.log("ok   Reports from another agent's hooks don't move a pane's tasks");
 const grokTurn = (view: { text: string }, extra: Record<string, unknown> = {}) => {
-  const c = cursorPane(view, extra);
+  // Grok's session log as grok_turn_end reads it: each turn's turn_completed stop_reason, once Grok writes it.
+  const ends: Record<string, string> = {};
+  const c = cursorPane(view, { invoke: async (cmd: string, a: { turn: string }) => (cmd === "grok_turn_end" ? ends[a.turn] ?? null : undefined), ...extra });
   c.p.agent = "grok";
-  const report = (ev: Record<string, unknown>) => c.f.agentEvents([[c.p.id, { launch: 1, turn: "pA", src: "grok", ...ev }]]);
+  const report = (ev: Record<string, unknown>) => c.f.agentEvents([[c.p.id, { launch: 1, turn: "pA", src: "grok", session: "01a1", ...ev }]]);
+  /** The pane's timers up to `to`, each one's read of the session log settled before the next. */
+  const wait = async (to: number) => {
+    for (let x; (x = c.timers.find((x) => x.run && x.due <= to)); await new Promise((r) => setTimeout(r, 0))) {
+      const run = x.run!;
+      (c.clock.at = x.due), (x.run = null), run();
+    }
+    c.clock.at = to;
+    await new Promise((r) => setTimeout(r, 0));
+  };
   c.clock.at = c.p.lastIn = 1000;
   const t = c.f.turnTask(c.p, "submit", model.promptMatch("A"), 1000);
   c.f.enterTurn(t, 1000);
@@ -1211,12 +1222,12 @@ const grokTurn = (view: { text: string }, extra: Record<string, unknown> = {}) =
   view.text = GROK_WORKING;
   c.p.activity();
   report({ kind: "start", t: 1100, match: t.match });
-  return { ...c, t, report };
+  return { ...c, t, report, ends, wait };
 };
 {
   // A prompt, its permission card, the answer "3" (Yes, proceed), and its end.
   const view = { text: GROK_IDLE };
-  const { p, pushed, clock, later, t, report } = grokTurn(view);
+  const { p, pushed, clock, ends, wait, t, report } = grokTurn(view);
   assert.deepEqual([t.state, p.busy, p.waiting], ["working", true, false], "working");
   clock.at = 3000;
   view.text = GROK_ASK;
@@ -1228,16 +1239,17 @@ const grokTurn = (view: { text: string }, extra: Record<string, unknown> = {}) =
   view.text = GROK_WORKING;
   p.activity();
   assert.deepEqual([sent.answer, t.state, p.busy, p.waiting], [true, "working", true, false], "answered");
-  // Its Stop, then its stop hooks run under the same bar, then the turn is over.
+  // Its Stop, then its stop hooks run under the same bar, then the turn is over and
+  // Grok's session log says it ended (end_turn).
   clock.at = 9000;
   report({ kind: "stop", t: 9000, response: "00000000000000f1" });
-  later(9400);
+  await wait(9400);
   assert.deepEqual([t.state, p.busy, p.waiting], ["working", true, false], "its Stop gate");
   view.text = GROK_IDLE;
-  later(9700);
-  assert.equal(t.state, "working", "idle for under half a second");
-  later(10_000);
-  await new Promise((r) => setTimeout(r, 0));
+  await wait(9700);
+  assert.equal(t.state, "working", "the bar idle, the session log not yet written");
+  ends.pA = "end_turn";
+  await wait(10_000);
   assert.deepEqual([t.state, t.events.at(-1).response, p.busy, p.waiting, pushed], ["completed", "00000000000000f1", false, true, ["approval", "completed"]], "done");
 }
 for (const [how, stops, state, notices] of [
@@ -1259,65 +1271,81 @@ for (const [how, stops, state, notices] of [
 // additionalContext, exit 2) sends Grok on under the same prompt, its bar unchanged,
 // with no new prompt hook, and stopHookActive is true for every Stop after. The
 // turn's own later cancel, failure or Stop decides; past 8 continuations Grok
-// forces the stop and runs no hook for it, and its bar then shows the turn over.
-for (const [how, after, state, response, notices] of [
-  ["the gate's last Stop", [{ kind: "stop", response: "00000000000000f2" }], "completed", "00000000000000f2", ["completed"]],
-  ["a failure after the block", [{ kind: "fail", detail: "server_error" }], "failed", undefined, ["failed"]],
-  ["a cancel in the gate", [{ kind: "interrupt" }], "cancelled", undefined, []],
-  ["8 continuations, then the forced stop", Array.from({ length: 7 }, (_, i) => ({ kind: "stop", response: `00000000000000a${i}` })), "completed", "00000000000000a6", ["completed"]],
+// forces the stop and runs no hook for it. Grok's session log has the turn's end
+// only once it really ends.
+for (const [how, after, ended, state, response, notices] of [
+  ["the gate's last Stop", [{ kind: "stop", response: "00000000000000f2" }], "end_turn", "completed", "00000000000000f2", ["completed"]],
+  ["a failure after the block", [{ kind: "fail", detail: "server_error" }], "error", "failed", undefined, ["failed"]],
+  ["a cancel in the gate", [{ kind: "interrupt" }], "cancelled", "cancelled", undefined, []],
+  ["8 continuations, then the forced stop", Array.from({ length: 7 }, (_, i) => ({ kind: "stop", response: `00000000000000a${i}` })), "end_turn", "completed", "00000000000000a6", ["completed"]],
 ] as const) {
   const view = { text: GROK_IDLE };
-  const { p, pushed, clock, later, t, report } = grokTurn(view);
+  const { p, pushed, clock, ends, wait, t, report } = grokTurn(view);
   clock.at = 3000;
   report({ kind: "stop", t: 3000, response: "00000000000000f1" });
-  later(8000);
+  await wait(8000);
   assert.deepEqual([t.state, p.busy, p.waiting, pushed], ["working", true, false, []], `${how}: Grok goes on after its first Stop`);
   let at = 8000;
   for (const s of after) {
     at += 3000;
     clock.at = at;
     report({ ...s, t: at });
-    later(at + 2000);
+    await wait(at + 2000);
   }
   if (state === "completed") assert.deepEqual([t.state, p.busy], ["working", true], `${how}: still going`);
+  ends.pA = ended;
   view.text = GROK_IDLE;
   p.activity();
-  later(at + 4000);
-  await new Promise((r) => setTimeout(r, 0));
+  await wait(at + 4000);
   assert.deepEqual([t.state, t.events.at(-1).response, p.busy, p.waiting, pushed], [state, response, false, state !== "cancelled", notices], how);
 }
 {
-  // Ctrl+C after the Stop, and the bar idle: the turn may have been cancelled in its
-  // gate, which Grok reports late, so it waits for that report or Grok's idle notice.
-  for (const late of [{ kind: "interrupt" }, { kind: "idle" }]) {
+  // Ctrl+C after the Stop, and the bar idle: Grok's session log says whether it cancelled
+  // the turn in its gate, which Grok reports late, or only cleared a draft once the turn
+  // was over.
+  for (const [ended, late, state, notices] of [["cancelled", { kind: "interrupt" }, "cancelled", []], ["end_turn", undefined, "completed", ["completed"]]] as const) {
     const view = { text: GROK_IDLE };
-    const { p, pushed, clock, later, t, report } = grokTurn(view);
+    const { p, pushed, clock, ends, wait, timers, t, report } = grokTurn(view);
     clock.at = 3000;
     report({ kind: "stop", t: 3000, response: "00000000000000f1" });
     clock.at = p.lastIn = 3200;
     p.wrote("\x03", true, p.sending("\x03"));
     view.text = GROK_IDLE;
-    later(9000);
-    assert.equal(t.state, "working", "Ctrl+C after the Stop: waiting for its report");
-    clock.at = 9000;
-    report({ ...late, t: 9000 });
-    await new Promise((r) => setTimeout(r, 0));
-    assert.deepEqual([t.state, pushed], late.kind === "idle" ? ["completed", ["completed"]] : ["cancelled", []], late.kind);
+    ends.pA = ended;
+    await wait(9000);
+    if (late) {
+      assert.deepEqual([t.state, p.grokStop?.turn, timers.filter((x: any) => x.run).length], ["working", "pA", 0], "Ctrl+C cancelled it: held for its report, no longer read");
+      clock.at = 9000;
+      report({ ...late, t: 9000 });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    assert.deepEqual([t.state, pushed], [state, notices], ended);
   }
-  // A bar too narrow to read: Grok's idle notice says the turn is over.
+  // A bar too narrow to read: the session log still says.
   const view = { text: GROK_IDLE };
-  const { pushed, clock, later, t, report } = grokTurn(view);
+  const { pushed, clock, ends, wait, t, report } = grokTurn(view);
   clock.at = 3000;
   report({ kind: "stop", t: 3000 });
   view.text = "  │ >\n\n  Shift+Tab:mode  │  Ct";
-  later(60_000);
-  assert.equal(t.state, "working", "an unreadable bar ends nothing");
-  clock.at = 63_000;
-  report({ kind: "idle", t: 63_000 });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual([t.state, pushed], ["completed", ["completed"]], "idle notice");
-  // A prompt queued while the turn ran starts once it's over. With nothing typed
-  // since the Stop, that Stop was the turn's last.
+  await wait(5000);
+  assert.equal(t.state, "working", "no end in the session log yet");
+  ends.pA = "end_turn";
+  await wait(5500);
+  assert.deepEqual([t.state, pushed], ["completed", ["completed"]], "the session log's end");
+  // Grok's idle notice says the session settled, not how its turn ended. With no success
+  // in the log, its own report decides, or the sweep's quiet: the pane polls no more.
+  const v1 = { text: GROK_IDLE };
+  const b = grokTurn(v1);
+  b.clock.at = 3000;
+  b.report({ kind: "stop", t: 3000, response: "00000000000000f1" });
+  v1.text = GROK_IDLE;
+  await b.wait(5000);
+  b.clock.at = 63_000;
+  b.report({ kind: "idle", t: 63_000 });
+  await b.wait(64_000);
+  assert.deepEqual([b.t.state, b.p.grokStop, b.timers.filter((x) => x.run).length, b.pushed], ["working", undefined, 0, []], "an idle notice and no end in the log");
+  // A prompt queued while the turn ran starts once it's over, and the session log has
+  // the turn's end by then.
   const v2 = { text: GROK_IDLE };
   const c = grokTurn(v2);
   c.clock.at = c.p.lastIn = 2500;
@@ -1325,38 +1353,46 @@ for (const [how, after, state, response, notices] of [
   c.f.enterTurn(next, 2500);
   c.clock.at = 3000;
   c.report({ kind: "stop", t: 3000, response: "00000000000000f1" });
+  c.ends.pA = "end_turn";
   c.report({ kind: "start", t: 3200, turn: "pB", match: next.match });
-  await new Promise((r) => setTimeout(r, 0));
+  await c.wait(3300);
   assert.deepEqual([c.t.state, c.t.events.at(-1).response, next.state, c.pushed], ["completed", "00000000000000f1", "working", ["completed"]], "a queued prompt");
 }
-console.log("ok   Grok's Stop holds until its screen shows the turn over");
+console.log("ok   Grok's Stop holds until its session log says how the turn ended");
 {
   // Grok second review 1: the next turn starting proves the held one over, not that it
   // succeeded. Ctrl+C in its Stop gate cancels it, and Grok's guide lets that report
-  // come after the next prompt's start.
-  const view = { text: GROK_IDLE };
-  const { p, f, t, clock, report, pushed } = grokTurn(view);
-  clock.at = 3000;
-  report({ kind: "stop", t: 3000, response: "00000000000000f1" });
-  clock.at = p.lastIn = 3200;
-  p.wrote("\x03", true, p.sending("\x03"));
-  clock.at = p.lastIn = 3400;
-  const next = f.turnTask(p, "submit", model.promptMatch("B"), 3400);
-  f.enterTurn(next, 3400);
-  report({ kind: "start", t: 3500, turn: "pB", match: next.match });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual([t.state, next.state, pushed], ["working", "working", []], "the next start completed a turn Ctrl+C went into");
-  clock.at = 5000;
-  report({ kind: "interrupt", t: 5000, turn: "pA" });
-  await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual([t.state, t.reason, next.state, p.busy, pushed], ["cancelled", "interrupted", "working", true, []], "its late cancel");
+  // come after the next prompt's start. A Ctrl+C that only cleared a draft once the
+  // turn was over leaves it succeeded.
+  for (const [ended, state, notices] of [["cancelled", "cancelled", []], ["end_turn", "completed", ["completed"]]] as const) {
+    const view = { text: GROK_IDLE };
+    const { p, f, t, clock, ends, wait, report, pushed } = grokTurn(view);
+    clock.at = 3000;
+    report({ kind: "stop", t: 3000, response: "00000000000000f1" });
+    clock.at = p.lastIn = 3200;
+    p.wrote("\x03", true, p.sending("\x03"));
+    clock.at = p.lastIn = 3400;
+    const next = f.turnTask(p, "submit", model.promptMatch("B"), 3400);
+    f.enterTurn(next, 3400);
+    ends.pA = ended;
+    report({ kind: "start", t: 3500, turn: "pB", match: next.match });
+    await wait(3600);
+    if (ended === "cancelled") {
+      assert.deepEqual([t.state, next.state, pushed], ["working", "working", []], "the next start completed a turn Ctrl+C cancelled");
+      clock.at = 5000;
+      report({ kind: "interrupt", t: 5000, turn: "pA" });
+      await wait(5100);
+    }
+    assert.deepEqual([t.state, next.state, p.busy, pushed], [state, "working", true, notices], ended);
+  }
 }
 {
   // Cancel-and-send replaces a turn and reports nothing for it. In a Loom pane
   // Ctrl+Enter arrives as a bare Enter, and Enter on the emptied composer sends the
-  // queued prompt now. Typed after the Stop, it leaves the turn's outcome unknown.
+  // queued prompt now. The session log has the replaced turn cancelled, and with no
+  // report its outcome stays unknown.
   const view = { text: GROK_IDLE };
-  const { p, f, t, clock, later, report, pushed, sweep } = grokTurn(view);
+  const { p, f, t, clock, ends, wait, report, pushed, sweep } = grokTurn(view);
   clock.at = p.lastIn = 2000;
   const next = f.turnTask(p, "submit", model.promptMatch("B"), 2000);
   f.enterTurn(next, 2000);
@@ -1364,31 +1400,71 @@ console.log("ok   Grok's Stop holds until its screen shows the turn over");
   report({ kind: "stop", t: 3000, response: "00000000000000f1" });
   clock.at = p.lastIn = 3200;
   p.wrote("\r", true, p.sending("\r"));
+  ends.pA = "cancelled";
   report({ kind: "start", t: 3300, turn: "pB", match: next.match });
+  await wait(3400);
   await sweep(9000);
   assert.deepEqual([t.state, next.state, pushed], ["working", "working", []], "send-now completed the turn it replaced");
   report({ kind: "stop", t: 9000, turn: "pB", response: "00000000000000f2" });
   view.text = GROK_IDLE;
-  later(10_000);
+  ends.pB = "end_turn";
+  await wait(10_000);
   await sweep(10_100);
   await sweep(41_000);
   assert.deepEqual([t.state, t.reason, next.state, next.events.at(-1).response, pushed], ["unknown", "no-end-signal", "completed", "00000000000000f2", ["completed"]], "send-now");
 }
 console.log("ok   A Grok prompt typed into the last turn's Stop gate never completes that turn");
 {
-  // Grok second review 2: Loom closes with a Stop held. The close handler marks every
-  // pane dead before it routes what shutdown returned, but each pane's last screen
-  // still says whether its turn was over. One that can't ends unknown.
-  for (const [how, screen, returned, ctrlC, late, state, reason, response, notices] of [
-    ["held, idle", GROK_IDLE, false, false, [], "completed", null, "00000000000000f1", ["completed"]],
-    ["returned by shutdown, idle", GROK_IDLE, true, false, [], "completed", null, "00000000000000f1", ["completed"]],
-    ["held, still working", GROK_WORKING, false, false, [], "unknown", "loom-closed", undefined, []],
-    ["returned by shutdown, still working", GROK_WORKING, true, false, [], "unknown", "loom-closed", undefined, []],
-    ["Ctrl+C after it, its cancel returned by shutdown", GROK_IDLE, false, true, [{ kind: "interrupt" }], "cancelled", "interrupted", undefined, []],
-    ["Ctrl+C after it, no report", GROK_IDLE, false, true, [], "unknown", "loom-closed", undefined, []],
+  // Grok third review: a turn that's over, its bar idle or the next prompt started, may still
+  // have failed or been cancelled after another Stop hook blocked its Stop. Grok reports that
+  // off the turn, late. Only its session log says it succeeded: Grok writes the turn's
+  // turn_completed once, as it really ends, and only "end_turn" is success.
+  const got = [];
+  for (const [how, queued, ended, click, late] of [
+    ["a queued prompt starts after a rate limit", true, undefined, false, { kind: "fail", detail: "rate_limit: 429" }],
+    ["a queued prompt starts after Grok's turn limit", true, "max_turn_requests", false, { kind: "fail", detail: "Grok stopped the turn: max_turns" }],
+    ["the bar goes idle after a rate limit", false, undefined, false, { kind: "fail", detail: "rate_limit: 429" }],
+    ["the bar goes idle after a click on Grok's stop button", false, "cancelled", true, { kind: "interrupt" }],
   ] as const) {
     const view = { text: GROK_IDLE };
-    const { p, f, t, clock, later, report, pushed } = grokTurn(view);
+    const { p, f, t, clock, ends, report, pushed, wait } = grokTurn(view);
+    let next: any;
+    if (queued) (clock.at = p.lastIn = 2500), (next = f.turnTask(p, "submit", model.promptMatch("B"), 2500)), f.enterTurn(next, 2500);
+    clock.at = 3000;
+    report({ kind: "stop", t: 3000, response: "00000000000000f1" });
+    await wait(3600); // another Stop hook blocked it: Grok goes on
+    if (click) (clock.at = p.lastIn = 3700), p.wrote("\x1b[<0;25;3M", true, p.sending("\x1b[<0;25;3M"));
+    if (ended) ends.pA = ended;
+    if (queued) report({ kind: "start", t: 5000, turn: "pB", match: next.match });
+    else view.text = GROK_IDLE;
+    await wait(5400);
+    clock.at = 5500;
+    report({ ...late, t: 5500 });
+    await wait(6000);
+    got.push([how, t.state, next?.state, [...pushed]]);
+  }
+  assert.deepEqual(got, [
+    ["a queued prompt starts after a rate limit", "failed", "working", ["failed"]],
+    ["a queued prompt starts after Grok's turn limit", "failed", "working", ["failed"]],
+    ["the bar goes idle after a rate limit", "failed", undefined, ["failed"]],
+    ["the bar goes idle after a click on Grok's stop button", "cancelled", undefined, []],
+  ]);
+}
+console.log("ok   A held Grok Stop succeeds only on its session log's word");
+{
+  // Grok second review 2: Loom closes with a Stop held. The close handler marks every
+  // pane dead before it routes what shutdown returned, then asks each held Stop's
+  // session log (closeTasks). One it can't confirm ends unknown.
+  for (const [how, returned, ctrlC, ended, late, state, reason, response, notices] of [
+    ["held, the log has its end", false, false, "end_turn", [], "completed", null, "00000000000000f1", ["completed"]],
+    ["returned by shutdown, the log has its end", true, false, "end_turn", [], "completed", null, "00000000000000f1", ["completed"]],
+    ["held, no end in the log", false, false, undefined, [], "unknown", "loom-closed", undefined, []],
+    ["returned by shutdown, no end in the log", true, false, undefined, [], "unknown", "loom-closed", undefined, []],
+    ["Ctrl+C after it, its cancel returned by shutdown", false, true, "cancelled", [{ kind: "interrupt" }], "cancelled", "interrupted", undefined, []],
+    ["Ctrl+C after it, no report", false, true, "cancelled", [], "unknown", "loom-closed", undefined, []],
+  ] as const) {
+    const view = { text: GROK_IDLE };
+    const { p, f, t, clock, ends, later, report, pushed } = grokTurn(view);
     let polls = 0;
     const settle = p.grokSettle;
     p.grokSettle = function (...a: unknown[]) { polls++; return settle.apply(this, a); };
@@ -1396,11 +1472,12 @@ console.log("ok   A Grok prompt typed into the last turn's Stop gate never compl
     const stop = { kind: "stop", t: 3000, response: "00000000000000f1" };
     if (!returned) report(stop);
     if (ctrlC) (clock.at = p.lastIn = 3100), p.wrote("\x03", true, p.sending("\x03"));
-    view.text = screen;
+    if (ended) ends.pA = ended;
+    view.text = GROK_IDLE;
     clock.at = 3200;
     Object.assign(p, { dead: true, busy: false, waiting: false });
     for (const s of returned ? [stop] : late) report({ ...s, t: 3150 });
-    f.sweepTasks(true);
+    await f.closeTasks();
     await new Promise((r) => setTimeout(r, 0));
     assert.deepEqual([t.state, t.reason, t.events.at(-1).response, pushed], [state, reason, response, notices], how);
     if (state === "unknown") assert.match(t.detail, /^Grok reported the end of its turn as Loom closed/, how);
@@ -1409,7 +1486,7 @@ console.log("ok   A Grok prompt typed into the last turn's Stop gate never compl
     assert.equal(polls, 0, `${how}: a dead pane's Stop polled on`);
   }
 }
-console.log("ok   Closing judges a held Grok Stop on the screen its pane left");
+console.log("ok   Closing asks a held Grok Stop's session log how its turn ended");
 {
   // Grok second review 3: a Grok pane closed while its Stop gate runs stops polling.
   const view = { text: GROK_IDLE };

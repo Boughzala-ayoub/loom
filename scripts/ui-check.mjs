@@ -102,6 +102,7 @@ try {
         }
         if (cmd === 'pty_shutdown') return { events: [], emitted: 0 }; // what the stopped panes reported as they went (lib.rs)
         if (cmd === 'agent_batch_base') return 0; // the last report batch Rust sent (lib.rs)
+        if (cmd === 'grok_turn_end') return (qa.grokEnds ?? {})[args.turn] ?? null; // Grok's session log (grok.rs turn_end): each turn's turn_completed stop_reason
         if (cmd === 'read_file') return 'export const answer = 42;\n// ' + args.path + '\n';
         if (cmd === 'read_image') {
           if (qa.failImage) throw new Error('Image file not found');
@@ -1763,7 +1764,7 @@ try {
     const grokOut = d => page.evaluate(([id, d]) => window.qa.panes.filter(p => p.id === id).at(-1).onOut.onmessage(d), [grok.id, d]);
     let grokBatch = 0;
     const grokReport = ev => page.evaluate(([id, ev, seq]) => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'agent-events', payload: { seq, events: [[id, ev]] } }),
-      [grok.id, { turn: 'p1', ...ev, launch: grok.launch, t: Date.now(), src: 'grok' }, ++grokBatch]);
+      [grok.id, { turn: 'p1', ...ev, launch: grok.launch, t: Date.now(), src: 'grok', session: 'grok-session' }, ++grokBatch]);
     const grokState = async () => (await cli('panes')).data.find(p => p.id === grok.id).state;
     const grokWorking = '\x1b[2J\x1b[H  > run rm -r del1\r\n\r\n   / Waiting for response… 0.4s          [stop]\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  Ctrl+c:cancel  │  Ctrl+x:shortcuts\r\n';
     await grokOut('\x1b[2J\x1b[H  Grok Build  1.0.52\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\r\n');
@@ -1823,6 +1824,8 @@ try {
     await page.waitForTimeout(1200);
     assert.deepEqual([await grokState(), (await cli('task', grokTask[0].task)).data.state], ['working', 'working'], `A Stop another hook blocked ends nothing, ${width}px`);
     await grokReport({ kind: 'stop', response: '00000000000000f2' });
+    // The turn is over, and Grok's session log says it ended (end_turn): that alone completes it.
+    await page.evaluate(() => { window.qa.grokEnds = { p1: 'end_turn' }; });
     await grokOut('\x1b[2J\x1b[H  > run rm -r del1\r\n\r\n  Removed del1.\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  Ctrl+x:shortcuts\r\n');
     await until(async () => (await grokState()) === 'waiting', `Grok's end waits on you, ${width}px`);
     const grokDone = (await cli('task', grokTask[0].task)).data;

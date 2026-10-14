@@ -57,9 +57,36 @@ fn hooks(exe: &Path) -> String {
 /// Session `sid`'s chat history: ~\.grok\sessions\<the folder, URL-encoded>\<sid>\chat_history.jsonl,
 /// found by its id under any folder.
 pub fn transcript(home: &Path, sid: &str) -> Option<PathBuf> {
+    session_file(home, sid, "chat_history.jsonl")
+}
+
+fn session_file(home: &Path, sid: &str, name: &str) -> Option<PathBuf> {
+    if sid.is_empty() || !sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
     std::fs::read_dir(home.join(".grok").join("sessions")).ok()?.flatten()
-        .map(|e| e.path().join(sid).join("chat_history.jsonl"))
+        .map(|e| e.path().join(sid).join(name))
         .find(|p| p.is_file())
+}
+
+/// How Grok's session log says turn `turn` of session `sid` ended: the
+/// stop_reason of its turn_completed in updates.jsonl, at or after byte `from`
+/// (the log's length at the turn's Stop), or "error" where it names an
+/// error_kind. Grok writes it once, as the turn really ends, after any Stop
+/// another hook sent the turn on from (seen in 1.0.52's logs). None until then,
+/// and where the log can't be read.
+pub fn turn_end(home: &Path, sid: &str, turn: &str, from: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut log = std::fs::File::open(session_file(home, sid, "updates.jsonl")?).ok()?;
+    log.seek(SeekFrom::Start(from)).ok()?;
+    let mut bytes = Vec::new();
+    log.read_to_end(&mut bytes).ok()?;
+    String::from_utf8_lossy(&bytes).lines()
+        .filter(|l| l.contains("turn_completed") && l.contains(turn))
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .map(|v| v["params"]["update"].clone())
+        .find(|u| u["sessionUpdate"] == "turn_completed" && u["prompt_id"] == turn)
+        .map(|u| if u["error_kind"].is_null() { u["stop_reason"].as_str().unwrap_or("unknown").to_string() } else { "error".to_string() })
 }
 
 #[cfg(test)]
@@ -102,6 +129,34 @@ mod tests {
         std::fs::write(session.join("chat_history.jsonl"), "").unwrap();
         assert_eq!(super::transcript(&home, "01a1"), Some(session.join("chat_history.jsonl")));
         assert_eq!(super::transcript(&home, "02b2"), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_turns_end_is_its_turn_completed_in_the_session_log() {
+        let home = std::env::temp_dir().join(format!("loom-grok-log-{}", std::process::id()));
+        let session = home.join(".grok").join("sessions").join("C%3A%5Cw").join("01a1");
+        std::fs::create_dir_all(&session).unwrap();
+        // Lines as Grok Build 1.0.52 writes them (updates.jsonl).
+        let line = |update: &str| format!(r#"{{"timestamp":1791978290,"method":"_x.ai/session/update","params":{{"sessionId":"01a1","update":{update}}}}}"#);
+        let stop = line(r#"{"sessionUpdate":"hook_execution","event_name":"stop","runs":[]}"#);
+        let lines = [
+            stop.clone(),
+            line(r#"{"sessionUpdate":"turn_completed","prompt_id":"pA","stop_reason":"end_turn","elapsed_ms":39681}"#),
+            line(r#"{"sessionUpdate":"turn_completed","prompt_id":"pB","stop_reason":"cancelled","elapsed_ms":1314}"#),
+            line(r#"{"sessionUpdate":"turn_completed","prompt_id":"pC","stop_reason":"end_turn","error_kind":"rate_limit"}"#),
+            line(r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"turn_completed pD"}}"#),
+        ];
+        std::fs::write(session.join("updates.jsonl"), lines.join("\n") + "\n").unwrap();
+        let end = |turn: &str, from: u64| super::turn_end(&home, "01a1", turn, from);
+        assert_eq!(end("pA", 0).as_deref(), Some("end_turn"));
+        assert_eq!(end("pB", 0).as_deref(), Some("cancelled"));
+        assert_eq!(end("pC", 0).as_deref(), Some("error"), "an error is no success, whatever its stop_reason");
+        assert_eq!(end("pD", 0), None, "not written yet: a message that names it is no end");
+        assert_eq!(end("pA", stop.len() as u64 + 1 + 40), None, "only from the Stop on");
+        assert_eq!(end("pA", 1 << 40), None, "from past the end");
+        assert_eq!(super::turn_end(&home, "02b2", "pA", 0), None, "another session");
+        assert_eq!(super::turn_end(&home, "..", "pA", 0), None, "no way out of sessions");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

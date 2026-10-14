@@ -1999,6 +1999,12 @@ mod commands {
     pub async fn last_messages(app: AppHandle, panes: Vec<(String, String, String, String)>) -> Result<HashMap<String, LastMessages>, String> {
         blocking(move || super::last_messages(app, panes)).await
     }
+    /// How Grok's session log says a turn ended (grok::turn_end), for a Stop the pane holds.
+    #[tauri::command]
+    pub async fn grok_turn_end(app: AppHandle, session: String, turn: String, from: u64) -> Option<String> {
+        let home = app.path().home_dir().ok()?;
+        blocking(move || grok::turn_end(&home, &session, &turn, from)).await
+    }
     #[tauri::command]
     pub async fn task_journal_read(app: AppHandle) -> Result<String, String> {
         blocking(move || super::read_task_journal(&super::task_journal_file(&app))).await
@@ -2250,7 +2256,7 @@ pub fn run() {
             commands::canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
             commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::stash_drop, commands::branch_delete, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
-            commands::model_options, commands::context_profile, commands::last_messages, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, relaunch_cancel, exe_updated,
+            commands::model_options, commands::context_profile, commands::last_messages, commands::grok_turn_end, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, relaunch_cancel, exe_updated,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,
             commands::dictate_stop,

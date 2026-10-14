@@ -281,6 +281,8 @@ const setup = () => {
     if (cmd === 'plugin:path|join') return args.paths.join('\\');
     // Codex's notify and OpenCode's plugin hand a pane its session id (lib.rs take_sessions): qa.sessions, once.
     if (cmd === 'take_sessions') return (qa.sessions ?? []).splice(0).filter(([id]) => args.ids.includes(id));
+    // Grok's session log, as grok.rs turn_end reads it: each turn's turn_completed stop_reason (qa.grokEnds), once Grok writes it.
+    if (cmd === 'grok_turn_end') return (qa.grokEnds ?? {})[args.turn] ?? null;
     // The last batch Rust sent (lib.rs agent_batch_base). qa-batch-kept: a reload that kept Loom running, and its count.
     if (cmd === 'agent_batch_base') return qa.batch;
     // What the stopped panes reported as they went (lib.rs pty_shutdown): qa.shutdownEvents, once.
@@ -804,7 +806,9 @@ try {
     const g = {
       id,
       draw: (busy) => agent(id, { codexRaw: `\x1b[2J\x1b[H  Grok\r\n\r\n  │ >\r\n\r\n  Shift+Tab:mode  │  ${busy ? 'Ctrl+c:cancel  │  ' : ''}Ctrl+x:shortcuts\r\n` }),
-      say: (...events) => report(id, ...events.map((e) => ({ src: 'grok', ...e }))),
+      say: (...events) => report(id, ...events.map((e) => ({ src: 'grok', session: 'grok-session', ...e }))),
+      /** Grok's session log records how `turn` ended (its turn_completed stop_reason), as Grok does once the turn is over. */
+      ended: (turn, reason) => page.evaluate(([turn, reason]) => { window.qa.grokEnds = { ...window.qa.grokEnds, [turn]: reason }; }, [turn, reason]),
       key: async (key) => {
         const from = await page.evaluate(() => window.qa.calls.length);
         await page.locator(`.pane[data-id="${id}"] .xterm-helper-textarea`).focus();
@@ -834,11 +838,13 @@ try {
     // Grok second review 1: the next turn starting proves the held one over, not that it
     // succeeded. Ctrl+C in its Stop gate cancels it, which Grok can report after that start,
     // and a cancel-and-send (Enter on the emptied composer sends the queued prompt now)
-    // replaces it unreported. A prompt queued while it ran still follows a completed turn.
+    // replaces it unreported. Grok's session log has either turn cancelled. A prompt queued
+    // while a turn ran follows a turn the log has ended.
     let g = await grokPane();
     const a = await g.prompt('turn A', 'pA');
     await g.say({ kind: 'stop', turn: 'pA', response: promptMatch('A, before its gate') });
     await g.key('Control+c');
+    await g.ended('pA', 'cancelled');
     const b = await g.prompt('turn B', 'pB');
     await page.waitForTimeout(600);
     assert.equal((await state(a.task)).state, 'working', 'The next start completed a turn Ctrl+C went into');
@@ -851,9 +857,11 @@ try {
     await g.type('turn D'); // queued behind C
     await g.say({ kind: 'stop', turn: 'pC', response: promptMatch('C, replaced') });
     await g.key('Enter'); // on the emptied composer: send D now
+    await g.ended('pC', 'cancelled');
     await g.say({ kind: 'start', turn: 'pD', match: promptMatch('turn D') });
     const d = await g.next(1);
     await g.say({ kind: 'stop', turn: 'pD', response: promptMatch('D, done') });
+    await g.ended('pD', 'end_turn');
     await g.draw(false);
     assert.equal((await until(d.task, 'completed')).events.at(-1).response, promptMatch('D, done'));
     assert.equal((await state(c.task)).state, 'working', 'A send-now completed the turn it replaced');
@@ -862,41 +870,79 @@ try {
     const e = await g.prompt('turn E', 'pE');
     await g.type('turn F'); // queued behind E
     await page.waitForTimeout(100);
+    await g.ended('pE', 'end_turn');
     await g.say({ kind: 'stop', turn: 'pE', response: promptMatch('E, done') }, { kind: 'start', turn: 'pF', match: promptMatch('turn F') });
     assert.equal((await until(e.task, 'completed')).events.at(-1).response, promptMatch('E, done'), 'A prompt queued while the turn ran follows its completion');
     ok('A Grok prompt typed into the last turn\'s Stop gate never completes that turn');
   }
+  if (review('grok-late')) {
+    // Grok third review: after another Stop hook blocked its Stop, a turn can fail or be
+    // cancelled, and Grok reports that off the turn, late. The next prompt starting or the
+    // bar going idle says the turn is over, not how. Grok's session log has no success for
+    // it, so it waits for its own report. The mouse case clicks the pane for real, with
+    // Grok's mouse reporting on, so the click goes in as mouse bytes.
+    for (const [how, queued, ended, click, late, want] of [
+      ['a queued prompt starts after a rate limit', true, undefined, false, { kind: 'fail', detail: 'rate_limit: 429' }, 'failed'],
+      ['a queued prompt starts after Grok\'s turn limit', true, 'max_turn_requests', false, { kind: 'fail', detail: 'Grok stopped the turn: max_turns' }, 'failed'],
+      ['the bar goes idle after a rate limit', false, undefined, false, { kind: 'fail', detail: 'rate_limit: 429' }, 'failed'],
+      ['the bar goes idle after a click on Grok\'s stop button', false, 'cancelled', true, { kind: 'interrupt' }, 'cancelled'],
+    ]) {
+      const g = await grokPane();
+      const a = await g.prompt('turn A', 'pA');
+      if (queued) await g.type('turn B');
+      if (click) await page.evaluate((id) => window.qa.out(id, '\x1b[?1000h\x1b[?1006h'), g.id);
+      await page.waitForTimeout(100);
+      await g.say({ kind: 'stop', turn: 'pA', response: promptMatch(`A, ${how}`) });
+      await page.waitForTimeout(400); // another Stop hook blocked it: Grok goes on
+      if (click) {
+        const from = await page.evaluate(() => window.qa.calls.length);
+        const box = await page.locator(`.pane[data-id="${g.id}"] .xterm-screen`).boundingBox();
+        await page.mouse.click(box.x + 100, box.y + 25);
+        await page.waitForFunction(([id, from]) => window.qa.calls.slice(from).some((c) => c.cmd === 'pty_write' && c.args.id === id && c.args.data.startsWith('\x1b[<')), [g.id, from]);
+      }
+      if (ended) await g.ended('pA', ended);
+      let b;
+      if (queued) (await g.say({ kind: 'start', turn: 'pB', match: promptMatch('turn B') })), (b = await g.next(1));
+      else await g.draw(false);
+      await page.waitForTimeout(1200);
+      assert.equal((await state(a.task)).state, 'working', `${how}: completed before its outcome came`);
+      await g.say({ ...late, turn: 'pA' });
+      const t = await until(a.task, want);
+      assert.deepEqual([t.events.some((e) => e.state === 'completed'), b && (await state(b.task)).state], [false, b && 'working'], how);
+    }
+    ok('A held Grok Stop succeeds only on its session log\'s word, by the next prompt or an idle bar');
+  }
   if (review('grok-close')) {
     // Grok second review 2: Loom closes with a Grok Stop held, or one shutdown returns. The
-    // close handler marks the panes dead before it routes what shutdown returned, yet each
-    // pane's last screen still says whether its turn was over. An idle one completes the
-    // task with the Stop's response, a working one leaves it unknown, and so does a Ctrl+C
-    // after the Stop, unless its cancel came back too. Each is journaled before the window goes.
-    for (const [how, held, idle, ctrlC, cancel, want] of [
-      ['held, idle', true, true, false, false, 'completed'],
-      ['returned by shutdown, idle', false, true, false, false, 'completed'],
-      ['held, still working', true, false, false, false, 'unknown'],
-      ['returned by shutdown, still working', false, false, false, false, 'unknown'],
-      ['Ctrl+C after it, its cancel returned by shutdown', true, true, true, true, 'cancelled'],
-      ['Ctrl+C after it, no report', true, true, true, false, 'unknown'],
+    // close handler marks the panes dead before it routes what shutdown returned, then asks
+    // each held Stop's session log how its turn ended. Its end there completes the task
+    // with the Stop's response; none leaves it unknown, and so does a Ctrl+C that cancelled
+    // it, unless its cancel came back too. Each is journaled before the window goes. The bar
+    // stays working where the log has the end, so the close, not the settle, reads it.
+    for (const [how, held, ended, ctrlC, cancel, want] of [
+      ['held, the log has its end', true, 'end_turn', false, false, 'completed'],
+      ['returned by shutdown, the log has its end', false, 'end_turn', false, false, 'completed'],
+      ['held, no end in the log', true, undefined, false, false, 'unknown'],
+      ['returned by shutdown, no end in the log', false, undefined, false, false, 'unknown'],
+      ['Ctrl+C after it, its cancel returned by shutdown', true, 'cancelled', true, true, 'cancelled'],
+      ['Ctrl+C after it, no report', true, 'cancelled', true, false, 'unknown'],
     ]) {
       const g = await grokPane();
       const a = await g.prompt('close with a Stop', 'pA');
       const launch = await gen(g.id), response = promptMatch(`final answer ${how}`);
-      const stop = { src: 'grok', kind: 'stop', turn: 'pA', response, launch, t: Date.now() };
+      const stop = { src: 'grok', session: 'grok-session', kind: 'stop', turn: 'pA', response, launch, t: Date.now() };
       if (held) await g.say(stop);
-      if (ctrlC) await g.key('Control+c');
+      if (ctrlC) (await g.key('Control+c')), await g.draw(false);
+      if (ended) await g.ended('pA', ended);
       await qa({ shutdownEvents: [...(held ? [] : [[g.id, stop]]), ...(cancel ? [[g.id, { src: 'grok', kind: 'interrupt', turn: 'pA', launch, t: Date.now() }]] : [])] });
-      // Loom closes once the pane shows its last screen, inside the half-second settle that would end the turn first.
-      if (idle) await g.draw(false);
-      while ((await cli('read', g.id)).data.text.includes('Ctrl+c:cancel') === idle) await page.waitForTimeout(10);
+      await page.waitForTimeout(400);
       await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'tauri://close-requested', payload: null }));
       await page.waitForFunction(() => window.qa.calls.some((c) => c.cmd === 'plugin:window|destroy'));
       const t = readJournal(await page.evaluate(() => window.qa.journalAtDestroy)).tasks.get(a.task);
       assert.deepEqual([t?.state, t?.reason ?? null, t?.events.at(-1).response], [want, { completed: null, unknown: 'loom-closed', cancelled: 'interrupted' }[want], want === 'completed' ? response : undefined], how);
       if (want === 'unknown') assert.ok(t.detail.startsWith('Grok reported the end of its turn as Loom closed') && t.detail.endsWith(`(final message ${response})`), `${how}: ${t.detail}`);
     }
-    ok('Closing judges a held Grok Stop on the screen its pane left, and journals it before the window goes');
+    ok('Closing asks a held Grok Stop\'s session log how its turn ended, and journals it before the window goes');
   }
   if (review('grok-dispose')) {
     // Grok second review 3: a Grok pane closed while its Stop gate runs stops polling for that Stop.
