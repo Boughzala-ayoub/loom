@@ -343,6 +343,7 @@ async function context(width, token = true, push = false) {
         if (data.staged && state.committed?.has(id)) data.staged = [];
         break;
       }
+      case 'new': data = threads[0]; break;
       default: data = {};
     }
     // A held show answers late with what was true when it was asked.
@@ -781,8 +782,8 @@ try {
     const { ctx, page } = await context(375);
     const options = async () => {
       await page.evaluate(() => (location.hash = '#/new'));
-      await page.locator('#new select[name=agent]').waitFor();
-      return page.locator('#new select[name=agent] option').allTextContents();
+      await page.locator('#new form').waitFor();
+      return page.locator('#new .mix-name').allTextContents();
     };
     const settings = () => goto(page, '#/settings', '#settings input[aria-label=Name]');
     await settings();
@@ -806,6 +807,70 @@ try {
     await ctx.close();
   }
   console.log('PASS New Thread and Add Agent offer the startups Settings lists, down to none');
+
+  // --- New thread: cards, a count per startup, what creating will do --------------------------
+  // Agents above terminals, Claude alone to begin with, the summary following every field, at most 16 panes,
+  // one loomctl new --mix with the whole pick, and the pick kept for next time on this phone.
+  for (const width of [320, 375, 768, 1024, 1280]) {
+    const { ctx, page, state } = await context(width);
+    state.startups.push({ label: 'PowerShell', cmd: '' }, { label: 'a-very-long-custom-command --with --flags', cmd: 'node tools/long.js' });
+    await goto(page, '#/new', '#new .mix-row');
+    const text = sel => page.locator(sel).innerText();
+    const counts = () => page.evaluate(() => [...document.querySelectorAll('#new .mix-row')].map(r => `${r.querySelector('.mix-name').textContent}=${r.querySelector('output').textContent}`));
+    assert.deepEqual(await page.locator('#new .mix-list h2').allTextContents(), ['Agents', 'Terminals']);
+    assert.deepEqual(await counts(), ['Claude=1', 'Codex=0', 'PowerShell=0', 'a-very-long-custom-command --with --flags=0']);
+    assert.equal(await page.locator('#new [data-kind=worktree]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await text('#new button.primary'), 'Create worktree');
+    assert.equal(await text('#new .new-summary'), 'Name the thread: the name becomes its branch and its folder.');
+    assert.ok(await page.getByRole('button', { name: 'One less Codex' }).isDisabled(), 'nothing to take away from 0');
+    await page.fill('#new input[name=name]', 'Fix login!');
+    await page.getByRole('button', { name: 'One more Codex' }).click();
+    await page.getByRole('button', { name: 'One more Codex' }).click();
+    await page.getByRole('button', { name: 'One more PowerShell' }).click();
+    const repo = await page.locator('#new select[name=project]').inputValue();
+    assert.equal(await text('#new .new-path'), repo);
+    assert.equal(await text('#new .new-summary'), `Loom will create loom/fix-login off HEAD, check it out in ~\\loom\\${repo.split(/[\\/]/).pop()}\\fix-login, then start Claude, 2 Codex and PowerShell there. A name already in use gets -2, -3… added.`);
+    await page.fill('#new input[name=base]', 'main');
+    assert.match(await text('#new .new-summary'), /off main,/);
+    await fits(page, width, 'new-mix'); await taps(page, width, '#new');
+    await page.screenshot({ path: resolve(out, `${width}-new-worktree.png`) });
+    // Create stays in reach at the foot of the screen while the form scrolls.
+    const foot = await page.locator('#new .new-actions').boundingBox();
+    assert.ok(Math.abs(foot.y + foot.height - page.viewportSize().height) <= 1, `${width}: Create sits at the foot (${foot.y + foot.height})`);
+    // 16 at most: every + gives way, a − brings them back.
+    for (let i = 0; i < 12; i++) await page.getByRole('button', { name: 'One more Claude' }).click();
+    assert.equal((await counts())[0], 'Claude=13');
+    assert.equal(await page.locator('#new .mix-row button:last-child:not(:disabled)').count(), 0, 'no + past 16');
+    await page.getByRole('button', { name: 'One less Claude' }).click();
+    assert.equal(await page.locator('#new .mix-row button:last-child:disabled').count(), 0, 'one under 16: every + again');
+    await page.locator('#new button.primary').click();
+    await until(`${width}: created`, async () => state.calls.some(c => c.cmd === 'new'));
+    const made = state.calls.find(c => c.cmd === 'new').argv;
+    assert.deepEqual([made[0], made[1], JSON.parse(made[2]), ...made.slice(3)], [repo, '--mix', { Claude: 12, Codex: 2, PowerShell: 1 }, '--name', 'Fix login!', '--base', 'main']);
+    await until(`${width}: the first pane opens`, async () => (await page.evaluate(() => location.hash)).startsWith('#/pane/'));
+    // This folder: no name, no base, and a project already open only switches.
+    await page.reload();
+    await goto(page, '#/new', '#new .mix-row');
+    assert.deepEqual(await counts(), ['Claude=12', 'Codex=2', 'PowerShell=1', 'a-very-long-custom-command --with --flags=0'], 'the last pick comes back');
+    await page.locator('#new [data-kind=checkout]').click();
+    assert.equal(await text('#new button.primary'), 'Open checkout');
+    assert.ok(!(await page.locator('#new input[name=name]').isVisible()) && !(await page.locator('#new input[name=base]').isVisible()));
+    assert.match(await text('#new .new-summary'), /^Alpha already has C:\/projects\/Alpha open\. Loom will switch to it and start nothing new\.$/);
+    await page.selectOption('#new select[name=project]', '');
+    await page.fill('#new input[name=folder]', 'D:\\elsewhere');
+    assert.equal(await text('#new .new-summary'), 'Loom will open D:\\elsewhere as it is, then start 12 Claude, 2 Codex and PowerShell there.');
+    assert.ok(!(await page.locator('#new .new-path').isVisible()), 'a typed folder shows no path line');
+    await page.getByRole('button', { name: 'One more a-very-long-custom-command --with --flags' }).click();
+    // The view as you see it, top and foot: a full-page shot draws the pinned bar and button mid-page.
+    for (const [at, y] of [['top', 0], ['foot', 1e6]]) {
+      await page.evaluate(y => scrollTo(0, y), y);
+      await page.screenshot({ path: resolve(out, `${width}-new-thread-${at}.png`) });
+    }
+    await fits(page, width, 'new-checkout'); await taps(page, width, '#new');
+    assert.deepEqual(state.errors, [], `${width}: errors in the page`);
+    await ctx.close();
+  }
+  console.log('PASS New thread: agents then terminals, a count each up to 16 panes, the summary follows the form, one new --mix, the pick kept');
 
   // --- An Activity reply survives the cards being rebuilt --------------------------------
   {

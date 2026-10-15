@@ -1,6 +1,6 @@
 /** Settings: the PC's Preferences, the agents its + menu offers, the window,
  * and this phone's own choices. Each PC setting is a loomctl command. */
-import { $, act, age, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar, ui } from "./core";
+import { $, act, age, app, button, closeSheet, confirmSheet, el, findPane, hooks, iconButton, panes, pref, run, setPref, sheet, sleep, store, toast, topBar, ui, type Startup } from "./core";
 import { b64u, unb64u } from "../push";
 import { dictationSheet, lists, pickLabel, readLists } from "./dictate";
 import { procsView, type Reading } from "../procs";
@@ -8,7 +8,6 @@ import { procsView, type Reading } from "../procs";
 type Theme = { name: string; scheme: string; current: boolean; vars: Record<string, string> };
 type Notify = { all: string; kinds: { finish: boolean; fail: boolean; blocked: boolean }; newPanes: string };
 type Settings = { sound: string; taskbar: string; overlay: string; awake: string; "plan-usage": string; font: string };
-type Startup = { label: string; cmd: string };
 /** A paired phone: its id is the start of its token's SHA-256 (remote.rs), its times unix ms. */
 type Device = { id: string; name: string; paired: number | null; seen: number | null; push: boolean };
 type Remote = { phones: number; address: string | null; port: number; devices?: Device[] };
@@ -55,7 +54,7 @@ export async function read() {
   const list = <T>(v: unknown, was: T[]) => (Array.isArray(v) ? (v as T[]) : was);
   [themes, startups, trash] = [list(t, themes), list(st, startups), list(tr, trash)];
   // New Thread and Add Agent offer these: one added here shows there, a removed one goes.
-  if (Array.isArray(st)) app.agents = startups.map((x) => x.label);
+  if (Array.isArray(st)) app.startups = startups;
   [notify, settings, remote] = [n, s, r];
   const cur = themes.find((x) => x.current);
   if (cur) wear(cur);

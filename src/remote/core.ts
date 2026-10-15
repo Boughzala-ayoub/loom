@@ -11,6 +11,8 @@ export type Pane = {
   model: string | null; effort: string | null; notify: string;
   context: { usedTokens: number; windowTokens: number; remainingPercent: number } | null;
 };
+/** One of the PC's + menu entries: what New thread and Add start. */
+export type Startup = { label: string; cmd: string };
 export type Thread = {
   id: string; name: string; repo: string; dir: string; branch: string; state: string; zoomed: string | null; layout: string; front?: boolean;
   changed?: { add: number; del: number; files: number }; panes: Pane[];
@@ -24,7 +26,7 @@ export { agentIcon };
 export const app = {
   token: pref("loom-token", ""),
   threads: [] as Thread[],
-  agents: ["claude", "codex", "opencode"],
+  startups: ["claude", "codex", "opencode"].map((cmd) => ({ label: cmd, cmd })) as Startup[], // the PC's + menu: New thread and Add pick from these
   phoneSize: false,
   restarting: false, // Loom is restarting on the PC: the loops wait, the page reloads when it's back
   visit: 0, // counts route()s: work a screen began acts only while the same visit to it lasts
@@ -306,6 +308,7 @@ const PATHS = {
   fold: "M6 9l6 6 6-6",
   play: "M8 5l11 7-11 7z",
   image: "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1ZM4 16l5-5 5 5M13 14l2-2 5 5M15.5 8.5h.01",
+  folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   paste: "M9 3.5h6v3H9zM9 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5H15M9 12h6M9 15.5h4",
 } as const;
 export type IconName = keyof typeof PATHS;

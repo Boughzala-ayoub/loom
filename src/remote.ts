@@ -2,7 +2,7 @@
  * changes, usage and settings as phone screens, each action a loomctl command
  * posted to /api/cli. See docs/phone-remote-study.md. */
 import "./remote.css";
-import { $, app, closeSheet, el, findPane, go, hooks, Offline, pref, run, sleep, store, toast, ui, type IconName, type Thread } from "./remote/core";
+import { $, app, closeSheet, el, findPane, go, hooks, Offline, pref, run, sleep, store, toast, ui, type IconName, type Startup, type Thread } from "./remote/core";
 import { drawHead, drawList, focusOnPc, follow, list, newView, openPane, paneView, reread, screen, showList, showNew, showPane } from "./remote/agents";
 import { diffView, filesView, read as readChanges, showCommit, showDiff, showFile, showFiles, showSummary, summary } from "./remote/changes";
 import { cancel as cancelDictation } from "./remote/dictate";
@@ -164,9 +164,9 @@ async function start() {
   $("#pairing").hidden = true;
   root.hidden = false;
   try {
-    const s = await run<{ phone: boolean; agents: string[] }>("status");
+    const [s, st] = await Promise.all([run<{ phone: boolean }>("status"), run<Startup[]>("startups").catch(() => null)]);
     app.phoneSize = s.phone;
-    if (Array.isArray(s.agents)) app.agents = s.agents; // empty too: an older Loom without the field keeps the defaults
+    if (Array.isArray(st)) app.startups = st; // empty too
     await refresh();
     void run<{ scheme: string; current: boolean; vars: Record<string, string> }[]>("theme").then((t) => {
       const cur = t.find((x) => x.current);

@@ -654,19 +654,24 @@ try {
   await page.context().close();
   console.log('PASS settings from the phone: sound, theme on the PC and the phone, text size, agents to start');
 
-  // Creating and closing threads from the phone.
+  // Creating and closing threads from the phone. pick: the form's counts, none of anything and then these.
+  const pick = async (page, labels) => {
+    for (const less of await page.locator('#new .mix-row button:first-of-type').all()) while (await less.isEnabled()) await less.click();
+    for (const label of labels) await page.getByRole('button', { name: `One more ${label}`, exact: true }).click();
+  };
   page = await context(375, phoneToken);
   git('switch', '-q', trunk);
   await page.goto(base + '#/new');
   await page.locator('#new form').waitFor();
   await page.selectOption('#new select[name=project]', repo);
   await page.fill('#new input[name=name]', 'phone-wt');
-  await page.selectOption('#new select[name=agent]', 'cmd');
+  await pick(page, ['cmd', 'powershell']); // two kinds in one thread: loomctl new --mix
   await page.click('#new button.primary');
   await page.waitForFunction(() => document.querySelector('#pane .who b')?.textContent.endsWith('· shell') && location.hash.startsWith('#/pane/'), null, { timeout: 60000 });
   let threads = ok('--json', 'threads').json;
   const wt = threads.find(t => t.branch === 'loom/phone-wt');
   assert.ok(wt, `A worktree thread on loom/phone-wt: ${JSON.stringify(threads.map(t => t.branch))}`);
+  assert.equal(wt.panes.length, 2, 'cmd and powershell both start');
   await page.goto(base);
   await page.locator('#list .thread', { has: page.locator('.thread-head .name', { hasText: 'phone-wt' }) }).locator('.thread-top .icon-btn').click();
   await sheetButton(page, 'Close the thread').click();
@@ -678,7 +683,7 @@ try {
   await page.fill('#new input[name=folder]', plain);
   await page.click('#new [data-kind=checkout]');
   assert.ok(!(await page.locator('#new input[name=name]').isVisible()), 'This folder needs no name');
-  await page.selectOption('#new select[name=agent]', 'cmd');
+  await pick(page, ['cmd']);
   await page.click('#new button.primary');
   await page.waitForFunction(() => location.hash.startsWith('#/pane/'), null, { timeout: 60000 });
   threads = ok('--json', 'threads').json;

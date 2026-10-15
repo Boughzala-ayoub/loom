@@ -229,6 +229,13 @@ try {
   r = loomctl('new', repoA, '--name', 'half', '--panes', '1.5');
   assert.equal(r.code, 1);
   assert.match(r.err, /whole number/);
+  // A bad --mix is refused before git makes anything too.
+  for (const [mix, why] of [['{"nope":1}', /--mix takes .*not nope/], ['{"cmd":0}', /counts are 1 to 16/], ['{"cmd":9,"powershell":8}', /1 to 16 panes, not 17/], ['[1]', /--mix takes/], ['{}', /not 0/]]) {
+    r = loomctl('new', repoA, '--name', 'half', '--mix', mix);
+    assert.equal(r.code, 1, mix);
+    assert.match(r.err, why);
+  }
+  assert.match(loomctl('new', repoA, '--name', 'half', '--mix', '{"cmd":1}', '--panes', '2').err, /takes the place of/);
   assert.equal(spawnSync('git', ['-C', repoA, 'branch', '--list', 'loom/half'], { encoding: 'utf8' }).stdout.trim(), '', 'No branch was cut');
   assert.ok(!existsSync(join(homedir(), 'loom', 'alpha', 'half')), 'No worktree was made');
   ok('close-thread', 'epsilon dir', '--yes');

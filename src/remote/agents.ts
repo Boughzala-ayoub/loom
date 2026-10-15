@@ -3,8 +3,9 @@
 import {
   act, age, agentIcon, app, back, base, button, closeSheet, confirmSheet, el, findPane, findThread, go, iconButton,
   item, logo, panes, pref, promptSheet, replace, replaceAround, run, sequence, setPref, sheet, stat, threadOf, tick, toast, topBar, ui,
-  type Pane, type Thread,
+  type Pane, type Startup, type Thread,
 } from "./core";
+import { agentOf } from "../agent";
 import { keyboard, type Typed } from "./keyboard";
 import { dictationSheet, lists, pickLabel, readLists, bar as recBar, record, repaint, transcribing } from "./dictate";
 import { drop as dropShots, imageButton, onPaste, retray, shots, tray, upload, withPaths } from "./images";
@@ -287,7 +288,7 @@ function replyBox(p: Pane) {
 
 function agentPicker() {
   const pick = el("select");
-  pick.append(...app.agents.map((a) => new Option(a, a)));
+  pick.append(...app.startups.map((s) => new Option(s.label, s.label)));
   pick.setAttribute("aria-label", "Agent");
   return pick;
 }
@@ -863,50 +864,119 @@ function paneActions() {
 }
 
 // --- A new thread -----------------------------------------------------------
+// The PC's New thread dialog on a phone: how the thread starts, the project, a name and base for a worktree,
+// how many of each startup, and what creating will do. loomctl new --mix starts them all in one thread.
 
 export const newView = el("section", "screen detail");
 newView.id = "new";
-const newForm = el("form", "body");
-newForm.style.display = "grid";
-newForm.style.gap = "16px";
-newForm.style.maxWidth = "560px";
+const newForm = el("form", "body new-form");
 newView.append(topBar("New thread", [], "#/"), newForm);
 let worktree = true;
+const MAX_PANES = 16; // createThread's limit
+/** The form's panes by startup label, kept on this phone so the last pick comes back, as on the PC. */
+const mix = new Map<string, number>(((): [string, number][] => {
+  try { return JSON.parse(pref("loom-new-mix", "[]")); } catch { return []; }
+})());
+const isAgent = (s: Startup) => agentOf(s.cmd) !== "shell";
+/** Agents, then terminals: the form's order and the order the panes start in. */
+const mixOrder = () => [...app.startups.filter(isAgent), ...app.startups.filter((s) => !isAgent(s))];
+const mixTotal = () => [...mix.values()].reduce((a, b) => a + b, 0);
 
 export function showNew() {
   const keep = (name: string) => (newForm.elements.namedItem(name) as HTMLInputElement | null)?.value ?? "";
-  const was = { project: keep("project"), agent: keep("agent") || "claude", name: "", base: keep("base"), folder: keep("folder"), panes: keep("panes") || "1" };
+  // Last time's mix, less startups removed since and odd counts; nothing left is one of the first.
+  const saved = new Map(mix);
+  mix.clear();
+  for (const s of mixOrder()) {
+    const n = saved.get(s.label);
+    if (typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= MAX_PANES) mix.set(s.label, n);
+  }
+  if (!mixTotal() && app.startups[0]) mix.set(app.startups[0].label, 1);
   const repos = [...new Set(app.threads.map((t) => t.repo))].sort((a, b) => base(a).localeCompare(base(b)));
   const project = el("select");
   project.name = "project";
   project.append(...repos.map((r) => new Option(base(r), r)), new Option("Another folder…", ""));
-  if (repos.includes(was.project)) project.value = was.project;
+  const was = keep("project");
+  if (repos.includes(was)) project.value = was;
+  const path = el("small", "new-path");
   const folder = field("Folder on the PC", "folder", "C:\\Users\\you\\code\\project");
-  const kind = el("div", "seg");
-  for (const [k, label] of [["worktree", "New worktree"], ["checkout", "This folder"]]) {
-    const b = button(label, () => { worktree = k === "worktree"; paint(); });
+  const kind = el("div", "new-kind");
+  for (const [k, title, line, mark] of [
+    ["worktree", "Create worktree", "A new folder and branch, so agents never collide with your checkout.", "branch"],
+    ["checkout", "Open checkout", "Work in the folder as it is. No new branch, no copy.", "folder"],
+  ] as const) {
+    const head = el("b", "", title);
+    head.prepend(ui(mark));
+    const b = button(head, () => { worktree = k === "worktree"; paint(); });
+    b.append(el("span", "", line));
     b.dataset.kind = k;
     kind.append(b);
   }
   const name = field("Thread name", "name", "fix-login");
-  const baseBranch = field("Base branch (optional)", "base", "HEAD");
-  const agent = el("select");
-  agent.name = "agent";
-  agent.append(...app.agents.map((a) => new Option(a, a)));
-  if (app.agents.includes(was.agent)) agent.value = was.agent;
-  const count = el("select");
-  count.name = "panes";
-  count.append(...[1, 2, 3, 4, 6, 8].map((n) => new Option(n === 1 ? "1 agent" : `${n} agents`, String(n))));
-  count.value = was.panes;
-  const create = el("button", "primary", "Create");
-  const projectField = labelled("Project", project);
-  newForm.replaceChildren(projectField, folder, kind, name, baseBranch, labelled("Agent", agent), labelled("How many", count), create);
+  const baseBranch = field("Base (optional)", "base", "HEAD");
+  const lists = (["Agents", "Terminals"] as const).map((title) => {
+    const list = el("section", "mix-list");
+    list.append(el("h2", "", title));
+    for (const s of mixOrder().filter((s) => isAgent(s) === (title === "Agents"))) {
+      const row = el("div", "mix-row");
+      row.dataset.label = s.label;
+      const step = (by: number) => iconButton(by < 0 ? "minus" : "plus", `${by < 0 ? "One less" : "One more"} ${s.label}`, () => {
+        const n = (mix.get(s.label) ?? 0) + by;
+        if (n > 0) mix.set(s.label, n);
+        else mix.delete(s.label);
+        setPref("loom-new-mix", JSON.stringify([...mix]));
+        paint();
+      });
+      row.append(agentIcon(agentOf(s.cmd)), el("span", "mix-name", s.label), step(-1), el("output"), step(1));
+      list.append(row);
+    }
+    list.hidden = list.children.length === 1;
+    return list;
+  });
+  const summary = el("p", "new-summary");
+  const create = el("button", "primary");
+  const actions = el("div", "new-actions");
+  actions.append(create);
+  newForm.replaceChildren(el("p", "new-help", "A branch of work with its own agents. They keep running while you look elsewhere."), kind,
+    labelled("Project", project, path), folder, name, baseBranch, ...lists,
+    el("p", "new-help", `Up to ${MAX_PANES} panes. Each agent pane keeps its own session.`), summary, actions);
   const paint = () => {
+    const repo = project.value || keep("folder").trim();
+    path.textContent = project.value;
+    path.hidden = !project.value;
     folder.hidden = project.value !== "";
     name.hidden = baseBranch.hidden = !worktree;
     for (const b of kind.querySelectorAll<HTMLButtonElement>("button")) b.setAttribute("aria-pressed", String((b.dataset.kind === "worktree") === worktree));
+    create.textContent = worktree ? "Create worktree" : "Open checkout";
+    const full = mixTotal() >= MAX_PANES;
+    for (const row of newForm.querySelectorAll<HTMLElement>(".mix-row")) {
+      const n = mix.get(row.dataset.label!) ?? 0;
+      row.classList.toggle("on", n > 0);
+      row.querySelector("output")!.textContent = String(n);
+      row.querySelector<HTMLButtonElement>("button")!.disabled = !n;
+      row.querySelector<HTMLButtonElement>("button:last-child")!.disabled = full;
+    }
+    const code = (t: string) => el("code", "", t);
+    const picks = mixOrder().filter((s) => mix.has(s.label));
+    const start = picks.flatMap((s, i) => {
+      const n = mix.get(s.label)!;
+      const b = el("b", "", n > 1 ? `${n} ${s.label}` : s.label);
+      return i ? [i === picks.length - 1 ? " and " : ", ", b] : [b];
+    });
+    // createThread's own slug: what the branch and folder are called (less a -2 if it's taken). --base alone names it too.
+    const typed = keep("base").trim();
+    const slug = (keep("name").trim() || typed).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const have = app.threads.find((t) => t.dir.toLowerCase() === repo.toLowerCase()); // createThread only shows this one again
+    if (!repo) summary.replaceChildren("Pick a project or type a folder.");
+    else if (!picks.length) summary.replaceChildren("Add an agent or a terminal to start.");
+    else if (!worktree)
+      summary.replaceChildren(...(have ? [have.name, " already has ", code(repo), " open. Loom will switch to it and start nothing new."] : ["Loom will open ", code(repo), " as it is, then start ", ...start, " there."]));
+    else if (!slug) summary.replaceChildren("Name the thread: the name becomes its branch and its folder.");
+    // ponytail: "off HEAD" without reading the PC's branch, which the PC's dialog names.
+    else summary.replaceChildren("Loom will create ", code(`loom/${slug}`), " off ", code(typed || "HEAD"), ", check it out in ",
+      code(`~\\loom\\${base(repo)}\\${slug}`), ", then start ", ...start, " there. A name already in use gets -2, -3… added.");
   };
-  project.onchange = paint;
+  project.onchange = newForm.oninput = paint;
   paint();
 }
 
@@ -916,9 +986,9 @@ function field(label: string, name: string, placeholder: string) {
   input.setAttribute("autocorrect", "off");
   return labelled(label, input);
 }
-function labelled(text: string, control: HTMLElement) {
+function labelled(text: string, ...controls: HTMLElement[]) {
   const l = el("label", "field", text);
-  l.append(control);
+  l.append(...controls);
   return l;
 }
 
@@ -927,13 +997,15 @@ newForm.onsubmit = async (e) => {
   const value = (name: string) => ((newForm.elements.namedItem(name) as HTMLInputElement | null)?.value ?? "").trim();
   const folder = value("project") || value("folder");
   if (!folder) return toast("Pick a project or type a folder.", true);
-  const args = [folder, "--agent", value("agent"), "--panes", value("panes") || "1"];
+  if (!mixTotal()) return toast("Add an agent or a terminal to start.", true);
+  const args = [folder, "--mix", JSON.stringify(Object.fromEntries(mix))];
   if (worktree) {
     if (!value("name") && !value("base")) return toast("Name the thread: its branch is loom/<name>.", true);
     if (value("name")) args.push("--name", value("name"));
     if (value("base")) args.push("--base", value("base"));
   }
   const submit = newForm.querySelector("button.primary") as HTMLButtonElement;
+  if (submit.disabled) return; // one creation at a time
   submit.disabled = true;
   await act(async () => {
     const th = await run<Thread>("new", args, { change: true, timeout: 120 });

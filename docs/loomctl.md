@@ -192,7 +192,7 @@ The three steps of `window show` (unminimize, show, focus) each time out after 2
 
 | Command | What it does |
 | --- | --- |
-| `new <folder> [--agent A \| --cmd C] [--model M] [--effort E] [--name N] [--base B] [--panes N]` | Open an existing folder as a thread. |
+| `new <folder> [--agent A \| --cmd C \| --mix JSON] [--model M] [--effort E] [--name N] [--base B] [--panes N]` | Open an existing folder as a thread. |
 | `add [thread] [--agent A \| --cmd C] [--model M] [--effort E]` | Start another agent or terminal in a thread and bring it to the front. |
 | `rename <thread> <name>` | Rename a thread. Its branch and folder keep their names. |
 | `restart [pane] [--yes]` | Start the pane's process again, resuming its session. A running one needs `--yes`. |
@@ -207,7 +207,9 @@ up the thread already open on it. `--name` and `--base` require Git.
 branch `loom/login`, from `--base` if given (else from the current HEAD). A
 base only origin has is fetched, and the thread starts from origin's commit
 for it. The worktree goes in `~\loom\<repo>\login`, and a name already taken gets a
-number added. `--panes N` opens 1 to 16 panes. Nothing is created if an
+number added. `--panes N` opens 1 to 16 panes. `--mix '{"claude":2,"powershell":1}'` starts
+several startups at once, agents first, as the New thread form does, in place of `--agent`, `--cmd`,
+`--model`, `--effort` and `--panes`. Nothing is created if an
 argument is wrong.
 
 `--agent` picks a startup by its label. The default list is `claude`, `codex`,

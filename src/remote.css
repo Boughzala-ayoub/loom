@@ -94,6 +94,34 @@ code, .mono { font-family: var(--mono); }
 .top .who b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; font-weight: 600; }
 .top .who span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .body { padding: 4px 16px 24px; }
+/* New thread: the PC dialog's cards, steppers and summary at phone size (agents.ts showNew). */
+.new-form { display: grid; gap: 16px; max-width: 560px; }
+.new-help { margin: 0; color: var(--muted); font-size: 14px; }
+.new-kind { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.new-kind button { display: grid; gap: 4px; align-content: start; padding: 14px 16px; border-radius: 16px; background: var(--panel); color: var(--muted); font-size: 13px; line-height: 1.45; text-align: left; }
+.new-kind button[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 45%, transparent); background: var(--lit); }
+.new-kind b { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 16px; font-weight: 600; }
+.new-kind svg { flex: none; width: 18px; height: 18px; }
+.new-path { color: var(--faint); font: 12px var(--mono); overflow-wrap: anywhere; }
+.mix-list { display: grid; gap: 8px; }
+.mix-list h2 { margin: 0; color: var(--muted); font-size: 14px; font-weight: 400; }
+.mix-row { display: flex; align-items: center; gap: 4px; min-height: 58px; padding: 4px 4px 4px 14px; border: 1px solid var(--edge); border-radius: 14px; color: var(--muted); }
+.mix-row.on { border-color: var(--edge-hi); background: var(--panel); color: var(--text); }
+.mix-row > .ico { flex: none; width: 20px; height: 20px; margin-right: 8px; }
+/* Wraps in full: a custom command can be long, and a label cut short could read as another. */
+.mix-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.mix-row output { min-width: 30px; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.mix-row:not(.on) output { color: var(--faint); }
+.mix-row .icon-btn { border-color: var(--edge-hi); border-radius: 12px; background: var(--raise); color: var(--text); }
+.mix-row .icon-btn:disabled { opacity: 0.35; }
+.new-summary { margin: 0; padding: 12px 14px; border: 1px solid var(--edge); border-radius: 14px; background: var(--panel); color: var(--muted); font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.new-summary :is(b, code) { color: var(--text); }
+.new-summary b { font-weight: 600; }
+.new-summary code { font-size: 13px; }
+/* The form outgrows the screen: Create stays in reach while you scroll. */
+/* A fade, not a rule: the form stops at 560 px and a line would stop with it on a wider screen. */
+.new-actions { position: sticky; bottom: 0; margin: -4px -16px -24px; padding: 14px 16px calc(12px + var(--safe-b)); background: linear-gradient(transparent, var(--bg) 10px); }
+.new-actions button { width: 100%; }
 .section-title { display: flex; align-items: baseline; gap: 8px; margin: 18px 0 6px 4px; color: var(--muted); font-size: 13px; font-weight: 600; }
 .section-title:first-child { margin-top: 4px; }
 .section-title .grow { flex: 1; }

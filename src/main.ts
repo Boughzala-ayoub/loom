@@ -9232,6 +9232,23 @@ function cliWord(a: Args, i: number, what: string) {
   return w;
 }
 
+/** --mix's {"label": count} as the panes a thread starts, in the New thread form's order: agents, then terminals. */
+function cliMix(text: string): PaneState[] {
+  let mix: unknown;
+  try {
+    mix = JSON.parse(text);
+  } catch {}
+  if (!mix || typeof mix !== "object" || Array.isArray(mix)) throw new Error('--mix takes {"label": count}, as in {"claude":2}.');
+  const counts = new Map<Startup, number>();
+  for (const [label, n] of Object.entries(mix)) {
+    const s = startups.find((x) => x.label.toLowerCase() === label.toLowerCase()); // as --agent finds it
+    if (!s) throw new Error(`--mix takes ${startups.map((x) => x.label).join(", ")}, not ${label}.`);
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > MAX_PANES) throw new Error(`--mix counts are 1 to ${MAX_PANES}, not ${JSON.stringify(n)} for ${label}.`);
+    counts.set(s, (counts.get(s) ?? 0) + n);
+  }
+  return mixOrder().flatMap((s) => Array<PaneState>(counts.get(s) ?? 0).fill({ cmd: s.cmd }));
+}
+
 /** The startup command for --agent, or --cmd as given. */
 function cliCommand(a: Args) {
   const cmd = str(a, "cmd");
@@ -10054,20 +10071,22 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   new: {
-    usage: "new <folder> [--agent A | --cmd C] [--model M] [--effort E] [--name N] [--base B] [--panes N]",
-    help: "Open an existing folder as a thread, using its canonical path. Invalid folders are refused before startup. --name or --base requires Git and cuts a new worktree; --base alone also supplies its name. A relative folder is relative to your terminal. --model selects an agent model; --effort selects Claude/Codex effort. Both refuse --cmd, and the agent validates support.",
-    options: { agent: "string", cmd: "string", model: "string", effort: "string", name: "string", base: "string", panes: "int" },
+    usage: "new <folder> [--agent A | --cmd C | --mix JSON] [--model M] [--effort E] [--name N] [--base B] [--panes N]",
+    help: "Open an existing folder as a thread, using its canonical path. Invalid folders are refused before startup. --name or --base requires Git and cuts a new worktree; --base alone also supplies its name. A relative folder is relative to your terminal. --model selects an agent model; --effort selects Claude/Codex effort. Both refuse --cmd, and the agent validates support. --mix starts several startups at once, agents first, as the New thread form does: {\"claude\":2,\"PowerShell\":1}. It takes the place of --agent, --cmd, --model, --effort and --panes.",
+    options: { agent: "string", cmd: "string", mix: "string", model: "string", effort: "string", name: "string", base: "string", panes: "int" },
     run: async (a, ctx) => {
       // Everything checked before git runs: nothing may be left behind by a bad argument.
       const folder = await invoke<string>("canonical_directory", { path: callerPath(cliWord(a, 0, "a folder"), ctx.cwd) });
-      const cmd = cliCommand(a);
-      const n = num(a, "panes", 1, 1, MAX_PANES);
+      const mix = str(a, "mix");
+      if (mix !== undefined && ["agent", "cmd", "model", "effort", "panes"].some((k) => a[k] !== undefined)) throw new Error("--mix takes the place of --agent, --cmd, --model, --effort and --panes.");
+      // createThread refuses an empty or oversize list before it makes anything.
+      const panes = mix !== undefined ? cliMix(mix) : Array<PaneState>(num(a, "panes", 1, 1, MAX_PANES)).fill({ cmd: cliCommand(a), startupSettings: { model: str(a, "model"), effort: str(a, "effort") } });
       const name = str(a, "name") ?? "", base = str(a, "base") ?? "";
       const top = name || base ? await git(folder, "rev-parse", "--show-toplevel").catch(() => {
         throw new Error(`${folder} isn't in a Git repository.`);
       }) : folder;
       const repo = top.trim().replace(/\//g, "\\");
-      const th = await createThread(repo, name, Array<PaneState>(n).fill({ cmd, startupSettings: { model: str(a, "model"), effort: str(a, "effort") } }), base);
+      const th = await createThread(repo, name, panes, base);
       const failed = th.panes.filter((p) => p.dead);
       if (failed.length) throw new Error(`Opened ${th.name}, but ${failed.map(paneName).join(", ")} didn't start. The pane shows why.`);
       return { data: threadData(th), text: `${th.name} (${th.id}) in ${th.dir}`, note: `loomctl opened ${th.name}` };
