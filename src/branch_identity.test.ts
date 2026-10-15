@@ -70,7 +70,7 @@ for (const branch of ["\u00a0approved", "approved\u00a0", "approved"]) for (cons
       const opened: any[] = [];
       sandbox.threads = [];
       sandbox.openThread = (st: any) => (opened.push(st), st);
-      await f.createThread(wt, "", "", "", 1);
+      await f.createThread(wt, "", [{ cmd: "" }], "");
       assert.equal(opened[0].branch, branch, "creation cached a different branch");
       // Restore's asynchronous checkout refresh must use the same identity.
       const refreshed: Promise<void> = new Promise(resolve => {

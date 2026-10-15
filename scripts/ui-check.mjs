@@ -262,11 +262,21 @@ try {
             ? [{ pane: host.closest('.pane').dataset.id, bottom: r.bottom, limit: bottom, right: r.right, rightLimit: right }]
             : [];
         });
-        return { width: root.clientWidth, scroll: root.scrollWidth, offenders, misplacedPaneActions, clippedHeader, clippedTerminals };
+        // A dialog clips what it can't fit: the window's width alone misses a control cut off at the dialog's edge.
+        const dialogClipped = [...document.querySelectorAll('dialog[open]')].flatMap(dialog => {
+          const box = dialog.getBoundingClientRect();
+          const cut = [...dialog.querySelectorAll('button, input:not([type=hidden]), select, textarea')].filter(el => {
+            const r = el.getBoundingClientRect();
+            return r.width && r.height && getComputedStyle(el).visibility !== 'hidden' && (r.left < box.left - 1 || r.right > box.right + 1);
+          }).map(el => `${dialog.id} ${el.tagName}#${el.id}.${el.className} ${el.getAttribute('aria-label') ?? ''}`);
+          return dialog.scrollWidth > dialog.clientWidth ? [`${dialog.id} scrolls sideways: ${dialog.scrollWidth} > ${dialog.clientWidth}`, ...cut] : cut;
+        });
+        return { width: root.clientWidth, scroll: root.scrollWidth, offenders, misplacedPaneActions, clippedHeader, clippedTerminals, dialogClipped };
       });
       assert.equal(result.width, width);
       assert.ok(result.scroll <= width, `${name}@${width}: ${JSON.stringify(result)}`);
       assert.deepEqual(result.offenders, [], `${name}@${width}: clipped controls`);
+      assert.deepEqual(result.dialogClipped, [], `${name}@${width}: controls past the open dialog's edge`);
       assert.deepEqual(result.clippedHeader, [], `${name}@${width}: header controls must fit vertically`);
       assert.deepEqual(result.misplacedPaneActions, [], `${name}@${width}: fullscreen and close must stay together at the right edge`);
       assert.deepEqual(result.clippedTerminals, [], `${name}@${width}: terminal cells must stay clear of the pane's bottom edge`);
@@ -3823,13 +3833,15 @@ try {
       }).map(el => el.id || el.textContent);
     });
     assert.deepEqual(unthemedOptions, [], 'Native selects and their options must use opaque theme colors');
-    await page.locator('#new-agent').focus();
+    await page.locator('#new-repo').focus();
     await page.keyboard.press('Alt+ArrowDown');
-    await audit('new-agent-dropdown');
+    await audit('new-repo-dropdown');
     await escape();
     assert.equal(await page.locator('#new').evaluate(dialog => dialog.open), true, 'Escape closes the dropdown before the dialog');
-    await page.click('#new-advanced summary');
-    await audit('new-advanced');
+    // A codex beside the claude the form starts with: one thread, both agents, agents in the list's order.
+    await page.click('#new .mix-row[data-label="codex"] .more');
+    assert.match(await page.locator('#new-summary').textContent(), /create loom\/keyboard-pass off .* then start claude and codex there/);
+    await audit('new-mix');
     await page.fill('#new-base', 'main');
     await page.evaluate(() => window.qa.failCreate = true);
     await page.click('#new-go');
@@ -3840,7 +3852,135 @@ try {
     await page.click('#new-go');
     await page.waitForFunction(() => !document.querySelector('#new').open);
     assert.equal(await page.locator('#wsname').textContent(), 'keyboard-pass');
+    await page.waitForFunction(() => window.qa.saved.threads.find(t => t.name === 'keyboard-pass')?.panes.map(p => p.cmd).join() === 'claude,codex', null, { timeout: 5000 })
+      .catch(() => assert.fail('The form must start one pane per counted agent'));
     assert.ok(await page.evaluate(() => window.qa.calls.some(c => c.cmd === 'git_run' && c.args.args[0] === 'worktree' && c.args.args.includes('loom/keyboard-pass') && c.args.args.at(-1) === 'main')));
+    // The summary says what creating will do. A folder a thread already has open is
+    // only shown again, so nothing new starts there.
+    await page.goto(base);
+    await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+    const summary = () => page.locator('#new-summary').textContent();
+    await page.click('#new-thread');
+    await page.check('input[value=checkout]');
+    await page.selectOption('#new-repo', 'C:\\projects\\tools');
+    assert.equal(await summary(), 'fix-settings already has C:\\projects\\tools open. Loom will switch to it and start nothing new.');
+    await audit('new-open-checkout');
+    // A base that names nothing becomes the branch itself, off HEAD, and a taken name gets a number: said as conditions, not as the plan.
+    await page.check('input[value=worktree]');
+    await page.fill('#new-name', 'review-base');
+    await page.fill('#new-base', 'brand-new');
+    assert.match(await summary(), /create loom\/review-base off brand-new, .* there\. A name already in use gets -2, -3. added\. If brand-new names no commit here or on origin, the new branch is brand-new itself, off HEAD\.$/);
+    await audit('new-missing-base');
+    // Ctrl+Enter from a control still enabled while a worktree is being made starts no second one.
+    await page.fill('#new-base', '');
+    await page.evaluate(() => { window.qa.heldGit = []; window.qa.holdGit = ['worktree', 'add']; });
+    await page.click('#new-go');
+    await page.waitForFunction(() => window.qa.heldGit.length === 1);
+    await audit('new-busy');
+    await page.locator('#new-close').focus();
+    await page.keyboard.press('Control+Enter');
+    await page.waitForTimeout(500);
+    assert.equal(await page.evaluate(() => window.qa.heldGit.length), 1, 'Ctrl+Enter during a creation must not start a second one');
+    await page.evaluate(() => { window.qa.holdGit = null; window.qa.heldGit.splice(0).forEach(answer => answer('')); });
+    await page.waitForFunction(() => !document.querySelector('#new').open);
+    // A saved mix keeps to the startups there are and to counts a thread can take. Labels
+    // such as constructor and __proto__ count like any other; a count past 16 is dropped.
+    const restoreWith = async (startups, paneMix) => {
+      await page.evaluate(([startups, paneMix]) => {
+        const saved = JSON.parse(localStorage.getItem('qa-state'));
+        localStorage.setItem('qa-state', JSON.stringify(Object.assign(saved, { startups, paneMix: JSON.parse(paneMix) })));
+      }, [startups, paneMix]);
+      await page.goto(base + '?restore');
+      await page.waitForFunction(() => window.qa.saved);
+      await page.click('#new-thread');
+    };
+    const counts = () => page.locator('#new .mix-row').evaluateAll(rows => rows.map(r => `${r.dataset.label}=${r.querySelector('output').textContent}`).join());
+    const odd = [{ label: 'claude', cmd: 'claude' }, { label: 'constructor', cmd: 'cmd' }, { label: '__proto__', cmd: 'cmd /k proto' }];
+    await restoreWith(odd, '{}');
+    assert.equal(await counts(), 'claude=1,constructor=0,__proto__=0', 'An empty mix starts the first startup, whatever the others are called');
+    await page.click('#new .mix-row[data-label="__proto__"] .more');
+    await page.check('input[value=worktree]');
+    await page.fill('#new-name', 'proto-mix');
+    await page.click('#new-go');
+    await page.waitForFunction(() => !document.querySelector('#new').open);
+    assert.equal(await page.waitForFunction(() => window.qa.saved.threads.find(t => t.name === 'proto-mix')?.panes.length === 2).then(() => page.evaluate(() => window.qa.saved.threads.find(t => t.name === 'proto-mix').panes.map(p => p.cmd).join())), 'claude,cmd /k proto');
+    await page.waitForFunction(() => localStorage.getItem('qa-state').includes('"__proto__":1'));
+    await page.goto(base + '?restore');
+    await page.waitForFunction(() => window.qa.saved);
+    await page.click('#new-thread');
+    assert.equal(await counts(), 'claude=1,constructor=0,__proto__=1', 'A saved __proto__ count comes back');
+    await page.click('#new-cancel');
+    await restoreWith(odd, '{"claude":4294967296,"constructor":16,"__proto__":16}');
+    assert.equal(await counts(), 'claude=0,constructor=16,__proto__=16', 'A saved count past 16 is dropped');
+    assert.equal(await page.locator('#new .mix-row .more:enabled').count(), 0);
+    await page.click('#new-go');
+    assert.equal(await page.locator('#new-err').textContent(), 'A thread takes 1 to 16 panes, not 32.');
+    const [errBox, barBox] = await Promise.all(['#new-err', '#new .new-actions'].map(s => page.locator(s).boundingBox()));
+    assert.ok(errBox.y + errBox.height <= barBox.y, `The error must show above the buttons: ${JSON.stringify([errBox, barBox])}`);
+    await audit('new-too-many');
+    assert.deepEqual(errors, [], 'No runtime errors from a saved mix');
+    await page.click('#new-cancel');
+    // Startups are the form's count keys, so each label names one choice. The + menu's add field
+    // takes a command already listed once; another command under a taken label gets a number.
+    await page.goto(base);
+    await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+    for (const cmd of ['claude', 'powershell', 'powershell', 'claude --model sonnet']) {
+      await page.click('#add-pane');
+      await page.fill('#menu-add', cmd);
+      await page.locator('#menu-add').press('Enter');
+      await escape();
+    }
+    await page.click('#add-pane');
+    await audit('pane-menu-custom-startups');
+    assert.equal(await page.locator('#menu-list .menu-item > span:first-child').filter({ hasText: /^claude$/ }).count(), 1, 'The + menu lists claude once');
+    await escape();
+    await page.click('#new-thread');
+    const rows = await page.locator('#new .mix-row').evaluateAll(rows => rows.map(r => [r.dataset.label, r.title]));
+    assert.equal(new Set(rows.map(([label]) => label)).size, rows.length, `Each row is its own startup: ${JSON.stringify(rows)}`);
+    assert.deepEqual(rows.filter(([label]) => /^(claude|powershell)/.test(label)), [['claude', 'claude'], ['claude --model sonnet', 'claude --model sonnet'], ['powershell', 'PowerShell'], ['powershell (2)', 'powershell']]);
+    // A long custom label wraps in full; its row and counter stay inside the dialog.
+    const fit = await page.evaluate(() => {
+      const dialog = document.querySelector('#new'), box = dialog.getBoundingClientRect();
+      return { scroll: dialog.scrollWidth, client: dialog.clientWidth, out: [...dialog.querySelectorAll('.mix-row')].flatMap(row => {
+        const r = row.getBoundingClientRect(), step = row.querySelector('.mix-step').getBoundingClientRect(), name = row.querySelector('.mix-name');
+        return r.left < box.left || r.right > box.right || step.left < r.left || step.right > r.right || name.scrollWidth > name.clientWidth ? [row.dataset.label] : [];
+      }) };
+    });
+    assert.ok(fit.scroll <= fit.client && !fit.out.length, `Startup rows, full labels and counters must fit the dialog: ${JSON.stringify(fit)}`);
+    await audit('new-custom-startups');
+    await page.click('#new .mix-row[data-label="powershell (2)"] .more');
+    await page.check('input[value=worktree]');
+    await page.fill('#new-name', 'unique-startups');
+    await page.click('#new-go');
+    await page.waitForFunction(() => !document.querySelector('#new').open);
+    assert.equal(await page.waitForFunction(() => window.qa.saved.threads.find(t => t.name === 'unique-startups')?.panes.length >= 2).then(() => page.evaluate(() => window.qa.saved.threads.find(t => t.name === 'unique-startups').panes.map(p => p.cmd).join())), 'claude,powershell');
+    // A saved list with repeats loads the same way: one claude, and the other claude command numbered.
+    await restoreWith([{ label: 'claude', cmd: 'claude' }, { label: 'claude', cmd: 'claude' }, { label: 'claude', cmd: 'claude --model sonnet' }], '{}');
+    assert.equal(await counts(), 'claude=1,claude (2)=0');
+    await page.click('#new .mix-row[data-label="claude (2)"] .more');
+    await page.check('input[value=worktree]');
+    await page.fill('#new-name', 'saved-duplicates');
+    await page.click('#new-go');
+    await page.waitForFunction(() => !document.querySelector('#new').open);
+    assert.equal(await page.waitForFunction(() => window.qa.saved.threads.find(t => t.name === 'saved-duplicates')?.panes.length >= 2).then(() => page.evaluate(() => window.qa.saved.threads.find(t => t.name === 'saved-duplicates').panes.map(p => p.cmd).join())), 'claude,claude --model sonnet');
+    assert.deepEqual(await page.evaluate(() => window.qa.saved.startups.map(s => `${s.label}=${s.cmd}`)), ['claude=claude', 'claude (2)=claude --model sonnet']);
+    // A label already saved keeps its command: a repeat's number skips every label in the list, in
+    // any case as --agent reads them, so a saved "powershell (2)" or "PowerShell (2)" still runs pwsh,
+    // for a saved count and for --agent alike.
+    for (const [alias, name] of [['powershell (2)', 'kept-alias'], ['PowerShell (2)', 'kept-case']]) {
+      await restoreWith([{ label: 'powershell', cmd: '' }, { label: 'powershell', cmd: 'powershell' }, { label: alias, cmd: 'pwsh' }], JSON.stringify({ [alias]: 1 }));
+      assert.equal(await page.locator('#new .mix-row').evaluateAll(rows => rows.map(r => `${r.dataset.label}=${r.title}=${r.querySelector('output').textContent}`).join()), `powershell=PowerShell=0,powershell (3)=powershell=0,${alias}=pwsh=1`);
+      await page.check('input[value=worktree]');
+      await page.fill('#new-name', name);
+      await page.click('#new-go');
+      await page.waitForFunction(() => !document.querySelector('#new').open);
+      assert.equal(await page.waitForFunction(n => window.qa.saved.threads.find(t => t.name === n)?.panes.length >= 1, name).then(() => page.evaluate(n => window.qa.saved.threads.find(t => t.name === n).panes.map(p => p.cmd).join(), name)), 'pwsh', `A saved count for "${alias}" starts pwsh`);
+      await page.waitForFunction(() => window.qa.calls.some(c => c.cmd === 'cli_ready'));
+      const aliasAdd = await cli('add', name, '--agent', 'powershell (2)');
+      assert.equal(aliasAdd.ok, true, JSON.stringify(aliasAdd));
+      assert.equal(await page.waitForFunction(n => window.qa.saved.threads.find(t => t.name === n)?.panes.length === 2, name).then(() => page.evaluate(n => window.qa.saved.threads.find(t => t.name === n).panes.at(-1).cmd, name)), 'pwsh', `--agent "powershell (2)" starts pwsh with "${alias}" saved`);
+    }
+    assert.deepEqual(errors, [], 'No runtime errors from custom startups');
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     for (let i = 0; i < 2; i++) {

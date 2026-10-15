@@ -320,28 +320,44 @@
     <!-- New thread. Native dialog: Esc closes it, focus stays inside, the OS draws the selects. -->
     <dialog id="new" aria-labelledby="new-title">
       <form id="new-form" method="dialog">
-        <h2 id="new-title">New thread</h2>
-        <fieldset class="thread-mode">
-          <legend>Where do you want to work?</legend>
-          <label><input type="radio" name="thread-mode" value="checkout" checked />Open checkout</label>
-          <label><input type="radio" name="thread-mode" value="worktree" />Create worktree</label>
+        <div class="new-head">
+          <h2 id="new-title">New thread</h2>
+          <button type="button" id="new-close" class="icon" title="Close" aria-label="Close"><i class="i i-x"></i></button>
+        </div>
+        <p class="form-help new-lede">A branch of work with its own agents. They keep running while you look elsewhere.</p>
+        <fieldset class="thread-mode" aria-label="Where do you want to work?">
+          <label><input type="radio" name="thread-mode" value="worktree" /><span><b><i class="i i-branch"></i>Create worktree</b>A new folder and branch, so agents never collide with your checkout.</span></label>
+          <label><input type="radio" name="thread-mode" value="checkout" checked /><span><b><i class="i i-folder"></i>Open checkout</b>Work in the folder as it is. No new branch, no copy.</span></label>
         </fieldset>
-        <p id="new-description" class="form-help">Work in the existing folder. No new branch or copy.</p>
-        <label>Project <select id="new-repo" required></select></label>
-        <button type="button" id="new-browse">Browse for a folder…</button>
-        <label id="new-name-field" class="hidden">
-          Thread name
-          <input id="new-name" spellcheck="false" autocomplete="off" placeholder="e.g. improve-search" disabled />
-        </label>
-        <label>Agent <select id="new-agent"></select></label>
-        <details id="new-advanced">
-          <summary>Advanced options</summary>
-          <label id="new-base-field" class="hidden">Base branch <input id="new-base" disabled spellcheck="false" autocomplete="off" placeholder="HEAD, branch, tag, or a new branch name" /></label>
-          <label>Pane count <input id="new-count" type="number" min="1" max="16" value="1" /></label>
-          <p class="form-help">Each agent pane keeps its own session. Older panes may ask you to select their previous conversation once.</p>
-        </details>
+        <label for="new-repo" class="new-label">Project</label>
+        <div class="new-repo-row">
+          <span class="new-repo-pick">
+            <span id="new-repo-name"></span><span id="new-repo-path"></span><i class="i i-chevron"></i>
+            <select id="new-repo" required></select>
+          </span>
+          <button type="button" id="new-browse"><i class="i i-folder"></i>Browse</button>
+        </div>
+        <div class="new-pair">
+          <label id="new-name-field" class="hidden">
+            Thread name
+            <input id="new-name" spellcheck="false" autocomplete="off" placeholder="e.g. improve-search" disabled />
+          </label>
+          <label id="new-base-field" class="hidden">
+            <span>Base <span class="new-optional">optional</span></span>
+            <input id="new-base" disabled spellcheck="false" autocomplete="off" placeholder="HEAD" title="HEAD, a branch, a tag, or a new branch name" />
+          </label>
+        </div>
+        <div class="new-mix">
+          <section><h3 class="new-label">Agents</h3><div id="new-agents" class="mix-list"></div></section>
+          <section>
+            <h3 class="new-label">Terminals</h3><div id="new-terms" class="mix-list"></div>
+            <p class="form-help">Up to 16 panes. Each agent pane keeps its own session.</p>
+          </section>
+        </div>
+        <p id="new-summary" class="new-summary"></p>
         <p id="new-err" class="err" role="status"></p>
         <div class="new-actions">
+          <span class="new-hint"><kbd>Esc</kbd> cancels</span>
           <button type="button" id="new-cancel" formnovalidate>Cancel</button>
           <button type="submit" id="new-go" class="primary">Open checkout</button>
         </div>

@@ -202,7 +202,9 @@ try {
   await page.locator('#new-thread').click();
   await page.check('input[value=worktree]');
   await page.fill('#new-name', 'closing-start');
-  await page.selectOption('#new-agent', 'powershell');
+  // Only a powershell: every count to zero, then one.
+  await page.evaluate(() => document.querySelectorAll('#new .mix-row .less').forEach(b => { while (!b.disabled) b.click(); }));
+  await page.click('#new .mix-row[data-label="powershell"] .more');
   await page.locator('#new-go').click();
   await page.waitForFunction(() => window.qa.pendingStarts.length > 0);
   const threadPty = await page.evaluate(() => window.qa.panes.at(-1).id);

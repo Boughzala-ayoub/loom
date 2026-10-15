@@ -37,7 +37,7 @@ try {
       assert.equal(cmd, "worktree_prepare"); prepared.push(args.dir);
     } });
   runInContext(code, sandbox);
-  const created = await sandbox.create(repo, "new thread", "", "", 1);
+  const created = await sandbox.create(repo, "new thread", [{ cmd: "" }], "");
   assert.deepEqual(readFileSync(join(entry, "index")), index, "creating a thread discarded an unavailable worktree's index");
   assert.equal(prepared.length, 1);
   assert.equal(prepared[0], created.dir);
@@ -52,7 +52,7 @@ try {
   symlinkSync(real, link, "junction");
   sandbox.worktreeDir = async (_: string, slug: string) => join(link, slug);
   try {
-    const linked = await sandbox.create(repo, "linked", "", "", 1);
+    const linked = await sandbox.create(repo, "linked", [{ cmd: "" }], "");
     assert.equal(linked.dir, realpathSync.native(join(real, "linked")));
     const recorded = readFileSync(join(repo, ".git", "worktrees", "linked", "gitdir"), "utf8").trim();
     assert.equal(realpathSync.native(join(recorded, "..")).toLowerCase(), linked.dir.toLowerCase());

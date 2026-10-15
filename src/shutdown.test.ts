@@ -37,7 +37,7 @@ assert.equal(p.dead, true, "native shutdown killed the pane but the surviving pa
 const restarted = await sandbox.cli({ cmd: "restart", argv: [], timeout: 1 });
 assert.equal(restarted.ok, false, "a cancelled close admitted new work while native reports remained closed");
 assert.equal(restart, 0);
-await assert.rejects(sandbox.create("repo", "new", "", "", 1), /clos|shutdown/i);
+await assert.rejects(sandbox.create("repo", "new", [{ cmd: "" }], ""), /clos|shutdown/i);
 assert.equal(pendingWrites.length, 1, "failed final writes must remain retryable");
 diskFull = false;
 await closeHandler!();

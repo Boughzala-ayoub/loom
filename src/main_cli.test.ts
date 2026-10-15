@@ -24,14 +24,14 @@ import * as gitparse from "./gitparse.ts";
 import * as stash from "./stash.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts", "sweepTasks", "watched", "reportsTurns"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts", "sweepTasks", "watched", "reportsTurns", "uniqueStartups"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`${node.declarationList.flags & ts.NodeFlags.Const ? "const" : "let"} ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice, headBranch, syncBranch, removeThread, sweepTasks };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice, headBranch, syncBranch, removeThread, sweepTasks, uniqueStartups };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
   const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
@@ -1197,4 +1197,37 @@ if (check(311)) {
 › `; sweep(9200); sweep(20000);
   assert.deepEqual(moves, ["working:answered"], "the last question's menu moved the next one on");
   console.log("ok   an approval moves on unseen only after its own menu was seen and then gone 2 s");
+}
+if (check(312)) {
+  // A repeated startup label becomes "label (N)". --agent takes the first label equal in any case and the
+  // form's saved count the exact label, so the renaming may change neither for any label in the list.
+  type Startup = { label: string; cmd: string };
+  const live: Startup[] = [];
+  let command = "";
+  const th = { panes: [], addPane: async ({ cmd }: { cmd: string }) => { command = cmd; return { id: "p", th, agent: "shell" }; } };
+  const c = fixture({ MAX_PANES: 16, cliThread: () => th, show() {}, revealPane() {}, save() {}, startups: live });
+  const unique = lastFixture.uniqueStartups as (list: Startup[]) => Startup[];
+  const agent = (list: Startup[], name: string) => {
+    live.splice(0, live.length, ...list);
+    command = "";
+    return c.add.run({ _: [], agent: name }).then(() => command, (e: Error) => `error: ${e.message}`);
+  };
+  const saved = [{ label: "powershell", cmd: "" }, { label: "powershell", cmd: "powershell" }, { label: "PowerShell (2)", cmd: "pwsh" }];
+  assert.equal(unique(saved).map((s) => s.label).join(), "powershell,powershell (3),PowerShell (2)");
+  assert.equal(await agent(unique(saved), "powershell (2)"), "pwsh", "a number Loom gave took a saved alias's --agent in another case");
+  const entries = ["a", "A", "a (2)", "A (2)", "a (3)", "a (2) (2)"].flatMap((label) => ["x", "y"].map((cmd) => ({ label, cmd })));
+  let lists: Startup[][] = [[]];
+  for (let size = 1; size <= 3; size++) lists = [...lists, ...lists.filter((l) => l.length === size - 1).flatMap((l) => entries.map((e) => [...l, e]))];
+  for (const list of lists) {
+    const out = unique(list), seen = JSON.stringify(list);
+    assert.equal(JSON.stringify(unique(out)), JSON.stringify(out), `normalizing twice changes nothing: ${seen}`);
+    assert.equal(new Set(out.map((s) => s.label)).size, out.length, `one row per label: ${seen}`);
+    for (const s of list) {
+      assert.ok(out.some((o) => o.cmd === s.cmd), `no command lost: ${seen}`);
+      assert.equal(out.find((o) => o.label === s.label)?.cmd, list.find((o) => o.label === s.label)!.cmd, `the form's count for "${s.label}" starts the same: ${seen}`);
+      for (const name of [s.label, s.label.toLowerCase(), s.label.toUpperCase()])
+        assert.equal(await agent(out, name), await agent(list, name), `--agent "${name}" starts the same: ${seen}`);
+    }
+  }
+  console.log(`ok   renaming repeated startup labels keeps what every listed label starts, by --agent in any case and by the form (${lists.length} lists)`);
 }

@@ -24,7 +24,7 @@ function creator(dir: string, git = (cwd: string, ...args: string[]) => real(cwd
     worktreeDir: async (_: string, slug: string) => join(dir, slug), openThread: (t: unknown) => t,
     invoke: async (cmd: string, args: { path: string }) => (cmd === "canonical_directory" ? realpathSync.native(args.path) : undefined) });
   runInContext(code, sandbox);
-  return sandbox.create as (repo: string, name: string, cmd: string, base: string, n: number) => Promise<{ dir: string; branch: string }>;
+  return sandbox.create as (repo: string, name: string, panes: { cmd: string }[], base: string) => Promise<{ dir: string; branch: string }>;
 }
 
 const dir = mkdtempSync(join(tmpdir(), "loom-thread-base-"));
@@ -43,14 +43,14 @@ try {
   const feature = real(origin, "rev-parse", "feature").trim(), main = real(local, "rev-parse", "HEAD").trim();
   const create = creator(join(dir, "threads"));
 
-  const remote = await create(local, "remote-case", "", "feature", 1);
+  const remote = await create(local, "remote-case", [{ cmd: "" }], "feature");
   assert.deepEqual([remote.branch, real(remote.dir, "rev-parse", "HEAD").trim()], ["loom/remote-case", feature], "a base only on origin became a new branch from local HEAD");
   console.log("ok   a base that exists only on origin is fetched and cut from");
 
   const shaOnly = join(dir, "sha-only");
   real(dir, "clone", "-q", "--no-local", "--single-branch", "--branch", "main", origin, shaOnly);
   assert.throws(() => real(shaOnly, "cat-file", "-e", `${feature}^{commit}`));
-  const bySha = await create(shaOnly, "sha-case", "", feature, 1);
+  const bySha = await create(shaOnly, "sha-case", [{ cmd: "" }], feature);
   assert.equal(real(bySha.dir, "rev-parse", "HEAD").trim(), feature);
   assert.equal(real(shaOnly, "for-each-ref", "refs/loom-fetch/"), "");
 
@@ -61,23 +61,23 @@ try {
     const repo = where === "fetched" ? origin : noTags, tag = `${where}-${type}-base`;
     const object = real(repo, "rev-parse", type === "blob" ? "HEAD:a.txt" : "HEAD^{tree}").trim();
     real(repo, "tag", tag, object);
-    await assert.rejects(create(noTags, `${where}-${type}`, "", tag, 1), new RegExp(`${tag}.*not.*commit`), `${where} ${type} tag was treated as a missing name`);
+    await assert.rejects(create(noTags, `${where}-${type}`, [{ cmd: "" }], tag), new RegExp(`${tag}.*not.*commit`), `${where} ${type} tag was treated as a missing name`);
     assert.equal(real(noTags, "for-each-ref", "--format=%(refname)", "refs/heads/").trim(), "refs/heads/main");
     assert.equal(real(noTags, "for-each-ref", "refs/loom-fetch/"), "");
   }
   real(origin, "tag", "-a", "commit-release", "-m", "release", feature);
-  const release = await create(noTags, "release-case", "", "commit-release", 1);
+  const release = await create(noTags, "release-case", [{ cmd: "" }], "commit-release");
   assert.equal(real(release.dir, "rev-parse", "HEAD").trim(), feature);
-  const missing = await create(noTags, "missing-case", "", "missing-base", 1);
+  const missing = await create(noTags, "missing-case", [{ cmd: "" }], "missing-base");
   assert.equal(missing.branch, "missing-base");
   assert.equal(real(missing.dir, "rev-parse", "HEAD").trim(), main);
   assert.equal(real(noTags, "for-each-ref", "refs/loom-fetch/"), "");
   console.log("ok   existing blob and tree tags reject locally and after fetch; an annotated commit tag and a missing name work");
 
   // A base found nowhere is still a new branch of that name, off HEAD; origin/x that isn't there is a typo.
-  const fresh = await create(local, "", "", "brand-new", 1);
+  const fresh = await create(local, "", [{ cmd: "" }], "brand-new");
   assert.deepEqual([fresh.branch, real(fresh.dir, "rev-parse", "HEAD").trim()], ["brand-new", main]);
-  await assert.rejects(create(local, "typo", "", "origin/nope", 1), /not a branch on that remote/);
+  await assert.rejects(create(local, "typo", [{ cmd: "" }], "origin/nope"), /not a branch on that remote/);
   console.log("ok   a base found nowhere is a new branch off HEAD, and a missing origin/x is refused");
 
   // Another creator makes the new branch between the base check and git worktree add.
@@ -89,7 +89,7 @@ try {
     }
     return real(cwd, ...args);
   });
-  await assert.rejects(racing("fresh")(local, "", "", "fresh", 1), (e: Error) => {
+  await assert.rejects(racing("fresh")(local, "", [{ cmd: "" }], "fresh"), (e: Error) => {
     assert.match(e.message, /fresh/);
     assert.doesNotMatch(e.message, /test stop/, "an explicit new branch that appeared meanwhile retried without end");
     return true;
@@ -97,7 +97,7 @@ try {
   assert.equal(adds, 1, "one try: the branch the caller named is taken");
   // loom/<slug> taken meanwhile still moves on to the next number.
   adds = 0;
-  const auto = await racing("loom/auto")(local, "auto", "", "", 1);
+  const auto = await racing("loom/auto")(local, "auto", [{ cmd: "" }], "");
   assert.deepEqual([auto.branch, adds], ["loom/auto-2", 2]);
   console.log("ok   a new branch made by someone else meanwhile stops the thread, and loom/<slug> takes the next number");
 
@@ -109,7 +109,7 @@ try {
   writeFileSync(join(origin, "a.txt"), "feature v2\n");
   real(origin, "commit", "-qam", "feature v2");
   const v2 = real(origin, "rev-parse", "feature").trim();
-  const stale = await create(narrow, "stale-case", "", "feature", 1);
+  const stale = await create(narrow, "stale-case", [{ cmd: "" }], "feature");
   assert.equal(real(narrow, "rev-parse", "origin/feature").trim(), feature, "the fixture's origin/feature is v1");
   assert.equal(real(stale.dir, "rev-parse", "HEAD").trim(), v2, "the thread started from a stale origin/feature");
   // No origin/feature at all, and another fetch in the repository rewrites FETCH_HEAD right after this one.
@@ -119,7 +119,7 @@ try {
     const out = real(cwd, ...args);
     if (args[0] === "fetch") real(cwd, "fetch", "-q", "origin", "main");
     return out;
-  })(single, "raced-case", "", "feature", 1);
+  })(single, "raced-case", [{ cmd: "" }], "feature");
   assert.equal(real(raced.dir, "rev-parse", "HEAD").trim(), v2, "the thread started from another fetch's FETCH_HEAD");
   assert.equal(real(single, "for-each-ref", "refs/loom-fetch/") + real(narrow, "for-each-ref", "refs/loom-fetch/"), "", "a fetch's own ref stayed behind");
   console.log("ok   a base fetched from origin is the commit this fetch got, not a stale origin/<base> or another fetch's FETCH_HEAD");
@@ -129,7 +129,7 @@ try {
   real(dir, "clone", "-q", "--bare", origin, away);
   real(dir, "clone", "-q", "--single-branch", "--branch", "main", away, offline);
   renameSync(away, `${away}-gone`);
-  await assert.rejects(create(offline, "offline-case", "", "feature", 1), /Could not read from remote repository/, "an unreachable origin made a thread from local HEAD");
+  await assert.rejects(create(offline, "offline-case", [{ cmd: "" }], "feature"), /Could not read from remote repository/, "an unreachable origin made a thread from local HEAD");
   assert.equal(real(offline, "for-each-ref", "--format=%(refname)", "refs/heads/").trim(), "refs/heads/main", "a branch was made");
   // The production git_run rejects with stderr alone, including paths that look like diagnostics.
   real(offline, "remote", "set-url", "origin", join(dir, "couldn't find remote ref", "unavailable"));
@@ -142,7 +142,7 @@ try {
     }
     return result.stdout;
   });
-  await assert.rejects(stderrOnly(offline, "misleading-case", "", "feature", 1), /Couldn't fetch feature from origin.*does not appear to be a git repository/s);
+  await assert.rejects(stderrOnly(offline, "misleading-case", [{ cmd: "" }], "feature"), /Couldn't fetch feature from origin.*does not appear to be a git repository/s);
   assert.doesNotMatch(fetchError, /^fatal: couldn't find remote ref/m);
   assert.equal(real(offline, "for-each-ref", "--format=%(refname)", "refs/heads/").trim(), "refs/heads/main");
   assert.equal(real(offline, "for-each-ref", "refs/loom-fetch/"), "");
@@ -152,7 +152,7 @@ try {
   mkdirSync(lone);
   real(lone, "init", "-q", "-b", "main");
   real(lone, "commit", "-q", "--allow-empty", "-m", "start");
-  const solo = await create(lone, "", "", "solo", 1);
+  const solo = await create(lone, "", [{ cmd: "" }], "solo");
   assert.deepEqual([solo.branch, real(solo.dir, "rev-parse", "HEAD").trim()], ["solo", real(lone, "rev-parse", "HEAD").trim()]);
   console.log("ok   an origin that can't be reached stops the thread with git's error; with no origin a missing base is still a new branch");
 
@@ -172,7 +172,7 @@ try {
   const kept = await creator(join(dir, "aged-threads"), (cwd, ...args) => {
     if (args[0] === "worktree" && args[1] === "add") real(cwd, "fetch", "-q", "origin", "main"), real(cwd, "gc", "--quiet"), collected++;
     return real(cwd, ...args);
-  })(aged, "aged-case", "", "feature", 1);
+  })(aged, "aged-case", [{ cmd: "" }], "feature");
   assert.deepEqual([collected, real(kept.dir, "rev-parse", "HEAD").trim()], [1, v2], "git gc pruned the base before git worktree add used it");
   assert.equal(real(aged, "for-each-ref", "refs/loom-fetch/"), "", "the fetch's own ref stayed behind");
   console.log("ok   a fetched base keeps its ref until git worktree add has used it, so git gc meanwhile can't prune it");
@@ -192,14 +192,14 @@ try {
   const brief = clone("brief");
   await locking(brief, (args) => {
     if (args[0] === "update-ref" && deletes === 1) writeFileSync(lockOf(brief), ""), setTimeout(() => rmSync(lockOf(brief)), 600);
-  })(brief, "brief-case", "", "feature", 1);
+  })(brief, "brief-case", [{ cmd: "" }], "feature");
   assert.ok(deletes > 1, "one try at deleting the ref");
   assert.equal(real(brief, "for-each-ref", "refs/loom-fetch/"), "", "the ref stayed behind after another git's short hold");
   // A hold that lasts: the thread is made, and the error says so and names the ref left behind.
   const held = clone("held");
   await assert.rejects(locking(held, (args) => {
     if (args[0] === "update-ref" && !existsSync(lockOf(held))) writeFileSync(lockOf(held), "");
-  })(held, "held-case", "", "feature", 1), (e: Error) => {
+  })(held, "held-case", [{ cmd: "" }], "feature"), (e: Error) => {
     assert.match(e.message, /^Made held-case in .+, but Loom couldn't delete its temporary ref refs\/loom-fetch\/[0-9a-f-]+: .*cannot lock ref/s);
     assert.ok(e.message.includes(fetchRef), "the error doesn't name the ref left");
     return true;
@@ -213,7 +213,7 @@ try {
     if (args[0] !== "worktree" || args[1] !== "add") return;
     writeFileSync(lockOf(broken), "");
     throw "fatal: test: no space left on device"; // as Loom's git rejects: git's own words
-  })(broken, "broken-case", "", "feature", 1), /^Error: fatal: test: no space left on device\nLoom also couldn't delete its temporary ref refs\/loom-fetch\//);
+  })(broken, "broken-case", [{ cmd: "" }], "feature"), /^Error: fatal: test: no space left on device\nLoom also couldn't delete its temporary ref refs\/loom-fetch\//);
   rmSync(lockOf(broken));
   console.log("ok   the fetch's own ref is deleted through another git's short hold on it, and a ref left behind is reported");
 } finally { rmSync(dir, { recursive: true, force: true }); }

@@ -1412,13 +1412,32 @@ const DEFAULT_STARTUPS: Startup[] = [
   { label: "git bash", cmd: '& "$env:ProgramFiles\\Git\\bin\\bash.exe" -i -l' },
 ];
 let startups: Startup[] = [...DEFAULT_STARTUPS];
+/** A label is one choice: the + menu's row, the new-thread form's count and loomctl's --agent.
+ * The first entry with a label keeps it, as --agent found it before. A later entry under a
+ * taken label goes if it repeats a command already there under that label or a number Loom
+ * gave it; another command takes the first "label (N)" no entry has in any case, so no label anyone
+ * saved changes what it starts and no command is lost. */
+function uniqueStartups(list: Startup[]): Startup[] {
+  const out: Startup[] = [];
+  const taken = new Set(list.map((s) => s.label.toLowerCase())); // --agent ignores case, so a number must too
+  for (const s of list) {
+    let label = s.label;
+    if (out.some((o) => o.label === label)) {
+      if (out.some((o) => o.cmd === s.cmd && (o.label === s.label || o.label.replace(/ \(\d+\)$/, "") === s.label))) continue;
+      for (let n = 2; taken.has(label.toLowerCase()); n++) label = `${s.label} (${n})`;
+      taken.add(label.toLowerCase());
+    }
+    out.push(label === s.label ? s : { ...s, label });
+  }
+  return out;
+}
 /** Cursor's and Grok's hooks report each turn, named by its own id, in order:
  * the reports alone say when a turn runs and ends (agentReport). A question
  * on their screens asks in the turn running (cursorQuestion). Cursor's Esc and
  * Ctrl-C are read off its keys; Grok reports a cancel itself. */
 const reportsTurns = (agent: Agent) => agent === "cursor" || agent === "grok";
 let fontSize = 13; // Ctrl+= / Ctrl+- / Ctrl+0, global to every pane, persisted
-let paneCount = 1; // the new-thread form's pane count, persisted so it keeps your last pick
+let paneMix: Record<string, number> = Object.create(null); // the new-thread form's panes by startup label, persisted so it keeps your last pick
 let soundEnabled = true;
 let taskbarEnabled = true;
 let keepAwake = false;
@@ -3655,7 +3674,7 @@ const flushSave = (): Promise<unknown> => {
       lang: langs.indexOf(lang),
       theme: theme.label,
       fontSize,
-      paneCount,
+      paneMix,
       soundEnabled,
       taskbarEnabled,
       notify: notifyPolicy,
@@ -7546,10 +7565,10 @@ async function resolveBase(repo: string, ref: string, own: string): Promise<stri
  * that names nothing, locally or on origin, is taken as a NEW branch name: the
  * thread is created on it, off HEAD. */
 /** The thread it opened, or the one already open on that folder. */
-async function createThread(repo: string, name: string, cmd: string, base: string, n: number, startupSettings?: PaneState["startupSettings"]): Promise<Thread> {
+async function createThread(repo: string, name: string, panes: PaneState[], base: string): Promise<Thread> {
   if (shuttingDown) throw new Error("Loom is closing. Retry closing the window before starting new work.");
   // Before git touches anything: a bad count must not leave a worktree behind.
-  if (!Number.isInteger(n) || n < 1 || n > MAX_PANES) throw new Error(`A thread takes 1 to ${MAX_PANES} panes, not ${n}.`);
+  if (!panes.length || panes.length > MAX_PANES) throw new Error(`A thread takes 1 to ${MAX_PANES} panes, not ${panes.length}.`);
   let dir = repo;
   let branch = "";
   let left = ""; // the fetch's own ref, when it couldn't be deleted
@@ -7640,17 +7659,34 @@ async function createThread(repo: string, name: string, cmd: string, base: strin
     }
     branch = await headBranch({ repo, dir, branch });
   }
-  const th = await openThread({ repo, dir, branch, name: name || basename(repo) }, Array(n).fill({ cmd, startupSettings }));
+  const th = await openThread({ repo, dir, branch, name: name || basename(repo) }, panes);
   // The thread is made and open: the error says so, and what's left to delete.
   if (left) throw new Error(`Made ${th.name} in ${th.dir}, but Loom ${left}`);
   return th;
 }
 
-/** "+ Thread": a native <dialog> — repo, name, agent, base branch, pane count.
- * The repo list is what threads were cut from so far; "browse…" adds one. */
+/** "+ Thread": a native <dialog> — mode, repo, name, base, and how many of
+ * each startup to run. The repo list is what threads were cut from so far;
+ * "browse…" adds one. */
 const dlg = $<HTMLDialogElement>("#new");
 const dlgRepo = $<HTMLSelectElement>("#new-repo");
 const dlgErr = $("#new-err");
+/** The project's HEAD, for the base placeholder and the summary, and its remotes: empty until git answers. */
+let dlgHead = { branch: "", sha: "", remotes: [] as string[] };
+const isAgent = (s: Startup) => agentOf(s.cmd) !== "shell";
+/** The form's order, and the order the panes start in: agents, then terminals. */
+const mixOrder = () => [...startups.filter(isAgent), ...startups.filter((s) => !isAgent(s))];
+const mixTotal = () => startups.reduce((n, s) => n + (paneMix[s.label] ?? 0), 0);
+/** A saved or kept mix as the form uses it: on an object with no prototype, own counts of
+ * 1 to MAX_PANES for startups there are now. Anything else counts as none. */
+function cleanMix(mix: unknown): Record<string, number> {
+  const out: Record<string, number> = Object.create(null);
+  for (const s of startups) {
+    const n: unknown = mix && typeof mix === "object" ? Object.getOwnPropertyDescriptor(mix, s.label)?.value : undefined;
+    if (typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= MAX_PANES) out[s.label] = n;
+  }
+  return out;
+}
 
 /** `repo` presets the project and switches to worktree mode (the project "+"). */
 function newThread(repo?: string) {
@@ -7665,17 +7701,106 @@ function newThread(repo?: string) {
     dlgRepo.value = repo;
     $<HTMLInputElement>('input[name="thread-mode"][value="worktree"]').checked = true;
   }
-  const agent = $<HTMLSelectElement>("#new-agent");
-  agent.textContent = "";
-  for (const s of startups) agent.append(new Option(s.label, s.cmd));
   $<HTMLInputElement>("#new-name").value = "";
   $<HTMLInputElement>("#new-base").value = "";
-  $<HTMLInputElement>("#new-count").value = String(paneCount);
+  // Last time's mix, less startups removed since; nothing left is one of the first.
+  paneMix = cleanMix(paneMix);
+  if (!mixTotal() && startups[0]) paneMix[startups[0].label] = 1;
+  renderMix();
   dlgErr.textContent = "";
-  $<HTMLDetailsElement>("#new-advanced").open = false;
   updateThreadMode();
+  void readHead();
   dlg.showModal();
   (repos.length && threadMode() === "worktree" ? $("#new-name") : dlgRepo).focus();
+}
+
+/** One row per startup: its mark, its label, and − count +. */
+function renderMix() {
+  const agents = $("#new-agents"), terms = $("#new-terms");
+  agents.textContent = terms.textContent = "";
+  for (const s of mixOrder()) {
+    const row = document.createElement("div");
+    row.className = "mix-row";
+    row.dataset.label = s.label;
+    row.title = s.cmd || "PowerShell";
+    const name = document.createElement("span");
+    name.className = "mix-name";
+    name.textContent = s.label;
+    const step = document.createElement("span");
+    step.className = "mix-step";
+    const button = (by: number, text: string, label: string) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = by < 0 ? "less" : "more";
+      b.textContent = text;
+      b.setAttribute("aria-label", `${label} ${s.label}`);
+      b.onclick = () => {
+        paneMix[s.label] = (paneMix[s.label] ?? 0) + by;
+        paintNew();
+      };
+      return b;
+    };
+    step.append(button(-1, "−", "One less"), document.createElement("output"), button(1, "+", "One more"));
+    row.append(icon(agentOf(s.cmd)), name, step);
+    (isAgent(s) ? agents : terms).append(row);
+  }
+  paintNew();
+}
+
+/** Everything that follows the fields: counts, the project's path, the base's HEAD, the summary. */
+function paintNew() {
+  const full = mixTotal() >= MAX_PANES;
+  for (const row of dlg.querySelectorAll<HTMLElement>(".mix-row")) {
+    const n = paneMix[row.dataset.label!] ?? 0;
+    row.classList.toggle("on", n > 0);
+    row.querySelector("output")!.textContent = String(n);
+    row.querySelector<HTMLButtonElement>(".less")!.disabled = !n;
+    row.querySelector<HTMLButtonElement>(".more")!.disabled = full;
+  }
+  const repo = dlgRepo.value;
+  $("#new-repo-name").textContent = dlgRepo.selectedOptions[0]?.text ?? "";
+  $("#new-repo-path").textContent = repo;
+  const { branch, sha } = dlgHead;
+  $<HTMLInputElement>("#new-base").placeholder = !sha ? "HEAD" : branch === "HEAD" ? `HEAD at ${sha}` : `HEAD: ${branch} at ${sha}`;
+  const code = (t: string) => Object.assign(document.createElement("code"), { textContent: t });
+  const picks = mixOrder().filter((s) => paneMix[s.label]);
+  const start = picks.flatMap((s, i) => {
+    const n = paneMix[s.label];
+    const b = Object.assign(document.createElement("b"), { textContent: n > 1 ? `${n} ${s.label}` : s.label });
+    return i ? [i === picks.length - 1 ? " and " : ", ", b] : [b];
+  });
+  // createThread's own slug: what the branch and folder are called (less a -2 if it's taken).
+  const slug = $<HTMLInputElement>("#new-name").value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const typed = $<HTMLInputElement>("#new-base").value.trim();
+  const have = threads.find((t) => t.dir === repo); // createThread only shows this one again
+  const summary = $("#new-summary");
+  if (!repo) summary.replaceChildren("Choose a project folder.");
+  else if (!picks.length) summary.replaceChildren("Add an agent or a terminal to start.");
+  else if (threadMode() !== "worktree")
+    summary.replaceChildren(...(have ? [have.name, " already has ", code(repo), " open. Loom will switch to it and start nothing new."] : ["Loom will open ", code(repo), " as it is, then start ", ...start, " there."]));
+  else if (!slug) summary.replaceChildren("Name the thread: the name becomes its branch and its folder.");
+  else {
+    // Git settles the base and the free name only as the thread is made: the summary gives createThread's rules for them.
+    const fallback = !typed ? [] : dlgHead.remotes.includes(typed.split("/")[0])
+      ? [" If ", code(typed), " names no commit here or on origin, Loom stops and makes nothing."]
+      : [" If ", code(typed), " names no commit here or on origin, the new branch is ", code(typed), " itself, off HEAD."];
+    summary.replaceChildren("Loom will create ", code(`loom/${slug}`), " off ", code(typed || (branch && branch !== "HEAD" ? branch : sha || "HEAD")), ", check it out in ",
+      code(`~\\loom\\${basename(repo)}\\${slug}`), ", then start ", ...start, " there. A name already in use gets -2, -3… added.", ...fallback);
+  }
+}
+
+/** The picked project's HEAD branch and commit, for the base field's placeholder. */
+async function readHead() {
+  const repo = dlgRepo.value;
+  dlgHead = { branch: "", sha: "", remotes: [] };
+  paintNew();
+  if (!repo) return;
+  const [branch, sha] = await Promise.all([git(repo, "rev-parse", "--abbrev-ref", "HEAD"), git(repo, "rev-parse", "--short", "HEAD")])
+    .then((r) => r.map((s) => s.trim()), () => ["", ""]); // not a repo, or no commit yet: plain HEAD
+  const remotes = (await git(repo, "remote").catch(() => "")).split(/\r?\n/).filter(Boolean);
+  if (repo !== dlgRepo.value) return; // another project was picked meanwhile
+  dlgHead = { branch, sha, remotes };
+  paintNew();
 }
 
 const threadMode = () => $<HTMLInputElement>('input[name="thread-mode"]:checked').value;
@@ -7687,64 +7812,73 @@ function updateThreadMode() {
   }
   $<HTMLInputElement>("#new-name").required = worktree;
   $("#new-go").textContent = worktree ? "Create worktree" : "Open checkout";
-  $("#new-description").textContent = worktree
-    ? "Create an isolated folder and branch for this thread. Your checkout stays where it is."
-    : "Work in the existing folder. No new branch or copy.";
   dlgErr.textContent = "";
+  paintNew();
 }
 for (const radio of document.querySelectorAll<HTMLInputElement>('input[name="thread-mode"]')) radio.onchange = updateThreadMode;
+$("#new-form").oninput = paintNew;
+$("#new-form").onkeydown = (e) => {
+  if (e.key !== "Enter" || !e.ctrlKey) return;
+  e.preventDefault();
+  $<HTMLFormElement>("#new-form").requestSubmit();
+};
 
 async function browseRepo() {
   const previous = dlgRepo.value;
   try {
     const dir = await pickFolder({ directory: true, multiple: false });
-    if (typeof dir !== "string") return void (dlgRepo.value = previous);
+    if (typeof dir !== "string") return void (dlgRepo.value = previous, paintNew());
     // A folder outside Git can still be opened as a checkout thread.
     const root = (await git(dir, "rev-parse", "--show-toplevel").catch(() => dir)).trim().replace(/\//g, "\\");
     if (!repos.includes(root)) repos.push(root);
     if (![...dlgRepo.options].some((o) => o.value === root))
       dlgRepo.insertBefore(new Option(basename(root), root), dlgRepo.lastElementChild);
     dlgRepo.value = root;
-    (threadMode() === "worktree" ? $("#new-name") : $("#new-agent")).focus();
+    void readHead();
+    (threadMode() === "worktree" ? $("#new-name") : dlgRepo).focus();
   } catch (err) {
     dlgErr.textContent = String(err);
   }
 }
-dlgRepo.onchange = () => { if (!dlgRepo.value) void browseRepo(); };
+dlgRepo.onchange = () => void (dlgRepo.value ? readHead() : browseRepo());
 $("#new-browse").onclick = () => void browseRepo();
 
-$("#new-cancel").onclick = () => dlg.close();
+$("#new-cancel").onclick = $("#new-close").onclick = () => dlg.close();
+
+/** Why the form stopped, scrolled clear of the buttons pinned under a long form on a small screen. */
+function newErr(msg: string) {
+  dlgErr.textContent = msg;
+  dlgErr.scrollIntoView({ block: "nearest" });
+}
 
 $<HTMLFormElement>("#new-form").onsubmit = async (e) => {
   e.preventDefault();
+  const go = $<HTMLButtonElement>("#new-go");
+  if (go.disabled) return; // one creation at a time: Ctrl+Enter from a control still enabled lands here too
   const repo = dlgRepo.value;
-  if (!repo) return void (dlgErr.textContent = "pick a repo");
+  if (!repo) return newErr("pick a repo");
   const worktree = threadMode() === "worktree";
   const name = $<HTMLInputElement>("#new-name").value.trim();
-  if (worktree && !name) return void (dlgErr.textContent = "Give this worktree a thread name.");
-  const n = Math.max(1, Math.min(parseInt($<HTMLInputElement>("#new-count").value, 10) || 1, MAX_PANES));
-  paneCount = n; // openThread save()s on the way out, so this rides along
-  const go = $<HTMLButtonElement>("#new-go");
+  if (worktree && !name) return newErr("Give this worktree a thread name.");
+  const total = mixTotal(); // cleanMix keeps each count to 1..MAX_PANES; the sum is checked here, before any array is made
+  if (!total) return newErr("Add an agent or a terminal to start.");
+  if (total > MAX_PANES) return newErr(`A thread takes 1 to ${MAX_PANES} panes, not ${total}.`);
+  const panes = mixOrder().flatMap((s) => Array<PaneState>(paneMix[s.label] ?? 0).fill({ cmd: s.cmd }));
   go.disabled = true;
-  const controls = [...$("#new-form").querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input:not(:disabled), select:not(:disabled), #new-browse")];
+  const controls = [...$("#new-form").querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input:not(:disabled), select:not(:disabled), #new-browse, .mix-step button")];
   controls.forEach((el) => (el.disabled = true));
   go.textContent = worktree ? "Creating…" : "Opening…";
   dlgErr.textContent = "creating…"; // a fetch can take a moment
   try {
-    await createThread(
-      repo,
-      worktree ? name : "",
-      $<HTMLSelectElement>("#new-agent").value,
-      worktree ? $<HTMLInputElement>("#new-base").value.trim() : "",
-      n,
-    );
+    await createThread(repo, worktree ? name : "", panes, worktree ? $<HTMLInputElement>("#new-base").value.trim() : "");
     dlg.close();
   } catch (err) {
-    dlgErr.textContent = String(err);
+    newErr(String(err));
   } finally {
     controls.forEach((el) => (el.disabled = false));
     go.disabled = false;
     go.textContent = worktree ? "Create worktree" : "Open checkout";
+    paintNew(); // the steppers' own limits again
   }
 };
 
@@ -7782,7 +7916,7 @@ function renderMenu() {
 /** "+ pane" and "+ Folder": pick a startup command, or extend the list. */
 const startupMenu = (pick: (cmd: string) => void): Menu => ({
   placeholder: "add a command…",
-  add: (v) => startups.push({ label: v, cmd: v }),
+  add: (v) => void (startups = uniqueStartups([...startups, { label: v, cmd: v }])),
   rows: (list) => {
     for (const s of startups) {
       const row = document.createElement("div");
@@ -9933,7 +10067,7 @@ const CLI: Record<string, CliCommand> = {
         throw new Error(`${folder} isn't in a Git repository.`);
       }) : folder;
       const repo = top.trim().replace(/\//g, "\\");
-      const th = await createThread(repo, str(a, "name") ?? "", cmd, str(a, "base") ?? "", n, { model: str(a, "model"), effort: str(a, "effort") });
+      const th = await createThread(repo, name, Array<PaneState>(n).fill({ cmd, startupSettings: { model: str(a, "model"), effort: str(a, "effort") } }), base);
       const failed = th.panes.filter((p) => p.dead);
       if (failed.length) throw new Error(`Opened ${th.name}, but ${failed.map(paneName).join(", ")} didn't start. The pane shows why.`);
       return { data: threadData(th), text: `${th.name} (${th.id}) in ${th.dir}`, note: `loomctl opened ${th.name}` };
@@ -10561,7 +10695,7 @@ async function main() {
     lang?: number;
     theme?: string;
     fontSize?: number;
-    paneCount?: number;
+    paneMix?: Record<string, number>;
     silent?: boolean;
     soundEnabled?: boolean;
     taskbarEnabled?: boolean;
@@ -10581,7 +10715,7 @@ async function main() {
 ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
     return; // Keep restoring true: no workspace save or CLI mutation is allowed.
   }
-  if (saved.startups?.length) startups = saved.startups;
+  if (saved.startups?.length) startups = uniqueStartups(saved.startups);
   if (saved.prefixes?.length) prefixes = saved.prefixes;
   prefix = prefixes[saved.prefix ?? 0] ?? prefixes[0];
   if (saved.langs?.length) langs = saved.langs;
@@ -10590,7 +10724,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   applyTheme(THEMES.find((t) => t.label === saved.theme) ?? THEMES[0]);
   // Before any Pane exists — the Terminal is built with it. Hand-editable file.
   fontSize = Math.min(Math.max(saved.fontSize ?? fontSize, 8), 24);
-  paneCount = Math.min(Math.max(saved.paneCount ?? paneCount, 1), MAX_PANES);
+  paneMix = cleanMix(saved.paneMix);
   // Preserve the old combined preference until each new setting is saved.
   soundEnabled = saved.soundEnabled ?? (saved.silent !== true);
   taskbarEnabled = saved.taskbarEnabled ?? (saved.silent !== true);

@@ -69,12 +69,14 @@ The update command does not run the installer or restart Loom.
 
 ## Using it
 
-`+ Thread` opens the new-thread form. **Open checkout** starts an agent in
+`+ Thread` opens the new-thread form. **Open checkout** starts agents in
 the existing folder. **Create worktree** creates a separate folder and branch.
-Pick a project or browse to one, choose an agent, and give worktrees a thread
-name. **Advanced options** contains the base ref and pane count. Loom
+Pick a project or browse to one, then set how many of each agent and terminal
+to start, up to 16 panes. The form keeps those counts for next time. Worktrees
+also take a thread name and an optional base. The box above the buttons says
+what Loom will do, and Ctrl+Enter submits. Loom
 creates the branch `loom/<name>` off the base (HEAD when blank) and checks it
-out as a worktree under `~\loom\<repo>\<name>`, then starts the agent there.
+out as a worktree under `~\loom\<repo>\<name>`, then starts the panes there.
 A name that is already a branch or a folder gets `-2`, `-3` appended, the way
 Orca names a second worktree, so the base you asked for is always the base you
 get. To continue an existing branch, put it in the base field. A base that
