@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, UserAttentionType } from "@tauri-apps/api/window";
 import { homeDir, join } from "@tauri-apps/api/path";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as pickFolder, message } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -3706,13 +3707,17 @@ function jumpWaiting() {
   revealPane(next);
 }
 
+/** False, showing nothing, for a pane closed since whatever offered it (the
+ * status bar's servers between polls); its thread's dispose empties its panes too. */
 function revealPane(p: Pane) {
+  if (!p.th.panes.includes(p)) return false;
   p.th.active = p; // Switching must not clear a different pane's notification.
   p.th.tab = null;
   show(p.th);
   if (p.th.zoomed && p.th.zoomed !== p) p.th.toggleZoom(p);
   if (matchMedia("(max-width: 1100px)").matches) toggleChanges(false);
   p.el.scrollIntoView({ block: "nearest" });
+  return true;
 }
 
 /** The header chip: how many panes want you, across every thread. One glance
@@ -8620,6 +8625,12 @@ function paintSpeakMore() {
   const b = $("#speak-more");
   b.title = `${lang.code ? `Transcribed as ${lang.label}` : "Language detected per clip"} · ${prefix.text.trim() ? `prefix ${prefix.text.trim()}` : "no prefix"}${prefix.enter ? ", sent the moment it lands" : ", waits for your Enter"} — click to change`;
   b.setAttribute("aria-label", `Dictation settings: ${lang.label}, ${prefix.text.trim() || "no prefix"}`);
+  // The status bar says the same, a click from either list.
+  setText($("#sb-lang"), lang.code ? lang.label : "Auto language");
+  $("#sb-lang").title = `${lang.code ? `Dictation is transcribed as ${lang.label}` : "Dictation detects the language per clip"}: click to change`;
+  setText($("#sb-prefix"), prefix.text.trim() || "No prefix");
+  $("#sb-prefix").title = `${prefix.text.trim() ? `Dictation starts with ${prefix.text.trim()}` : "Dictation types no prefix"}${prefix.enter ? " and is sent the moment it lands" : " and waits for your Enter"}: click to change`;
+  fitStatus();
 }
 // Declarations, not consts: both run from menus wired before this line.
 function paintLang() {
@@ -8636,6 +8647,152 @@ function paintSpeak() {
   b.textContent = speakShown ? "shown" : "hidden";
   b.setAttribute("aria-pressed", String(speakShown));
 }
+
+// --- status bar: the panes' servers, the phone remote, this PC ---------------
+type StatusReading = {
+  cpu: number;
+  memory: { used: number; total: number };
+  remote: { port: number; listening: boolean; error: string | null } | null;
+  servers: { port: number; pane: string; name: string }[];
+};
+type Server = { port: number; pane: Pane; name: string };
+// A declaration: paintSpeakMore, above, uses it. The same text again would still relayout the bar.
+function setText(el: HTMLElement, text: string) {
+  if (el.textContent !== text) el.textContent = text;
+}
+let statusReading: StatusReading | undefined;
+let statusServers: Server[] = [];
+let statusSig = "";
+let statusBusy = false;
+/** Phones show one server and a count; the menu behind the count lists them all. */
+const statusNarrow = matchMedia("(max-width: 480px)");
+
+/** status_bar's reading (lib.rs), every 3 s while Loom is in view. */
+async function pollStatus() {
+  if (statusBusy) return;
+  statusBusy = true;
+  try {
+    statusReading = await invoke<StatusReading>("status_bar");
+    paintStatus();
+  } catch {
+    // The bar keeps its last reading.
+  } finally {
+    statusBusy = false;
+  }
+}
+
+const serverName = (s: Server) => s.name || "port";
+// The thread, not the pane's title: a shell's is its exe's whole path and the command.
+const serverTitle = (s: Server) => `${serverName(s)} listens on port ${s.port}, in a pane of ${s.pane.th.name}. Click to show that pane.`;
+const statusSpan = (className: string, text: string) => Object.assign(document.createElement("span"), { className, textContent: text });
+
+/** The bar's parts a window too narrow for them all goes without, least needed
+ * first: each is also elsewhere (Preferences, the task manager, the mic's menu). */
+const STATUS_DROPS = ["#sb-version", "#sb-mem-of", ".sb-dictate", "#sb-prefix", "#sb-lang", "#sb-remote"];
+/** Every part back, then drop them in order while the bar overflows. A declaration: paintSpeakMore, above, calls it. */
+function fitStatus() {
+  const bar = $("#statusbar");
+  const parts = STATUS_DROPS.map((s) => bar.querySelector(s)!);
+  bar.classList.remove("sb-squeeze");
+  for (const p of parts) p.classList.remove("sb-dropped");
+  for (const p of parts) {
+    if (bar.scrollWidth <= bar.clientWidth) break;
+    p.classList.add("sb-dropped");
+  }
+  // Every part gone and still too wide (long names on a phone): the server names give way, down to their ports.
+  bar.classList.toggle("sb-squeeze", bar.scrollWidth > bar.clientWidth);
+}
+
+function paintStatus() {
+  const r = statusReading;
+  if (!r?.memory) return;
+  const GB = 2 ** 30;
+  setText($("#sb-cpu"), `CPU ${Math.round(r.cpu)}%`);
+  setText($("#sb-mem"), `Memory ${Math.round((r.memory.used / r.memory.total) * 100)}%`);
+  setText($("#sb-mem-of"), `(${(r.memory.used / GB).toFixed(1)} of ${(r.memory.total / GB).toFixed(1)} GB)`);
+  const remote = $("#sb-remote");
+  remote.classList.toggle("hidden", !r.remote);
+  if (r.remote) {
+    remote.classList.toggle("off", !r.remote.listening);
+    setText(remote.querySelector<HTMLElement>(".num")!, `:${r.remote.port}`);
+    remote.title = r.remote.listening ? `The phone remote serves on port ${r.remote.port}` : `The phone remote is on but not serving${r.remote.error ? `: ${r.remote.error}` : ""}`;
+  }
+  // A server whose pane the page doesn't have (closing as this was read) isn't shown.
+  const panes = new Map(threads.flatMap((t) => t.panes).map((p) => [p.id, p]));
+  statusServers = r.servers.flatMap((s) => {
+    const pane = panes.get(s.pane);
+    return pane ? [{ ...s, pane }] : [];
+  });
+  const shown = statusNarrow.matches ? 1 : 2;
+  const sig = `${shown} ${statusServers.map((s) => `${s.pane.id} ${serverTitle(s)}`).join("|")}`;
+  if (sig !== statusSig) {
+    statusSig = sig;
+    paintServers(shown);
+  }
+  fitStatus();
+}
+
+/** A server by its pane and port: what keyboard focus follows across a refresh. */
+const serverKey = (s: Server) => `${s.pane.id}:${s.port}`;
+
+function paintServers(shown: number) {
+  // Focus on a server, the count or a row of the open list stays on that server or the count across the
+  // rebuild, as renderPicker's does by data-key. Focus anywhere else stays put.
+  const focused = document.activeElement as HTMLElement | null;
+  const inList = openMenu === serversMenu && menu.contains(focused);
+  const focusKey = inList || $("#sb-servers").contains(focused) ? focused?.dataset.key : undefined;
+  const items: HTMLElement[] = statusServers.slice(0, shown).map((s) => {
+    const b = document.createElement("button");
+    b.className = "sb-item sb-server";
+    b.dataset.key = serverKey(s);
+    b.title = serverTitle(s);
+    b.append(statusSpan("dot", ""), statusSpan("sb-name", serverName(s)), statusSpan("num", `:${s.port}`));
+    b.onclick = () => void (revealPane(s.pane) || paintStatus());
+    return b;
+  });
+  if (statusServers.length > shown) {
+    const more = document.createElement("button");
+    more.className = "sb-item sb-more";
+    more.dataset.key = "more";
+    more.textContent = `+${statusServers.length - shown}`;
+    more.title = `${statusServers.length} servers in all: click for the list`;
+    more.setAttribute("aria-haspopup", "menu");
+    more.onclick = () => showMenu(more, serversMenu);
+    items.push(more);
+  }
+  $("#sb-servers").replaceChildren(...items);
+  const more = items.find((b) => b.dataset.key === "more");
+  // The list open over the old count follows: on the new one, or closed with it.
+  if (openMenu === serversMenu && !menu.classList.contains("hidden")) {
+    if (more) {
+      anchor = more;
+      renderMenu();
+      place();
+    } else hideMenu();
+  }
+  if (focusKey === undefined) return;
+  // The same server or count; gone, the list's first row, then the count, the first server, the PC's readings.
+  const rows = menu.classList.contains("hidden") ? [] : [...$("#menu-list").querySelectorAll<HTMLElement>(".menu-item")];
+  const pool = inList ? [...rows, ...items] : items;
+  (pool.find((e) => e.dataset.key === focusKey) ?? (inList ? rows[0] : undefined) ?? more ?? items[0] ?? $("#sb-pc")).focus();
+}
+
+/** Every server the panes run, behind the bar's count. */
+const serversMenu: Menu = {
+  placeholder: "",
+  rows: (list) => {
+    for (const s of statusServers) {
+      const row = document.createElement("div");
+      row.className = "menu-item";
+      row.dataset.key = serverKey(s);
+      row.title = serverTitle(s);
+      row.append(statusSpan("", `${serverName(s)} :${s.port}`), statusSpan("muted", s.pane.th.name));
+      // Its pane gone before the next poll: the bar drops that server now instead.
+      row.onclick = () => void (hideMenu(), revealPane(s.pane) || paintStatus());
+      list.append(row);
+    }
+  },
+};
 
 /** The mic's menu: the language and the prefix lists as they are, each with a
  * way to add one (that list on its own, with its field), then Hide. */
@@ -10638,6 +10795,14 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   // Which step, decided when it runs: a second click while the mic opens is its stop.
   dictate.onclick = () => mic(() => (recording ? micStop() : micStart()));
   speakMore.onclick = () => showMenu(speakMore, speakMenu);
+  // The status bar's buttons keep the pane's focus too.
+  $("#statusbar").onmousedown = (e) => e.preventDefault();
+  $("#sb-lang").onclick = () => showMenu($("#sb-lang"), langMenu);
+  $("#sb-prefix").onclick = () => showMenu($("#sb-prefix"), prefixMenu);
+  $("#sb-pc").onclick = () => $("#task-manager").click();
+  void getVersion().then((v) => v && (setText($("#sb-version"), `Loom ${v}`), fitStatus()), () => {});
+  // A wider or narrower window has room for more of the bar, or less.
+  new ResizeObserver(fitStatus).observe($("#statusbar"));
   $("#speak-pref").onclick = () => ((speakShown = !speakShown), paintSpeak(), save());
   themeBtn.onclick = () => showMenu(themeBtn, themeMenu);
   $("#notification-sound").onclick = () => ((soundEnabled = !soundEnabled), paintNotifications(), save());
@@ -10867,10 +11032,14 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   setInterval(pollSessions, 4000);
   setInterval(tick(() => pollStats(++statTick % 6 === 0)), 10_000);
   setInterval(tick(() => threads.forEach((t) => t.paintAge())), 30_000);
+  setInterval(tick(pollStatus), 3000);
+  void pollStatus();
+  statusNarrow.onchange = paintStatus;
   resumePolls = () => {
     if (backgroundHidden()) return;
     void pollUsage();
     void pollStats(true);
+    void pollStatus();
   };
   document.addEventListener("visibilitychange", resumePolls);
 

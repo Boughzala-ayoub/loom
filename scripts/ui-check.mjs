@@ -59,6 +59,9 @@ try {
               { pid: 4, name: 'System', cpu: 0.4, memory: 12288 }, { pid: 7001, name: `${long}.exe`, cpu: 12.3, memory: 2.2 * 1024 * MB },
               ...Array.from({ length: 60 }, (_, i) => ({ pid: 2000 + i * 4, name: 'svchost.exe', cpu: 0, memory: 3 * MB })), { pid: 9001, name: 'loom.exe', cpu: 2.2, memory: 310 * MB }] };
         }
+        // The status bar's reading (lib.rs status_bar): a test sets qa.servers to panes of the page.
+        if (cmd === 'status_bar') return { cpu: qa.cpu ?? 23.4, memory: { used: (qa.memGB ?? 13.3) * 2 ** 30, total: 15.6 * 2 ** 30 }, remote: { port: 7420, listening: true, error: null }, servers: qa.servers ?? [] };
+        if (cmd === 'plugin:app|version') return '3.0.0';
         if (cmd === 'set_keep_awake') {
           if (qa.failAwake || location.search.includes('awake-error')) throw new Error('Test power request failed');
           qa.keepAwake = args.enabled;
@@ -248,10 +251,11 @@ try {
           const bounds = host.getBoundingClientRect();
           const style = getComputedStyle(host);
           const pane = host.closest('.pane');
-          // A pane scrolled out of the stacked column pauses its renderer and refits
-          // when it comes back into view (checked after thread-add-powershell).
-          const column = pane.closest('.grid')?.getBoundingClientRect(), box = pane.getBoundingClientRect();
-          if (column && (box.bottom <= column.top || box.top >= column.bottom)) return [];
+          // A terminal scrolled out of the stacked column pauses its renderer and refits
+          // when it comes back into view (checked after thread-add-powershell). Its
+          // screen, not its pane: a pane's last rows can show with its screen above them.
+          const column = pane.closest('.grid')?.getBoundingClientRect();
+          if (column && (r.bottom <= column.top || r.top >= column.bottom)) return [];
           const bottom = pane.getBoundingClientRect().bottom - parseFloat(getComputedStyle(pane).borderBottomWidth) - 4;
           const right = bounds.right - parseFloat(style.paddingRight);
           return r.bottom > bottom + 0.5 || r.right > right + 0.5
@@ -1916,6 +1920,210 @@ try {
         assert.equal(await reads(), closed, 'no reads once it is closed');
       }
       await cli('theme', process.env.UI_THEME || 'loom');
+    }
+    // The status bar (main.ts paintStatus): dictation's settings, three servers the panes run (two shown, one on a
+    // phone, the rest behind a count), the phone remote and this PC, on one line at every width. Narrow windows drop
+    // the dictation side and the memory's GB, phones the remote too. Each part opens what it names.
+    {
+      await page.evaluate(() => {
+        const ids = [...document.querySelectorAll('.pane')].map(p => p.dataset.id);
+        window.qa.servers = [['node', 1420], ['Contoso.Enterprise.DevServer', 5173], ['python', 8000]].map(([name, port], i) => ({ name, port, pane: ids[i % ids.length] }));
+      });
+      await page.waitForFunction(() => document.querySelectorAll('#statusbar .sb-server').length, null, { timeout: 5000 });
+      const home = await page.locator('#wsname').innerText();
+      const bar = await page.evaluate(() => {
+        const box = document.querySelector('#statusbar').getBoundingClientRect();
+        const items = [...document.querySelectorAll('#statusbar .sb-item')].filter(el => el.getBoundingClientRect().width);
+        const rects = items.map(el => el.getBoundingClientRect());
+        return {
+          shown: items.map(el => el.innerText.replace(/\s+/g, ' ').trim()),
+          outside: items.filter((el, i) => rects[i].left < box.left || rects[i].right > box.right || rects[i].top < box.top || rects[i].bottom > box.bottom).map(el => el.innerText),
+          overlaps: rects.slice(1).filter((r, i) => r.left < rects[i].right - 0.5).length,
+          cut: [...document.querySelectorAll('#statusbar .sb-name')].some(el => el.scrollWidth > el.clientWidth),
+          bottom: box.bottom === innerHeight,
+          // Which of the parts a narrow window goes without (main.ts STATUS_DROPS, least needed first) it dropped.
+          dropped: ['#sb-version', '#sb-mem-of', '.sb-dictate', '#sb-prefix', '#sb-lang', '#sb-remote'].map(s => document.querySelector(s).classList.contains('sb-dropped')),
+        };
+      });
+      const phone = width <= 480;
+      if (width === 1280) assert.deepEqual(bar.shown, ['Hold F4 to dictate', 'English', '/prompt', 'node :1420', 'Contoso.Enterprise.DevServer :5173', '+1', 'phone remote :7420', 'CPU 23% Memory 85% (13.3 of 15.6 GB)', 'Loom 3.0.0'], `statusbar@${width}`);
+      if (width === 320) assert.deepEqual(bar.shown, ['node :1420', '+2', 'CPU 23% Memory 85%'], `statusbar@${width}`);
+      assert.deepEqual(bar.dropped, [...bar.dropped].sort((a, b) => b - a), `statusbar@${width}: parts go least needed first: ${bar.dropped}`);
+      assert.deepEqual(bar.shown.filter(s => /^\+\d$|:1420|:5173/.test(s)), phone ? ['node :1420', '+2'] : ['node :1420', 'Contoso.Enterprise.DevServer :5173', '+1'], `statusbar@${width}: servers`);
+      assert.deepEqual(bar.outside, [], `statusbar@${width}: items outside the bar`);
+      assert.equal(bar.overlaps, 0, `statusbar@${width}: items overlap`);
+      if (!phone) assert.ok(bar.cut, `statusbar@${width}: a long server name is cut short`);
+      assert.ok(bar.bottom, `statusbar@${width}: the bar sits on the window's bottom edge`);
+      await audit('statusbar');
+      await page.click('#statusbar .sb-more');
+      await page.waitForFunction(() => document.querySelectorAll('#pane-menu:not(.hidden) .menu-item').length === 3);
+      await audit('statusbar-servers');
+      const row = page.locator('#pane-menu .menu-item', { hasText: 'python :8000' });
+      const thread = await row.locator('.muted').innerText();
+      await row.click();
+      await page.waitForFunction(t => document.querySelector('#wsname').textContent === t, thread);
+      if (!bar.dropped[4]) {
+        await page.click('#sb-lang');
+        await page.waitForFunction(() => [...document.querySelectorAll('#pane-menu:not(.hidden) .menu-item')].some(r => r.textContent.startsWith('French')));
+        await audit('statusbar-lang');
+        await escape();
+      }
+      await page.click('#sb-pc');
+      await page.locator('#task-manager-dialog .proc').first().waitFor();
+      await page.click('#task-manager-close');
+      // node :1420 is the first pane's: back on the thread the checks after this one expect.
+      await page.click('#statusbar .sb-server');
+      await page.waitForFunction(t => document.querySelector('#wsname').textContent === t, home);
+      await page.evaluate(() => { window.qa.servers = []; });
+      await page.waitForFunction(() => !document.querySelector('#statusbar .sb-server'), null, { timeout: 5000 });
+      // A page in a context of its own, for checks that change what the rest of this run expects.
+      const freshPage = async w => {
+        const ctx = await browser.newContext({ viewport: { width: w, height: 900 } });
+        await ctx.addInitScript({ content: mocks + '\n(' + setup.toString() + ')(' + JSON.stringify(process.env.UI_THEME || 'loom') + ');' });
+        const pg = await ctx.newPage();
+        pg.setDefaultTimeout(10000);
+        await pg.goto(base);
+        await pg.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
+        return { pg, done: () => ctx.close() };
+      };
+      // Peak readings, long names and five-digit ports: every control stays inside the bar. The names give way only
+      // after every optional part has, so a cut-down name never sits beside the version. Here and just above the
+      // phone breakpoint, 481px, where two servers show.
+      const fits = async (pg, w) => {
+        await pg.evaluate(() => {
+          const pane = document.querySelector('.pane').dataset.id;
+          Object.assign(window.qa, { cpu: 100, memGB: 15.6, servers: [['Contoso.Enterprise.Server', 49151], ['Other.Enterprise.Server', 49150], ['third', 49149]].map(([name, port]) => ({ name, port, pane })) });
+        });
+        await pg.waitForFunction(() => document.querySelector('#sb-cpu').textContent === 'CPU 100%' && document.querySelector('#statusbar .sb-server .num')?.textContent === ':49151', null, { timeout: 5000 });
+        const r = await pg.evaluate(() => {
+          const bar = document.querySelector('#statusbar'), box = bar.getBoundingClientRect();
+          const items = [...bar.querySelectorAll('.sb-item')].filter(el => el.getBoundingClientRect().width);
+          // A name narrower than both its text and its cap (.sb-name's max-width) was squeezed.
+          const names = [...bar.querySelectorAll('.sb-name')];
+          return {
+            scroll: bar.scrollWidth, width: bar.clientWidth,
+            outside: items.filter(el => { const r = el.getBoundingClientRect(); return r.left < box.left - 0.5 || r.right > box.right + 0.5; }).map(el => el.innerText.replace(/\s+/g, ' ')),
+            squeezed: names.some(el => el.clientWidth < Math.min(el.scrollWidth, parseFloat(getComputedStyle(el).maxWidth)) - 1),
+            versionShown: !!document.querySelector('#sb-version').getBoundingClientRect().width,
+            readings: document.querySelector('#sb-pc').innerText.replace(/\s+/g, ' '),
+          };
+        });
+        assert.ok(r.scroll <= r.width, `statusbar-peak@${w}: the bar overflows: ${JSON.stringify(r)}`);
+        assert.deepEqual(r.outside, [], `statusbar-peak@${w}: controls outside the bar`);
+        assert.ok(!(r.squeezed && r.versionShown), `statusbar-peak@${w}: names cut down while the version still shows`);
+        assert.match(r.readings, /^CPU 100% Memory 100%/, `statusbar-peak@${w}: the readings`);
+        await pg.screenshot({ path: `${out}/statusbar-peak-${w}.png`, animations: 'disabled' });
+        await pg.evaluate(() => Object.assign(window.qa, { cpu: undefined, memGB: undefined, servers: [] }));
+        await pg.waitForFunction(() => !document.querySelector('#statusbar .sb-server') && document.querySelector('#sb-cpu').textContent === 'CPU 23%', null, { timeout: 5000 });
+      };
+      await fits(page, width);
+      if (width === 320) {
+        const { pg, done } = await freshPage(481);
+        await fits(pg, 481);
+        await done();
+      }
+      // A server's pane closes, here with its whole thread from loomctl. The open list follows the bar at the next
+      // poll, on the new count. A row or button clicked before that shows nothing, never the closed thread with every
+      // grid hidden, and the bar drops that server at once.
+      {
+        const { pg, done } = await freshPage(width);
+        await pg.evaluate(() => {
+          const ids = [...document.querySelectorAll('.pane')].map(p => p.dataset.id); // ids[2]: review-keyboard-navigation's pane
+          window.qa.servers = [['python', 8000, 2], ['node', 1420, 0], ['vite', 5173, 1], ['redis', 6379, 0]].map(([name, port, i]) => ({ name, port, pane: ids[i] }));
+        });
+        await pg.waitForFunction(() => document.querySelector('#statusbar .sb-more'), null, { timeout: 5000 });
+        await pg.click('#statusbar .sb-more');
+        await pg.waitForFunction(() => document.querySelectorAll('#pane-menu:not(.hidden) .menu-item').length === 4);
+        await pg.evaluate(() => { window.qa.servers = window.qa.servers.filter(s => s.name !== 'redis'); });
+        await pg.waitForFunction(() => document.querySelectorAll('#pane-menu:not(.hidden) .menu-item').length === 3, null, { timeout: 5000 })
+          .catch(() => assert.fail(`statusbar-stale@${width}: the open list must follow the bar's servers`));
+        assert.ok(await pg.evaluate(() => {
+          const m = document.querySelector('#pane-menu').getBoundingClientRect(), b = document.querySelector('#statusbar .sb-more').getBoundingClientRect();
+          return m.bottom <= b.top + 1 && m.left < b.right && m.right > b.left;
+        }), `statusbar-stale@${width}: the open list sits on the new count`);
+        const staleRow = await pg.locator('#pane-menu .menu-item', { hasText: 'python :8000' }).elementHandle();
+        const staleButton = await pg.locator('#statusbar .sb-server', { hasText: 'python' }).elementHandle();
+        const reply = await pg.evaluate(async () => {
+          await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', { event: 'cli', payload: { id: 9101, cmd: 'close-thread', argv: ['review-keyboard-navigation', '--yes'], stdin: null, cwd: null, timeout: 5, key: null } });
+          for (const end = Date.now() + 5000; Date.now() < end;) {
+            const c = window.qa.calls.find(c => c.cmd === 'cli_reply' && c.args.id === 9101);
+            if (c) return c.args.reply;
+            await new Promise(r => setTimeout(r, 20));
+          }
+        });
+        assert.equal(reply?.ok, true, `statusbar-stale@${width}: close-thread: ${JSON.stringify(reply)}`);
+        const shown = () => pg.evaluate(() => ({ name: document.querySelector('#wsname').textContent, grids: [...document.querySelectorAll('.grid')].filter(g => !g.classList.contains('hidden')).length }));
+        // Closing a thread shows its neighbour: where the stale clicks must leave things.
+        const home = (await shown()).name;
+        assert.notEqual(home, 'review-keyboard-navigation');
+        // Detached or not, each keeps the click handler it was built with: the clicks a poll would race.
+        await staleRow.evaluate(el => el.click());
+        assert.deepEqual(await shown(), { name: home, grids: 1 }, `statusbar-stale@${width}: a stale list row`);
+        await staleButton.evaluate(el => el.click());
+        assert.deepEqual(await shown(), { name: home, grids: 1 }, `statusbar-stale@${width}: a stale server button`);
+        assert.ok(!(await pg.locator('#statusbar').innerText()).includes('python'), `statusbar-stale@${width}: the closed pane's server leaves the bar`);
+        await done();
+      }
+      // Keyboard focus across a refresh. A row of the open list stays on its server (pane and port), and Enter still
+      // opens it; the count keeps focus while it shows. A row that goes hands focus to the list's first row, a count
+      // that goes to the first server. Focus anywhere else stays where it is.
+      {
+        const { pg, done } = await freshPage(width);
+        const servers = names => pg.evaluate(names => {
+          const ids = [...document.querySelectorAll('.pane')].map(p => p.dataset.id); // ids[2]: review-keyboard-navigation's pane
+          const all = { node: [1420, 0], vite: [5173, 1], redis: [6379, 0], python: [8000, 2] };
+          window.qa.servers = names.map(n => ({ name: n, port: all[n][0], pane: ids[all[n][1]] }));
+        }, names);
+        const focused = () => pg.evaluate(() => document.activeElement === document.body ? 'BODY' : document.activeElement.id || document.activeElement.innerText.replace(/\s+/g, ' ').trim());
+        const rows = n => pg.waitForFunction(n => document.querySelectorAll('#pane-menu:not(.hidden) .menu-item').length === n, n, { timeout: 5000 });
+        const phone = width <= 480;
+        await servers(['node', 'vite', 'redis', 'python']);
+        await pg.waitForFunction(() => document.querySelector('#statusbar .sb-more'), null, { timeout: 5000 });
+        await pg.click('#statusbar .sb-more');
+        await rows(4);
+        await pg.locator('#pane-menu .menu-item', { hasText: 'python :8000' }).focus();
+        await servers(['node', 'vite', 'python']);
+        await rows(3);
+        assert.match(await focused(), /^python :8000 /, `statusbar-focus@${width}: the focused row stays on its server`);
+        await pg.screenshot({ path: `${out}/statusbar-focus-${width}.png`, animations: 'disabled' });
+        await pg.keyboard.press('Enter');
+        await pg.waitForFunction(() => document.querySelector('#wsname').textContent === 'review-keyboard-navigation', null, { timeout: 5000 })
+          .catch(() => assert.fail(`statusbar-focus@${width}: Enter on the kept row opens its pane`));
+        await servers(['node', 'vite', 'redis', 'python']);
+        await pg.waitForFunction(() => document.querySelector('#statusbar .sb-more')?.textContent === (innerWidth <= 480 ? '+3' : '+2'), null, { timeout: 5000 });
+        await pg.click('#statusbar .sb-more');
+        await rows(4);
+        await pg.locator('#pane-menu .menu-item', { hasText: 'redis :6379' }).focus();
+        await servers(['node', 'vite', 'python']);
+        await rows(3);
+        assert.equal(await focused(), await pg.locator('#pane-menu .menu-item').first().evaluate(e => e.innerText.replace(/\s+/g, ' ').trim()), `statusbar-focus@${width}: a row that goes hands focus to the first row`);
+        await pg.keyboard.press('Escape');
+        await pg.locator('#statusbar .sb-more').focus();
+        await servers(['node', 'python']);
+        await pg.waitForFunction(() => innerWidth <= 480 ? document.querySelector('#statusbar .sb-more')?.textContent === '+1' : !document.querySelector('#statusbar .sb-more'), null, { timeout: 5000 });
+        // A phone shows one server, so its count stays (+1); wider, both show and the count goes.
+        assert.equal(await focused(), phone ? '+1' : 'node :1420', `statusbar-focus@${width}: the count keeps focus, or its first server takes it`);
+        if (phone) {
+          await pg.keyboard.press('Enter');
+          await rows(2);
+          await pg.keyboard.press('Escape');
+        } else {
+          await servers(['node', 'vite', 'python']);
+          await pg.waitForFunction(() => document.querySelector('#statusbar .sb-more')?.textContent === '+1', null, { timeout: 5000 });
+          await pg.locator('#statusbar .sb-more').focus();
+          await servers(['node', 'vite', 'redis', 'python']);
+          await pg.waitForFunction(() => document.querySelector('#statusbar .sb-more')?.textContent === '+2', null, { timeout: 5000 });
+          assert.equal(await focused(), '+2', `statusbar-focus@${width}: the count keeps focus as it changes`);
+          await pg.keyboard.press('Enter');
+          await rows(4);
+          await pg.keyboard.press('Escape');
+        }
+        await pg.locator('#dashboard-btn').focus();
+        await servers(['vite']);
+        await pg.waitForFunction(() => document.querySelector('#statusbar .sb-server')?.innerText.includes('vite'), null, { timeout: 5000 });
+        assert.equal(await focused(), 'dashboard-btn', `statusbar-focus@${width}: focus elsewhere stays put`);
+        await done();
+      }
     }
     // Task notices: a pane's bell, its menu open, and the Preferences rows (finished / failed / blocked) all fit and stay tappable.
     {

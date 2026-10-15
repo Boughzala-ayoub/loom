@@ -248,6 +248,14 @@ async fn status(app: &AppHandle) -> Value {
     json!({ "on": on, "listening": listening, "port": port, "phones": phones, "pushes": pushes, "devices": devices, "pairing": pairing, "error": error, "address": name.map(|n| format!("https://{n}")) })
 }
 
+/// The status bar's word on the remote (main.ts paintStatus): None while off,
+/// else its port, whether it listens, and why not. Locks only: the bar asks every few seconds.
+pub fn bar(app: &AppHandle) -> Option<Value> {
+    let remote = app.state::<Remote>();
+    let (on, port) = { let c = remote.config.lock().unwrap(); (c.on, c.port.unwrap_or(PORT)) };
+    on.then(|| json!({ "port": port, "listening": remote.server.lock().unwrap().is_some(), "error": remote.error.lock().unwrap().clone() }))
+}
+
 /// This PC's name on your tailnet, if Tailscale is installed and signed in.
 fn tailnet_name() -> Option<String> {
     use std::os::windows::process::CommandExt;

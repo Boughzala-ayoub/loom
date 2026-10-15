@@ -169,6 +169,19 @@
       </div>
     </div>
 
+    <!-- The status bar: dictation's key and settings, then the servers the
+         panes run, the phone remote and this PC. Narrow windows keep the right side. -->
+    <footer id="statusbar" aria-label="Status">
+      <span class="sb-item sb-dictate"><i class="i i-mic" aria-hidden="true"></i>Hold <kbd>F4</kbd> to dictate</span>
+      <button id="sb-lang" class="sb-item" aria-haspopup="menu"></button>
+      <button id="sb-prefix" class="sb-item" aria-haspopup="menu"></button>
+      <span class="spacer"></span>
+      <span id="sb-servers"></span>
+      <span id="sb-remote" class="sb-item hidden"><span class="dot"></span>phone remote <span class="num"></span></span>
+      <button id="sb-pc" class="sb-item" title="This PC's CPU and memory: click for the task manager"><span id="sb-cpu"></span><span id="sb-mem"></span><span id="sb-mem-of" class="sb-detail"></span></button>
+      <span id="sb-version" class="sb-item"></span>
+    </footer>
+
     <div id="pane-menu" class="hidden">
       <div id="menu-list"></div>
       <input id="menu-add" spellcheck="false" placeholder="add a command…" title="Enter adds it to the list" />

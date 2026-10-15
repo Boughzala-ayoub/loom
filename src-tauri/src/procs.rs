@@ -83,14 +83,77 @@ fn ticks(t: FILETIME) -> u64 {
     (t.dwHighDateTime as u64) << 32 | t.dwLowDateTime as u64
 }
 
+/// The whole PC's CPU time so far: (busy, total), 0s when Windows wouldn't say.
+fn cpu_times() -> (u64, u64) {
+    let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+    if unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.is_err() {
+        return (0, 0);
+    }
+    // Kernel time counts the idle time too.
+    let total = ticks(kernel) + ticks(user);
+    (total.saturating_sub(ticks(idle)), total)
+}
+
+/// The bar's own last CPU times and when, so it and a phone's task manager don't take each other's share.
+static BAR: Mutex<Option<(Instant, u64, u64)>> = Mutex::new(None);
+
+/// The status bar's CPU and memory (main.ts paintStatus): the PC's CPU share
+/// since the bar's last reading, and memory in use of all.
+pub fn bar() -> Value {
+    let mut last = BAR.lock().unwrap();
+    // The first reading in a while (Loom was hidden): a second shortly after, so it says how busy the PC is now.
+    if last.is_none_or(|(at, ..)| at.elapsed() > STALE) {
+        let (busy, total) = cpu_times();
+        *last = Some((Instant::now(), busy, total));
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let (busy, total) = cpu_times();
+    let (_, was_busy, was_total) = last.replace((Instant::now(), busy, total)).unwrap();
+    let mut mem = MEMORYSTATUSEX { dwLength: size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    let _ = unsafe { GlobalMemoryStatusEx(&mut mem) };
+    json!({
+        "cpu": share(busy.saturating_sub(was_busy), total.saturating_sub(was_total)),
+        "memory": { "used": mem.ullTotalPhys - mem.ullAvailPhys, "total": mem.ullTotalPhys },
+    })
+}
+
+/// Each TCP port listened on, IPv4 and IPv6, with the pid listening: twice
+/// for a server on both (vite on 127.0.0.1 and ::1).
+pub(crate) fn listening() -> Vec<(u32, u16)> {
+    use windows::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_LISTENER};
+    // AF_INET and AF_INET6.
+    let table = |family: u32| -> Vec<u32> {
+        // u32s: the count, then rows of u32s and bytes.
+        let mut buf: Vec<u32> = Vec::new();
+        for _ in 0..3 {
+            let mut size = (buf.len() * 4) as u32;
+            let ptr = if buf.is_empty() { None } else { Some(buf.as_mut_ptr().cast()) };
+            match unsafe { GetExtendedTcpTable(ptr, &mut size, false, family, TCP_TABLE_OWNER_PID_LISTENER, 0) } {
+                0 => return buf,
+                // ERROR_INSUFFICIENT_BUFFER: room for the sockets opened before the next try.
+                122 => buf = vec![0; size as usize / 4 + 64],
+                _ => break,
+            }
+        }
+        Vec::new()
+    };
+    // SAFETY: Windows wrote the count, then that many rows of the family's type, from the second u32.
+    fn rows<T>(buf: &[u32]) -> &[T] {
+        if buf.is_empty() { return &[] }
+        unsafe { std::slice::from_raw_parts(buf.as_ptr().add(1).cast::<T>(), buf[0] as usize) }
+    }
+    // The port is in network byte order, in the low 16 bits.
+    let port = |p: u32| u16::from_be(p as u16);
+    let v4 = table(2);
+    let v6 = table(23);
+    rows::<MIB_TCPROW_OWNER_PID>(&v4).iter().map(|r| (r.dwOwningPid, port(r.dwLocalPort)))
+        .chain(rows::<MIB_TCP6ROW_OWNER_PID>(&v6).iter().map(|r| (r.dwOwningPid, port(r.dwLocalPort))))
+        .collect()
+}
+
 fn sample() -> (Times, Vec<Proc>) {
     let mut times = Times { at: Some(Instant::now()), ..Default::default() };
-    let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
-    if unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.is_ok() {
-        // Kernel time counts the idle time too.
-        times.total = ticks(kernel) + ticks(user);
-        times.busy = times.total.saturating_sub(ticks(idle));
-    }
+    (times.busy, times.total) = cpu_times();
     let procs = list();
     times.procs = procs.iter().map(|p| ((p.pid, p.created), p.time)).collect();
     (times, procs)
@@ -287,5 +350,23 @@ mod tests {
         assert!(!procs.iter().any(|p| p["pid"] == 0), "the idle process is no process");
         assert!(v["memory"]["used"].as_u64().unwrap() < v["memory"]["total"].as_u64().unwrap());
         assert!(v["uptime"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn a_port_listened_on_is_read_with_its_pid() {
+        let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let v6 = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let all = listening();
+        for l in [v4, v6] {
+            let port = l.local_addr().unwrap().port();
+            assert!(all.contains(&(std::process::id(), port)), "port {port} in {all:?}");
+        }
+    }
+
+    #[test]
+    fn the_bar_reads_cpu_and_memory_from_its_first_call() {
+        let v = bar();
+        assert!(v["cpu"].is_f64(), "{v}");
+        assert!(v["memory"]["used"].as_u64().unwrap() < v["memory"]["total"].as_u64().unwrap(), "{v}");
     }
 }

@@ -1815,6 +1815,39 @@ fn exe_updated() -> bool {
     at.is_some() && exe_written() != at
 }
 
+/// The status bar's reading, every few seconds (main.ts paintStatus): the PC's
+/// CPU and memory, the phone remote, and the TCP ports the panes' processes
+/// listen on, each with its pane and the listening exe's name.
+#[tauri::command]
+async fn status_bar(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut v = procs::bar();
+        v["remote"] = remote::bar(&app).into();
+        // Each pane's processes, its job's: what it started, detached or not.
+        let panes: Vec<(String, Vec<u32>)> = app.state::<Ptys>().0.lock().unwrap().iter()
+            .filter_map(|(id, s)| Some((id.clone(), s._job.as_ref()?.pids()))).collect();
+        let mut servers: Vec<(u16, &str, u32)> = Vec::new();
+        for (pid, port) in procs::listening() {
+            // ponytail: Windows' dynamic range (49152 up) holds agents' own sockets (each Codex pane has one), not servers; a server on a random port there goes unlisted.
+            if port >= 49152 { continue }
+            let Some((pane, _)) = panes.iter().find(|(_, pids)| pids.contains(&pid)) else { continue };
+            if !servers.iter().any(|s| s.0 == port && s.1 == pane) { servers.push((port, pane, pid)) }
+        }
+        servers.sort();
+        v["servers"] = servers.iter().map(|&(port, pane, pid)| serde_json::json!({ "port": port, "pane": pane, "name": exe_name(pid) })).collect();
+        v
+    }).await.map_err(|e| e.to_string())
+}
+
+/// Process `pid`'s exe without its folder or .exe, "" when Loom can't open it.
+fn exe_name(pid: u32) -> String {
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let Ok(process) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }) else { return String::new() };
+    let image = image_of(process);
+    unsafe { let _ = windows::Win32::Foundation::CloseHandle(process); }
+    image.and_then(|p| Some(p.file_stem()?.to_string_lossy().into_owned())).unwrap_or_default()
+}
+
 /// Waits up to a minute for process `pid` to exit.
 fn wait_exit(pid: u32) {
     use windows::Win32::Foundation::CloseHandle;
@@ -2256,7 +2289,7 @@ pub fn run() {
             commands::canonical_directory,
             commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
             commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::stash_drop, commands::branch_delete, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
-            commands::model_options, commands::context_profile, commands::last_messages, commands::grok_turn_end, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, relaunch_cancel, exe_updated,
+            commands::model_options, commands::context_profile, commands::last_messages, commands::grok_turn_end, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, relaunch_cancel, exe_updated, status_bar,
             commands::task_journal_read, commands::task_journal_write,
             commands::dictate_start,
             commands::dictate_stop,

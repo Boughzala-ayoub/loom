@@ -66,7 +66,7 @@ cpal = "0.18.1"
 # Already in the tree through tao and wry: the overlay shows without taking focus,
 # and the phone's task manager reads processes, CPU and memory (procs.rs), and
 # branch deletion reads which folders git.exe processes run in (deletion.rs).
-windows = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming", "Wdk_System_SystemInformation", "Wdk_System_Threading", "Win32_System_Diagnostics_Debug"] }
+windows = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Power", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming", "Wdk_System_SystemInformation", "Wdk_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_NetworkManagement_IpHelper"] }
 
 [dev-dependencies]
 # A paused clock, so remote.rs's upload deadlines are tested in minutes that take none.
