@@ -153,7 +153,7 @@ async function restartLoom() {
 }
 
 /** The task manager (src/procs.ts) in a sheet, read through remote.rs's /api/procs. */
-async function openTasks() {
+export async function openTasks() {
   const view = procsView(() => run<Reading>("procs", [], { path: "/api/procs", timeout: 10 }));
   const closed = sheet([view.box], "Task manager", "Close");
   $("#sheet").classList.add("tasks-sheet");

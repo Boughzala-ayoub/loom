@@ -90,6 +90,10 @@ function reading(state) {
       { pid: 9001, name: 'loom.exe', cpu: 2.2, memory: 310 * MB },
     ] };
 }
+// The servers the panes run, as the strip reads them: a long name first (the widest strip, in every view),
+// and a five-digit port.
+const SERVER = 'Contoso.Enterprise.Synchronization';
+const SERVERS = [{ port: 3000, pane: 'a1', name: SERVER }, { port: 8000, pane: 'b1', name: 'python' }, { port: 45678, pane: 'b1', name: 'node' }];
 // The phones paired with Loom (loomctl remote's devices): this one, whose id is the start of its token's SHA-256
 // as remote.rs keeps it, one with a long name, and one paired before Loom kept names and times.
 const MINE = createHash('sha256').update('fixture-token').digest('hex').slice(0, 12);
@@ -240,6 +244,8 @@ async function context(width, token = true, push = false) {
     if (state.renamed) { threads[0].name = 'Renamed'; threads[0].panes[0].ref = 'Renamed:1'; }
     // Another thread named Alpha: its Claude is Alpha:1 too.
     if (state.twins) threads.push(thread('c', 'Alpha'));
+    // extra: that many more threads, a list longer than the screen.
+    for (let i = 0; i < (state.extra ?? 0); i++) threads.push(thread(`x${i}`, `Extra${i}`));
     if (state.changedTitle) threads[1].panes[0].title = 'Another agent has changed its title';
     if (state.shell) threads[1].panes[0].agent = 'shell';
     // Loom restarted on the PC (restartPc): the same agents, with new pane ids and the sids saved with them.
@@ -273,6 +279,9 @@ async function context(width, token = true, push = false) {
       case 'theme': data = state.theme ? [{ ...state.theme, current: true }] : ['loom', 'nord', 'light'].map((name, i) => ({ name, scheme: i === 2 ? 'light' : 'dark', current: i === 0, vars: {} })); break;
       // The task manager's reading comes from remote.rs itself, not loomctl (core.ts run's path).
       case 'procs': if (!req.url().endsWith('/api/procs')) return route.fulfill({ status: 404, json: { ok: false, error: 'Not found.' } }); data = reading(state); break;
+      // So is the strip's (lib.rs status_reading): servers sorted by port, state.servers or SERVERS, and state.cpu.
+      case 'bar': if (!req.url().endsWith('/api/bar')) return route.fulfill({ status: 404, json: { ok: false, error: 'Not found.' } });
+        data = { cpu: state.cpu ?? 23.4, memory: { used: 13.3 * 1024 * MB, total: 15.6 * 1024 * MB }, remote: null, servers: state.servers ?? SERVERS }; break;
       // planUsage: the PC's Plan usage, 'on' unless a test turns it off.
       case 'set': if (c.argv[0] === 'plan-usage' && c.argv[1]) state.planUsage = c.argv[1]; data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': state.planUsage ?? 'on', font: '13' }; break;
       case 'notify': data = { all: 'on', kinds: { finish: true, fail: true, blocked: true }, newPanes: 'inherit' }; break;
@@ -375,12 +384,34 @@ async function taps(page, width, root) {
   const small = await page.evaluate(r => [...document.querySelectorAll(`${r} button, ${r} input`)].filter(e => e.offsetParent && e.getBoundingClientRect().height < 44).map(e => e.outerHTML.slice(0, 80)), root);
   assert.deepEqual(small, [], `${width}: controls under 44 px in ${root}`);
 }
+/** The strip floats on its own: 8 px and more above the tab bar on a phone, in the list's column when wide,
+ * New thread above it, every part a finger tall, and a long name cut short rather than pushing CPU and RAM
+ * out. `end`: the list's last agent, scrolled to, stays above it. */
+async function stripFits(page, width, name, end = false) {
+  await page.locator('#strip:not([hidden]) .ss-pc').waitFor();
+  await taps(page, width, '#strip');
+  const s = await page.evaluate(end => {
+    const box = e => e?.checkVisibility() ? e.getBoundingClientRect() : null; // fixed: no offsetParent
+    if (end) { scrollTo(0, document.documentElement.scrollHeight); document.querySelector('#list').scrollTop = 1e6; }
+    const cap = document.querySelector('#strip .ss-cap'), nm = document.querySelector('#strip .ss-name');
+    return { strip: box(document.querySelector('#strip')).toJSON(), tabs: box(document.querySelector('nav#tabs')).toJSON(), fab: box(document.querySelector('.fab'))?.toJSON(),
+      pc: box(document.querySelector('#strip .ss-pc')).right, capRight: box(cap).right, spills: cap.scrollWidth > cap.clientWidth, cut: nm ? nm.scrollWidth > nm.clientWidth : null,
+      vals: [...document.querySelectorAll('#strip .ss-val')].map(v => v.textContent), last: end ? box([...document.querySelectorAll('#list .agent')].at(-1)).bottom : null };
+  }, end);
+  if (width < 900) assert.ok(s.strip.bottom <= s.tabs.top - 8 && s.strip.left >= 11.5 && s.strip.right <= width - 11.5, `${width} ${name}: the strip floats apart from the tabs ${JSON.stringify([s.strip, s.tabs])}`);
+  else assert.ok(s.strip.left >= 84 && s.strip.right <= 84 + 380, `${width} ${name}: the strip sits in the list's column ${JSON.stringify(s.strip)}`);
+  if (s.fab) assert.ok(s.fab.bottom <= s.strip.top - 8, `${width} ${name}: New thread sits above the strip`);
+  assert.ok(!s.spills && s.pc <= s.capRight, `${width} ${name}: CPU and RAM stay inside the strip`);
+  if (width <= 375 && s.cut !== null) assert.ok(s.cut, `${width} ${name}: the long server name is cut short`);
+  assert.deepEqual(s.vals, ['23%', '85%'], `${width} ${name}: CPU and RAM`);
+  if (end) assert.ok(s.last <= s.strip.top, `${width} ${name}: the list's last agent scrolls clear of the strip (${s.last} > ${s.strip.top})`);
+}
 try {
   for (const width of (process.env.REMOTE_WIDTHS || '320,375,768,901,1024,1280').split(',').map(Number)) {
     const { ctx, page } = await context(width, false);
     await goto(page, '', '#pairing form'); await fits(page, width, 'pairing'); await ctx.close();
     const { ctx: c2, page: p, state } = await context(width);
-    await goto(p, '', '#list .agent'); await fits(p, width, 'threads');
+    await goto(p, '', '#list .agent'); await stripFits(p, width, 'threads', true); await fits(p, width, 'threads');
     // An OMP pane shows OMP's mark.
     state.omp = true; await goto(p, '', '#list .agent');
     assert.ok(await p.evaluate(() => [...document.querySelectorAll('#list svg.ico path')].some(e => e.getAttribute('d') === 'M0 1.5h24v4.5H0zM3 6h6v10.5H3zM13.5 6h6v16.5h-6z')), `${width}: OMP's mark in the list`);
@@ -400,7 +431,9 @@ try {
     await sheetButton(p, 'Rename').click(); await fits(p, width, 'rename'); await close(p);
     await p.locator('#list .seg button').filter({ hasText: 'Activity' }).click(); await p.locator('#list .card').first().waitFor(); await fits(p, width, 'activity');
     await attach(p, '#list .card >> nth=0', PNG); await p.locator('#list .card .shot').first().waitFor(); await fits(p, width, 'activity-image'); await taps(p, width, '#list .reply-box');
-    await goto(p, '#/pane/a1', '#screen .line'); await fits(p, width, 'pane-question'); await p.click('#keys-btn'); await fits(p, width, 'keyboard');
+    await goto(p, '#/pane/a1', '#screen .line'); await fits(p, width, 'pane-question');
+    // A phone gives an agent the whole screen, strip and tabs gone; wide, the strip stays in the list's column.
+    assert.equal(await p.locator('#strip').isVisible(), width >= 900, `${width}: the strip beside an agent`); await p.click('#keys-btn'); await fits(p, width, 'keyboard');
     await p.locator('#keys [data-key=fn]').click(); await fits(p, width, 'function-keys'); await p.click('#more'); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'pane-menu'); await close(p);
     // Dictating: the recording bar in the box's place, then the Dictation sheet from ⋯.
     await p.click('#mic'); await p.locator('#rec .info b', { hasText: '0:01' }).waitFor(); await fits(p, width, 'recording'); await taps(p, width, '#rec'); await p.getByRole('button', { name: 'Cancel dictation' }).click();
@@ -466,9 +499,9 @@ try {
     for (const sec of ['unstaged', 'staged', 'untracked']) { await goto(p, `#/diff/a/${sec}/alpha.txt`, '#diff .hunk'); await fits(p, width, `diff-${sec}`); }
     await goto(p, '#/commit/a/abc1234', '#diff .commit-head'); await fits(p, width, 'commit');
     await goto(p, '#/files/a', '#files .list-row'); await fits(p, width, 'files'); await goto(p, '#/file/a/alpha.txt', '#diff .r'); await fits(p, width, 'file');
-    await goto(p, '#/usage', '#usage .provider'); await fits(p, width, 'usage'); await goto(p, '#/context/a1', '#context .bars'); await fits(p, width, 'context');
+    await goto(p, '#/usage', '#usage .provider'); await stripFits(p, width, 'usage'); await fits(p, width, 'usage'); await goto(p, '#/context/a1', '#context .bars'); await fits(p, width, 'context');
     state.planUsage = 'off'; await goto(p, '#/usage', '#usage .provider:has-text("Plan usage is off")'); await fits(p, width, 'usage-plan-off'); await taps(p, width, '#usage .provider'); state.planUsage = 'on';
-    await goto(p, '#/settings', '#settings .group'); await fits(p, width, 'settings');
+    await goto(p, '#/settings', '#settings .group'); await stripFits(p, width, 'settings'); await fits(p, width, 'settings');
     await p.locator('#settings .setting', { hasText: 'Language and prefix' }).locator('button').click(); await p.locator('#sheet.on .dict-row').first().waitFor(); await fits(p, width, 'settings-dictation'); await sheetButton(p, 'Done').click(); await p.locator('#settings .setting').filter({ hasText: 'Theme' }).locator('button').click(); await fits(p, width, 'themes'); await close(p);
     await p.getByRole('button', { name: 'Unpair all', exact: true }).click(); await fits(p, width, 'unpair-confirm'); await close(p);
     // The paired phones, each with its Remove: none, this one alone, then three with a long name, which is cut
@@ -495,6 +528,67 @@ try {
   }
   assert.deepEqual(overflow, [], 'no view may be wider than the window');
   console.log(`PASS ${checks} views fit their width`);
+
+  // --- The strip above the tabs --------------------------------------------------------------
+  // Its server opens that pane, +2 lists all three and each opens its own, CPU and RAM open the task manager.
+  // A server whose pane the phone hasn't read waits, none says "No servers", it reads every 3 s and shows a
+  // new reading, and a list longer than the screen scrolls its last agent clear of it.
+  for (const width of [375, 1024]) {
+    const { ctx, page, state } = await context(width);
+    const hash = () => page.evaluate(() => location.hash);
+    await goto(page, '', '#list .agent');
+    await page.locator('#strip:not([hidden]) .ss-server').waitFor();
+    assert.deepEqual([await page.locator('#strip .ss-name').innerText(), await page.locator('#strip .ss-port').innerText(), await page.locator('#strip .ss-count').innerText()], [SERVER, ':3000', '+2']);
+    await page.locator('#strip .ss-server').click();
+    await until(`${width}: the server opens its pane`, async () => (await hash()) === '#/pane/a1');
+    await goto(page, '', '#list .agent');
+    await page.locator('#strip .ss-more').click();
+    await page.locator('#sheet.on .ss-row').nth(2).waitFor();
+    const rows = await page.evaluate(() => [...document.querySelectorAll('#sheet .ss-row')].map(r => [r.querySelector('b').textContent, r.querySelector('small').textContent, r.querySelector('.ss-port').textContent]));
+    assert.deepEqual(rows, [[SERVER, 'Alpha · pane 1', ':3000'], ['python', 'Beta · pane 1', ':8000'], ['node', 'Beta · pane 1', ':45678']]);
+    await page.waitForTimeout(250); // the sheet's way in, before a screenshot
+    await fits(page, width, 'strip-servers'); await taps(page, width, '#sheet');
+    await page.locator('#sheet .ss-row').nth(1).click();
+    await until(`${width}: a listed server opens its pane`, async () => (await hash()) === '#/pane/b1' && await page.locator('#sheet').isHidden());
+    await goto(page, '', '#list .agent');
+    await page.locator('#strip .ss-pc').click();
+    await page.locator('#sheet.on.tasks-sheet .proc').first().waitFor();
+    await page.locator('#sheet').getByRole('button', { name: 'Close', exact: true }).click();
+    // A pane the phone hasn't read yet: its server waits for a reading that has it. None at all: "No servers".
+    state.servers = [{ port: 3000, pane: 'zz9', name: 'ghost' }, { port: 8000, pane: 'b1', name: 'python' }];
+    await until(`${width}: an unknown pane's server waits`, async () => (await page.locator('#strip .ss-name').innerText()) === 'python' && !(await page.locator('#strip .ss-more').count()), 5000);
+    state.servers = [];
+    await page.locator('#strip .ss-none', { hasText: 'No servers' }).waitFor({ timeout: 5000 });
+    await stripFits(page, width, 'no-servers'); await fits(page, width, 'strip-none');
+    // Every 3 s, and a new reading shows.
+    const reads = () => state.calls.filter(c => c.cmd === 'bar').length;
+    const first = reads();
+    await page.waitForTimeout(6500);
+    assert.ok(reads() - first >= 2 && reads() - first <= 3, `${width}: two or three reads in 6.5 s, not ${reads() - first}`);
+    state.cpu = 71.6;
+    await page.locator('#strip .ss-val', { hasText: '72%' }).waitFor({ timeout: 5000 });
+    assert.equal(await page.locator('#strip .ss-fill').first().evaluate(e => e.style.width), '72%');
+    // A list longer than the screen.
+    Object.assign(state, { cpu: undefined, servers: undefined, extra: 12 });
+    await goto(page, '', '#list .agent');
+    await until(`${width}: 14 threads`, async () => (await page.locator('#list .agent').count()) === 14);
+    await stripFits(page, width, 'long-list', true);
+    await page.screenshot({ path: resolve(out, `${width}-strip-long-list.png`) });
+    assert.deepEqual(state.errors, [], `${width}: errors in the page`);
+    await ctx.close();
+  }
+  // In a light theme the strip wears the PC's colours too.
+  {
+    const { ctx, page, state } = await context(375);
+    state.theme = { name: 'paper', scheme: 'light', vars: palette('paper') };
+    await goto(page, '', '#list .agent');
+    await stripFits(page, 375, 'paper');
+    assert.equal(await page.locator('#strip .ss-cap').evaluate(e => getComputedStyle(e).backgroundColor), await page.evaluate(() => { const d = document.createElement('div'); d.style.color = getComputedStyle(document.documentElement).getPropertyValue('--raise'); document.body.append(d); const c = getComputedStyle(d).color; d.remove(); return c; }));
+    await page.screenshot({ path: resolve(out, '375-strip-paper.png') });
+    assert.deepEqual(state.errors, []);
+    await ctx.close();
+  }
+  console.log('PASS the strip: its server and each listed one open their pane, CPU and RAM the task manager; unknown panes wait, none says so; read every 3 s; a long list scrolls clear; light theme');
 
   // --- The task manager (Settings, On the PC) -----------------------------------------------
   // In a dark and a light theme at every width: the modal fits, a 60-character name is cut short with its

@@ -484,6 +484,7 @@ async fn route(app: &AppHandle, request: &Request, port: u16) -> Reply {
         ("POST", "/api/image") => image(app, request).await,
         ("POST", "/api/push") => push(app, request),
         ("POST", "/api/procs") => procs(app, request).await,
+        ("POST", "/api/bar") => strip(app, request).await,
         ("GET", "/api/link") => link_secret(request),
         _ => Reply::error(404, "Not found."),
     }
@@ -841,6 +842,19 @@ async fn procs(app: &AppHandle, request: &Request) -> Reply {
         return unpaired();
     }
     match tauri::async_runtime::spawn_blocking(crate::procs::read).await {
+        Ok(data) => Reply::json(200, json!({ "ok": true, "data": data })),
+        Err(error) => Reply::error(500, &error.to_string()),
+    }
+}
+
+/// The phone's strip above its tabs: the PC status bar's reading (lib.rs
+/// status_reading), every 3 s while the page is in view. Read here, as procs is.
+async fn strip(app: &AppHandle, request: &Request) -> Reply {
+    if phone(app, request).is_none() {
+        return unpaired();
+    }
+    let app = app.clone();
+    match tauri::async_runtime::spawn_blocking(move || crate::status_reading(&app)).await {
         Ok(data) => Reply::json(200, json!({ "ok": true, "data": data })),
         Err(error) => Reply::error(500, &error.to_string()),
     }

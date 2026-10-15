@@ -175,6 +175,22 @@ try {
   assert.ok(pc.procs.some(p => p.pid === child.pid && p.name === 'loom.exe'), 'the test Loom itself');
   assert.ok(pc.memory.used < pc.memory.total && pc.uptime > 0 && pc.cpu >= 0 && pc.cpu <= 100, JSON.stringify({ ...pc, procs: pc.procs.length }));
   console.log(`PASS /api/procs for a paired phone only: ${pc.procs.length} processes, CPU ${pc.cpu}%, System at ${system.cpu}%`);
+  // The strip's reading (lib.rs status_reading, through /api/bar): the PC's CPU and memory, and a server the
+  // cmd pane runs, with that pane and its exe, until Ctrl+C ends it.
+  assert.equal((await api('/api/bar', {})).status, 401, 'No token, no strip');
+  const cmdPane = ok('--json', 'threads').json[0].panes[0].id;
+  for (let i = 0; i < 100 && !/>\s*$/.test(ok('read', cmdPane).out); i++) await pause(200);
+  const served = 40000 + (process.pid % 9000); // under 49152, where the strip lists servers
+  const bar = async () => (await (await api('/api/bar', {}, auth)).json()).data;
+  ok('send', cmdPane, `node -e "require('http').createServer().listen(${served}, '127.0.0.1')"`);
+  let reading;
+  for (let i = 0; i < 40 && !(reading = await bar()).servers.some(s => s.port === served); i++) await pause(500);
+  assert.ok(reading.memory.used < reading.memory.total && reading.cpu >= 0 && reading.cpu <= 100, JSON.stringify(reading));
+  assert.deepEqual(reading.servers.find(s => s.port === served), { port: served, pane: cmdPane, name: 'node' }, JSON.stringify(reading.servers));
+  ok('keys', cmdPane, 'ctrl-c');
+  for (let i = 0; i < 40 && (reading = await bar()).servers.some(s => s.port === served); i++) await pause(500);
+  assert.ok(!reading.servers.some(s => s.port === served), 'the server leaves the strip once it ends');
+  console.log(`PASS /api/bar for a paired phone only: CPU ${reading.cpu}%, and node on :${served} in the cmd pane until Ctrl+C`);
   assert.match(ok('remote').out, /1 phone paired/);
   assert.ok(!readFileSync(profile.replace(/\.json$/, '.remote.json'), 'utf8').includes(token), 'Only a hash of the token is saved');
   code = ok('--json', 'remote', 'pair').json.pairing;

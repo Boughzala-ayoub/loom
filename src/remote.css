@@ -37,6 +37,8 @@
   --shadow: 0 12px 32px -8px rgb(0 0 0 / 0.7);
   --safe-b: env(safe-area-inset-bottom, 0px);
   --bar: calc(64px + var(--safe-b));
+  --strip: 54px; /* the strip above the tabs (strip.ts), and the gap above and below it */
+  --strip-gap: 10px;
   font: 16px/1.4 var(--ui);
 }
 :root[data-scheme="light"] { color-scheme: light; --shadow: 0 12px 32px -12px rgb(0 0 0 / 0.25); --on-accent: #fff; }
@@ -81,7 +83,7 @@ code, .mono { font-family: var(--mono); }
 .switch:checked::after { transform: translateX(22px); background: var(--on-accent); }
 
 /* The frame: screens above a tab bar (phone) or beside a rail (wide) -------- */
-#app { min-height: 100dvh; padding-bottom: var(--bar); }
+#app { min-height: 100dvh; padding-bottom: calc(var(--bar) + var(--strip) + var(--strip-gap) * 2); }
 .screen { min-width: 0; min-height: calc(100dvh - var(--bar)); }
 .top { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 4px; min-height: 60px; padding: 6px 6px 6px 18px; background: var(--bg); }
 .top.back-top { padding-left: 4px; }
@@ -108,6 +110,36 @@ nav#tabs a { position: relative; display: grid; place-items: center; align-conte
 nav#tabs a svg { width: 22px; height: 22px; }
 nav#tabs a[aria-current="page"] { color: var(--text); font-weight: 600; }
 nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 99px; background: var(--warn); color: #1a1405; font: 700 11px/18px var(--ui); text-align: center; }
+/* The strip above the tabs (strip.ts): the PC's servers, CPU and RAM in a capsule of its own, with
+   the list fading out behind it. Each part is a whole tap target, 46 px tall. */
+#strip-fade { position: fixed; z-index: 2; left: 0; right: 0; bottom: var(--bar); height: calc(var(--strip) + var(--strip-gap) * 2 + 14px); pointer-events: none; background: linear-gradient(transparent, var(--bg) 42%); }
+#strip { position: fixed; z-index: 4; left: 12px; right: 12px; bottom: calc(var(--bar) + var(--strip-gap)); display: flex; max-width: 560px; height: var(--strip); margin: 0 auto; color: var(--muted); font: 13px/1 var(--ui); white-space: nowrap; }
+.ss-cap { flex: 1; min-width: 0; display: flex; align-items: stretch; padding: 3px; border: 1px solid var(--edge-hi); border-radius: 18px; background: var(--raise); box-shadow: 0 14px 32px -16px rgb(0 0 0 / 0.55), inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent); }
+#strip button { min-width: 0; min-height: 0; display: flex; align-items: center; gap: 8px; padding: 0 11px; border: 0; border-radius: 14px; background: none; }
+#strip button:active { background: var(--press); }
+.ss-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-dim); }
+.ss-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text); font-weight: 600; }
+.ss-port { margin-left: -6px; color: var(--faint); font-weight: 500; font-variant-numeric: tabular-nums; }
+.ss-count { padding: 5px 8px; border-radius: 99px; background: var(--press); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
+#strip .ss-more { flex: none; padding: 0 8px 0 2px; }
+.ss-none { display: flex; align-items: center; gap: 8px; padding: 0 12px; color: var(--faint); }
+.ss-none .ss-dot { background: none; box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.ss-sep { flex: none; width: 1px; margin: 12px 2px; background: var(--edge-hi); }
+#strip .ss-pc { flex: none; margin-left: auto; gap: 14px; padding: 0 10px; }
+.ss-meter { display: grid; gap: 6px; min-width: 58px; }
+.ss-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.ss-label { color: var(--faint); font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+.ss-val { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ss-track { height: 3px; border-radius: 3px; background: var(--edge-hi); overflow: hidden; }
+.ss-fill { display: block; height: 100%; border-radius: inherit; background: var(--muted); }
+@media (max-width: 360px) { #strip .ss-port { display: none; } #strip .ss-pc { gap: 12px; padding: 0 8px; } .ss-meter { min-width: 52px; } }
+#sheet .ss-rows { display: grid; gap: 2px; margin: 2px 0 6px; }
+#sheet .ss-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 60px; padding: 0 10px; border: 0; border-radius: 14px; background: none; text-align: left; }
+#sheet .ss-row:active { background: var(--press); }
+#sheet .ss-row .ss-dot { width: 8px; height: 8px; }
+#sheet .ss-row b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+#sheet .ss-row small { display: block; margin-top: 4px; color: var(--muted); font-size: 13px; }
+#sheet .ss-row .ss-port { margin: 0; padding: 5px 9px; border-radius: 8px; background: var(--press); color: var(--muted); font: 13px var(--mono); }
 
 @media (min-width: 900px) {
   #app { display: grid; grid-template-columns: 84px 380px minmax(0, 1fr); padding-bottom: 0; }
@@ -121,13 +153,17 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
   .screen.primary.alone .body { max-width: 760px; }
   .back-top .back { display: none; }
   .back-top { padding-left: 18px !important; }
+  /* The strip sits at the foot of the list column, under New thread. */
+  #strip { left: calc(84px + 12px); right: auto; width: calc(380px - 24px); bottom: calc(12px + var(--safe-b)); margin: 0; }
+  #strip-fade { left: 84px; right: auto; width: 380px; bottom: 0; height: calc(var(--strip) + 38px); }
+  .screen.primary { padding-bottom: calc(var(--strip) + 24px); }
 }
 /* Phones show one screen at a time: the detail when there is one. */
 @media (max-width: 899px) {
   #app[data-detail] .screen.primary { display: none; }
   /* A detail screen has the whole phone: its back arrow returns to the tabs. */
   #app[data-detail] { padding-bottom: 0; }
-  #app[data-detail] nav#tabs { display: none; }
+  #app[data-detail] :is(nav#tabs, #strip, #strip-fade) { display: none; }
   #app[data-detail] .pane-screen { height: 100dvh; }
   #app[data-detail] .screen { min-height: 100dvh; }
   #app[data-detail] #dock { padding-bottom: calc(14px + var(--safe-b)); }
@@ -178,9 +214,9 @@ nav#tabs .badge { position: absolute; top: 6px; left: calc(50% + 8px); min-width
 
 /* New thread floats over the list; the list ends clear of it. */
 #list .body { padding-bottom: 96px; }
-.fab { position: fixed; right: 16px; bottom: calc(var(--bar) + 16px); z-index: 3; display: inline-flex; align-items: center; gap: 8px; min-height: 52px; padding: 0 20px 0 16px; border: 0; border-radius: 26px; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 600; box-shadow: var(--shadow); }
+.fab { position: fixed; right: 16px; bottom: calc(var(--bar) + var(--strip) + var(--strip-gap) + 12px); z-index: 3; display: inline-flex; align-items: center; gap: 8px; min-height: 52px; padding: 0 20px 0 16px; border: 0; border-radius: 26px; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 600; box-shadow: var(--shadow); }
 .fab svg { width: 19px; height: 19px; }
-@media (min-width: 900px) { .fab { right: auto; left: calc(84px + 380px - 20px); bottom: 24px; transform: translateX(-100%); } }
+@media (min-width: 900px) { .fab { right: auto; left: calc(84px + 380px - 20px); bottom: calc(var(--strip) + 36px); transform: translateX(-100%); } }
 
 /* Activity: every agent, waiting first, with what it last heard and said. */
 .card { display: grid; gap: 8px; margin-bottom: 10px; padding: 6px 12px 12px; border: 1px solid var(--edge); border-radius: 18px; background: var(--panel); }

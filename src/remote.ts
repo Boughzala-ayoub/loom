@@ -8,6 +8,7 @@ import { diffView, filesView, read as readChanges, showCommit, showDiff, showFil
 import { cancel as cancelDictation } from "./remote/dictate";
 import { contextView, read as readUsage, showContext, usageView } from "./remote/usage";
 import { closeStale, read as readSettings, settingsView, syncPush, wear } from "./remote/settings";
+import { readStrip, strip, stripFade } from "./remote/strip";
 
 // The theme the PC wore last time, before anything is read: no flash of another one.
 try { wear(JSON.parse(pref("loom-theme", "null")) ?? { scheme: "dark", vars: {} }); } catch { /* the default palette */ }
@@ -36,6 +37,7 @@ const placeholder = el("section", "screen detail");
 placeholder.append(el("div", "empty"));
 const screens = [list, paneView, newView, summary, diffView, filesView, usageView, contextView, settingsView, placeholder];
 root.append(...screens);
+tabs.before(stripFade, strip);
 
 type View = { tab: Tab; primary: HTMLElement; detail?: HTMLElement; hint?: [string, string]; enter: () => void };
 function view(): View {
@@ -183,6 +185,8 @@ async function start() {
   // gate on the pane's lastOutput if mobile data use matters.
   void loop(1000, screen);
   void loop(6000, () => readChanges());
+  // ponytail: reads on while a detail screen covers the strip, so it's current when it shows again.
+  void loop(3000, readStrip);
 }
 
 window.addEventListener("hashchange", route);

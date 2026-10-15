@@ -55,7 +55,8 @@ export const hooks = { unpaired: () => {}, changed: () => {} };
  * connection gets the first run's answer instead of running it again. Each
  * waits as long as Loom would, then gives up: a reply lost on the way (the phone
  * changed networks) must not hold up the screen and every key after it. `path`
- * asks remote.rs itself instead of loomctl: /api/procs, the task manager's reading. */
+ * asks remote.rs itself instead of loomctl: /api/procs, the task manager's reading,
+ * and /api/bar, the strip's. */
 export async function run<T>(cmd: string, argv: string[] = [], opts: { stdin?: string; change?: boolean; timeout?: number; path?: string } = {}): Promise<T> {
   const key = opts.change ? `phone-${[...crypto.getRandomValues(new Uint8Array(12))].map((b) => b.toString(16).padStart(2, "0")).join("")}` : null;
   const timeout = opts.timeout ?? 30;

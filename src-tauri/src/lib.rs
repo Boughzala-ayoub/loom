@@ -1820,23 +1820,27 @@ fn exe_updated() -> bool {
 /// listen on, each with its pane and the listening exe's name.
 #[tauri::command]
 async fn status_bar(app: AppHandle) -> Result<serde_json::Value, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut v = procs::bar();
-        v["remote"] = remote::bar(&app).into();
-        // Each pane's processes, its job's: what it started, detached or not.
-        let panes: Vec<(String, Vec<u32>)> = app.state::<Ptys>().0.lock().unwrap().iter()
-            .filter_map(|(id, s)| Some((id.clone(), s._job.as_ref()?.pids()))).collect();
-        let mut servers: Vec<(u16, &str, u32)> = Vec::new();
-        for (pid, port) in procs::listening() {
-            // ponytail: Windows' dynamic range (49152 up) holds agents' own sockets (each Codex pane has one), not servers; a server on a random port there goes unlisted.
-            if port >= 49152 { continue }
-            let Some((pane, _)) = panes.iter().find(|(_, pids)| pids.contains(&pid)) else { continue };
-            if !servers.iter().any(|s| s.0 == port && s.1 == pane) { servers.push((port, pane, pid)) }
-        }
-        servers.sort();
-        v["servers"] = servers.iter().map(|&(port, pane, pid)| serde_json::json!({ "port": port, "pane": pane, "name": exe_name(pid) })).collect();
-        v
-    }).await.map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || status_reading(&app)).await.map_err(|e| e.to_string())
+}
+
+/// status_bar's reading, which the phone's strip shares (remote.rs strip).
+/// Blocks for a moment on the first reading in a while (procs::bar).
+pub(crate) fn status_reading(app: &AppHandle) -> serde_json::Value {
+    let mut v = procs::bar();
+    v["remote"] = remote::bar(app).into();
+    // Each pane's processes, its job's: what it started, detached or not.
+    let panes: Vec<(String, Vec<u32>)> = app.state::<Ptys>().0.lock().unwrap().iter()
+        .filter_map(|(id, s)| Some((id.clone(), s._job.as_ref()?.pids()))).collect();
+    let mut servers: Vec<(u16, &str, u32)> = Vec::new();
+    for (pid, port) in procs::listening() {
+        // ponytail: Windows' dynamic range (49152 up) holds agents' own sockets (each Codex pane has one), not servers; a server on a random port there goes unlisted.
+        if port >= 49152 { continue }
+        let Some((pane, _)) = panes.iter().find(|(_, pids)| pids.contains(&pid)) else { continue };
+        if !servers.iter().any(|s| s.0 == port && s.1 == pane) { servers.push((port, pane, pid)) }
+    }
+    servers.sort();
+    v["servers"] = servers.iter().map(|&(port, pane, pid)| serde_json::json!({ "port": port, "pane": pane, "name": exe_name(pid) })).collect();
+    v
 }
 
 /// Process `pid`'s exe without its folder or .exe, "" when Loom can't open it.
