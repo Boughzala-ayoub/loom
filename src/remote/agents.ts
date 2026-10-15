@@ -973,8 +973,13 @@ export function showNew() {
       summary.replaceChildren(...(have ? [have.name, " already has ", code(repo), " open. Loom will switch to it and start nothing new."] : ["Loom will open ", code(repo), " as it is, then start ", ...start, " there."]));
     else if (!slug) summary.replaceChildren("Name the thread: the name becomes its branch and its folder.");
     // ponytail: "off HEAD" without reading the PC's branch, which the PC's dialog names.
+    // Git settles the base only as the thread is made: createThread's rule for a base that names nothing. The PC's
+    // dialog reads the repository's remotes to give one of its two outcomes; the phone can't, so it gives both.
+    // The refusal is createThread's remotes.includes(base.split("/")[0]): a remote's name alone, or one and a /.
     else summary.replaceChildren("Loom will create ", code(`loom/${slug}`), " off ", code(typed || "HEAD"), ", check it out in ",
-      code(`~\\loom\\${base(repo)}\\${slug}`), ", then start ", ...start, " there. A name already in use gets -2, -3… added.");
+      code(`~\\loom\\${base(repo)}\\${slug}`), ", then start ", ...start, " there. A name already in use gets -2, -3… added.",
+      ...(typed ? [" If ", code(typed), " names no commit here or on origin, the new branch is ", code(typed), " itself, off HEAD. If it is a remote's name, or starts with one and a /, as in ",
+        code("origin/x"), ", Loom stops and makes nothing instead."] : []));
   };
   project.onchange = newForm.oninput = paint;
   paint();

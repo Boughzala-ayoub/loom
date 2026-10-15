@@ -832,6 +832,22 @@ try {
     assert.equal(await text('#new .new-summary'), `Loom will create loom/fix-login off HEAD, check it out in ~\\loom\\${repo.split(/[\\/]/).pop()}\\fix-login, then start Claude, 2 Codex and PowerShell there. A name already in use gets -2, -3… added.`);
     await page.fill('#new input[name=base]', 'main');
     assert.match(await text('#new .new-summary'), /off main,/);
+    // A base that names no commit here or on origin: createThread makes a branch of that name itself, off HEAD,
+    // or makes nothing when it is spelled like a remote's branch. The summary says both, as the PC's does.
+    const start = 'then start Claude, 2 Codex and PowerShell there. A name already in use gets -2, -3… added.';
+    const missing = b => ` If ${b} names no commit here or on origin, the new branch is ${b} itself, off HEAD. If it is a remote's name, or starts with one and a /, as in origin/x, Loom stops and makes nothing instead.`;
+    await page.fill('#new input[name=base]', 'brand-new');
+    assert.equal(await text('#new .new-summary'), `Loom will create loom/fix-login off brand-new, check it out in ~\\loom\\Alpha\\fix-login, ${start}${missing('brand-new')}`);
+    // A base alone names the thread too.
+    await page.fill('#new input[name=name]', '');
+    assert.equal(await text('#new .new-summary'), `Loom will create loom/brand-new off brand-new, check it out in ~\\loom\\Alpha\\brand-new, ${start}${missing('brand-new')}`);
+    await page.evaluate(() => scrollTo(0, 1e6));
+    await fits(page, width, 'new-base-only'); await page.screenshot({ path: resolve(out, `${width}-new-base-only.png`) });
+    // A remote's own name, no slash: createThread refuses it too when nothing resolves as it (origin/HEAD absent).
+    await page.fill('#new input[name=name]', 'Fix login!');
+    await page.fill('#new input[name=base]', 'origin');
+    assert.equal(await text('#new .new-summary'), `Loom will create loom/fix-login off origin, check it out in ~\\loom\\Alpha\\fix-login, ${start}${missing('origin')}`);
+    await page.fill('#new input[name=base]', 'main');
     await fits(page, width, 'new-mix'); await taps(page, width, '#new');
     await page.screenshot({ path: resolve(out, `${width}-new-worktree.png`) });
     // Create stays in reach at the foot of the screen while the form scrolls.
@@ -870,7 +886,8 @@ try {
     assert.deepEqual(state.errors, [], `${width}: errors in the page`);
     await ctx.close();
   }
-  console.log('PASS New thread: agents then terminals, a count each up to 16 panes, the summary follows the form, one new --mix, the pick kept');
+  assert.deepEqual(overflow, [], 'no New thread view may be wider than the window');
+  console.log('PASS New thread: agents then terminals, a count each up to 16 panes, the summary follows the form and says what a base that names nothing does, one new --mix, the pick kept');
 
   // --- An Activity reply survives the cards being rebuilt --------------------------------
   {
