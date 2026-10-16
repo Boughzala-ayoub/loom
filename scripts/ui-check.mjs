@@ -1551,6 +1551,8 @@ try {
     await cursorReport({ kind: 'start', match: '0123456789abcdef' });
     await cursorOut('\x1b[2J\x1b[H  run echo hi\r\n ⠘⠣ Working\r\n\r\n  → Add a follow-up      ctrl+c to stop\r\n');
     await until(async () => (await cursorState()) === 'working', `Cursor's busy hook reads as working, ${width}px`);
+    // Its busy hook can draw the pane working a moment before the Enter's task is listed.
+    await until(async () => (await cli('tasks')).data.length > cursorTasks, `Cursor's prompt makes a task, ${width}px`);
     const cursorTask = (await cli('tasks')).data.slice(cursorTasks);
     assert.deepEqual(cursorTask.map(t => [t.agent, t.source, t.state]), [['cursor', 'manual', 'working']], `The prompt is Cursor's task, ${width}px`);
     await audit('cursor-working');
