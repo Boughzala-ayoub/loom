@@ -3956,6 +3956,16 @@ try {
     await page.click('#new-go');
     await page.waitForFunction(() => !document.querySelector('#new').open);
     assert.equal(await page.waitForFunction(() => window.qa.saved.threads.find(t => t.name === 'unique-startups')?.panes.length >= 2).then(() => page.evaluate(() => window.qa.saved.threads.find(t => t.name === 'unique-startups').panes.map(p => p.cmd).join())), 'claude,powershell');
+    // A saved list without PowerShell gets it back from the + menu's add field by its label alone:
+    // the pane's own shell (an empty command), not a program named powershell.
+    await restoreWith([{ label: 'claude', cmd: 'claude' }, { label: 'cmd', cmd: 'cmd' }], '{}');
+    await page.click('#new-cancel');
+    await page.click('#add-pane');
+    await page.fill('#menu-add', 'powershell');
+    await page.locator('#menu-add').press('Enter');
+    await escape();
+    await page.waitForFunction(() => window.qa.saved.startups?.some(s => s.label === 'powershell'));
+    assert.deepEqual(await page.evaluate(() => window.qa.saved.startups.map(s => [s.label, s.cmd])), [['claude', 'claude'], ['cmd', 'cmd'], ['powershell', '']], 'PowerShell comes back as the pane\'s own shell');
     // A saved list with repeats loads the same way: one claude, and the other claude command numbered.
     await restoreWith([{ label: 'claude', cmd: 'claude' }, { label: 'claude', cmd: 'claude' }, { label: 'claude', cmd: 'claude --model sonnet' }], '{}');
     assert.equal(await counts(), 'claude=1,claude (2)=0');

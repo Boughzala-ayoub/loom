@@ -1431,6 +1431,13 @@ function uniqueStartups(list: Startup[]): Startup[] {
   }
   return out;
 }
+/** What a name typed as a new startup starts: one of Loom's own while no entry
+ * has its label (powershell, whose empty command is the pane's own shell),
+ * else the name run as a command. */
+function typedStartup(name: string): Startup {
+  const own = DEFAULT_STARTUPS.find((d) => d.label === name.toLowerCase());
+  return own && !startups.some((s) => s.label.toLowerCase() === own.label) ? { ...own } : { label: name, cmd: name };
+}
 /** Cursor's and Grok's hooks report each turn, named by its own id, in order:
  * the reports alone say when a turn runs and ends (agentReport). A question
  * on their screens asks in the turn running (cursorQuestion). Cursor's Esc and
@@ -7916,7 +7923,7 @@ function renderMenu() {
 /** "+ pane" and "+ Folder": pick a startup command, or extend the list. */
 const startupMenu = (pick: (cmd: string) => void): Menu => ({
   placeholder: "add a command…",
-  add: (v) => void (startups = uniqueStartups([...startups, { label: v, cmd: v }])),
+  add: (v) => void (startups = uniqueStartups([...startups, typedStartup(v)])),
   rows: (list) => {
     for (const s of startups) {
       const row = document.createElement("div");
@@ -9970,13 +9977,13 @@ const CLI: Record<string, CliCommand> = {
   },
   startups: {
     usage: "startups [add <label> <command...> | remove <label>]",
-    help: "The agents and terminals the + menu offers, which new and add --agent pick from: list them, add one, or remove one.",
+    help: "The agents and terminals the + menu offers, which new and add --agent pick from: list them, add one, or remove one. One of Loom's own added by its label alone, as powershell, comes back as it was.",
     run: (a) => {
       const [how, label, ...cmd] = a._;
       if (how === "add") {
         if (!label) throw new Error("Name the new entry.");
         if (startups.some((x) => x.label === label)) throw new Error(`There is already a "${label}".`);
-        startups.push({ label, cmd: cmd.join(" ") || label });
+        startups.push(cmd.length ? { label, cmd: cmd.join(" ") } : typedStartup(label));
         save();
       } else if (how === "remove") {
         const i = startups.findIndex((x) => x.label === label);

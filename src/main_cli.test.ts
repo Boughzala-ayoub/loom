@@ -24,7 +24,7 @@ import * as gitparse from "./gitparse.ts";
 import * as stash from "./stash.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts", "sweepTasks", "watched", "reportsTurns", "uniqueStartups"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts", "sweepTasks", "watched", "reportsTurns", "uniqueStartups", "DEFAULT_STARTUPS", "typedStartup"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -1230,4 +1230,18 @@ if (check(312)) {
     }
   }
   console.log(`ok   renaming repeated startup labels keeps what every listed label starts, by --agent in any case and by the form (${lists.length} lists)`);
+}
+if (check(313)) {
+  // A saved list that lost PowerShell gets it back by its label: its command is empty, the pane's
+  // own shell, which no typed command can give. A label already listed, or a command, runs as given.
+  type Startup = { label: string; cmd: string };
+  const live: Startup[] = [{ label: "claude", cmd: "claude" }, { label: "cmd", cmd: "cmd" }];
+  const c = fixture({ startups: live });
+  const add = (...a: string[]) => ({ ...c.startups.run({ _: ["add", ...a] }).data.at(-1) });
+  assert.deepEqual(add("PowerShell"), { label: "powershell", cmd: "" }, "PowerShell comes back as the pane's own shell");
+  assert.deepEqual(add("cursor"), { label: "cursor", cmd: "cursor-agent" }, "Loom's own cursor is Cursor's agent");
+  assert.deepEqual(add("Powershell"), { label: "Powershell", cmd: "Powershell" }, "a label already listed, in any case, runs as typed");
+  assert.deepEqual(add("pwsh", "pwsh", "-NoLogo"), { label: "pwsh", cmd: "pwsh -NoLogo" });
+  assert.deepEqual(add("tool"), { label: "tool", cmd: "tool" });
+  console.log("ok   adding one of Loom's own startups by its label brings it back as it was");
 }
