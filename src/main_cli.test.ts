@@ -22,19 +22,21 @@ import * as prompt from "./prompt.ts";
 import { agentOf } from "./agent.ts";
 import * as gitparse from "./gitparse.ts";
 import * as stash from "./stash.ts";
+import * as paneEventsLib from "./pane_events.ts";
+import { TaskEventGate } from "./task_event_gate.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts", "sweepTasks", "watched", "reportsTurns", "uniqueStartups", "DEFAULT_STARTUPS", "typedStartup"]);
+const names = new Set(["CLI", "CliTimeout", "CliError", "cliWord", "cliCommand", "cliTask", "record", "taskText", "taskLocation", "paneName", "paneData", "paneSettings", "threadData", "threadState", "cliState", "CLI_STATES", "windowStep", "waitTask", "taskStates", "choose", "cliGen", "moveTask", "pendingJournal", "taskWrites", "journal", "journalQueue", "journalLines", "journalCalls", "snapshotCalls", "journalDirty", "typedTasks", "waitReceipt", "cliReceipt", "receiptLost", "pollProviderUsage", "providerPolls", "accountPlan", "accountPolls", "accountCache", "accountHolds", "pushNotice", "AGENT_NAMES", "bootedAt", "working", "fetchPlan", "resetIso", "normalizePlan", "liveScreen", "paneMenu", "inventory", "inventoryDiff", "hashedFiles", "headBranch", "syncBranch", "windowClosing", "gitStatus", "prUrl", "dictationData", "removeThread", "riskText", "closingThreads", "closePlan", "cliDelete", "lossCounts", "sweepTasks", "watched", "reportsTurns", "uniqueStartups", "DEFAULT_STARTUPS", "typedStartup", "watchPanes", "cliThread", "cliPane", "cliStates", "CLI_ALIASES", "paneEvents", "paneEventGate", "paneEventLine"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && names.has(node.name!.text)) pieces.push(node.getText(source));
   if (ts.isVariableStatement(node)) for (const d of node.declarationList.declarations)
     if (names.has(d.name.getText(source))) pieces.push(`${node.declarationList.flags & ts.NodeFlags.Const ? "const" : "let"} ${d.getText(source)};`);
 }
-const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice, headBranch, syncBranch, removeThread, sweepTasks, uniqueStartups };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const code = ts.transpileModule(pieces.join("\n") + "\nglobalThis.f = { CLI, pollProviderUsage, fetchPlan, moveTask, journal, inventory, inventoryDiff, pushNotice, headBranch, syncBranch, removeThread, sweepTasks, uniqueStartups, paneEvents };", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 let lastFixture: any;
 function fixture(extra: Record<string, unknown> = {}) {
-  const s = createContext({ ...cli, ...task, ...prompt, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
+  const s = createContext({ ...cli, ...task, ...prompt, ...paneEventsLib, TaskEventGate, agentOf, console, setTimeout: (f: () => void) => setTimeout(f, 10), clearTimeout,
     gone: () => false, invoke: async () => ({}), startupTurns: null, contextOf: () => undefined, closedTaskContexts: new WeakMap(), taskSeq: 3, taskWatch: new Map(), heldEnter: new Map(), keepTasks() {}, keepReceipts() {},
     threads: [], current: null, unsaved: new Set(), tasks: new Map(), save() {}, startups: [{ label: "Codex", cmd: "codex" }, { label: "Claude", cmd: "claude" }], desktopWindow: undefined,
     ...extra });
@@ -1244,4 +1246,35 @@ if (check(313)) {
   assert.deepEqual(add("pwsh", "pwsh", "-NoLogo"), { label: "pwsh", cmd: "pwsh -NoLogo" });
   assert.deepEqual(add("tool"), { label: "tool", cmd: "tool" });
   console.log("ok   adding one of Loom's own startups by its label brings it back as it was");
+}
+if (check(314)) {
+  // Review round 1, 4: watch --panes reads a closed pane's or thread's kept events by their exact
+  // ids, and a pane's stable id finds it again after a restart.
+  type P = { id: string; stableId: string; agent: string; th: { id: string; name: string; panes: P[] } };
+  const thread = (id: string, name: string) => ({ id, name, panes: [] as P[] });
+  const pane = (id: string, stableId: string, th: P["th"]) => { const p = { id, stableId, agent: "claude", th }; th.panes.push(p); return p; };
+  const alpha = thread("t-a", "alpha"), beta = thread("t-b", "beta");
+  const a1 = pane("p-1", "s-1", alpha), b1 = pane("p-2", "s-2", beta);
+  const threads = [alpha, beta];
+  let c = fixture({ threads, current: alpha });
+  const add = (p: P, state: string) => lastFixture.paneEvents.add({ at: "", pane: p.id, stableId: p.stableId, ref: `${p.th.name}:1`, thread: p.th.name, threadId: p.th.id,
+    agent: "claude", title: "", old: "working", state, asking: false, exit: null, generation: 1, turns: 1, tail: [] });
+  const watch = (a: Record<string, string>) => c.watch.run({ _: [], panes: true, ...a }, { seconds: 0 });
+  const seqs = async (a: Record<string, string>) => (await watch(a)).data.events.map((e: { seq: number }) => e.seq);
+  const e1 = add(a1, "idle"), e2 = add(b1, "exited");
+  assert.deepEqual(await seqs({ pane: "alpha:1" }), [e1.seq], "thread:n names an open pane");
+  assert.deepEqual(await seqs({ pane: "s-1" }), [e1.seq], "an open pane's stable id");
+  threads.splice(1, 1); // beta and its pane close
+  for (const [a, what] of [[{ pane: "p-2" }, "pane id"], [{ pane: "s-2" }, "stable id"], [{ thread: "t-b" }, "thread id"]] as const)
+    assert.deepEqual(await seqs(a), [e2.seq], `a closed pane's events by its ${what}`);
+  await assert.rejects(watch({ thread: "beta" }), /No thread "beta"/, "a name is resolved among open threads");
+  await assert.rejects(watch({ pane: "p-9" }), /No thread "p-9"/, "an id no event or pane has is still an error");
+  // A restart: the pane has a new id and its old stable id, and Loom has no events yet.
+  alpha.panes.length = 0;
+  const again = pane("p-3", "s-1", alpha);
+  c = fixture({ threads: [alpha], current: alpha });
+  assert.deepEqual(await seqs({ pane: "s-1" }), [], "a follower's stable id is open, with nothing yet");
+  const e3 = add(again, "working");
+  assert.deepEqual(await seqs({ pane: "s-1" }), [e3.seq], "and hears the pane after the restart");
+  console.log("ok   watch --panes keeps a closed pane's and thread's events readable by id, and a stable id across a restart");
 }

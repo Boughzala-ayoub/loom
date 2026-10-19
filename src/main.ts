@@ -9346,10 +9346,13 @@ async function watchPanes(a: Args, seconds: number, signal?: AbortSignal) {
   if (a._.length || ["metadata", "policy", "policy-v4", "notification-context"].some((k) => a[k] !== undefined))
     throw new Error("watch --panes takes --thread, --pane, --state and --after, not a task or --metadata.");
   const after = num(a, "after", 0, 0, Number.MAX_SAFE_INTEGER), th = str(a, "thread"), sel = str(a, "pane");
-  // Ids, resolved on each ask: a follower's next ask finds the pane again after a restart.
+  // An exact id (a pane's, its stable id, a thread's) is kept as given, so the events of a pane or
+  // thread since closed stay readable and a stable id finds the pane after a restart. A name, thread:n
+  // or current is resolved among what is open, on each ask.
+  const known = (id: string, ids: (e: PaneEvent) => string[]) => paneEvents.events.some((e) => ids(e).includes(id));
   const filter = {
-    threads: th === undefined ? [] : [cliThread(th, true).id],
-    panes: sel === undefined ? [] : [cliPane(sel, true).id],
+    threads: th === undefined ? [] : [known(th, (e) => [e.threadId]) ? th : cliThread(th, true).id],
+    panes: sel === undefined ? [] : [known(sel, (e) => [e.pane, e.stableId]) || threads.some((t) => t.panes.some((p) => p.stableId === sel)) ? sel : cliPane(sel, true).id],
     states: a.state === undefined ? [] : cliStates(str(a, "state"), ""),
   };
   const want = (e: PaneEvent) => matches(filter, e);
