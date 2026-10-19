@@ -2441,6 +2441,14 @@ class Pane {
     this.programState = undefined;
     this.providerUsage = null;
     this.startupStarted = Date.now();
+    // This launch is the pane's from here, starting through Codex's session check
+    // and the awaits below: a repaint meanwhile shows it starting, and the last
+    // launch's exit, wakes and session marks no longer count, though they can
+    // still arrive, and this launch's can come before pty_spawn replies.
+    const wasDead = this.dead;
+    this.dead = false;
+    this.launched = gen;
+    this.paint();
     if (resume && this.agent === "codex" && this.sessionId && !ownSession(this.startup)) {
       try {
         if (!(await invoke<boolean>("has_codex_session", { sid: this.sessionId }))) this.sessionId = undefined;
@@ -2471,12 +2479,7 @@ class Pane {
     this.resumeNotice?.remove();
     this.resumeNotice = undefined;
     if (!resume) this.sessionId = undefined;
-    if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
-    this.dead = false;
-    this.paint(); // starting, through the awaits below
-    // This launch is the pane's from here: its exit, wakes and session marks can
-    // come before pty_spawn replies, and an older launch's count no longer.
-    this.launched = gen;
+    if (wasDead) this.term.reset(); // the old TUI's screen is not the new one's
     this.opencodeStatus = false;
     const can =
       resume &&

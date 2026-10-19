@@ -16,13 +16,13 @@ const names = new Set(["spawn", "launch", "stop", "exited", "launchGen", "launch
 const members = pane.members.filter((m) => m.name && names.has(m.name.getText(source))).map((m) => m.getText(source));
 const code = ts.transpileModule(`globalThis.P = class {\n${members.join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
-function fixture() {
+function fixture(over: Record<string, unknown> = {}) {
   const native = new Map<string, number>();
   const calls: [string, any][] = [];
   let hold: ((v: boolean) => void)[] | null = null;
   const invoke = async (cmd: string, a: any) => {
     calls.push([cmd, a]);
-    if (cmd === "has_session") return hold ? new Promise((r) => hold!.push(r)) : true;
+    if (cmd === "has_session" || cmd === "has_codex_session") return hold ? new Promise((r) => hold!.push(r)) : true;
     if (cmd === "pty_spawn") return void native.set(a.id, a.launch);
     if (cmd === "pty_kill") {
       if (a.launch != null && native.has(a.id) && native.get(a.id) !== a.launch) return;
@@ -35,7 +35,7 @@ function fixture() {
   const p = Object.assign(new s.P(), {
     id: "pane-1", agent: "claude", sid: "sid-1", startup: "claude", effort: "", dead: true, disposed: false, th: { dir: "C:\\work" },
     out: { id: 0 }, term: { cols: 80, rows: 24, write() {}, reset() {} }, paint() {}, retryCodexStartup() {}, settler: { see() {}, stop() {} },
-  });
+  }, over);
   return { p, native, calls, holdSessions: () => (hold = []), releaseSessions: () => hold!.splice(0).forEach((r) => r(true)) };
 }
 
@@ -60,22 +60,32 @@ function fixture() {
   console.log("ok   A stop during a relaunch's session check ends the running process, and the relaunch gives up");
 }
 
-{
-  // Review round 1, 3: an exit still settling when a relaunch begins isn't the relaunch's,
-  // however long its session check keeps it from repainting.
-  const { p, holdSessions, releaseSessions } = fixture();
+for (const agent of ["claude", "codex"]) {
+  // Review round 1, 3 and round 2, 7: an exit still settling when a relaunch begins isn't the
+  // relaunch's, however long Claude's or Codex's session check holds it up, and neither a
+  // repaint (a focus) nor the last launch's exit report meanwhile brings that exit back.
+  const { p, native, holdSessions, releaseSessions } = fixture({ agent, startup: agent });
   const state = (x: any) => (x.dead ? "exited" : x.starting ? "starting" : "idle");
   const events: string[] = [];
   p.settler = new Settler((old, st) => events.push(`${old}>${st} gen ${p.generation} exit ${p.exitCode ?? null}`), 30, () => state(p));
   p.paint = () => p.settler.see(state(p));
   const settle = () => new Promise((r) => setTimeout(r, 100));
   const up = async (launch: Promise<unknown>) => { assert.equal(await launch, true); p.starting = false; p.paint(); await settle(); };
+  const resume = async () => {
+    const old = native.get("pane-1");
+    p.sessionId = "session-1"; // a fresh launch forgets it; Codex checks it on resume
+    const launch = p.spawn(true);
+    await new Promise((r) => setTimeout(r, 0));
+    p.paint();
+    if (old === p.launched) p.exited(0); // main.ts's pty-exit listener, for the last launch
+    return launch;
+  };
   await up(p.spawn(false));
   p.exited(0);
   await settle();
   assert.deepEqual(events, ["starting>idle gen 1 exit null", "idle>exited gen 1 exit 0"], "an exit that stood is the launch's that exited");
   holdSessions();
-  let relaunch = p.spawn(true);
+  let relaunch = resume();
   await settle();
   assert.deepEqual(events.slice(2), ["exited>starting gen 2 exit null"], "the relaunch is starting while its session check waits");
   releaseSessions();
@@ -83,10 +93,10 @@ function fixture() {
   events.length = 0;
   p.exited(0);
   holdSessions();
-  relaunch = p.spawn(true); // within the settle time
+  relaunch = resume(); // within the settle time
   await settle();
   assert.deepEqual(events, ["idle>starting gen 3 exit null"], "an exit replaced by a relaunch never settles, under the old launch or the new");
   releaseSessions();
   await up(relaunch);
-  console.log("ok   A relaunch held in its session check never reports the last launch's exit as its own");
+  console.log(`ok   A ${agent} relaunch held in its session check never reports the last launch's exit as its own`);
 }
