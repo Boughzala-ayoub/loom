@@ -25,6 +25,7 @@ mod procs;
 mod deletion;
 mod stash;
 mod workspace;
+mod logfile;
 
 const SHELL_INIT: &str = include_str!("shell-init.ps1");
 /// Extra Claude Code settings, handed to each pane's `claude` via --settings.
@@ -263,8 +264,10 @@ async fn overlay(app: AppHandle, show: Option<bool>) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
     let existing = app.get_webview_window("overlay");
     let Some(show) = show else {
+        if existing.is_some() { logfile::line("overlay: destroy"); }
         return existing.map_or(Ok(()), |w| w.destroy().map_err(|e| e.to_string()));
     };
+    logfile::line(if show { "overlay: show" } else { "overlay: hide" });
     let w = match existing {
         Some(w) => w,
         None => tauri::WebviewWindowBuilder::new(&app, "overlay", tauri::WebviewUrl::App("overlay.html".into()))
@@ -421,7 +424,7 @@ fn pty_spawn(
         // whose file Loom can't add them to still runs, without the reports.
         let home = app.path().home_dir().map_err(|e| e.to_string())?;
         if let Err(e) = cursor::install(&home, &exe) {
-            eprintln!("pane {id}: {e}");
+            logfile::line(&format!("pane {id}: {e}"));
         }
     }
     let is_grok = cmd_line.is_none() && grok::is_grok(&argv[0]);
@@ -430,7 +433,7 @@ fn pty_spawn(
         // whose file Loom can't write still runs, without the reports.
         let home = app.path().home_dir().map_err(|e| e.to_string())?;
         if let Err(e) = grok::install(&home, &exe) {
-            eprintln!("pane {id}: {e}");
+            logfile::line(&format!("pane {id}: {e}"));
         }
     }
     // Loom's PATH, then the pane's, as cmd finds a program below: one
@@ -571,8 +574,10 @@ fn pty_spawn(
 
     let killer = child.clone_killer();
     let pid = child.process_id();
+    // 0: unknown.
+    logfile::line(&format!("pane {id}: start {} pid {} launch {}", argv[0], pid.unwrap_or(0), launch.unwrap_or(0)));
     // First, before the process has long to start anything outside it.
-    let job = pid.and_then(|pid| contain(pid).map_err(|e| eprintln!("pane {id}: no job object, so its detached processes outlive it: {e}")).ok());
+    let job = pid.and_then(|pid| contain(pid).map_err(|e| logfile::line(&format!("pane {id}: no job object, so its detached processes outlive it: {e}"))).ok());
     // Past here nothing would stop the child but its job, which may be missing.
     let (mut reader, writer) = match pair.master.try_clone_reader().and_then(|r| Ok((r, pair.master.take_writer()?))) {
         Ok(ends) => ends,
@@ -624,12 +629,14 @@ fn pty_spawn(
                 }
             }
             if !output_flow.acquire() { break; }
+            let bytes = text.len();
             // Tagged with this launch's channel, so a relaunch's late output is still told apart.
             let sent = match if bus { output_app.state::<output::Bus>().push(channel, text) } else { Err(text) } {
                 Ok(()) => true,
                 Err(text) => on_out.send(text).is_ok(),
             };
             if !sent { break; }
+            logfile::output(bytes);
         }
         output_app.state::<output::Flows>().0.lock().unwrap().remove(&channel);
     });
@@ -652,6 +659,7 @@ fn pty_spawn(
     drop(reports);
     std::thread::spawn(move || {
         let code = child.wait().map(|s| s.exit_code()).unwrap_or(1);
+        logfile::line(&format!("pane {id}: exit pid {} code {code}", pid.unwrap_or(0)));
         let ptys = app.state::<Ptys>();
         let session = {
             let mut map = ptys.0.lock().unwrap();
@@ -2147,6 +2155,8 @@ pub fn run() {
         }
         std::process::exit(0);
     }
+    // The app from here on, not a helper run or --help: its log starts.
+    logfile::init();
     // Started by `relaunch`: the Loom it replaces exits first. Its agents and
     // shells must not inherit the variable.
     if let Some(pid) = std::env::var("LOOM_AFTER_PID").ok().and_then(|p| p.parse::<u32>().ok()) {
@@ -2236,6 +2246,7 @@ pub fn run() {
                 .data_directory(profile)
                 .enable_clipboard_access()
                 .build()?;
+            logfile::line("window main: built");
             // A drag or resize fires dozens of events a second: save once it has
             // been still for 500 ms. On the main thread, as before: the plugin's own
             // event handler takes the lock a save holds while it reads the window.
@@ -2263,6 +2274,11 @@ pub fn run() {
                 let ids: Vec<String> = handle.state::<Ptys>().0.lock().unwrap().keys().cloned().collect();
                 if !ids.is_empty() { send_wakes(&handle, &ids); send_task_events(&handle, &ids); }
             });
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(600));
+                logfile::heartbeat(handle.state::<Ptys>().0.lock().unwrap().len());
+            });
             app.state::<WindowStateReady>().0.store(true, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })
@@ -2277,6 +2293,9 @@ pub fn run() {
                     }
                     _ => {}
                 }
+            }
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                logfile::line(&format!("window {}: destroyed", window.label()));
             }
             // The frontend may cancel close if its final save fails. Only the
             // main window owns the terminals, and the overlay must not keep the
@@ -2302,6 +2321,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|_, event| {
+            // A log without this line ended in a crash.
+            if matches!(event, tauri::RunEvent::Exit) { logfile::line("exit"); }
             // Once, as the event loop ends: the window really closed.
             if matches!(event, tauri::RunEvent::Exit) && RELAUNCH.swap(false, std::sync::atomic::Ordering::SeqCst) {
                 if let Err(e) = start_again() {

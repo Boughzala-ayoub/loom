@@ -43,7 +43,7 @@ pub fn serve(app: AppHandle, name: String) {
     tauri::async_runtime::spawn(async move {
         let security = match owner_only() {
             Ok(s) => s,
-            Err(e) => return eprintln!("control pipe: {e}"),
+            Err(e) => return crate::logfile::line(&format!("control pipe: {e}")),
         };
         let mut first = true;
         loop {
@@ -59,7 +59,7 @@ pub fn serve(app: AppHandle, name: String) {
                 // ponytail: a fixed 1 s back-off. A failure here is transient (out
                 // of resources); giving up would leave loomctl no listener until restart.
                 Err(e) => {
-                    eprintln!("control pipe {name}: {e}; retrying");
+                    crate::logfile::line(&format!("control pipe {name}: {e}; retrying"));
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }

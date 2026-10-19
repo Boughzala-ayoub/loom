@@ -64,7 +64,7 @@ pub fn dictate_start(app: AppHandle, state: State<Dictation>) -> Result<(), Stri
 
     std::thread::spawn(move || {
         if let Err(e) = ensure_ctx(&app) {
-            eprintln!("dictate: {e}"); // the stop call re-runs this and reports it
+            crate::logfile::line(&format!("dictate: {e}")); // the stop call re-runs this and reports it
         }
     });
     Ok(())
@@ -171,7 +171,7 @@ fn capture(
         let sup = dev.default_input_config().map_err(|e| e.to_string())?;
         let (rate, channels) = (sup.sample_rate(), sup.channels() as usize);
         let cfg = sup.config();
-        let err = |e| eprintln!("dictate: audio stream: {e}");
+        let err = |e| crate::logfile::line(&format!("dictate: audio stream: {e}"));
         let (a, b) = (buf.clone(), buf);
         let stream = match sup.sample_format() {
             cpal::SampleFormat::F32 => dev.build_input_stream(
