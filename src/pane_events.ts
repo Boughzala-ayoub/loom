@@ -156,7 +156,8 @@ export class Courier {
   push(e: PaneEvent) {
     if (this.stopped || !matches(this.hook, e)) return;
     this.queue.push({ seq: e.seq, body: JSON.stringify(e) });
-    if (this.queue.length > MAX_QUEUE) this.fail(this.queue.shift()!.seq, `dropped: more than ${MAX_QUEUE} deliveries waiting`);
+    // While running, queue[0] is the one being delivered: the oldest waiting goes, never it.
+    if (this.queue.length > MAX_QUEUE) this.fail(this.queue.splice(this.running ? 1 : 0, 1)[0].seq, `dropped: more than ${MAX_QUEUE} deliveries waiting`);
     void this.run();
   }
 
@@ -172,6 +173,7 @@ export class Courier {
     try {
       if (this.hook.header) headers.push(hookHeader(this.hook.header));
       if (this.hook.secret) headers.push(["X-Loom-Signature", await sign(this.hook.secret, body)]);
+      if (this.stopped) return "the webhook was removed"; // while signing
       return await this.post(this.hook.url, headers, body);
     } catch (e) {
       return String(e instanceof Error ? e.message : e);
@@ -193,7 +195,8 @@ export class Courier {
   }
 
   private async deliver(seq: number, body: string) {
-    for (let i = 0; ; i++) {
+    // Removed during a retry's wait: the next try never goes out.
+    for (let i = 0; !this.stopped; i++) {
       const got = await this.attempt(seq, body);
       if (typeof got === "number" && got >= 200 && got < 300) {
         this.sent++;

@@ -126,13 +126,43 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   c.push(log.add(event()));
   check("a removed webhook queues nothing", !c.queue.length);
 
-  // A stuck receiver: the queue is capped, the oldest dropped and logged.
-  let release!: () => void;
-  const stuck = new Courier({ url: "http://h/x" }, () => new Promise((r) => { release = () => r(200); }), () => {}, async () => {});
-  for (let i = 0; i < MAX_QUEUE + 5; i++) stuck.push(log.add(event()));
+  // A stuck receiver: the queue is capped, the oldest waiting dropped and logged.
+  const asked: number[] = [], answer: ((status: number) => void)[] = [];
+  const stuck = new Courier({ url: "http://h/x" }, (_url, headers) => {
+    asked.push(Number(Object.fromEntries(headers)["X-Loom-Delivery"]));
+    return new Promise((r) => answer.push(r));
+  }, () => {}, async () => {});
+  const pushed: number[] = [];
+  for (let i = 0; i < MAX_QUEUE + 5; i++) { const e = log.add(event()); pushed.push(e.seq); stuck.push(e); }
   check("at most MAX_QUEUE wait; the oldest are dropped and logged", stuck.queue.length === MAX_QUEUE && stuck.failures.length === 5);
+  check("the one being delivered is never the one dropped", stuck.failures.map((f) => f.seq).join() === pushed.slice(1, 6).join());
+  answer.shift()!(500);
+  await sleep(5);
+  check("a failed delivery in flight is retried, not abandoned", asked.join() === [pushed[0], pushed[0]].join());
+  answer.shift()!(200);
+  await sleep(5);
+  check("then the oldest kept goes next", asked[2] === pushed[6] && stuck.sent === 1 && !stuck.failures.some((f) => f.seq === pushed[0]));
   stuck.stop();
-  release();
+  answer.shift()!(200);
+}
+
+{
+  // Review round 1, 2: removing a webhook stops what it was still going to send.
+  const log = new PaneEventLog();
+  let posts = 0, wake!: () => void;
+  const post = async () => { posts++; return 500; };
+  const c = new Courier({ url: "http://h/x" }, post, () => {}, () => new Promise<void>((r) => (wake = r)));
+  c.push(log.add(event()));
+  await sleep(5);
+  c.stop();
+  wake();
+  await sleep(5);
+  check("removed while waiting to retry: no further try", posts === 1);
+  const signed = new Courier({ url: "http://h/x", secret: "k" }, post, () => {}, async () => {});
+  signed.push(log.add(event()));
+  signed.stop(); // the first try is signing
+  await sleep(5);
+  check("removed while signing: nothing is posted", posts === 1);
 }
 
 if (fails) throw new Error(`${fails} failed`);
