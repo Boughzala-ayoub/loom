@@ -24,7 +24,7 @@ import { claudeDivider, claudeComposer, readMenu, readFeedback, cursorKey, menuK
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
-import { Courier, hookHeader, hookUrl, matches, PaneEventLog, Settler, TAIL_LINES, TAIL_WIDTH, type PaneEvent, type Webhook } from "./pane_events";
+import { Courier, hookHeader, hookUrl, matches, PaneEventLog, SETTLE_MS, Settler, TAIL_LINES, TAIL_WIDTH, type PaneEvent, type Webhook } from "./pane_events";
 import { newPushKey, pushRequest, type PushKey, type PushMessage, type PushSub } from "./push";
 import type { OverlayRow, OverlayState } from "./overlay";
 import { procsView, type Reading } from "./procs";
@@ -2018,7 +2018,7 @@ class Pane {
   /** This pane's own id across restarts, where `id` is new each start: saved with it and restored only into it. */
   stableId: string = crypto.randomUUID();
   /** Its state as `watch --panes`, `wait --until` and webhooks hear it: what paint() shows, once it stood 2 s. */
-  readonly settler = new Settler((old, state, since) => paneEvent(this, old, state, since));
+  readonly settler = new Settler((old, state, since) => paneEvent(this, old, state, since), SETTLE_MS, () => cliState(this));
   /** Enters a person gave it in Loom's window that may have sent a prompt no
    * task holds yet (manualEnter), oldest first. Never their text. */
   manual: ManualEnter[] = [];
@@ -2358,6 +2358,7 @@ class Pane {
    * kills what it started (see spawn). */
   async stop() {
     const gen = ++this.launchGen;
+    this.settler.stop(); // what was settling belongs to the launch this ends
     await invoke("pty_kill", { id: this.id, launch: this.installed });
     // A launch that began while the kill was in flight is the pane now: it stays up.
     if (gen === this.launchGen) this.exited(1, "stopped");
@@ -2379,6 +2380,7 @@ class Pane {
   async spawn(resume: boolean, retry = false): Promise<true | string> {
     if (shuttingDown) return "Loom has stopped its panes for shutdown. Retry closing the window.";
     const gen = ++this.launchGen;
+    this.settler.stop(); // the last launch's exit can't settle as this one's
     const before = this.launching;
     let done!: () => void;
     this.launching = new Promise<void>((r) => (done = r));
@@ -2471,6 +2473,7 @@ class Pane {
     if (!resume) this.sessionId = undefined;
     if (this.dead) this.term.reset(); // the old TUI's screen is not the new one's
     this.dead = false;
+    this.paint(); // starting, through the awaits below
     // This launch is the pane's from here: its exit, wakes and session marks can
     // come before pty_spawn replies, and an older launch's count no longer.
     this.launched = gen;

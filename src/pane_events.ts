@@ -22,16 +22,20 @@ export type PaneEvent = {
 };
 
 /** One pane's state as it settles. `see` gets what the UI shows on every
- * repaint; the first value is where the pane starts and sends nothing. */
+ * repaint; the first value is where the pane starts and sends nothing.
+ * `now`, the pane's state when the wait ends: one it left without a repaint
+ * never stood, and what it is now starts counting instead. */
 export class Settler {
   settled: string | undefined;
   private next: string | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private fire: (old: string, state: string, since: number) => void;
   private ms: number;
-  constructor(fire: (old: string, state: string, since: number) => void, ms = SETTLE_MS) {
+  private now?: () => string;
+  constructor(fire: (old: string, state: string, since: number) => void, ms = SETTLE_MS, now?: () => string) {
     this.fire = fire;
     this.ms = ms;
+    this.now = now;
   }
 
   see(state: string) {
@@ -42,9 +46,11 @@ export class Settler {
     const since = Date.now();
     this.next = state;
     this.timer = setTimeout(() => {
+      this.next = undefined;
+      const now = this.now?.() ?? state;
+      if (now !== state) return this.see(now);
       const old = this.settled!;
       this.settled = state;
-      this.next = undefined;
       this.fire(old, state, since);
     }, this.ms);
   }

@@ -42,6 +42,24 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
 }
 
 {
+  // Review round 1, 3: a pane can leave a state without a repaint (a relaunch's first awaits).
+  const fired: string[] = [];
+  let now = "idle";
+  const s = new Settler((old, state) => fired.push(`${old}>${state}`), 40, () => now);
+  s.see("idle");
+  s.see("exited");
+  now = "starting";
+  await sleep(60);
+  check("a state the pane left unseen never fires; where it is now starts counting", fired.length === 0 && s.settled === "idle");
+  await sleep(40);
+  check("and fires once it has stood", fired.join() === "idle>starting");
+  s.see("idle");
+  now = "starting";
+  await sleep(60);
+  check("left for the state that settled: nothing", fired.length === 1 && s.settled === "starting");
+}
+
+{
   const log = new PaneEventLog(1000, 3);
   const a = log.add(event(), 1000), b = log.add(event({ state: "waiting" }), 1000);
   check("numbers start past the clock and grow within one ms", a.seq === 1001 && b.seq === 1002);

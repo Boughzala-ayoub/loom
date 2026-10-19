@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 // @ts-ignore Node-only test.
 import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
+import { Settler } from "./pane_events.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const pane = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
@@ -33,7 +34,7 @@ function fixture() {
   runInContext(code, s);
   const p = Object.assign(new s.P(), {
     id: "pane-1", agent: "claude", sid: "sid-1", startup: "claude", effort: "", dead: true, disposed: false, th: { dir: "C:\\work" },
-    out: { id: 0 }, term: { cols: 80, rows: 24, write() {}, reset() {} }, paint() {}, retryCodexStartup() {},
+    out: { id: 0 }, term: { cols: 80, rows: 24, write() {}, reset() {} }, paint() {}, retryCodexStartup() {}, settler: { see() {}, stop() {} },
   });
   return { p, native, calls, holdSessions: () => (hold = []), releaseSessions: () => hold!.splice(0).forEach((r) => r(true)) };
 }
@@ -57,4 +58,35 @@ function fixture() {
   assert.ok(!native.has("pane-1"), "the stop left the process it said it ended running");
   assert.equal(calls.filter(([c]) => c === "pty_spawn").length, 1, "the stopped relaunch still started a process");
   console.log("ok   A stop during a relaunch's session check ends the running process, and the relaunch gives up");
+}
+
+{
+  // Review round 1, 3: an exit still settling when a relaunch begins isn't the relaunch's,
+  // however long its session check keeps it from repainting.
+  const { p, holdSessions, releaseSessions } = fixture();
+  const state = (x: any) => (x.dead ? "exited" : x.starting ? "starting" : "idle");
+  const events: string[] = [];
+  p.settler = new Settler((old, st) => events.push(`${old}>${st} gen ${p.generation} exit ${p.exitCode ?? null}`), 30, () => state(p));
+  p.paint = () => p.settler.see(state(p));
+  const settle = () => new Promise((r) => setTimeout(r, 100));
+  const up = async (launch: Promise<unknown>) => { assert.equal(await launch, true); p.starting = false; p.paint(); await settle(); };
+  await up(p.spawn(false));
+  p.exited(0);
+  await settle();
+  assert.deepEqual(events, ["starting>idle gen 1 exit null", "idle>exited gen 1 exit 0"], "an exit that stood is the launch's that exited");
+  holdSessions();
+  let relaunch = p.spawn(true);
+  await settle();
+  assert.deepEqual(events.slice(2), ["exited>starting gen 2 exit null"], "the relaunch is starting while its session check waits");
+  releaseSessions();
+  await up(relaunch);
+  events.length = 0;
+  p.exited(0);
+  holdSessions();
+  relaunch = p.spawn(true); // within the settle time
+  await settle();
+  assert.deepEqual(events, ["idle>starting gen 3 exit null"], "an exit replaced by a relaunch never settles, under the old launch or the new");
+  releaseSessions();
+  await up(relaunch);
+  console.log("ok   A relaunch held in its session check never reports the last launch's exit as its own");
 }
