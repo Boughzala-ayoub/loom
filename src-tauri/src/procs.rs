@@ -137,11 +137,6 @@ pub(crate) fn listening() -> Vec<(u32, u16)> {
         }
         Vec::new()
     };
-    // SAFETY: Windows wrote the count, then that many rows of the family's type, from the second u32.
-    fn rows<T>(buf: &[u32]) -> &[T] {
-        if buf.is_empty() { return &[] }
-        unsafe { std::slice::from_raw_parts(buf.as_ptr().add(1).cast::<T>(), buf[0] as usize) }
-    }
     // The port is in network byte order, in the low 16 bits.
     let port = |p: u32| u16::from_be(p as u16);
     let v4 = table(2);
@@ -149,6 +144,16 @@ pub(crate) fn listening() -> Vec<(u32, u16)> {
     rows::<MIB_TCPROW_OWNER_PID>(&v4).iter().map(|r| (r.dwOwningPid, port(r.dwLocalPort)))
         .chain(rows::<MIB_TCP6ROW_OWNER_PID>(&v6).iter().map(|r| (r.dwOwningPid, port(r.dwLocalPort))))
         .collect()
+}
+
+/// The rows of a GetExtendedTcpTable answer: the count, then that many rows of
+/// the family's type from the second u32. Never past the buffer, whatever
+/// count it holds.
+fn rows<T>(buf: &[u32]) -> &[T] {
+    let Some((&count, rest)) = buf.split_first() else { return &[] };
+    let room = std::mem::size_of_val(rest) / size_of::<T>();
+    // SAFETY: `rest` holds at least that many rows' bytes, aligned as u32s, which the rows are.
+    unsafe { std::slice::from_raw_parts(rest.as_ptr().cast::<T>(), (count as usize).min(room)) }
 }
 
 fn sample() -> (Times, Vec<Proc>) {
@@ -350,6 +355,18 @@ mod tests {
         assert!(!procs.iter().any(|p| p["pid"] == 0), "the idle process is no process");
         assert!(v["memory"]["used"].as_u64().unwrap() < v["memory"]["total"].as_u64().unwrap());
         assert!(v["uptime"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn a_table_is_read_no_further_than_its_buffer() {
+        use windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID;
+        // Six u32s a row: a count of 1000 with room for two.
+        let mut buf = vec![0u32; 1 + 12];
+        buf[0] = 1000;
+        assert_eq!(rows::<MIB_TCPROW_OWNER_PID>(&buf).len(), 2);
+        buf[0] = 1;
+        assert_eq!(rows::<MIB_TCPROW_OWNER_PID>(&buf).len(), 1, "the count when it fits");
+        assert!(rows::<MIB_TCPROW_OWNER_PID>(&[]).is_empty());
     }
 
     #[test]

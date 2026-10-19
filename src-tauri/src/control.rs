@@ -91,39 +91,23 @@ fn create(name: &str, first: bool, security: usize) -> std::io::Result<NamedPipe
 /// A pipe only this Windows account (and the system) can open. The default
 /// descriptor also lets everyone read.
 fn owner_only() -> Result<usize, String> {
-    use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
-    use windows::Win32::Security::Authorization::{ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
-    use windows::Win32::Security::{GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER};
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    unsafe {
-        let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).map_err(|e| e.to_string())?;
-        let mut len = 0;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
-        let mut buf = vec![0u8; len as usize];
-        let got = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr().cast()), len, &mut len);
-        let _ = CloseHandle(token);
-        got.map_err(|e| e.to_string())?;
-        let user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut raw = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut raw).map_err(|e| e.to_string())?;
-        // Owned by this account, stated, not left to the token's default owner
-        // (Administrators when elevated): loomctl checks the owner (pipe.rs owner_is).
-        let sid = raw.to_string().unwrap_or_default();
-        let sddl = format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GA;;;SY)");
-        let _ = LocalFree(Some(HLOCAL(raw.0.cast())));
-        let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
-        let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(wide.as_ptr()), SDDL_REVISION_1, &mut descriptor, None)
-            .map_err(|e| e.to_string())?;
-        let attributes = Box::new(SECURITY_ATTRIBUTES {
-            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0,
-            bInheritHandle: false.into(),
-        });
-        Ok(Box::into_raw(attributes) as usize)
-    }
+    use windows::core::PCWSTR;
+    use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    // Owned by this account, stated, not left to the token's default owner
+    // (Administrators when elevated): loomctl checks the owner (pipe.rs owner_is).
+    let sid = crate::pipe::sid().ok_or("can't read this account's SID")?;
+    let sddl = format!("O:{sid}D:P(A;;GA;;;{sid})(A;;GA;;;SY)");
+    let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(wide.as_ptr()), SDDL_REVISION_1, &mut descriptor, None) }
+        .map_err(|e| e.to_string())?;
+    let attributes = Box::new(SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: false.into(),
+    });
+    Ok(Box::into_raw(attributes) as usize)
 }
 
 /// loomctl says hello with its protocol first and gets this Loom's back; only

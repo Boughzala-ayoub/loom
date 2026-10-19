@@ -39,13 +39,13 @@ fn legacy_user() -> String {
 }
 
 /// This account's SID as text, S-1-5-21-....
-fn sid() -> Option<String> {
+pub fn sid() -> Option<String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
-    use windows::Win32::Security::{Authorization::ConvertSidToStringSidW, TOKEN_USER};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
     let user = current_user().ok()?;
     unsafe {
         let mut raw = windows::core::PWSTR::null();
-        ConvertSidToStringSidW((*(user.as_ptr() as *const TOKEN_USER)).User.Sid, &mut raw).ok()?;
+        ConvertSidToStringSidW(sid_of(&user)?, &mut raw).ok()?;
         let text = raw.to_string().ok();
         let _ = LocalFree(Some(HLOCAL(raw.0.cast())));
         text
@@ -117,6 +117,14 @@ pub fn current_user() -> Result<Vec<u8>, String> {
     }
 }
 
+/// The SID in `user`, a TOKEN_USER's bytes from current_user. Read unaligned:
+/// a Vec<u8> promises the struct no alignment. The SID it points to lives on
+/// inside `user`. None when the bytes are too short to be one.
+fn sid_of(user: &[u8]) -> Option<windows::Win32::Security::PSID> {
+    use windows::Win32::Security::TOKEN_USER;
+    (user.len() >= size_of::<TOKEN_USER>()).then(|| unsafe { std::ptr::read_unaligned(user.as_ptr().cast::<TOKEN_USER>()) }.User.Sid)
+}
+
 /// Whether the pipe is owned by `user` (a TOKEN_USER from current_user). Loom
 /// makes its pipes owned by its account (control.rs). A name is only a name:
 /// another account could create it first, so the owner is checked before
@@ -126,13 +134,14 @@ pub fn owner_is(pipe: &std::fs::File, user: &[u8]) -> Result<bool, String> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
-    use windows::Win32::Security::{EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_USER};
+    use windows::Win32::Security::{EqualSid, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID};
+    let sid = sid_of(user).ok_or("not an account's identity")?;
     unsafe {
         let (mut owner, mut descriptor) = (PSID::default(), PSECURITY_DESCRIPTOR::default());
         let got = GetSecurityInfo(HANDLE(pipe.as_raw_handle()), SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
             Some(&mut owner), None, None, None, Some(&mut descriptor));
         if got.is_err() { return Err(format!("{got:?}")); }
-        let same = EqualSid(owner, (*(user.as_ptr() as *const TOKEN_USER)).User.Sid).is_ok();
+        let same = EqualSid(owner, sid).is_ok();
         let _ = LocalFree(Some(HLOCAL(descriptor.0)));
         Ok(same)
     }
@@ -159,6 +168,13 @@ mod tests {
         let id = format!("{:016x}", fnv1a(&sid));
         assert_eq!(pipe_name(None), format!(r"\\.\pipe\{PREFIX}-{id}"));
         assert!(instance_pipe().starts_with(&format!(r"\\.\pipe\{PREFIX}-{id}-pid")));
+    }
+
+    #[test]
+    fn a_sid_is_read_only_from_a_whole_token_user() {
+        let user = current_user().unwrap();
+        assert!(sid_of(&user).is_some());
+        assert!(sid_of(&user[..4]).is_none(), "too short to be a TOKEN_USER");
     }
 
     #[test]
