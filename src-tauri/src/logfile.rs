@@ -40,13 +40,17 @@ pub fn init() {
 }
 
 /// `dir`'s loom.log for appending, moved aside first once it's past ROTATE.
+/// Every Loom (a profile, a second launch) writes this one file and holds it
+/// without FILE_SHARE_DELETE, so none can rename it while another writes: it
+/// moves aside once its last writer has gone, and no Loom's lines go missing.
 fn open(dir: &Path) -> Option<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
     std::fs::create_dir_all(dir).ok()?;
     let path = dir.join("loom.log");
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE) {
         let _ = std::fs::rename(&path, dir.join("loom.1.log"));
     }
-    std::fs::OpenOptions::new().append(true).create(true).open(path).ok()
+    std::fs::OpenOptions::new().append(true).create(true).share_mode(1 | 2).open(path).ok() // FILE_SHARE_READ | FILE_SHARE_WRITE
 }
 
 /// One line, stamped with local time as the event log stamps crashes.
@@ -120,6 +124,30 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("loom.log")).unwrap(), "next\n");
         drop(super::open(&dir).expect("a small log is appended to"));
         assert_eq!(std::fs::read_to_string(dir.join("loom.log")).unwrap(), "next\n");
+        drop(file);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Review round 1, 6: a Loom starting while another writes can't move its file out from under it.
+    #[test]
+    fn a_log_another_loom_writes_stays_where_it_is() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("loom-log-shared-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut first = super::open(&dir).expect("the first Loom's log");
+        first.write_all(&vec![b'x'; super::ROTATE as usize + 1]).unwrap();
+        let (mut second, mut third) = (super::open(&dir).expect("a second Loom's"), super::open(&dir).expect("a third's"));
+        for (file, text) in [(&mut first, "first\n"), (&mut second, "second\n"), (&mut third, "third\n")] {
+            file.write_all(text.as_bytes()).unwrap();
+        }
+        assert!(!dir.join("loom.1.log").exists(), "nothing moves aside while a Loom writes");
+        assert!(std::fs::read_to_string(dir.join("loom.log")).unwrap().ends_with("first\nsecond\nthird\n"), "every Loom's lines are in loom.log");
+        drop((first, second, third));
+        let mut next = super::open(&dir).expect("the log once they've gone");
+        next.write_all(b"next\n").unwrap();
+        assert!(std::fs::read_to_string(dir.join("loom.1.log")).unwrap().ends_with("third\n"), "the big one moves aside then");
+        assert_eq!(std::fs::read_to_string(dir.join("loom.log")).unwrap(), "next\n");
+        drop(next);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
