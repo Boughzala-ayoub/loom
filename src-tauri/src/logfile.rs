@@ -9,15 +9,15 @@
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
-static FILE: OnceLock<std::fs::File> = OnceLock::new();
+static FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 /// Past this at startup the log moves to loom.1.log, replacing the one there.
 const ROTATE: u64 = 5 << 20;
-/// ponytail: past this, a run stops writing, so a warning storm can't fill the
-/// disk; the size is looked at again only when Loom next starts.
-const RUN_MAX: u64 = 50 << 20;
-static WRITTEN: AtomicU64 = AtomicU64::new(0);
+/// Past this, no Loom adds to loom.log until it moves aside at a start, so a
+/// warning storm can't fill the disk. The cap is on the file every Loom shares,
+/// not on one run: a Loom left open stops the others from rotating it.
+const MAX: u64 = 50 << 20;
 /// Pane output handed to the page since the last heartbeat.
 static OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
 static OUTPUT_BATCHES: AtomicU64 = AtomicU64::new(0);
@@ -28,7 +28,7 @@ pub fn init() {
     if !cfg!(debug_assertions) {
         // tauri.conf.json's identifier: app_local_data_dir, where the trash lives too.
         let file = std::env::var_os("LOCALAPPDATA").and_then(|dir| open(&Path::new(&dir).join("dev.ayoub.loom").join("logs")));
-        if let Some(file) = file { let _ = FILE.set(file); }
+        if let Some(file) = file { let _ = FILE.set(Mutex::new(file)); }
     }
     // panic = "abort" in release: this is the last thing a panic does.
     std::panic::set_hook(Box::new(|info| line(&format!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture()))));
@@ -50,21 +50,34 @@ fn open(dir: &Path) -> Option<std::fs::File> {
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > ROTATE) {
         let _ = std::fs::rename(&path, dir.join("loom.1.log"));
     }
-    std::fs::OpenOptions::new().append(true).create(true).share_mode(1 | 2).open(path).ok() // FILE_SHARE_READ | FILE_SHARE_WRITE
+    // read: LockFileEx refuses a handle that can only append.
+    std::fs::OpenOptions::new().read(true).append(true).create(true).share_mode(1 | 2).open(path).ok() // FILE_SHARE_READ | FILE_SHARE_WRITE
 }
 
 /// One line, stamped with local time as the event log stamps crashes.
 pub fn line(text: &str) {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     let entry = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} {text}\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds);
-    if WRITTEN.fetch_add(entry.len() as u64, Relaxed) > RUN_MAX {
-        return;
+    match FILE.get() {
+        // One thread at a time: File::lock must never meet this handle's own lock.
+        Some(file) => append(&file.lock().unwrap_or_else(|e| e.into_inner()), entry.as_bytes(), MAX),
+        None => {
+            let _ = std::io::stderr().write_all(entry.as_bytes());
+        }
     }
-    // Appends: whole lines from any thread, no lock.
-    let _ = match FILE.get() {
-        Some(mut file) => file.write_all(entry.as_bytes()),
-        None => std::io::stderr().write_all(entry.as_bytes()),
-    };
+}
+
+/// `entry` at the end of `file`, unless that takes it past `max`. Every Loom
+/// appends to the one file, so each reads its size and writes under a lock on
+/// it that they all take: two can't both see room for one more entry.
+fn append(mut file: &std::fs::File, entry: &[u8], max: u64) {
+    let locked = file.lock().is_ok();
+    if file.metadata().is_ok_and(|m| m.len() + entry.len() as u64 <= max) {
+        let _ = file.write_all(entry);
+    }
+    if locked {
+        let _ = file.unlock();
+    }
 }
 
 /// One batch of pane output handed to the page (pty_spawn's emitter).
@@ -149,5 +162,47 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("loom.log")).unwrap(), "next\n");
         drop(next);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The cap and entry size the next two tests use in place of MAX and real lines.
+    const CAP: u64 = 64 << 10;
+    const ENTRY: usize = 1000;
+
+    /// Review round 2, 8: while one Loom holds the log, fresh Looms each with a
+    /// run's worth to write still share one cap on it.
+    #[test]
+    fn looms_that_share_a_log_share_its_cap() {
+        let dir = std::env::temp_dir().join(format!("loom-log-cap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let anchor = super::open(&dir).expect("the Loom left open");
+        anchor.try_lock().expect("the lock append takes works on the handle open gives");
+        anchor.unlock().unwrap();
+        let fresh = || {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["logfile::tests::a_fresh_loom_fills_the_log", "--exact", "--ignored"])
+                .env("LOOM_LOG_CAP_TEST", &dir)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        for mut loom in [fresh(), fresh()] {
+            assert!(loom.wait().unwrap().success());
+        }
+        let len = std::fs::metadata(dir.join("loom.log")).unwrap().len();
+        assert!(len <= CAP && len > CAP - ENTRY as u64, "two runs of {CAP} bytes each wrote {len} in all");
+        drop(anchor);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A fresh Loom for the test above, in a process of its own: enough
+    /// entries to fill the cap alone.
+    #[test]
+    #[ignore = "looms_that_share_a_log_share_its_cap runs it"]
+    fn a_fresh_loom_fills_the_log() {
+        let Some(dir) = std::env::var_os("LOOM_LOG_CAP_TEST") else { return };
+        let file = super::open(std::path::Path::new(&dir)).expect("the shared log");
+        for _ in 0..CAP as usize / ENTRY + 1 {
+            super::append(&file, &[b'x'; ENTRY], CAP);
+        }
     }
 }
