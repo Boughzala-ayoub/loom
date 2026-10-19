@@ -1535,7 +1535,7 @@ console.log("ok   Closing waits for a Grok session log read already out");
   let polls = 0;
   const settle = p.grokSettle;
   p.grokSettle = function (...a: unknown[]) { polls++; return settle.apply(this, a); };
-  Object.assign(p, { observer: { disconnect() {} }, unlisten: [], out: { id: 1 }, gpu() {}, term: { dispose() {} }, el: { remove() {} }, row: { remove() {} }, pip: { remove() {} } });
+  Object.assign(p, { observer: { disconnect() {} }, settler: { stop() {} }, unlisten: [], out: { id: 1 }, gpu() {}, term: { dispose() {} }, el: { remove() {} }, row: { remove() {} }, pip: { remove() {} } });
   await p.dispose();
   later(10_000);
   assert.equal(polls, 0, "a closed pane's held Stop polled on");

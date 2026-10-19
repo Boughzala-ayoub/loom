@@ -39,6 +39,13 @@ with --json, and reconnects when Loom goes away, from the last one it printed.
 On a task it stops once the task is finished. A failure that ends it is one
 more JSON line, with \"next\", the event number to resume from.
 
+loomctl watch --panes --follow does the same for pane states: one event each
+time a pane settles as working, idle, waiting, exited or starting for 2 s,
+with its thread, agent, title and last lines. --thread T, --pane P and
+--state idle,waiting narrow it. loomctl wait <pane> --until idle blocks until
+the pane has settled idle. loomctl webhook add <url> has Loom POST the same
+events to a URL, from every thread, with nothing to set up per project.
+
 With --json, every failure prints one JSON object: \"code\" (usage, not-running,
 busy, unreachable, version, connection, timeout or failed), \"sent\" (whether
 the command reached Loom: if so it may have run) and \"error\". From Loom it can
@@ -449,7 +456,7 @@ fn follow(parsed: &Parsed, names: &[String], watch: &Watchdog, cwd: &str) -> i32
                 }
                 let data = &reply["data"];
                 if data["gap"] == json!(true) {
-                    note(&format!("Loom no longer has every event after {after} (it keeps the last 500 finished tasks), or its journal started over."));
+                    note(&format!("Loom no longer has every event after {after}: it keeps the last 500 finished tasks and 500 pane events, and pane events start over when Loom does."));
                 }
                 for e in data["events"].as_array().into_iter().flatten() {
                     match json {
@@ -491,9 +498,13 @@ fn follow(parsed: &Parsed, names: &[String], watch: &Watchdog, cwd: &str) -> i32
     }
 }
 
-/// An event as `watch` prints it without --json.
+/// An event as `watch` prints it without --json: a task's, or a pane's (`watch --panes`).
 fn event_line(e: &Value) -> String {
     let s = |k: &str| e[k].as_str().unwrap_or("").to_string();
+    if e.get("old").is_some() {
+        let asking = if e["asking"] == json!(true) { " (asking)" } else { "" };
+        return format!("{}  {}  {}  {} -> {}{asking}  {}", e["seq"], s("at"), s("ref"), s("old"), s("state"), s("title"));
+    }
     let detail = s("detail");
     format!("{}  {}  {}  {}  {}{}", e["seq"], s("at"), s("task"), s("state"), s("signal"), if detail.is_empty() { detail } else { format!("  {detail}") })
 }

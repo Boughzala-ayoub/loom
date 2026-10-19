@@ -655,6 +655,9 @@ loomctl send api-fix:1 --receipt 'npm test'   # a token for wait --receipt
 loomctl --key fix-1 submit api-fix:1 fix the login test   # a task id, once Enter went in
 loomctl wait --task <id>                # until it finishes or asks for approval
 loomctl watch --follow                  # every task's state changes as they happen
+loomctl watch --panes --follow          # every pane that settles as working, idle, waiting or exited
+loomctl wait api-fix:1 --until idle     # until that pane has settled idle
+loomctl webhook add https://host/hook --secret s   # POST those pane events there
 loomctl --key job-7 new C:\code\app --name login   # retried with the same key, runs once
 loomctl help                            # every command the running Loom knows
 ```
@@ -741,6 +744,38 @@ and permission hooks, Codex's turn notification naming the prompt, OpenCode's
 plugin, a shell's exit code). Going quiet never completes a task. Loom keeps
 tasks in a journal beside the workspace file, so ids, `--key` retries and
 `watch` numbers survive a restart. `docs/loomctl.md` has the details.
+
+### Telling other apps when a pane finishes
+
+Every pane reports its state changes without any setup, in every thread. When
+a pane settles into a new state (`working`, `idle`, `waiting`, `exited` or
+`starting`) and stays there for 2 seconds, Loom records one event: the
+thread, pane, agent, title, old and new state, when it began, whether a
+numbered question is on screen (`asking`), the exit code for `exited`, and the
+pane's last 10 lines. The 2 seconds keep a pause between tool calls, or a
+burst of output that goes back to the old state, from sending anything. The
+states are the ones the pane's tag shows. A finished agent shows `waiting`
+until someone looks at it, or goes straight to `idle` if someone already
+is, so listen for both.
+
+Three ways to hear them:
+
+```powershell
+loomctl --json watch --panes --follow                 # one JSON line per event, reconnecting
+loomctl watch --panes --state waiting,exited --thread api-fix
+loomctl wait api-fix:1 --until idle --timeout 600     # blocks until it has settled idle
+loomctl webhook add https://example.com/loom --secret s3cret --state idle,waiting,exited
+```
+
+A webhook gets each event as a JSON POST with `X-Loom-Event: pane-state`,
+`X-Loom-Delivery: <seq>` and, with `--secret`, `X-Loom-Signature:
+sha256=<hex HMAC-SHA256 of the body>`. `--header "Authorization: Bearer ..."`
+adds one header, and `--thread`, `--pane` and `--state` keep only some events.
+Loom retries a failed delivery after 2, 4, 8, 16, 32 and 64 seconds, keeping
+each webhook's events in order. `loomctl webhook list` shows what each one
+sent and its last failures, and `loomctl webhook test 1` posts a test event.
+Webhooks are kept in the workspace file; events are kept in memory, the last
+500. `docs/loomctl.md` has the event fields.
 
 `--key NAME` makes a retry safe: Loom runs each key once, and the same command
 with the same key gets the first answer, waiting for it if it's still

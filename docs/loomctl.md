@@ -145,6 +145,7 @@ shows one.
 | `task <id> [--end cancelled\|unknown]` | A task from `submit` as it stands. See [Tasks](#tasks). |
 | `tasks [--pane P] [--state S]` | Every open task and the last 500 to finish. |
 | `watch [task] [--after N] [--follow] [--metadata [--policy \| --policy-v4] [--notification-context]]` | Task events after number N, as they come. See [Waiting and watching](#waiting-and-watching). |
+| `watch --panes [--thread T] [--pane P] [--state S] [--after N] [--follow]` | Pane state events: each time a pane settles as working, idle, waiting, exited or starting. See [Pane events](#pane-events). |
 | `close-plan <thread> [--delete worktree\|branch]` | What `close-thread` would close and delete, changing nothing. See [Deleting a worktree](#deleting-a-worktree). |
 | `trash [list]` | Deleted worktrees waiting in Loom's trash, and where their folders and Git records went. See [Undoing a deletion](#undoing-a-deletion). |
 | `info` | Which Loom answered. Answered by the handshake, not the window. |
@@ -564,6 +565,7 @@ among them may already have run something.
 | Command | What it does |
 | --- | --- |
 | `wait [pane] [--state S]` | Until the pane is in a state: `waiting` by default, or several such as `--state idle,waiting`. |
+| `wait [pane] --until S` | Until the pane has settled in a state, as [pane events](#pane-events) report it: there for 2 s. |
 | `wait <pane> --turn-after N [--gen N]` | Until an agent finishes turn N+1. |
 | `wait --receipt R` | Until what `send --receipt` sent finishes. |
 | `wait --task ID [--until S] [--or-idle]` | Until a task finishes or asks for approval, or reaches a state `--until` names. |
@@ -590,6 +592,7 @@ when time runs out.
 | `dictation remove lang <code>` / `remove prefix [text...]` | Drop one from its list. The last of each stays. |
 | `notify [pane [inherit\|on\|off]] [--all on\|off] [--finish\|--fail\|--blocked on\|off] [--new-panes inherit\|on\|off]` | Task notices: show them, or change every pane's, one pane's, the kinds or what new panes start with. See [Task notices](#task-notices). |
 | `notify --check SEQ,...` | Whether those events may go out as notices now. |
+| `webhook [list] \| add <url> [--header "Name: value"] [--secret S] [--thread T] [--pane P] [--state S] \| remove <n> \| test [n]` | Where Loom POSTs pane events. See [Webhooks](#webhooks). |
 | `remote [on [--port N] \| off \| pair \| revoke [phone] \| push test]` | The phone remote: its state and paired phones, start or stop it, show a pairing code for a phone, unpair one phone or every phone, or send the phones with notifications on a test one. See [Phone remote](#phone-remote). |
 
 ### Git
@@ -1276,6 +1279,104 @@ An event's `signal` says what moved it: `loomctl` (accepted or manually ended), 
 The journal is `workspaces.tasks.jsonl` beside `workspaces.json`, or
 `<profile>.tasks.jsonl` beside a profile. It holds digests, never the text,
 and the counters that keep `seq` and `gap` right across restarts.
+
+## Pane events
+
+Tasks follow one piece of work. Pane events follow the panes themselves, with
+nothing to set up: when a pane settles into a new state and stays there for 2
+seconds, Loom records one event. A tool call that pauses output, or a blip
+that goes back to the old state within the 2 seconds, records nothing. The
+states are the ones `panes` prints and the pane's tag shows:
+`working`, `idle`, `waiting` (an agent finished or asks, until you look at
+it), `exited` and `starting`. Looking at a waiting pane moves it to `idle`,
+and that is an event too. A pane someone looks at within 2 seconds of its
+agent finishing goes from `working` straight to `idle`, so to hear every
+finished turn, take both `idle` and `waiting`. A pane's first state sends
+nothing; the state it settles in next does, so when Loom starts, each pane
+that boots sends `starting` to `idle`.
+
+```json
+{ "seq": 1760870412337, "at": "2026-10-19T10:40:10.331Z",
+  "pane": "mvf3at74-32", "stableId": "0b6d…", "ref": "api-fix:1", "thread": "api-fix", "threadId": "mvf2ggyt-4",
+  "agent": "claude", "title": "Fix the login test", "old": "working", "state": "waiting",
+  "asking": false, "exit": null, "generation": 1, "turns": 4,
+  "tail": ["● Done. The login test passes again.", "", "❯ ", "…"] }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `seq` | The event's number. Numbers are milliseconds since 1970, or just past when two events share one, so they only grow, across Loom restarts too |
+| `at` | When the pane entered the new state, 2 s before the event |
+| `pane`, `stableId`, `ref`, `thread`, `threadId` | The pane as `panes --json` names it. `stableId` stays the same across restarts |
+| `agent`, `title` | What runs there and the title its tag shows |
+| `old`, `state` | The state it left and the one it settled in |
+| `asking` | `waiting` on a numbered question, such as an approval, rather than a finished turn |
+| `exit` | The process's exit code, for `exited`; otherwise `null` |
+| `generation`, `turns` | As in `panes --json` |
+| `tail` | The pane's last 10 lines, scrollback included, ending at its last line with anything on it, each cut at 200 characters |
+
+Loom keeps the last 500 events in memory. They start over when Loom does.
+
+`watch --panes` answers like `watch`: the events after `--after N` (0 by
+default), waiting up to `--timeout` for one, with `next` to pass back.
+`--after` also takes a time in milliseconds, so
+`--after ([DateTimeOffset]::Now.ToUnixTimeMilliseconds())` starts from now.
+`gap: true` means some events after N are gone: pruned, or N came from
+before Loom's last start. `--thread`, `--pane` and `--state` narrow it, and
+any of them alone means `--panes`. `--follow` keeps going and reconnects, as
+for tasks:
+
+```powershell
+loomctl --json watch --panes --follow --state waiting,exited | ForEach-Object {
+  $e = $_ | ConvertFrom-Json
+  if ($e.state -eq 'waiting') { "$($e.ref) is done or asking: $($e.tail[-1])" }
+}
+```
+
+`wait <pane> --until idle` (or several states) returns once the pane has
+settled there, with the pane's record and its last `event`. It returns at
+once when the pane already settled there. To wait for the turn a `send`
+started, use `wait --task` with the id `send` printed: right after a send the
+pane may not have left `idle` yet.
+
+### Webhooks
+
+`webhook add <url>` makes Loom POST every pane event to that URL, from every
+thread, kept in the workspace file beside the other settings.
+
+```powershell
+loomctl webhook add https://example.com/loom --secret s3cret --header "Authorization: Bearer abc" --state idle,waiting,exited
+loomctl webhook test 1     # one test POST: {"seq": 0, "test": true, "at": "..."}
+loomctl webhook            # each one, with what it sent, what waits and its last 20 failures
+loomctl webhook remove 1
+```
+
+Each POST is one event as JSON, with these headers:
+
+| Header | Value |
+| --- | --- |
+| `Content-Type` | `application/json` |
+| `X-Loom-Event` | `pane-state` |
+| `X-Loom-Delivery` | The event's `seq`. A retry sends the same one |
+| `X-Loom-Signature` | With `--secret`: `sha256=` and the hex HMAC-SHA256 of the body, keyed by the secret |
+| Your `--header` | As given |
+
+`--thread` keeps one thread's events, by name. `--pane` keeps one pane's,
+following it across restarts by its `stableId`. `--state` keeps the states
+listed. Any 2xx is delivered. Anything else, or no answer within 20 s, is
+tried again after 2, 4, 8, 16, 32 and 64 seconds, except a 4xx other than 408
+and 429, which a retry wouldn't change. Each webhook sends its events one at a
+time in order, and holds at most 100 waiting; past that the oldest is dropped.
+Failures go to `webhook list` and the window's console. Loom sends through
+Windows' `curl.exe`, as for the phone's notifications.
+
+To check a signature in Node:
+
+```js
+const sig = 'sha256=' + crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+const got = String(req.headers['x-loom-signature'] ?? '');
+const ok = got.length === sig.length && crypto.timingSafeEqual(Buffer.from(got), Buffer.from(sig));
+```
 
 ## Retrying safely
 

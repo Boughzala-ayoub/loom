@@ -24,6 +24,7 @@ import { claudeDivider, claudeComposer, readMenu, readFeedback, cursorKey, menuK
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
+import { Courier, hookHeader, hookUrl, matches, PaneEventLog, Settler, TAIL_LINES, TAIL_WIDTH, type PaneEvent, type Webhook } from "./pane_events";
 import { newPushKey, pushRequest, type PushKey, type PushMessage, type PushSub } from "./push";
 import type { OverlayRow, OverlayState } from "./overlay";
 import { procsView, type Reading } from "./procs";
@@ -2016,6 +2017,8 @@ class Pane {
   notifyIds: string[] = [this.id];
   /** This pane's own id across restarts, where `id` is new each start: saved with it and restored only into it. */
   stableId: string = crypto.randomUUID();
+  /** Its state as `watch --panes`, `wait --until` and webhooks hear it: what paint() shows, once it stood 2 s. */
+  readonly settler = new Settler((old, state, since) => paneEvent(this, old, state, since));
   /** Enters a person gave it in Loom's window that may have sent a prompt no
    * task holds yet (manualEnter), oldest first. Never their text. */
   manual: ManualEnter[] = [];
@@ -2054,7 +2057,7 @@ class Pane {
   private startupOutput = "";
   private startupRetry = false;
   private spawnResume = false;
-  private exitCode?: number;
+  exitCode?: number;
   private startupStarted = 0;
   /** This pane's own row under its thread in the sidebar — Orca lists each
    * agent session under its worktree, and a thread with a claude and a codex
@@ -2831,6 +2834,7 @@ class Pane {
     this.row.classList.toggle("on", this.th === current && this.th.active === this);
     this.pip.dataset.state = state;
     this.pip.title = `${this.agent}: ${title} (${word})`;
+    if (!this.disposed) this.settler.see(cliState(this));
     this.th.paint(); // the thread row sums its panes
     syncSpin();
     // Exiting or relaunching changes whether this pane can be dictated into.
@@ -2913,6 +2917,7 @@ class Pane {
 
   async dispose() {
     this.disposed = true;
+    this.settler.stop();
     dashboardMessages.delete(this.id);
     dashboardDrafts.delete(this.id);
     // Closing the pane mid-sentence: drop the recording, there's nowhere to put it.
@@ -3687,6 +3692,7 @@ const flushSave = (): Promise<unknown> => {
       notify: notifyPolicy,
       keepAwake,
       planUsage,
+      webhooks,
       speakButton: speakShown,
       overlay: overlayMode,
       ui: { thread: threads.indexOf(current!), dashboard: dashboardOpen, dashboardCompact, sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
@@ -9150,9 +9156,9 @@ async function pollProviderUsage(panes = threads.flatMap((t) => t.panes)) {
 const cliState = (p: Pane) => (p.dead ? "exited" : p.starting ? "starting" : p.waiting ? "waiting" : p.busy ? "working" : "idle");
 const CLI_STATES = ["waiting", "working", "idle", "exited", "starting"];
 const CLI_ALIASES: Record<string, string> = { busy: "working", dead: "exited", ready: "idle" };
-function cliStates(value: unknown, fallback: string): string[] {
+function cliStates(value: unknown, fallback: string, option = "--state"): string[] {
   const list = String(value ?? fallback).toLowerCase().split(",").map((s) => CLI_ALIASES[s.trim()] ?? s.trim());
-  for (const s of list) if (!CLI_STATES.includes(s)) throw new Error(`--state takes ${CLI_STATES.join(", ")}, not ${s}.`);
+  for (const s of list) if (!CLI_STATES.includes(s)) throw new Error(`${option} takes ${CLI_STATES.join(", ")}, not ${s}.`);
   return list;
 }
 
@@ -9285,6 +9291,81 @@ async function until(ok: () => boolean, seconds: number, what: string, signal?: 
 }
 
 const gone = (p: Pane) => !p.th.panes.includes(p) || !threads.includes(p.th);
+
+/** A pane's last n lines, scrollback included, up to the last line with
+ * anything on it: below a short prompt the screen is blank rows. */
+function tailLines(p: Pane, n: number) {
+  const buf = p.term.buffer.active;
+  let to = buf.length;
+  while (to > 0 && !buf.getLine(to - 1)?.translateToString(true, 0, p.term.cols).trim()) to--;
+  const from = Math.max(0, to - n), lines: string[] = [];
+  for (let y = from; y < to; y++) lines.push(buf.getLine(y)?.translateToString(true, 0, p.term.cols) ?? "");
+  return { lines, from, to };
+}
+
+/** Pane state events (pane_events.ts): each state a pane settled into, as
+ * watch --panes, wait --until and the webhooks hear it. In memory only. */
+const paneEvents = new PaneEventLog();
+const paneEventGate = new TaskEventGate();
+let webhooks: Webhook[] = [];
+let couriers: Courier[] = [];
+// The phone's Web Push already posts through Windows' curl on a blocking thread: webhooks share it.
+// Its failure speaks of push services, so a webhook's says what curl met instead.
+const CURL_EXITS: Record<string, string> = { "6": "couldn't resolve the host", "7": "couldn't connect", "28": "no answer in 20 s", "35": "TLS handshake failed", "60": "certificate not trusted" };
+const postHook = (url: string, headers: [string, string][], body: string) =>
+  invoke<number>("push_post", { endpoint: url, headers, body: Array.from(new TextEncoder().encode(body)) }).catch((e) => {
+    const code = /curl exit (-?\d+)/.exec(String(e))?.[1];
+    throw new Error(code === undefined ? String(e) : `${CURL_EXITS[code] ?? "curl failed"} (curl exit ${code})`);
+  });
+
+function paneEvent(p: Pane, old: string, state: string, since: number) {
+  if (gone(p)) return;
+  const e = paneEvents.add({
+    at: new Date(since).toISOString(), pane: p.id, stableId: p.stableId, ref: paneName(p), thread: p.th.name, threadId: p.th.id,
+    agent: p.agent, title: p.label, old, state,
+    asking: state === "waiting" && p.agent !== "shell" && !!readMenu(liveScreen(p, false), p.agent),
+    exit: state === "exited" ? p.exitCode ?? null : null, generation: p.generation, turns: p.turns,
+    tail: tailLines(p, TAIL_LINES).lines.map((l) => l.trimEnd().slice(0, TAIL_WIDTH)),
+  });
+  paneEventGate.notify();
+  for (const c of couriers) c.push(e);
+}
+
+/** One courier per webhook: an unchanged hook keeps its queue, a removed one stops. */
+function syncCouriers() {
+  const kept = couriers.filter((c) => webhooks.includes(c.hook));
+  for (const c of couriers) if (!kept.includes(c)) c.stop();
+  couriers = webhooks.map((h) => kept.find((c) => c.hook === h) ?? new Courier(h, postHook));
+}
+
+/** watch --panes: the events after --after that the filters keep, waiting up to the timeout for one. */
+async function watchPanes(a: Args, seconds: number, signal?: AbortSignal) {
+  if (a._.length || ["metadata", "policy", "policy-v4", "notification-context"].some((k) => a[k] !== undefined))
+    throw new Error("watch --panes takes --thread, --pane, --state and --after, not a task or --metadata.");
+  const after = num(a, "after", 0, 0, Number.MAX_SAFE_INTEGER), th = str(a, "thread"), sel = str(a, "pane");
+  // Ids, resolved on each ask: a follower's next ask finds the pane again after a restart.
+  const filter = {
+    threads: th === undefined ? [] : [cliThread(th, true).id],
+    panes: sel === undefined ? [] : [cliPane(sel, true).id],
+    states: a.state === undefined ? [] : cliStates(str(a, "state"), ""),
+  };
+  const want = (e: PaneEvent) => matches(filter, e);
+  await paneEventGate.waitUntil(() => paneEvents.after(after, want).events.length > 0, Math.max(0, seconds - 1) * 1000, signal);
+  const { events, next, gap } = paneEvents.after(after, want);
+  return { data: { events, next, done: false, gap }, text: events.map(paneEventLine).join("\n") };
+}
+
+/** A webhook as `webhook list` shows it: the secret and the header's value never. */
+function hookRow(h: Webhook, i: number) {
+  const c = couriers[i], pane = (id: string) => threads.flatMap((t) => t.panes).find((p) => p.stableId === id);
+  return {
+    n: i + 1, url: h.url, header: h.header ? `${h.header.slice(0, h.header.indexOf(":"))}: ...` : null, secret: !!h.secret,
+    threads: h.threads ?? [], panes: (h.panes ?? []).map((id) => { const p = pane(id); return p ? paneName(p) : id; }), states: h.states ?? [],
+    sent: c?.sent ?? 0, queued: c?.queue.length ?? 0, lastOk: c?.lastOk ?? null, failures: c?.failures ?? [],
+  };
+}
+
+const paneEventLine = (e: PaneEvent) => `${e.seq}  ${e.at}  ${e.ref}  ${e.old} -> ${e.state}${e.asking ? " (asking)" : ""}  ${e.title}`;
 
 /** --delete: what close-plan and close-thread delete besides closing. */
 function cliDelete(a: Args, th: Thread): "" | "worktree" | "branch" {
@@ -9692,15 +9773,9 @@ const CLI: Record<string, CliCommand> = {
       let raw: string, from: number | undefined, to: number | undefined;
       if (a.lines === undefined) raw = liveScreen(p);
       else {
-        const buf = p.term.buffer.active;
-        const n = num(a, "lines", 50, 1, 100_000);
-        // Up to the last line with anything on it: below a short prompt the screen is blank rows.
-        let end = buf.length;
-        while (end > 0 && !buf.getLine(end - 1)?.translateToString(true, 0, p.term.cols).trim()) end--;
-        const lines: string[] = [];
-        for (let y = Math.max(0, end - n); y < end; y++) lines.push(buf.getLine(y)?.translateToString(true, 0, p.term.cols) ?? "");
-        raw = lines.join("\n");
-        [from, to] = [Math.max(0, end - n), end];
+        const tail = tailLines(p, num(a, "lines", 50, 1, 100_000));
+        raw = tail.lines.join("\n");
+        [from, to] = [tail.from, tail.to];
       }
       const text = raw.split("\n").map((l) => l.trimEnd()).join("\n").replace(/\n+$/, "");
       const buf = p.term.buffer.active;
@@ -10209,14 +10284,24 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   wait: {
-    usage: "wait [pane] [--state waiting] [--turn-after N [--gen N]] [--receipt R] [--task ID [--until S] [--or-idle]] [--timeout S]",
-    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting. --turn-after N: until an agent finishes turn N+1 (turns in loomctl panes). --receipt R: until the command or turn behind send --receipt's token finishes. If task-end abandons held Enter, the wait stops with an explicit no-outcome error. --task ID: until a task finishes or asks for approval, or reaches --until S. --or-idle also returns when that task's same pane generation is idle or waiting, even if already idle; waitReason is task or pane-idle. It does not settle the task or prove completion.",
+    usage: "wait [pane] [--state waiting] [--until S] [--turn-after N [--gen N]] [--receipt R] [--task ID [--until S] [--or-idle]] [--timeout S]",
+    help: "Block until a pane is in a state: waiting (the default), working, idle or exited. Several: --state idle,waiting. --until S, on a pane: until it has settled there, as watch --panes reports it: in that state for 2 s, so a pause between tool calls doesn't count as idle. It returns at once if the pane already settled there; after a send, wait --task with the id send printed waits for that turn. --turn-after N: until an agent finishes turn N+1 (turns in loomctl panes). --receipt R: until the command or turn behind send --receipt's token finishes. If task-end abandons held Enter, the wait stops with an explicit no-outcome error. --task ID: until a task finishes or asks for approval, or reaches --until S. --or-idle also returns when that task's same pane generation is idle or waiting, even if already idle; waitReason is task or pane-idle. It does not settle the task or prove completion.",
     options: { state: "string", "turn-after": "int", gen: "int", receipt: "string", task: "string", until: "string", "or-idle": "bool" },
     run: async (a, ctx) => {
       const id = str(a, "task");
       if (id !== undefined) return waitTask(cliTask(id), str(a, "until"), ctx.seconds, flag(a, "or-idle"), ctx.signal);
       if (a["or-idle"] !== undefined) throw new Error("--or-idle is for --task.");
-      if (a.until !== undefined) throw new Error("--until is for --task.");
+      const settle = str(a, "until");
+      if (settle !== undefined) {
+        if (a.state !== undefined || a["turn-after"] !== undefined || a.receipt !== undefined) throw new Error("--until goes with a pane or --task alone: loomctl wait <pane> --until idle.");
+        const p = cliPane(a._[0], true), want = cliStates(settle, "", "--until");
+        // Settled there, with no other state counting down.
+        const there = () => want.includes(p.settler.settled ?? "") && cliState(p) === p.settler.settled;
+        await until(() => gone(p) || there(), ctx.seconds, `${paneName(p)} to settle ${want.join(" or ")}`, ctx.signal);
+        if (gone(p)) throw new Error("The pane was closed.");
+        const event = [...paneEvents.events].reverse().find((e) => e.pane === p.id) ?? null;
+        return { data: { ...paneData(p), event }, text: `${paneName(p)} is ${cliState(p)}` };
+      }
       const token = str(a, "receipt");
       if (token !== undefined) return waitReceipt(token, ctx.seconds, ctx.signal);
       const p = cliPane(a._[0], true);
@@ -10343,10 +10428,11 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   watch: {
-    usage: "watch [task] [--after N] [--follow] [--metadata [--policy | --policy-v4] [--notification-context]]",
-    help: "Task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send, manual or agent) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one. --metadata --policy-v4 opts into loom-durable-events-v4: disposition replaces notify with send, held, muted or none. Persist held notices before advancing next, then recheck with notify --check SEQ --policy-v4. Owner release creates no new event. The v3 contract is unchanged. --notification-context, with --metadata and --policy or --policy-v4, adds where each event happened as Loom recorded it (context: threadId, threadName, paneId, paneNumber, paneTitle, agent, provider, capturedAt, origin, issues), with source loom-durable-events-v3-context-v1 or loom-durable-events-v4-context-v1. A title the running program set is never in it. Such an answer holds at most 1000 events and 512 KiB: read on from next.",
-    options: { after: "int", metadata: "bool", policy: "bool", "policy-v4": "bool", "notification-context": "bool" },
+    usage: "watch [task] [--after N] [--follow] [--metadata [--policy | --policy-v4] [--notification-context]] | watch --panes [--thread T] [--pane P] [--state S] [--after N] [--follow]",
+    help: "--panes (or --thread, --pane or --state alone): pane state events instead of tasks. Each time a pane settles into a new state (working, idle, waiting, exited, starting) and stays there 2 s, one event: seq, at (when the state began), pane, stableId, ref, thread, threadId, agent, title, old, state, asking (waiting on a numbered question), exit (exited only), generation, turns and tail (its last 10 lines). Loom keeps the last 500 in memory. Numbers are milliseconds since 1970 or just past, so they grow across restarts and --after also takes a time; gap is true when some after N are gone (pruned, or Loom restarted since N). Filters: --thread T, --pane P, --state idle,waiting. Without --panes: task events after number N (0 by default), oldest first: each state a task moved to, numbered across all tasks and across restarts. Waits for one up to --timeout, woken by the journal's writes, then prints them and next, the number to pass back. With a task, only its events, and done once it finished. loomctl watch --follow keeps going, one JSON line per event with --json, reconnecting when Loom goes away. --metadata gives each event's number, task, pane id, pane generation, state and time only, and for a completed one the name of the agent's final message (response, a hash, never the text; null when the agent reported none), with source loom-durable-events-v2. --metadata --policy adds what started the task (source: submit, send, manual or agent) and whether the notification policy lets it go out (notify), with source loom-durable-events-v3. A v2 read that would include a notice the policy holds back is refused, so a reader that can't see the policy never sends one. --metadata --policy-v4 opts into loom-durable-events-v4: disposition replaces notify with send, held, muted or none. Persist held notices before advancing next, then recheck with notify --check SEQ --policy-v4. Owner release creates no new event. The v3 contract is unchanged. --notification-context, with --metadata and --policy or --policy-v4, adds where each event happened as Loom recorded it (context: threadId, threadName, paneId, paneNumber, paneTitle, agent, provider, capturedAt, origin, issues), with source loom-durable-events-v3-context-v1 or loom-durable-events-v4-context-v1. A title the running program set is never in it. Such an answer holds at most 1000 events and 512 KiB: read on from next.",
+    options: { after: "int", metadata: "bool", policy: "bool", "policy-v4": "bool", "notification-context": "bool", panes: "bool", thread: "string", pane: "string", state: "string" },
     run: async (a, ctx) => {
+      if (flag(a, "panes") || a.thread !== undefined || a.pane !== undefined || a.state !== undefined) return watchPanes(a, ctx.seconds, ctx.signal);
       const one = a._[0] ? cliTask(a._[0]) : undefined;
       const meta = flag(a, "metadata"), v4 = flag(a, "policy-v4"), v3 = meta && (flag(a, "policy") || v4);
       const withContext = flag(a, "notification-context");
@@ -10387,6 +10473,54 @@ const CLI: Record<string, CliCommand> = {
           ...(meta ? { source: (v4 ? "loom-durable-events-v4" : v3 ? "loom-durable-events-v3" : "loom-durable-events-v2") + (withContext ? "-context-v1" : "") } : {}),
         },
         text: shown.map((e) => `${e.seq}  ${at(e.at)}  ${e.task}  ${e.state}` + (meta ? "" : `  ${e.signal}${e.detail ? `  ${e.detail}` : ""}`)).join("\n"),
+      };
+    },
+  },
+  webhook: {
+    usage: "webhook [list] | webhook add <url> [--header \"Name: value\"] [--secret S] [--thread T] [--pane P] [--state S] | webhook remove <n> | webhook test [n]",
+    help: "Webhooks for pane state events, for every thread and pane, kept with Loom's settings. Loom POSTs each event that watch --panes would print to every webhook whose filters keep it, as JSON, with X-Loom-Event: pane-state and X-Loom-Delivery: <seq>. --header adds one header (an API key). --secret signs each body: X-Loom-Signature: sha256=<hex HMAC-SHA256 of the body>. --thread (by name), --pane (follows that pane across restarts) and --state idle,waiting,exited keep only those events. A failed delivery is tried again after 2, 4, 8, 16, 32 and 64 s, in order, and a 4xx other than 408 or 429 isn't retried; list shows what each sent, what waits, and its last 20 failures. test posts {\"seq\": 0, \"test\": true, \"at\": ...} once and says what came back. remove takes its number from list.",
+    options: { header: "string", secret: "string", thread: "string", pane: "string", state: "string" },
+    run: async (a) => {
+      const [how = "list", ...rest] = a._;
+      const pick = (w: string | undefined) => {
+        const n = Number(w);
+        if (!webhooks.length) throw new Error("There are no webhooks. loomctl webhook add <url> adds one.");
+        if (!Number.isInteger(n) || n < 1 || n > webhooks.length) throw new Error(`Name a webhook by its number in loomctl webhook list, 1 to ${webhooks.length}.`);
+        return n - 1;
+      };
+      if (how !== "add" && ["header", "secret", "thread", "pane", "state"].some((k) => a[k] !== undefined))
+        throw new Error("--header, --secret, --thread, --pane and --state go with webhook add.");
+      if (how === "add") {
+        if (rest.length !== 1) throw new Error("webhook add takes one URL.");
+        const h: Webhook = { url: hookUrl(rest[0]) };
+        const header = str(a, "header"), secret = str(a, "secret"), th = str(a, "thread"), sel = str(a, "pane");
+        if (header !== undefined) hookHeader((h.header = header));
+        if (secret !== undefined) {
+          if (!secret) throw new Error("--secret needs a value.");
+          h.secret = secret;
+        }
+        if (th !== undefined) h.threads = [cliThread(th).name];
+        if (sel !== undefined) h.panes = [cliPane(sel).stableId];
+        if (a.state !== undefined) h.states = cliStates(str(a, "state"), "");
+        webhooks = [...webhooks, h];
+      } else if (how === "remove") {
+        const i = pick(rest[0]);
+        webhooks = webhooks.filter((_, j) => j !== i);
+      } else if (how === "test") {
+        const i = pick(rest[0] ?? "1"), url = webhooks[i].url;
+        const got = await couriers[i].attempt(0, JSON.stringify({ seq: 0, test: true, at: new Date().toISOString() }));
+        if (typeof got !== "number" || got < 200 || got >= 300) throw new Error(`${url} didn't take the test: ${typeof got === "number" ? `HTTP ${got}` : got}.`);
+        return { data: { n: i + 1, url, status: got }, text: `${url}: HTTP ${got}` };
+      } else if (how !== "list") throw new Error(`webhook takes list, add, remove or test, not ${how}.`);
+      if (how !== "list") {
+        syncCouriers();
+        save();
+      }
+      const rows = webhooks.map(hookRow);
+      return {
+        data: rows,
+        text: rows.length ? table(rows.map((r) => [String(r.n), r.url, [r.threads.join(","), r.panes.join(","), r.states.join(",")].filter(Boolean).join(" ") || "every event",
+          `sent ${r.sent}${r.queued ? `, ${r.queued} waiting` : ""}${r.failures.length ? `, last failure ${r.failures[r.failures.length - 1].at}: ${r.failures[r.failures.length - 1].error}` : ""}`])) : "No webhooks.",
       };
     },
   },
@@ -10730,6 +10864,7 @@ async function main() {
     planUsage?: boolean;
     speakButton?: boolean;
     overlay?: boolean | OverlayMode;
+    webhooks?: Webhook[];
     ui?: { thread?: number; dashboard?: boolean; dashboardCompact?: boolean; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
@@ -10762,6 +10897,11 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   };
   await setKeepAwake(saved.keepAwake === true);
   planUsage = saved.planUsage !== false;
+  // Hand-editable file: a hook loomctl wouldn't accept is left out.
+  webhooks = (Array.isArray(saved.webhooks) ? saved.webhooks : []).filter((h) => {
+    try { return !!hookUrl(h.url) && (!h.header || !!hookHeader(h.header)); } catch { return false; }
+  });
+  syncCouriers();
   speakShown = saved.speakButton !== false;
   // true was "in background" before there was an "always".
   overlayMode = saved.overlay === true ? "background" : OVERLAY_MODES.find(m => m === saved.overlay) ?? "off";
