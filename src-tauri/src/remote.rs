@@ -715,7 +715,8 @@ pub async fn push_post(endpoint: String, headers: Vec<(String, String)>, body: V
 
 /// Through Windows' curl.exe, as usage.rs does: Loom's Rust has no TLS. The
 /// headers and the address go in a config on stdin and the body in a temp
-/// file, so none of them shows on a command line.
+/// file, so none of them shows on a command line. `-g`: a webhook's address
+/// is one request, its braces and brackets characters, never a curl glob.
 fn post(endpoint: &str, headers: &[(String, String)], body: &[u8]) -> Result<u16, String> {
     use std::io::Write;
     use std::os::windows::process::CommandExt;
@@ -730,7 +731,7 @@ fn post(endpoint: &str, headers: &[(String, String)], body: &[u8]) -> Result<u16
     config += &format!("url = {}\ndata-binary = {}\n", quote(endpoint), quote(&format!("@{}", file.display())));
     let curl = std::env::var("SystemRoot").map(|r| format!("{r}\\System32\\curl.exe")).unwrap_or_else(|_| "curl.exe".into());
     let out = Command::new(curl)
-        .args(["-q", "-sS", "-m", "20", "-o", "NUL", "-w", "%{http_code}", "-K", "-"])
+        .args(["-q", "-g", "-sS", "-m", "20", "-o", "NUL", "-w", "%{http_code}", "-K", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1233,5 +1234,40 @@ mod tests {
         let text = String::from_utf8_lossy(&squeezed);
         assert!(text.contains("Content-Encoding: gzip") && squeezed.len() < 1000);
         assert!(text.contains("frame-ancestors 'none'"));
+    }
+
+    /// Review round 1, 1: curl's URL globbing would turn one delivery into several.
+    #[test]
+    fn a_webhook_address_is_one_request_braces_and_brackets_included() {
+        use std::io::{Read, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        // Answers 200 to each request and keeps its request line, until a connection sends nothing.
+        let lines = std::thread::spawn(move || {
+            let mut lines = vec![];
+            for stream in server.incoming() {
+                let mut stream = stream.unwrap();
+                let (mut got, mut buf) = (vec![], [0; 4096]);
+                while let Ok(n @ 1..) = stream.read(&mut buf) {
+                    got.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&got);
+                    let Some(end) = text.find("\r\n\r\n") else { continue };
+                    let length = text[..end].lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()));
+                    if got.len() >= end + 4 + length.unwrap_or(0) {
+                        break;
+                    }
+                }
+                if got.is_empty() {
+                    break;
+                }
+                lines.push(String::from_utf8_lossy(&got).lines().next().unwrap().to_string());
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            }
+            lines
+        });
+        let status = post(&format!("http://127.0.0.1:{port}/{{one,two}}/[1-3]"), &[("X-Loom-Event".into(), "pane-state".into())], b"{}");
+        drop(std::net::TcpStream::connect(("127.0.0.1", port)).unwrap());
+        assert_eq!(status, Ok(200), "one status, not one per globbed address");
+        assert_eq!(lines.join().unwrap(), ["POST /{one,two}/[1-3] HTTP/1.1"]);
     }
 }
