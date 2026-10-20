@@ -1377,7 +1377,9 @@ and 429, which a retry wouldn't change. Each webhook sends its events one at a
 time in order, and holds at most 100 waiting; past that the oldest is dropped.
 Failures go to `webhook list`. Each delivery, retry and failure, with its
 HTTP status, also gets one line in Loom's log,
-`%LOCALAPPDATA%\dev.ayoub.loom\logs\loom.log`. Loom sends through
+`%LOCALAPPDATA%\dev.ayoub.loom\logs\loom.log`. The line names the webhook by
+its host and a hash of its address, such as `api2.cursor.sh #1a2b3c`, never
+the address, which can hold a secret. Loom sends through
 Windows' `curl.exe`, as for the phone's notifications.
 
 To check a signature in Node:

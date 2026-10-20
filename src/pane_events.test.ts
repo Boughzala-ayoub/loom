@@ -1,7 +1,7 @@
 // Self-check for pane state events. Run: node src/pane_events.test.ts
 // @ts-ignore Node-only test.
 import { createHmac } from "node:crypto";
-import { Courier, hookHeader, hookUrl, matches, MAX_QUEUE, PaneEventLog, RETRY_S, Settler, sign, type PaneEvent } from "./pane_events.ts";
+import { Courier, hookHeader, hookTag, hookUrl, matches, MAX_QUEUE, PaneEventLog, RETRY_S, Settler, sign, type PaneEvent } from "./pane_events.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean) {
@@ -149,12 +149,17 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   await idle(c);
   check("a failure is retried with backoff until it lands", slept.join() === "2000,4000" && c.sent === 2 && !c.failures.length);
   const first = log.events[0].seq;
+  const tag = hookTag("http://h/x");
   check("each try is logged with its status, the delivery too", logged.join("\n") === [
-    `Loom webhook http://h/x: event ${first} (loom:1 working>idle) HTTP 500; retrying in 2 s.`,
-    `Loom webhook http://h/x: event ${first} (loom:1 working>idle) curl exit 7; retrying in 4 s.`,
-    `Loom webhook http://h/x: event ${first} (loom:1 working>idle) delivered, HTTP 204 after 3 tries.`,
-    `Loom webhook http://h/x: event ${first + 1} (loom:1 working>waiting) delivered, HTTP 200.`,
+    `Loom webhook ${tag}: event ${first} (loom:1 working>idle) HTTP 500; retrying in 2 s.`,
+    `Loom webhook ${tag}: event ${first} (loom:1 working>idle) curl exit 7; retrying in 4 s.`,
+    `Loom webhook ${tag}: event ${first} (loom:1 working>idle) delivered, HTTP 204 after 3 tries.`,
+    `Loom webhook ${tag}: event ${first + 1} (loom:1 working>waiting) delivered, HTTP 200.`,
   ].join("\n"));
+  // Review 2026-10-20, 4: the address can be the secret, in its user, path or query.
+  const secret = "https://ash:pw1@hooks.example.com:8443/automations/7e9a7c1c?token=tk2";
+  const named = hookTag(secret);
+  check("a log names a webhook by host and hash, never its address", named.startsWith("hooks.example.com:8443 #") && !/ash|pw1|automations|7e9a7c1c|token|tk2/.test(named) && named !== hookTag(secret + "x"));
   check("events go out in order", seen.map((s) => JSON.parse(s.body).state).join() === "idle,idle,idle,waiting");
   const h = Object.fromEntries(seen[0].headers);
   check("each delivery is signed and carries the extra header", h["X-Loom-Signature"] === (await sign("k", seen[0].body)) && h["X-Who"] === "ash" && h["X-Loom-Event"] === "pane-state");

@@ -1,6 +1,7 @@
 /** Pane state events: what `loomctl watch --panes`, `wait --until` and
  * webhooks hear when a pane settles into a new state. The parts that need no
  * Loom state, so they run under plain node; main.ts feeds them from paint(). */
+import { hash32 } from "./prompt.ts";
 
 /** How long a new state must stand before it counts. Output that pauses for a
  * tool call, or a blip that goes back to the old state, sends nothing; a turn
@@ -137,6 +138,14 @@ export function hookUrl(url: string) {
   return url;
 }
 
+/** A webhook as logs name it: its host and a hash of the address, never the
+ * address, whose user, path or query can be the secret. */
+export function hookTag(url: string) {
+  let host: string;
+  try { host = new URL(url).host; } catch { host = "an unreadable address"; }
+  return `${host} #${hash32(url).slice(0, 6)}`;
+}
+
 /** "Name: value", split, or an error saying why not. */
 export function hookHeader(header: string): [string, string] {
   const i = header.indexOf(":");
@@ -172,11 +181,13 @@ export class Courier {
   private post: Post;
   private log: (msg: string) => void;
   private sleep: (ms: number) => Promise<void>;
+  private tag: string;
   constructor(hook: Webhook, post: Post, log: (msg: string) => void = console.warn, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))) {
     this.hook = hook;
     this.post = post;
     this.log = log;
     this.sleep = sleep;
+    this.tag = hookTag(hook.url);
   }
 
   push(e: PaneEvent) {
@@ -229,12 +240,12 @@ export class Courier {
       if (typeof got === "number" && got >= 200 && got < 300) {
         this.sent++;
         this.lastOk = new Date().toISOString();
-        return this.log(`Loom webhook ${this.hook.url}: event ${seq} (${what}) delivered, HTTP ${got}${tries}.`);
+        return this.log(`Loom webhook ${this.tag}: event ${seq} (${what}) delivered, HTTP ${got}${tries}.`);
       }
       const why = typeof got === "number" ? `HTTP ${got}` : got;
       const final = (typeof got === "number" && got >= 400 && got < 500 && got !== 408 && got !== 429) || i >= RETRY_S.length;
       if (final || this.stopped) return this.fail(job, `${why}${tries}`);
-      this.log(`Loom webhook ${this.hook.url}: event ${seq} (${what}) ${why}; retrying in ${RETRY_S[i]} s.`);
+      this.log(`Loom webhook ${this.tag}: event ${seq} (${what}) ${why}; retrying in ${RETRY_S[i]} s.`);
       await this.sleep(RETRY_S[i] * 1000);
     }
   }
@@ -242,6 +253,6 @@ export class Courier {
   private fail({ seq, what }: Courier["queue"][number], error: string) {
     this.failures.push({ at: new Date().toISOString(), seq, error });
     if (this.failures.length > KEEP_FAILURES) this.failures.shift();
-    this.log(`Loom webhook ${this.hook.url}: event ${seq} (${what}) not delivered (${error}).`);
+    this.log(`Loom webhook ${this.tag}: event ${seq} (${what}) not delivered (${error}).`);
   }
 }
