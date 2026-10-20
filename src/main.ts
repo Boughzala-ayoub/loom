@@ -1970,6 +1970,8 @@ class Pane {
   /** Codex asked (an approval or a question, OSC 9) and no answer went in
    * since. Its title says Working all through one, but nothing runs. */
   codexAsking = false;
+  /** When Codex last asked: an Esc or Ctrl-C that went in before then isn't its answer (wrote). */
+  private codexAskedAt = 0;
   /** Whether a Cursor turn runs, as its hooks' reports say, in order: from a
    * turn's start to its stop (agentReport, cursorRuns). Unset until this
    * launch's first, as when Loom couldn't add its hooks: then its "ctrl+c to
@@ -2333,7 +2335,7 @@ class Pane {
     // use; "p=?" there is a capability probe, not news.
     this.term.parser.registerOscHandler(9, (d) => {
       if (this.agent === "codex") this.codexAsking = codexAsks(d);
-      if (this.codexAsking) taskSignal(this, { kind: "approval", at: Date.now(), detail: d.slice(0, 200) });
+      if (this.codexAsking) taskSignal(this, { kind: "approval", at: (this.codexAskedAt = Date.now()), detail: d.slice(0, 200) });
       this.wake(undefined, "osc9");
       return true;
     });
@@ -3244,7 +3246,8 @@ class Pane {
       // late, after its turn ended and another began, interrupted that
       // other turn only if it went in during it.
       this.interruptAt = began ?? Date.now();
-      this.codexAsking = false;
+      // So with Codex's question: one asked after it went in still asks.
+      if (this.interruptAt >= this.codexAskedAt) this.codexAsking = false;
       // Claude reports no end for a turn it interrupts, so a signal held for
       // one it began by itself was an older turn's. If it works on, this key
       // is input: its end counts as a turn you started. Typed with Claude

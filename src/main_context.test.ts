@@ -177,7 +177,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "keyAtIdle", "claudeStopped", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "keyAtIdle", "claudeStopped", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "codexAskedAt", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -608,6 +608,25 @@ for (const key of ["\x03", "\x1b"]) {
   await sweep(5500);
   const [a, b] = [...tasks.values()];
   assert.deepEqual([a.state, b.state], ["completed", "approval"], `${JSON.stringify(key)} from an ended turn, its write back late, cancelled the next turn's question`);
+}
+for (const key of ["\x03", "\x1b"]) {
+  // The same for Codex's question: a key that went in before Codex asked
+  // (OSC 9, as its handler sets it) comes back late. Codex still asks, and its
+  // "esc to interrupt" hint, still drawn, is no work. One that goes in once
+  // it asked answers it.
+  const { p, clock } = claudePane({ interruptHint: () => true });
+  p.agent = "codex";
+  clock.at = 1000;
+  const sent = p.sending(key);
+  clock.at = 3000;
+  Object.assign(p, { codexAsking: true, codexAskedAt: 3000 });
+  clock.at = 3500;
+  p.wrote(key, true, sent, 1000);
+  p.activity();
+  assert.deepEqual([p.codexAsking, p.busy], [true, false], `${JSON.stringify(key)} from an ended turn, its write back late, showed Codex's question as work`);
+  clock.at = 4500;
+  p.wrote(key, true, p.sending(key), 4500);
+  assert.equal(p.codexAsking, false, `${JSON.stringify(key)} at Codex's question left it asking`);
 }
 console.log("ok   An Esc or Ctrl-C whose write comes back late interrupts only a turn it went in during");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
