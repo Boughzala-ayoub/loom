@@ -358,6 +358,9 @@ check("Its frame before the timer shows: working", claudeWorking("* Thinking…\
 check("The line a turn leaves: not working", claudeWorking(claudeBusy.replace(/^✢ .*$/m, "✻ Worked for 22m 17s")), false);
 check("A tool still running, indented: not the working line", claudeWorking(claudeBusy.replace(/^✢ .*\n/m, "")), false);
 check("A truncated line ending in …: not working", claudeWorking("● Read(src/main.ts…)\n* a bullet that ends here…ish\n"), false);
+// Pane.activity: a turn that ends with a background shell running leaves Claude idle at its input (2026-10-20).
+const claudeIdle = claudeBusy.replace(/^✢ .*$/m, "Churned for 3m 49s · $1.44").replace(/^  ⎿  Running…\n/m, "");
+check("A turn over, a shell still running: idle at its input", [claudeWorking(claudeIdle), readInput(claudeIdle.split("\n").map((l) => pad(cells([l]))), "claude").kind], [false, "empty"]);
 
 // The hint where Claude draws it, not quoted in the transcript.
 const claudeQuote = claudeBusy.replace(/^✢ .*$/m, "✻ Worked for 22m 17s").replace("  ⎿  Running…", "Press esc to interrupt a long run.");

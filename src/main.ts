@@ -1936,6 +1936,8 @@ class Pane {
   }
   waiting = false; // the agent rang: turn finished / wants input
   waitingSince = 0;
+  /** Claude was seen idle at its input since its alert rose (activity). */
+  private alertIdle = false;
   private _dead = false;
   exitedAt = 0;
   /** The process exited; Enter relaunches it. */
@@ -2619,6 +2621,15 @@ class Pane {
     this.workAt = now;
     clearTimeout(this.idle);
     this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
+    // Under an unread alert, output is Claude redrawing its prompt, not work,
+    // until its working line comes back after Loom saw it idle at its input:
+    // a turn it began by itself (a background shell's notice, a wake-up),
+    // which no Enter or hook start announces. Idle first, so the working line
+    // still up as the alert rings (its Stop hooks running) isn't one.
+    if (this.waiting && this.agent === "claude") {
+      if (!claudeWorking(this.screen(true))) this.alertIdle ||= readInput(screenCells(this), "claude").kind !== "unknown";
+      else if (this.alertIdle) this.waiting = false;
+    }
     if (this.busy || this.waiting) return;
     this.busy = true;
     this.paint();
@@ -2790,6 +2801,7 @@ class Pane {
     if (this.waiting) return;
     this.waiting = true;
     this.waitingSince = Date.now();
+    this.alertIdle = false;
     this.busy = false;
     this.paint();
     beep();

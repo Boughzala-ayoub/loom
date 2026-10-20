@@ -8,6 +8,7 @@ import { createContext, runInContext } from "node:vm";
 import ts from "typescript";
 import * as model from "./task.ts";
 import { pruneSettled } from "./cli.ts";
+import { Settler } from "./pane_events.ts";
 import { readMenu, readFeedback, cursorKey, menuRev, menuKeys, readSurvey, interruptHint, grokRunning } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
@@ -180,7 +181,8 @@ const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting"
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, agentReport: fx.f.agentReport, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, reportsHeld: fx.f.reportsHeld, reportsTurns: fx.f.reportsTurns, tasks: fx.tasks, ...extra,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, agentReport: fx.f.agentReport, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, reportsHeld: fx.f.reportsHeld, reportsTurns: fx.f.reportsTurns, tasks: fx.tasks,
+    claudeWorking: () => fx.screen.busy, readInput: () => ({ kind: fx.screen.input ? "empty" : "unknown" }), screenCells: () => [], ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
   const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
@@ -193,9 +195,9 @@ function claudePane(extra: Record<string, unknown> = {}) {
   return { ...fx, p, later, out, timers };
 }
 {
-  // A turn Claude begins under an alert nobody has read draws no work on the
-  // pane (the alert stays), yet its task starts where its output did, not
-  // where the turn before it began.
+  // Output under an alert nobody has read, with no working line, draws no
+  // work on the pane (the alert stays), yet a turn's task starts where its
+  // output did, not where the turn before it began.
   const { p, tasks, f, later, out } = claudePane();
   out(10_000); out(10_500);
   later(11_000);
@@ -219,6 +221,40 @@ function claudePane(extra: Record<string, unknown> = {}) {
   assert.equal([...tasks.values()][0].startedAt, 5000, "the turn's own bell moved its start");
 }
 console.log("ok   A turn Claude began by itself starts where its output did, unread alert or not");
+{
+  // 2026-10-20: Claude ended a turn with a background shell running, then took up
+  // the shell's notice with no Enter. Its working line, back after Loom saw it
+  // idle at its input, is a turn: the pane works, and its end reaches pane
+  // events. The working line still up as the alert rang (Stop hooks) isn't one.
+  const { p, later, out, screen } = claudePane({ turnReceipts() {} });
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  const settled = () => new Promise((r) => setTimeout(r, 5));
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  screen.busy = true;
+  out(10_000); out(10_500);
+  await settled();
+  later(11_000);
+  p.wake(undefined, "bell");
+  out(11_200);
+  assert.equal(state(), "waiting", "the working line still up as the alert rang began a turn");
+  screen.busy = false, screen.input = true;
+  out(12_000);
+  await settled();
+  assert.equal(state(), "waiting", "output at its prompt is work");
+  screen.busy = true;
+  out(600_000);
+  assert.equal(state(), "working", "a turn Claude began by itself still shows the last one's alert");
+  await settled();
+  later(660_000);
+  p.wake(undefined, "hook");
+  await settled();
+  assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>working", "working>waiting"], "its end never reached pane events");
+  assert.equal(p.turns, 1, "a turn counts after input only (loomctl.md)");
+}
+console.log("ok   A turn Claude begins by itself under an unread alert works, and its end is a pane event");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
   // A person's turn ends (its task completed), and Claude's next turn reports
   // a failure or a question before Loom reads any output of it: the output

@@ -1288,7 +1288,10 @@ seconds, Loom records one event. A tool call that pauses output, or a blip
 that goes back to the old state within the 2 seconds, records nothing. The
 states are the ones `panes` prints and the pane's tag shows:
 `working`, `idle`, `waiting` (an agent finished or asks, until you look at
-it), `exited` and `starting`. Looking at a waiting pane moves it to `idle`,
+it), `exited` and `starting`. A turn Claude begins by itself while waiting,
+such as when a background shell finishes or a scheduled wake-up fires, shows
+as `working` once Loom has seen Claude idle at its input and then its working
+line again. Looking at a waiting pane moves it to `idle`,
 and that is an event too. A pane someone looks at within 2 seconds of its
 agent finishing goes from `working` straight to `idle`, so to hear every
 finished turn, take both `idle` and `waiting`. A pane's first state sends
