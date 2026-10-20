@@ -131,6 +131,13 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   c.push(log.add(event({ state: "waiting" })));
   await idle(c);
   check("a failure is retried with backoff until it lands", slept.join() === "2000,4000" && c.sent === 2 && !c.failures.length);
+  const first = log.events[0].seq;
+  check("each try is logged with its status, the delivery too", logged.join("\n") === [
+    `Loom webhook http://h/x: event ${first} (loom:1 working>idle) HTTP 500; retrying in 2 s.`,
+    `Loom webhook http://h/x: event ${first} (loom:1 working>idle) curl exit 7; retrying in 4 s.`,
+    `Loom webhook http://h/x: event ${first} (loom:1 working>idle) delivered, HTTP 204 after 3 tries.`,
+    `Loom webhook http://h/x: event ${first + 1} (loom:1 working>waiting) delivered, HTTP 200.`,
+  ].join("\n"));
   check("events go out in order", seen.map((s) => JSON.parse(s.body).state).join() === "idle,idle,idle,waiting");
   const h = Object.fromEntries(seen[0].headers);
   check("each delivery is signed and carries the extra header", h["X-Loom-Signature"] === (await sign("k", seen[0].body)) && h["X-Who"] === "ash" && h["X-Loom-Event"] === "pane-state");

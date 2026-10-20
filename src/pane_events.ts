@@ -146,7 +146,7 @@ export type Failure = { at: string; seq: number; error: string };
  * events in order. A failure is retried after each of RETRY_S; a 4xx other
  * than 408 and 429 won't change on a retry and is dropped at once. */
 export class Courier {
-  readonly queue: { seq: number; body: string }[] = [];
+  readonly queue: { seq: number; body: string; what: string }[] = [];
   readonly failures: Failure[] = [];
   sent = 0;
   lastOk: string | null = null;
@@ -165,9 +165,9 @@ export class Courier {
 
   push(e: PaneEvent) {
     if (this.stopped || !matches(this.hook, e)) return;
-    this.queue.push({ seq: e.seq, body: JSON.stringify(e) });
+    this.queue.push({ seq: e.seq, body: JSON.stringify(e), what: `${e.ref} ${e.old}>${e.state}` });
     // While running, queue[0] is the one being delivered: the oldest waiting goes, never it.
-    if (this.queue.length > MAX_QUEUE) this.fail(this.queue.splice(this.running ? 1 : 0, 1)[0].seq, `dropped: more than ${MAX_QUEUE} deliveries waiting`);
+    if (this.queue.length > MAX_QUEUE) this.fail(this.queue.splice(this.running ? 1 : 0, 1)[0], `dropped: more than ${MAX_QUEUE} deliveries waiting`);
     void this.run();
   }
 
@@ -196,7 +196,7 @@ export class Courier {
     try {
       while (this.queue.length && !this.stopped) {
         const job = this.queue[0];
-        await this.deliver(job.seq, job.body);
+        await this.deliver(job);
         if (this.queue[0] === job) this.queue.shift();
       }
     } finally {
@@ -204,26 +204,28 @@ export class Courier {
     }
   }
 
-  private async deliver(seq: number, body: string) {
+  private async deliver(job: Courier["queue"][number]) {
+    const { seq, body, what } = job;
     // Removed during a retry's wait: the next try never goes out.
     for (let i = 0; !this.stopped; i++) {
       const got = await this.attempt(seq, body);
+      const tries = i ? ` after ${i + 1} tries` : "";
       if (typeof got === "number" && got >= 200 && got < 300) {
         this.sent++;
         this.lastOk = new Date().toISOString();
-        return;
+        return this.log(`Loom webhook ${this.hook.url}: event ${seq} (${what}) delivered, HTTP ${got}${tries}.`);
       }
       const why = typeof got === "number" ? `HTTP ${got}` : got;
       const final = (typeof got === "number" && got >= 400 && got < 500 && got !== 408 && got !== 429) || i >= RETRY_S.length;
-      if (final || this.stopped) return this.fail(seq, `${why}${i ? ` after ${i + 1} tries` : ""}`);
-      this.log(`Loom webhook ${this.hook.url}: event ${seq} ${why}; retrying in ${RETRY_S[i]} s.`);
+      if (final || this.stopped) return this.fail(job, `${why}${tries}`);
+      this.log(`Loom webhook ${this.hook.url}: event ${seq} (${what}) ${why}; retrying in ${RETRY_S[i]} s.`);
       await this.sleep(RETRY_S[i] * 1000);
     }
   }
 
-  private fail(seq: number, error: string) {
+  private fail({ seq, what }: Courier["queue"][number], error: string) {
     this.failures.push({ at: new Date().toISOString(), seq, error });
     if (this.failures.length > KEEP_FAILURES) this.failures.shift();
-    this.log(`Loom webhook ${this.hook.url}: event ${seq} not delivered (${error}).`);
+    this.log(`Loom webhook ${this.hook.url}: event ${seq} (${what}) not delivered (${error}).`);
   }
 }

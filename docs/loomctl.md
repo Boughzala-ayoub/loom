@@ -1372,7 +1372,9 @@ listed. Any 2xx is delivered. Anything else, or no answer within 20 s, is
 tried again after 2, 4, 8, 16, 32 and 64 seconds, except a 4xx other than 408
 and 429, which a retry wouldn't change. Each webhook sends its events one at a
 time in order, and holds at most 100 waiting; past that the oldest is dropped.
-Failures go to `webhook list` and the window's console. Loom sends through
+Failures go to `webhook list`. Each delivery, retry and failure, with its
+HTTP status, also gets one line in Loom's log,
+`%LOCALAPPDATA%\dev.ayoub.loom\logs\loom.log`. Loom sends through
 Windows' `curl.exe`, as for the phone's notifications.
 
 To check a signature in Node:

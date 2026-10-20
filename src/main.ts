@@ -9349,11 +9349,14 @@ function paneEvent(p: Pane, old: string, state: string, since: number) {
   for (const c of couriers) c.push(e);
 }
 
+/** Each delivery and failure, in loom.log, which outlasts the window. */
+const hookLog = (text: string) => void invoke("log_line", { text }).catch(() => {});
+
 /** One courier per webhook: an unchanged hook keeps its queue, a removed one stops. */
 function syncCouriers() {
   const kept = couriers.filter((c) => webhooks.includes(c.hook));
   for (const c of couriers) if (!kept.includes(c)) c.stop();
-  couriers = webhooks.map((h) => kept.find((c) => c.hook === h) ?? new Courier(h, postHook));
+  couriers = webhooks.map((h) => kept.find((c) => c.hook === h) ?? new Courier(h, postHook, hookLog));
 }
 
 /** watch --panes: the events after --after that the filters keep, waiting up to the timeout for one. */
