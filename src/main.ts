@@ -1936,9 +1936,9 @@ class Pane {
   }
   waiting = false; // the agent rang: turn finished / wants input
   waitingSince = 0;
-  /** Claude was seen idle at its input since its alert rose (activity). */
-  private alertIdle = false;
-  /** Claude began a turn by itself under its alert, and it hasn't ended yet. */
+  /** Claude was seen idle at its input since its last turn ended or alert rose (activity). */
+  private sawIdle = false;
+  /** Claude began a turn by itself, with no input, and it hasn't ended yet. */
   private beganItself = false;
   /** Turns ended: the ones `turns` counts, and ones Claude began by itself, which it doesn't (pane events: Settler). */
   ends = 0;
@@ -2627,14 +2627,16 @@ class Pane {
     this.workAt = now;
     clearTimeout(this.idle);
     this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
-    // Under an unread alert, output is Claude redrawing its prompt, not work,
-    // until its working line comes back after Loom saw it idle at its input:
-    // a turn it began by itself (a background shell's notice, a wake-up),
-    // which no Enter or hook start announces. Idle first, so the working line
-    // still up as the alert rings (its Stop hooks running) isn't one.
-    if (this.waiting && this.agent === "claude") {
-      if (!claudeWorking(this.screen(true))) this.alertIdle ||= readInput(screenCells(this), "claude").kind !== "unknown";
-      else if (this.alertIdle) ((this.waiting = false), (this.beganItself = true));
+    // A turn Claude began by itself (a background shell's notice, a wake-up)
+    // has no Enter or hook start to announce it: its working line, back after
+    // Loom saw it idle at its input with no input since, is one, its last
+    // alert read or not, and it clears that alert. Under an alert, other output
+    // is Claude redrawing its prompt, not work. Idle first, so the working line
+    // still up as a turn ends (its Stop hooks running) isn't one. Read only
+    // while it may begin one: never during a turn you started.
+    if (this.agent === "claude" && !this.beganItself && this.lastIn <= this.lastTurnAt) {
+      if (!claudeWorking(this.screen(true))) this.sawIdle ||= readInput(screenCells(this), "claude").kind !== "unknown";
+      else if (this.sawIdle) ((this.waiting = false), (this.beganItself = true));
     }
     if (this.busy || this.waiting) return;
     this.busy = true;
@@ -2798,18 +2800,22 @@ class Pane {
     // marker poll and a PowerShell start later; OpenCode's plugin and OSC 99),
     // and the second can land after the next task went in. So the first source
     // that counts a turn is the only one that counts them for this launch; the
-    // others still raise the alert.
+    // others still raise the alert. A turn Claude began by itself has no input
+    // to count it: that source ends it, or any once its working line has gone.
+    // An older turn's late signal comes while it still works, and ends nothing.
+    let ended = false;
     if (this.agent !== "shell" && this.lastIn > this.lastTurnAt && (this.turnSource ??= source) === source) {
       this.turns++;
       this.lastTurnAt = at;
       turnReceipts(this, at);
-      this.ends++;
-    } else if (this.beganItself) this.ends++;
-    this.beganItself = false;
-    if (this.waiting) return;
+      ended = true;
+    } else ended = this.beganItself && (source === this.turnSource || !claudeWorking(this.screen(true)));
+    if (ended) ((this.ends++), (this.beganItself = this.sawIdle = false));
+    // Ended under the alert still up: the Settler hears it now, not at the next repaint.
+    if (this.waiting) return void (ended && this.paint());
     this.waiting = true;
     this.waitingSince = Date.now();
-    this.alertIdle = false;
+    this.sawIdle = false;
     this.busy = false;
     this.paint();
     beep();

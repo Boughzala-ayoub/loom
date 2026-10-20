@@ -177,7 +177,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "alertIdle", "beganItself", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -315,10 +315,68 @@ console.log("ok   A turn Claude begins by itself under an unread alert works, an
   screen.busy = true;
   out(600_000);
   later(601_000);
+  screen.busy = false; // its Stop hook, read once the working line went
   p.wake(undefined, "hook");
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>waiting"], "a short turn Claude began by itself was lost");
   assert.equal(p.turns, 1, "a turn counts after input only (loomctl.md)");
+}
+{
+  // Third round, 1: the last turn's late Stop hook comes after Claude began
+  // its next turn by itself, which still works. That turn's end is its own.
+  const { p, later, out, screen } = claudePane({ turnReceipts() {} });
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  screen.busy = true;
+  out(10_000); out(10_500);
+  await new Promise((r) => setTimeout(r, 5));
+  later(11_000);
+  p.wake(undefined, "bell");
+  screen.busy = false, screen.input = true;
+  out(11_200);
+  screen.busy = true;
+  out(11_400);
+  later(11_600);
+  p.wake(undefined, "hook");
+  assert.equal(p.ends, 1, "the last turn's late hook ended a turn still working");
+  out(12_000); out(13_000);
+  await new Promise((r) => setTimeout(r, 5));
+  later(20_000);
+  p.wake(undefined, "bell");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(p.ends, 2);
+  assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>waiting"], "the end of the turn Claude began by itself was lost");
+}
+{
+  // Third round, 2: the alert looked at and idle settled, Claude begins a turn
+  // by itself, ends it within 2 s, and someone looks at it at once.
+  const { p, later, out, screen } = claudePane({ turnReceipts() {} });
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  screen.busy = true;
+  out(10_000); out(10_500);
+  await new Promise((r) => setTimeout(r, 5));
+  later(11_000);
+  p.wake(undefined, "bell");
+  screen.busy = false, screen.input = true;
+  out(11_200);
+  p.seen();
+  later(20_000);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(state(), "idle");
+  screen.busy = true;
+  out(600_000);
+  later(601_000);
+  p.wake(undefined, "bell");
+  p.seen();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(events, ["idle>working", "working>idle", "idle>idle"], "a short turn Claude began by itself after its alert was read was lost");
 }
 console.log("ok   One turn is one pane event: not two for a redraw and a late hook, not none for a quiet or a self-started one");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
