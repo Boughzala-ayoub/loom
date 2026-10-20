@@ -1297,8 +1297,10 @@ it), `exited` and `starting`. A turn Claude begins by itself, such as when a
 background shell finishes or a scheduled wake-up fires, is one once Loom has
 seen Claude idle at its input and then its working line again with no input
 between, whether or not someone looked at its last alert, and it shows as
-`working`. A late signal of the turn before it ends nothing while Claude still
-works. A turn that ended just before its pane restarted is the old launch's,
+`working`. A signal that comes while its working line is still up waits for
+that line to go. So a late signal of the turn before raises no alert and
+leaves the pane `working`, and the turn's own signal, read before Claude drew
+its last frame, still ends it. A turn that ended just before its pane restarted is the old launch's,
 never an event of the new one. Looking at a waiting pane moves it to `idle`,
 and that is an event too. A pane someone looks at within 2 seconds of its
 agent finishing goes from `working` straight to `idle`, so to hear every

@@ -1940,6 +1940,8 @@ class Pane {
   private sawIdle = false;
   /** Claude began a turn by itself, with no input, and it hasn't ended yet. */
   private beganItself = false;
+  /** A signal that came during that turn while its working line was still up (wake). */
+  private endHeld: WakeSource | undefined;
   /** Turns ended: the ones `turns` counts, and ones Claude began by itself, which it doesn't (pane events: Settler). */
   ends = 0;
   private _dead = false;
@@ -2430,6 +2432,7 @@ class Pane {
     // A new process: the last one's commands, exit codes and turns aren't its own.
     this.commands = this.turns = 0;
     this.beganItself = this.sawIdle = false;
+    this.endHeld = undefined;
     // The last launch's turns that ended before an event settled were its own.
     this.settler.restart();
     this.lastFailed = this.lastExit = null;
@@ -2636,7 +2639,9 @@ class Pane {
     // alert read or not, and it clears that alert. Under an alert, other output
     // is Claude redrawing its prompt, not work. Idle first, so the working line
     // still up as a turn ends (its Stop hooks running) isn't one. Read only
-    // while it may begin one: never during a turn you started.
+    // while it may begin one: never during a turn you started. A signal held
+    // while it still worked (wake) ends that turn once the working line goes.
+    if (this.endHeld && !claudeWorking(this.screen(true))) this.wake(undefined, this.endHeld);
     if (this.agent === "claude" && !this.beganItself && this.lastIn <= this.lastTurnAt) {
       if (!claudeWorking(this.screen(true))) this.sawIdle ||= readInput(screenCells(this), "claude").kind !== "unknown";
       else if (this.sawIdle) ((this.waiting = false), (this.beganItself = true));
@@ -2805,15 +2810,20 @@ class Pane {
     // that counts a turn is the only one that counts them for this launch; the
     // others still raise the alert. A turn Claude began by itself has no input
     // to count it: that source ends it, or any once its working line has gone.
-    // An older turn's late signal comes while it still works, and ends nothing.
     let ended = false;
     if (this.agent !== "shell" && this.lastIn > this.lastTurnAt && (this.turnSource ??= source) === source) {
       this.turns++;
       this.lastTurnAt = at;
       turnReceipts(this, at);
       ended = true;
-    } else ended = this.beganItself && (source === this.turnSource || !claudeWorking(this.screen(true)));
-    if (ended) ((this.ends++), (this.beganItself = this.sawIdle = false));
+    } else if (this.beganItself && source !== this.turnSource && claudeWorking(this.screen(true))) {
+      // Held, and the pane left as it is: an older turn's late signal while
+      // Claude still works, or this turn's own read before its last frame
+      // was. activity() ends the turn once the working line goes.
+      this.endHeld = source;
+      return;
+    } else ended = this.beganItself;
+    if (ended) ((this.ends++), (this.beganItself = this.sawIdle = false), (this.endHeld = undefined));
     // Ended under the alert still up: the Settler hears it now, not at the next repaint.
     if (this.waiting) return void (ended && this.paint());
     this.waiting = true;
