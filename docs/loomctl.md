@@ -1063,8 +1063,10 @@ Claude reports it at once and takes it into the running turn (Claude Code
 Answering a question puts the task back to `working`: an Enter or a one-key
 answer (`1`, `y`) that went in, from `choose`, `keys` or the window. Moving
 the highlight doesn't count, and an answer whose write failed leaves the task
-asking, with `answerInDoubt: true` until an answer goes in. Esc on Claude's permission dialog denies
-it and ends the turn, so the task ends `cancelled`.
+asking, with `answerInDoubt: true` until an answer goes in. An answer counts
+from when it went in, so one that went in before the agent asked again
+answered the earlier question, and the new one still asks. Esc on Claude's
+permission dialog denies it and ends the turn, so the task ends `cancelled`.
 
 An Esc that the agent shrugs off changes nothing: Loom waits 2 seconds after
 the Esc and cancels only if the agent stopped working, and only if no end was

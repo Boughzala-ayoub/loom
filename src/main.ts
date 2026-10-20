@@ -1970,8 +1970,9 @@ class Pane {
   /** Codex asked (an approval or a question, OSC 9) and no answer went in
    * since. Its title says Working all through one, but nothing runs. */
   codexAsking = false;
-  /** When Codex last asked: an Esc or Ctrl-C that went in before then isn't its answer (wrote). */
-  private codexAskedAt = 0;
+  /** When the agent last asked (its approval signal, taskSignal): an answer,
+   * Esc or Ctrl-C that went in before then was an earlier question's (wrote). */
+  askedAt = 0;
   /** Whether a Cursor turn runs, as its hooks' reports say, in order: from a
    * turn's start to its stop (agentReport, cursorRuns). Unset until this
    * launch's first, as when Loom couldn't add its hooks: then its "ctrl+c to
@@ -2335,7 +2336,7 @@ class Pane {
     // use; "p=?" there is a capability probe, not news.
     this.term.parser.registerOscHandler(9, (d) => {
       if (this.agent === "codex") this.codexAsking = codexAsks(d);
-      if (this.codexAsking) taskSignal(this, { kind: "approval", at: (this.codexAskedAt = Date.now()), detail: d.slice(0, 200) });
+      if (this.codexAsking) taskSignal(this, { kind: "approval", at: Date.now(), detail: d.slice(0, 200) });
       this.wake(undefined, "osc9");
       return true;
     });
@@ -3241,13 +3242,14 @@ class Pane {
     // it touches nothing of this launch's question, tasks, interruptions or
     // alert. The reports it held still go on.
     if (sent.gen !== this.generation) return void stop?.release();
+    // When it went in (`began`), not when its write came back: one back late,
+    // after its turn or question ended and another began, interrupted or
+    // answered that other only if it went in during it. A question asked
+    // since it went in (askedAt) still asks.
+    const at = began ?? Date.now(), current = at >= this.askedAt;
     if (delivered && (data === "\x1b" || data === "\x03")) {
-      // When it went in (`began`), not when its write came back: one back
-      // late, after its turn ended and another began, interrupted that
-      // other turn only if it went in during it.
-      this.interruptAt = began ?? Date.now();
-      // So with Codex's question: one asked after it went in still asks.
-      if (this.interruptAt >= this.codexAskedAt) this.codexAsking = false;
+      this.interruptAt = at;
+      if (current) this.codexAsking = false;
       // Claude reports no end for a turn it interrupts, so a signal held for
       // one it began by itself was an older turn's. If it works on, this key
       // is input: its end counts as a turn you started. Typed with Claude
@@ -3279,6 +3281,8 @@ class Pane {
     if (!sent.answer) return;
     const asking = [...tasks.values()].filter((t) => t.pane === this.id && t.gen === this.generation && t.state === "approval");
     if (!delivered) return void asking.forEach((t) => moveTask(t, { state: "approval", signal: "answer", answerInDoubt: true }));
+    // Gone in before the agent last asked: it answered an earlier question.
+    if (!current) return;
     this.codexAsking = false;
     this.answeredCursor(sent.menu);
     taskSignal(this, { kind: "resume", at: Date.now() });
@@ -5286,6 +5290,8 @@ async function enterTask(p: Pane, t: Task) {
  * Stop is held until Claude is seen idle (sweepTasks). One the startup read
  * defers takes where the pane is now (`ctx`) along, for its launch's tasks. */
 function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
+  // As it asks, held or not: an answer written back later is judged by it (Pane.wrote).
+  if (s.kind === "approval" && (s.launch ?? p.generation) === p.generation) p.askedAt = s.at;
   const held = enterHeld.get(p.id);
   if (held) return void held.signals.push({ signal: { ...s, launch: s.launch ?? p.generation }, context: ctx });
   if (startupTurns) {
