@@ -480,17 +480,49 @@ await heldOldHook(async ({ p, later, out, screen }, events) => {
 for (const key of ["\x03", "\x1b"]) {
   // Fifth round, 2: Ctrl-C or Esc interrupts that turn. Claude reports no end
   // for it, so the held hook isn't one: it goes back to idle, never waiting.
+  // Read as typed: Claude may redraw idle before the key's write returns.
   await heldOldHook(async ({ p, later, out, screen }, events, state) => {
     later(13_000);
     p.lastIn = 13_000;
-    p.wrote(key, true, p.sending(key));
+    const sent = p.sending(key);
     screen.busy = false, screen.input = true;
+    p.wrote(key, true, sent);
     out(13_400);
     later(15_000);
     await new Promise((r) => setTimeout(r, 5));
     assert.deepEqual([state(), p.ends], ["idle", 1], `${JSON.stringify(key)} let the last turn's late hook end the turn it interrupted`);
     assert.deepEqual(events, ["idle>working", "working>idle"]);
   });
+  // Sixth round: a short turn Claude began by itself has ended, its Stop hook
+  // held through the quiet wait, and the key goes into its idle input. It
+  // interrupted nothing: the hook still ends the turn.
+  const { p, later, out, screen } = claudePane({ turnReceipts() {} });
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  screen.busy = true;
+  out(10_000); out(10_500);
+  await new Promise((r) => setTimeout(r, 5));
+  later(11_000);
+  p.wake(undefined, "bell");
+  screen.busy = false, screen.input = true;
+  out(12_000);
+  await new Promise((r) => setTimeout(r, 5));
+  screen.busy = true;
+  out(600_000);
+  screen.busy = false;
+  out(600_900);
+  later(601_000);
+  p.wake(undefined, "hook");
+  later(601_200);
+  p.lastIn = 601_200;
+  p.wrote(key, true, p.sending(key));
+  later(603_000);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual([state(), p.ends], ["waiting", 2], `${JSON.stringify(key)} at Claude's idle input dropped the end of the turn it began by itself`);
+  assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>waiting"]);
 }
 console.log("ok   One turn is one pane event: not two for a redraw and a late hook, not none for a quiet or a self-started one");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
