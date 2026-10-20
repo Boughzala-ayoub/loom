@@ -477,6 +477,21 @@ await heldOldHook(async ({ p, later, out, screen }, events) => {
   assert.deepEqual([p.waiting, p.ends], [true, 2], "the held hook never ended the turn once Claude sat at its input");
   assert.deepEqual(events, ["idle>working", "working>idle", "idle>waiting"]);
 });
+for (const key of ["\x03", "\x1b"]) {
+  // Fifth round, 2: Ctrl-C or Esc interrupts that turn. Claude reports no end
+  // for it, so the held hook isn't one: it goes back to idle, never waiting.
+  await heldOldHook(async ({ p, later, out, screen }, events, state) => {
+    later(13_000);
+    p.lastIn = 13_000;
+    p.wrote(key, true, p.sending(key));
+    screen.busy = false, screen.input = true;
+    out(13_400);
+    later(15_000);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual([state(), p.ends], ["idle", 1], `${JSON.stringify(key)} let the last turn's late hook end the turn it interrupted`);
+    assert.deepEqual(events, ["idle>working", "working>idle"]);
+  });
+}
 console.log("ok   One turn is one pane event: not two for a redraw and a late hook, not none for a quiet or a self-started one");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
   // A person's turn ends (its task completed), and Claude's next turn reports

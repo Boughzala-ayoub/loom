@@ -3230,6 +3230,11 @@ class Pane {
     if (delivered && (data === "\x1b" || data === "\x03")) {
       this.interruptAt = Date.now();
       this.codexAsking = false;
+      // Claude reports no end for a turn it interrupts, so a signal held for
+      // one it began by itself was an older turn's. If it works on, this key
+      // is input: its end counts as a turn you started.
+      this.endHeld = undefined;
+      this.beganItself = false;
       // Cursor's: only one typed with neither its question nor its feedback
       // open stops the turn: the one running as it was typed, or one Loom
       // hasn't heard of yet (agentReport). It counts from when the pane's
