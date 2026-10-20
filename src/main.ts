@@ -1938,6 +1938,10 @@ class Pane {
   waitingSince = 0;
   /** Claude was seen idle at its input since its alert rose (activity). */
   private alertIdle = false;
+  /** Claude began a turn by itself under its alert, and it hasn't ended yet. */
+  private beganItself = false;
+  /** Turns ended: the ones `turns` counts, and ones Claude began by itself, which it doesn't (pane events: Settler). */
+  ends = 0;
   private _dead = false;
   exitedAt = 0;
   /** The process exited; Enter relaunches it. */
@@ -2020,7 +2024,7 @@ class Pane {
   /** This pane's own id across restarts, where `id` is new each start: saved with it and restored only into it. */
   stableId: string = crypto.randomUUID();
   /** Its state as `watch --panes`, `wait --until` and webhooks hear it: what paint() shows, once it stood 2 s. */
-  readonly settler = new Settler((old, state, since) => paneEvent(this, old, state, since), SETTLE_MS, () => cliState(this));
+  readonly settler = new Settler((old, state, since) => paneEvent(this, old, state, since), SETTLE_MS, () => cliState(this), () => this.ends);
   /** Enters a person gave it in Loom's window that may have sent a prompt no
    * task holds yet (manualEnter), oldest first. Never their text. */
   manual: ManualEnter[] = [];
@@ -2630,7 +2634,7 @@ class Pane {
     // still up as the alert rings (its Stop hooks running) isn't one.
     if (this.waiting && this.agent === "claude") {
       if (!claudeWorking(this.screen(true))) this.alertIdle ||= readInput(screenCells(this), "claude").kind !== "unknown";
-      else if (this.alertIdle) this.waiting = false;
+      else if (this.alertIdle) ((this.waiting = false), (this.beganItself = true));
     }
     if (this.busy || this.waiting) return;
     this.busy = true;
@@ -2799,7 +2803,9 @@ class Pane {
       this.turns++;
       this.lastTurnAt = at;
       turnReceipts(this, at);
-    }
+      this.ends++;
+    } else if (this.beganItself) this.ends++;
+    this.beganItself = false;
     if (this.waiting) return;
     this.waiting = true;
     this.waitingSince = Date.now();

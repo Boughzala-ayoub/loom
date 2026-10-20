@@ -177,7 +177,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "alertIdle", "beganItself", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -229,7 +229,7 @@ console.log("ok   A turn Claude began by itself starts where its output did, unr
   const { p, later, out, screen } = claudePane({ turnReceipts() {} });
   const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
   const settled = () => new Promise((r) => setTimeout(r, 5));
-  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state);
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
   p.paint = () => p.settler.see(state());
   p.paint();
   p.lastIn = 9_000;
@@ -255,6 +255,72 @@ console.log("ok   A turn Claude began by itself starts where its output did, unr
   assert.equal(p.turns, 1, "a turn counts after input only (loomctl.md)");
 }
 console.log("ok   A turn Claude begins by itself under an unread alert works, and its end is a pane event");
+{
+  // Review 2026-10-20, round 2, 1: the pane looked at, Claude redraws its idle
+  // prompt (Loom shows any output as work), then the turn's late Stop hook
+  // raises the alert again. One turn: no second event.
+  const { p, later, out } = claudePane({ turnReceipts() {} });
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  out(10_000); out(10_500);
+  await new Promise((r) => setTimeout(r, 5));
+  later(11_000);
+  p.wake(undefined, "bell");
+  await new Promise((r) => setTimeout(r, 5));
+  p.seen();
+  out(11_500);
+  later(13_100);
+  p.wake(undefined, "hook");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(events, ["idle>working", "working>waiting"], "a redraw and a late hook made one turn two");
+  assert.equal(p.turns, 1);
+}
+{
+  // Round 2, 2: a short turn goes quiet before its Stop hook comes, and
+  // someone looks at it at once: still its end.
+  const { p, later, out } = claudePane({ turnReceipts() {} });
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  out(10_000);
+  later(11_600);
+  p.wake(undefined, "hook");
+  p.seen();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(events, ["idle>idle"], "a short turn that went quiet before its hook was lost");
+  assert.equal(p.turns, 1);
+}
+{
+  // A turn Claude begins by itself under its alert and ends within 2 s: no
+  // input, so turns doesn't count it, but it ended a turn all the same.
+  const { p, later, out, screen } = claudePane({ turnReceipts() {} });
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  screen.busy = true;
+  out(10_000); out(10_500);
+  await new Promise((r) => setTimeout(r, 5));
+  later(11_000);
+  p.wake(undefined, "bell");
+  screen.busy = false, screen.input = true;
+  out(12_000);
+  await new Promise((r) => setTimeout(r, 5));
+  screen.busy = true;
+  out(600_000);
+  later(601_000);
+  p.wake(undefined, "hook");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>waiting"], "a short turn Claude began by itself was lost");
+  assert.equal(p.turns, 1, "a turn counts after input only (loomctl.md)");
+}
+console.log("ok   One turn is one pane event: not two for a redraw and a late hook, not none for a quiet or a self-started one");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
   // A person's turn ends (its task completed), and Claude's next turn reports
   // a failure or a question before Loom reads any output of it: the output

@@ -42,9 +42,12 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
 }
 
 {
-  // 2026-10-20: a turn shorter than the settle time ended unheard.
+  // 2026-10-20 and its reviews: a turn shorter than the settle time ended
+  // unheard. A return to the settled state counts once the pane ended a turn
+  // on the way (ends), never for what it drew or a second signal of one end.
+  let ends = 0;
   const fired: string[] = [];
-  const s = new Settler((old, state) => fired.push(`${old}>${state}`), 40);
+  const s = new Settler((old, state) => fired.push(`${old}>${state}`), 40, undefined, () => ends);
   s.see("waiting");
   s.see("waiting");
   await sleep(60);
@@ -52,18 +55,25 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   s.see("idle");
   s.see("working");
   await sleep(20);
+  ends++;
   s.see("waiting");
   await sleep(60);
-  check("back at waiting before working settled is the next turn's end", fired.join() === "waiting>waiting" && s.settled === "waiting");
-  // Review 2026-10-20, 2: one turn's bell, looked at, then its Stop hook's late signal.
+  check("back at waiting before working settled, a turn ended, is that turn's end", fired.join() === "waiting>waiting" && s.settled === "waiting");
+  // Review 2026-10-20, 2, and its second round, 1: looked at, an idle redraw
+  // Loom shows as work, then the same turn's late Stop hook.
+  s.see("idle");
+  s.see("working");
   s.see("idle");
   s.see("waiting");
   await sleep(60);
-  check("a second signal of the same turn's end, no work between, sends nothing", fired.length === 1);
-  // Review 2026-10-20, 3: a quick turn whose end someone looks at at once.
+  check("back at waiting with no turn ended on the way sends nothing, whatever showed between", fired.length === 1);
+  // Review 2026-10-20, 3, and its second round, 2: a quick turn goes quiet
+  // before its end comes, and someone looks at it at once.
   s.see("idle");
   await sleep(60);
   s.see("working");
+  s.see("idle");
+  ends++;
   s.see("waiting");
   s.see("idle");
   await sleep(60);

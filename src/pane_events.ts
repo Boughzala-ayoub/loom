@@ -5,7 +5,7 @@ import { hash32 } from "./prompt.ts";
 
 /** How long a new state must stand before it counts. Output that pauses for a
  * tool call, or a blip that goes back to the old state, sends nothing; a turn
- * shorter than this sends waiting>waiting, or idle>idle if looked at at once. */
+ * that ends in less than this sends waiting>waiting, or idle>idle if looked at at once. */
 export const SETTLE_MS = 2000;
 /** Events kept for readers that fall behind. */
 export const KEEP_EVENTS = 500;
@@ -26,7 +26,11 @@ export type PaneEvent = {
 /** One pane's state as it settles. `see` gets what the UI shows on every
  * repaint; the first value is where the pane starts and sends nothing.
  * `now`, the pane's state when the wait ends: one it left without a repaint
- * never stood, and what it is now starts counting instead. */
+ * never stood, and what it is now starts counting instead. `ends`, how many
+ * turns the pane has ended: back where it settled is a blip unless that moved
+ * meanwhile, a turn shorter than the settle time, its end looked at or not.
+ * What the pane drew on the way (Claude shows any output as working) and a
+ * second signal of one turn's end don't move it. */
 export class Settler {
   settled: string | undefined;
   private next: string | undefined;
@@ -34,26 +38,21 @@ export class Settler {
   private fire: (old: string, state: string, since: number) => void;
   private ms: number;
   private now?: () => string;
-  constructor(fire: (old: string, state: string, since: number) => void, ms = SETTLE_MS, now?: () => string) {
+  private ends: () => number;
+  /** `ends` when the state settled. */
+  private endsThen = 0;
+  constructor(fire: (old: string, state: string, since: number) => void, ms = SETTLE_MS, now?: () => string, ends = () => 0) {
     this.fire = fire;
     this.ms = ms;
     this.now = now;
+    this.ends = ends;
   }
 
-  /** Since the state last settled: the pane worked, and then waited (a turn ended). */
-  private worked = false;
-  private ended = false;
-
   see(state: string) {
-    if (this.settled === undefined) { this.settled = state; return; }
+    if (this.settled === undefined) { this.settled = state; this.endsThen = this.ends(); return; }
     if (state === this.next) return;
-    this.clear();
-    if (state === "working") this.worked = true;
-    else if (state === "waiting" && this.worked) this.ended = true;
-    // Back where it settled is a blip, unless a turn ended on the way: one
-    // shorter than the settle time counts, looked at at once or not. A second
-    // signal of one turn's end, with no work between, doesn't.
-    if (state === this.settled && !this.ended) return this.reset();
+    this.stop();
+    if (state === this.settled && this.ends() === this.endsThen) return;
     const since = Date.now();
     this.next = state;
     this.timer = setTimeout(() => {
@@ -62,23 +61,14 @@ export class Settler {
       if (now !== state) return this.see(now);
       const old = this.settled!;
       this.settled = state;
-      this.reset();
+      this.endsThen = this.ends();
       this.fire(old, state, since);
     }, this.ms);
   }
 
   stop() {
-    this.clear();
-    this.reset();
-  }
-
-  private clear() {
     clearTimeout(this.timer);
     this.next = undefined;
-  }
-
-  private reset() {
-    this.worked = this.ended = false;
   }
 }
 
