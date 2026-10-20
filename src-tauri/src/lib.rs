@@ -708,12 +708,6 @@ fn output_bus(bus: State<output::Bus>, on_out: tauri::ipc::Channel<Vec<(u32, Str
     bus.open(move |batch| { let _ = on_out.send(batch); });
 }
 
-/// A line from the page for loom.log (a webhook's delivery), on one line.
-#[tauri::command]
-fn log_line(text: String) {
-    logfile::line(&text.chars().take(1000).map(|c| if c.is_control() { ' ' } else { c }).collect::<String>());
-}
-
 /// `pty_ack` for several panes and batches at once: `(channel, batches parsed)`.
 #[tauri::command]
 fn pty_acks(flows: State<output::Flows>, acks: Vec<(u32, usize)>) {
@@ -1952,6 +1946,13 @@ mod commands {
         tauri::async_runtime::spawn_blocking(f).await.expect("blocking command panicked")
     }
 
+    /// A line from the page for loom.log (a webhook's delivery), on one line.
+    /// The log waits on a lock every Loom takes, so never on the window's thread.
+    #[tauri::command]
+    pub async fn log_line(text: String) {
+        blocking(move || logfile::line(&text.chars().take(1000).map(|c| if c.is_control() { ' ' } else { c }).collect::<String>())).await
+    }
+
     #[tauri::command]
     #[allow(clippy::too_many_arguments)]
     pub async fn pty_spawn(app: AppHandle, id: String, cwd: Option<String>, argv: Vec<String>, codex_state_id: Option<String>,
@@ -2316,7 +2317,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::canonical_directory,
-            commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, log_line, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
+            commands::pty_spawn, output_bus, control::cli_reply, control::cli_ready, pty_write, pty_ack, pty_acks, commands::log_line, commands::pty_resize, commands::pty_kill, commands::pty_shutdown, commands::agent_batch_base, load_state, commands::save_state, commands::open_vscode,
             commands::worktree_fingerprint, commands::worktree_remove, commands::worktree_prepare, commands::trash_list, commands::git_run, commands::stash_drop, commands::branch_delete, commands::git_midway, commands::git_stdin, commands::list_files, commands::read_file, commands::read_image, take_sessions, commands::opencode_sessions, commands::codex_sessions, commands::has_codex_session, commands::session_usage, commands::codex_session_usage, usage::has_session, usage::pane_booted, commands::plan_usage, commands::codex_plan_usage,
             commands::model_options, commands::context_profile, commands::last_messages, commands::grok_turn_end, overlay, awake::set_keep_awake, remote::remote, remote::push_targets, remote::push_key, remote::push_forget, remote::push_post, procs::procs, relaunch, relaunch_cancel, exe_updated, status_bar,
             commands::task_journal_read, commands::task_journal_write,
