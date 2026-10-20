@@ -177,7 +177,7 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "claudeStopped", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "keyAtIdle", "claudeStopped", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
@@ -493,6 +493,28 @@ for (const key of ["\x03", "\x1b"]) {
     assert.deepEqual([state(), p.ends], ["idle", 1], `${JSON.stringify(key)} let the last turn's late hook end the turn it interrupted`);
     assert.deepEqual(events, ["idle>working", "working>idle"]);
   });
+  for (const ackFirst of [false, true]) {
+    // Seventh round: the key goes in half a redraw, its input drawn without
+    // the working line, which comes back before or after the key's write
+    // returns. Claude still worked: the key interrupted it.
+    await heldOldHook(async ({ p, later, out, screen }, events, state) => {
+      screen.busy = false, screen.input = true;
+      out(12_100);
+      later(12_120);
+      p.lastIn = 12_120;
+      const sent = p.sending(key);
+      if (ackFirst) p.wrote(key, true, sent);
+      screen.busy = true;
+      out(12_130);
+      if (!ackFirst) p.wrote(key, true, sent);
+      screen.busy = false;
+      out(12_600);
+      later(15_000);
+      await new Promise((r) => setTimeout(r, 5));
+      assert.deepEqual([state(), p.ends], ["idle", 1], `${JSON.stringify(key)} in half a redraw let the last turn's late hook end the turn it interrupted${ackFirst ? ", the write back first" : ""}`);
+      assert.deepEqual(events, ["idle>working", "working>idle"]);
+    });
+  }
   // Sixth round: a short turn Claude began by itself has ended, its Stop hook
   // held through the quiet wait, and the key goes into its idle input. It
   // interrupted nothing: the hook still ends the turn.

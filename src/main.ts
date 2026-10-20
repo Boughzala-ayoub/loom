@@ -1942,6 +1942,10 @@ class Pane {
   private beganItself = false;
   /** A signal that came during that turn before Claude was quiet and stopped (wake). */
   private endHeld: WakeSource | undefined;
+  /** An Esc or Ctrl-C typed during that turn with Claude stopped (sending): it
+   * interrupted nothing, unless the working line shows again before the turn
+   * ends, the key having come in half a redraw (activity). */
+  private keyAtIdle = false;
   /** Claude's working line is gone, and its input or a numbered question is on screen: sweepTasks' idle check. */
   private claudeStopped() {
     return !claudeWorking(this.screen(true)) && (readInput(screenCells(this), "claude").kind !== "unknown" || !!readMenu(liveScreen(this, false), "claude"));
@@ -2435,7 +2439,7 @@ class Pane {
     this.exitCode = undefined;
     // A new process: the last one's commands, exit codes and turns aren't its own.
     this.commands = this.turns = 0;
-    this.beganItself = this.sawIdle = false;
+    this.beganItself = this.sawIdle = this.keyAtIdle = false;
     this.endHeld = undefined;
     // The last launch's turns that ended before an event settled were its own.
     this.settler.restart();
@@ -2632,6 +2636,10 @@ class Pane {
       return;
     }
     const now = Date.now();
+    // Half a redraw: a key read as typed at Claude's idle input (sending) came
+    // while it still worked, and interrupted that turn after all. Read before
+    // the echo window: the rest of the redraw comes within milliseconds.
+    if (this.keyAtIdle && claudeWorking(this.screen(true))) ((this.endHeld = undefined), (this.beganItself = this.keyAtIdle = false));
     if (now - this.lastIn < 300) return;
     if (!this.workSince || now - this.workAt >= 1500) this.workSince = now;
     this.workAt = now;
@@ -2829,7 +2837,7 @@ class Pane {
       this.endHeld = source;
       return;
     } else ended = this.beganItself;
-    if (ended) ((this.ends++), (this.beganItself = this.sawIdle = false), (this.endHeld = undefined));
+    if (ended) ((this.ends++), (this.beganItself = this.sawIdle = this.keyAtIdle = false), (this.endHeld = undefined));
     // Ended under the alert still up: the Settler hears it now, not at the next repaint.
     if (this.waiting) return void (ended && this.paint());
     this.waiting = true;
@@ -3198,8 +3206,10 @@ class Pane {
     const answer = this.answers(d), cursor = this.agent === "cursor";
     const menu = answer && reportsTurns(this.agent) && this.cursorAsking ? readMenu(liveScreen(this, false), this.agent) : null;
     const stop = cursor && (d === "\x1b" || d === "\x03") && !this.cursorAsking && !this.cursorFeedback;
-    // Claude already stopped as it's typed: it interrupts no turn (wrote).
+    // Claude already stopped as it's typed: it interrupts no turn (wrote), unless
+    // its working line shows again (activity).
     const idle = this.beganItself && (d === "\x1b" || d === "\x03") && this.claudeStopped();
+    this.keyAtIdle ||= idle;
     return { gen: this.generation, answer, ...(idle ? { idle } : {}), ...(menu ? { menu: menuRev(menu) } : {}), ...(stop ? { stop: { turn: this.cursorTurn ? this.cursorGen : undefined, at: Date.now(), release: holdReports(this) } } : {}) };
   }
   /** Cursor's question `rev` is answered, the one on screen as the answer was
@@ -3236,8 +3246,9 @@ class Pane {
       // one it began by itself was an older turn's. If it works on, this key
       // is input: its end counts as a turn you started. Typed with Claude
       // already stopped (sending), it interrupted nothing: a signal held
-      // through the quiet wait is still that turn's end.
-      if (!sent.idle) ((this.endHeld = undefined), (this.beganItself = false));
+      // through the quiet wait is still that turn's end, unless the working
+      // line showed again (activity).
+      if (!(sent.idle && this.keyAtIdle)) ((this.endHeld = undefined), (this.beganItself = this.keyAtIdle = false));
       // Cursor's: only one typed with neither its question nor its feedback
       // open stops the turn: the one running as it was typed, or one Loom
       // hasn't heard of yet (agentReport). It counts from when the pane's
