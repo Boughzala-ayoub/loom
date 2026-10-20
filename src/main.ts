@@ -1940,8 +1940,12 @@ class Pane {
   private sawIdle = false;
   /** Claude began a turn by itself, with no input, and it hasn't ended yet. */
   private beganItself = false;
-  /** A signal that came during that turn while its working line was still up (wake). */
+  /** A signal that came during that turn before Claude was quiet and stopped (wake). */
   private endHeld: WakeSource | undefined;
+  /** Claude's working line is gone, and its input or a numbered question is on screen: sweepTasks' idle check. */
+  private claudeStopped() {
+    return !claudeWorking(this.screen(true)) && (readInput(screenCells(this), "claude").kind !== "unknown" || !!readMenu(liveScreen(this, false), "claude"));
+  }
   /** Turns ended: the ones `turns` counts, and ones Claude began by itself, which it doesn't (pane events: Settler). */
   ends = 0;
   private _dead = false;
@@ -2632,16 +2636,17 @@ class Pane {
     if (!this.workSince || now - this.workAt >= 1500) this.workSince = now;
     this.workAt = now;
     clearTimeout(this.idle);
-    this.idle = window.setTimeout(() => ((this.busy = false), this.paint()), 1500);
+    // Quiet: a signal held during a turn Claude began by itself (wake) ends it
+    // once Claude is also idle at its input or asks. A redraw split across
+    // chunks can show neither working line nor input, but never for 1.5 s.
+    this.idle = window.setTimeout(() => ((this.busy = false), this.endHeld && this.claudeStopped() ? this.wake(undefined, this.endHeld) : this.paint()), 1500);
     // A turn Claude began by itself (a background shell's notice, a wake-up)
     // has no Enter or hook start to announce it: its working line, back after
     // Loom saw it idle at its input with no input since, is one, its last
     // alert read or not, and it clears that alert. Under an alert, other output
     // is Claude redrawing its prompt, not work. Idle first, so the working line
     // still up as a turn ends (its Stop hooks running) isn't one. Read only
-    // while it may begin one: never during a turn you started. A signal held
-    // while it still worked (wake) ends that turn once the working line goes.
-    if (this.endHeld && !claudeWorking(this.screen(true))) this.wake(undefined, this.endHeld);
+    // while it may begin one: never during a turn you started.
     if (this.agent === "claude" && !this.beganItself && this.lastIn <= this.lastTurnAt) {
       if (!claudeWorking(this.screen(true))) this.sawIdle ||= readInput(screenCells(this), "claude").kind !== "unknown";
       else if (this.sawIdle) ((this.waiting = false), (this.beganItself = true));
@@ -2809,17 +2814,18 @@ class Pane {
     // and the second can land after the next task went in. So the first source
     // that counts a turn is the only one that counts them for this launch; the
     // others still raise the alert. A turn Claude began by itself has no input
-    // to count it: that source ends it, or any once its working line has gone.
+    // to count it: that source ends it, or any once Claude is quiet and idle
+    // at its input or asking.
     let ended = false;
     if (this.agent !== "shell" && this.lastIn > this.lastTurnAt && (this.turnSource ??= source) === source) {
       this.turns++;
       this.lastTurnAt = at;
       turnReceipts(this, at);
       ended = true;
-    } else if (this.beganItself && source !== this.turnSource && claudeWorking(this.screen(true))) {
+    } else if (this.beganItself && source !== this.turnSource && (this.busy || !this.claudeStopped())) {
       // Held, and the pane left as it is: an older turn's late signal while
       // Claude still works, or this turn's own read before its last frame
-      // was. activity() ends the turn once the working line goes.
+      // was. Its quiet timer (activity) ends the turn with it.
       this.endHeld = source;
       return;
     } else ended = this.beganItself;

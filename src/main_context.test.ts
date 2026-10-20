@@ -177,12 +177,13 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "claudeStopped", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
   const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, agentReport: fx.f.agentReport, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, reportsHeld: fx.f.reportsHeld, reportsTurns: fx.f.reportsTurns, tasks: fx.tasks,
-    claudeWorking: () => fx.screen.busy, readInput: () => ({ kind: fx.screen.input ? "empty" : "unknown" }), screenCells: () => [], ...extra,
+    claudeWorking: () => fx.screen.busy, readInput: () => ({ kind: fx.screen.input ? "empty" : "unknown" }), screenCells: () => [],
+    readMenu: () => (fx.screen.menu ? { question: [], options: ["Yes", "No"] } : null), liveScreen: () => "", ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
   runInContext(paneCode, s);
   const p = Object.assign(new s.Pane(), { id: fx.p.id, generation: 1, agent: "claude", th: fx.th, dead: false, interruptAt: 0, manual: [], screen: () => "", paint() {} });
@@ -252,6 +253,7 @@ console.log("ok   A turn Claude began by itself starts where its output did, unr
   p.wake(undefined, "hook");
   screen.busy = false; // its last frame, parsed after the hook was read
   out(660_100);
+  later(661_600); // then quiet
   await settled();
   assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>working", "working>waiting"], "its end never reached pane events");
   assert.equal(p.turns, 1, "a turn counts after input only (loomctl.md)");
@@ -319,6 +321,7 @@ console.log("ok   A turn Claude begins by itself under an unread alert works, an
   later(601_000);
   screen.busy = false; // its Stop hook, read once the working line went
   p.wake(undefined, "hook");
+  later(601_500); // and Claude quiet
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>waiting"], "a short turn Claude began by itself was lost");
   assert.equal(p.turns, 1, "a turn counts after input only (loomctl.md)");
@@ -411,12 +414,69 @@ console.log("ok   A turn Claude begins by itself under an unread alert works, an
   assert.equal(state(), "working", "a hook read before the last frame showed the pane waiting");
   screen.busy = false;
   out(601_000);
+  later(602_500);
   assert.equal(state(), "waiting", "the turn's own hook was lost once its last frame came");
   p.seen();
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(p.ends, 2);
   assert.deepEqual(events, ["idle>working", "working>idle", "idle>idle"], "a short turn whose hook came before its last frame was lost");
 }
+// A turn Claude began by itself, settled as working, then the last turn's
+// late Stop hook, held. `then` goes on from there.
+async function heldOldHook(then: (c: ReturnType<typeof claudePane>, events: string[], state: () => string) => Promise<void>) {
+  const c = claudePane({ turnReceipts() {} });
+  const { p, later, out, screen } = c;
+  const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+  p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+  p.paint = () => p.settler.see(state());
+  p.paint();
+  p.lastIn = 9_000;
+  screen.busy = true;
+  out(10_000); out(10_500);
+  later(11_000);
+  p.wake(undefined, "bell");
+  screen.busy = false, screen.input = true;
+  out(11_200);
+  screen.busy = true;
+  out(11_400);
+  await new Promise((r) => setTimeout(r, 5));
+  out(12_000);
+  p.wake(undefined, "hook");
+  await then(c, events, state);
+}
+await heldOldHook(async ({ p, later, out, screen }, events, state) => {
+  // Fifth round, 1: a redraw split across chunks shows, for one chunk, no
+  // working line and no input, or its input without the working line yet.
+  for (const [at, input] of [[12_100, false], [12_300, true]] as const) {
+    screen.busy = false, screen.input = input;
+    out(at);
+    screen.busy = true, screen.input = true;
+    out(at + 30);
+  }
+  for (let at = 12_500; at < 20_000; at += 500) out(at);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual([state(), p.ends], ["working", 1], "half a redraw released the last turn's late hook as this turn's end");
+  later(20_000);
+  p.wake(undefined, "bell");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(p.ends, 2);
+  assert.deepEqual(events, ["idle>working", "working>waiting"], "a split redraw sent a finished event while Claude worked");
+});
+await heldOldHook(async ({ p, later, out, screen }, events) => {
+  // Quiet on a frame with neither working line nor input (one Loom can't
+  // read) releases nothing; quiet at its input does.
+  screen.busy = false, screen.input = false;
+  out(12_500);
+  later(14_100);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual([p.waiting, p.ends], [false, 1], "quiet on a frame Loom can't read released the held hook");
+  screen.input = true;
+  out(14_200);
+  later(15_800);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual([p.waiting, p.ends], [true, 2], "the held hook never ended the turn once Claude sat at its input");
+  assert.deepEqual(events, ["idle>working", "working>idle", "idle>waiting"]);
+});
 console.log("ok   One turn is one pane event: not two for a redraw and a late hook, not none for a quiet or a self-started one");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
   // A person's turn ends (its task completed), and Claude's next turn reports
