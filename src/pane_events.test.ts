@@ -42,6 +42,22 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
 }
 
 {
+  // 2026-10-20: a turn shorter than the settle time ended unheard.
+  const fired: string[] = [];
+  const s = new Settler((old, state) => fired.push(`${old}>${state}`), 40);
+  s.see("waiting");
+  s.see("waiting");
+  await sleep(60);
+  check("a repaint while waiting sends nothing", fired.length === 0);
+  s.see("idle");
+  s.see("working");
+  await sleep(20);
+  s.see("waiting");
+  await sleep(60);
+  check("back at waiting before working settled is the next turn's end", fired.join() === "waiting>waiting" && s.settled === "waiting");
+}
+
+{
   // Review round 1, 3: a pane can leave a state without a repaint (a relaunch's first awaits).
   const fired: string[] = [];
   let now = "idle";

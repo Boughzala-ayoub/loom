@@ -1285,7 +1285,9 @@ and the counters that keep `seq` and `gap` right across restarts.
 Tasks follow one piece of work. Pane events follow the panes themselves, with
 nothing to set up: when a pane settles into a new state and stays there for 2
 seconds, Loom records one event. A tool call that pauses output, or a blip
-that goes back to the old state within the 2 seconds, records nothing. The
+that goes back to the old state within the 2 seconds, records nothing. Going
+back to `waiting` is never a blip: a turn shorter than 2 seconds, or a second
+question right after the first, records `waiting` to `waiting`. The
 states are the ones `panes` prints and the pane's tag shows:
 `working`, `idle`, `waiting` (an agent finished or asks, until you look at
 it), `exited` and `starting`. A turn Claude begins by itself while waiting,

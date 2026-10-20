@@ -3,7 +3,8 @@
  * Loom state, so they run under plain node; main.ts feeds them from paint(). */
 
 /** How long a new state must stand before it counts. Output that pauses for a
- * tool call, or a blip that goes back to the old state, sends nothing. */
+ * tool call, or a blip that goes back to the old state, sends nothing; a turn
+ * shorter than this sends waiting>waiting. */
 export const SETTLE_MS = 2000;
 /** Events kept for readers that fall behind. */
 export const KEEP_EVENTS = 500;
@@ -41,8 +42,11 @@ export class Settler {
   see(state: string) {
     if (this.settled === undefined) { this.settled = state; return; }
     if (state === this.next) return;
+    const left = this.next !== undefined;
     this.stop();
-    if (state === this.settled) return;
+    // Only a new alert makes a pane wait: back at waiting, however soon, is
+    // the next turn's end or question, not a blip, and it counts.
+    if (state === this.settled && !(left && state === "waiting")) return;
     const since = Date.now();
     this.next = state;
     this.timer = setTimeout(() => {
