@@ -545,6 +545,46 @@ for (const key of ["\x03", "\x1b"]) {
   await new Promise((r) => setTimeout(r, 5));
   assert.deepEqual([state(), p.ends], ["waiting", 2], `${JSON.stringify(key)} at Claude's idle input dropped the end of the turn it began by itself`);
   assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>waiting"]);
+  {
+    // Eighth round: the key goes in as a turn Claude began by itself ends,
+    // and its write comes back only once Claude has begun another and that
+    // one's Stop hook is held. The key was the ended turn's.
+    const { p, later, out, screen } = claudePane({ turnReceipts() {} });
+    const events: string[] = [], state = () => (p.waiting ? "waiting" : p.busy ? "working" : "idle");
+    p.settler = new Settler((old, st) => events.push(`${old}>${st}`), 0, state, () => p.ends);
+    p.paint = () => p.settler.see(state());
+    p.paint();
+    p.lastIn = 9_000;
+    screen.busy = true;
+    out(10_000); out(10_500);
+    await new Promise((r) => setTimeout(r, 5));
+    later(11_000);
+    p.wake(undefined, "bell");
+    screen.busy = false, screen.input = true;
+    out(12_000);
+    await new Promise((r) => setTimeout(r, 5));
+    screen.busy = true;
+    out(600_000);
+    later(600_200);
+    p.lastIn = 600_200;
+    const sent = p.sending(key);
+    later(600_800);
+    p.wake(undefined, "bell");
+    screen.busy = false;
+    out(601_000);
+    screen.busy = true;
+    out(601_500);
+    screen.busy = false;
+    out(602_000);
+    later(602_100);
+    p.wake(undefined, "hook");
+    later(602_200);
+    p.wrote(key, true, sent);
+    later(604_000);
+    await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual([state(), p.ends], ["waiting", 3], `${JSON.stringify(key)} from an ended turn, its write back late, dropped the next turn's end`);
+    assert.deepEqual(events, ["idle>working", "working>waiting", "waiting>waiting"]);
+  }
 }
 console.log("ok   One turn is one pane event: not two for a redraw and a late hook, not none for a quiet or a self-started one");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {

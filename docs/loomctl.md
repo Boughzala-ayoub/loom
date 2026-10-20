@@ -1305,8 +1305,10 @@ Claude drew its last frame, still ends it. Esc or Ctrl-C typed while Claude
 still works drops such a signal: Claude reports no end for a turn it
 interrupts. Typed once it has stopped, the key interrupts nothing and the
 signal still ends the turn, unless the working line shows again first: the
-key came in the middle of a redraw. A turn that ended just before its pane restarted
-is the old launch's, never an event of the new one.
+key came in the middle of a redraw. A key belongs to the turn it was typed
+in, so one whose write completes after that turn ended drops nothing of the
+next. A turn that ended just before its pane restarted is the old launch's,
+never an event of the new one.
 Looking at a waiting pane moves it to `idle`,
 and that is an event too. A pane someone looks at within 2 seconds of its
 agent finishing goes from `working` straight to `idle`, so to hear every

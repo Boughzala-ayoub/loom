@@ -3210,7 +3210,7 @@ class Pane {
     // its working line shows again (activity).
     const idle = this.beganItself && (d === "\x1b" || d === "\x03") && this.claudeStopped();
     this.keyAtIdle ||= idle;
-    return { gen: this.generation, answer, ...(idle ? { idle } : {}), ...(menu ? { menu: menuRev(menu) } : {}), ...(stop ? { stop: { turn: this.cursorTurn ? this.cursorGen : undefined, at: Date.now(), release: holdReports(this) } } : {}) };
+    return { gen: this.generation, ends: this.ends, answer, ...(idle ? { idle } : {}), ...(menu ? { menu: menuRev(menu) } : {}), ...(stop ? { stop: { turn: this.cursorTurn ? this.cursorGen : undefined, at: Date.now(), release: holdReports(this) } } : {}) };
   }
   /** Cursor's question `rev` is answered, the one on screen as the answer was
    * typed: drawn on until Cursor redraws, it isn't asked again, while one
@@ -3247,8 +3247,9 @@ class Pane {
       // is input: its end counts as a turn you started. Typed with Claude
       // already stopped (sending), it interrupted nothing: a signal held
       // through the quiet wait is still that turn's end, unless the working
-      // line showed again (activity).
-      if (!(sent.idle && this.keyAtIdle)) ((this.endHeld = undefined), (this.beganItself = this.keyAtIdle = false));
+      // line showed again (activity). Back once a turn ended since it was
+      // typed, it was that turn's: a later one's signal isn't its to drop.
+      if (sent.ends === this.ends && !(sent.idle && this.keyAtIdle)) ((this.endHeld = undefined), (this.beganItself = this.keyAtIdle = false));
       // Cursor's: only one typed with neither its question nor its feedback
       // open stops the turn: the one running as it was typed, or one Loom
       // hasn't heard of yet (agentReport). It counts from when the pane's
@@ -5319,7 +5320,7 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
 }
 
 /** What a write means to the process, read as it's typed (Pane.sending). */
-type Meant = { gen: number; answer: boolean; idle?: boolean; menu?: string; stop?: { turn?: string; at: number; release: () => void } };
+type Meant = { gen: number; ends: number; answer: boolean; idle?: boolean; menu?: string; stop?: { turn?: string; at: number; release: () => void } };
 /** A Grok Stop the pane holds (Pane.grokStop). */
 type GrokStop = Extract<Signal, { kind: "stop" }>;
 
