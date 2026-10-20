@@ -3240,7 +3240,10 @@ class Pane {
     // alert. The reports it held still go on.
     if (sent.gen !== this.generation) return void stop?.release();
     if (delivered && (data === "\x1b" || data === "\x03")) {
-      this.interruptAt = Date.now();
+      // When it went in (`began`), not when its write came back: one back
+      // late, after its turn ended and another began, interrupted that
+      // other turn only if it went in during it.
+      this.interruptAt = began ?? Date.now();
       this.codexAsking = false;
       // Claude reports no end for a turn it interrupts, so a signal held for
       // one it began by itself was an older turn's. If it works on, this key

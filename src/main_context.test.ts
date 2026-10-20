@@ -587,6 +587,29 @@ for (const key of ["\x03", "\x1b"]) {
   }
 }
 console.log("ok   One turn is one pane event: not two for a redraw and a late hook, not none for a quiet or a self-started one");
+for (const key of ["\x03", "\x1b"]) {
+  // Ninth round: the key goes in as a turn Claude began by itself ends, and
+  // its write comes back only once Claude has begun another and asks in it.
+  // It went in before that turn began: that turn's task still asks.
+  const { p, tasks, f, screen, clock, sweep } = claudePane({ turnReceipts() {} });
+  p.workSince = 900;
+  clock.at = p.lastIn = 1000;
+  const sent = p.sending(key);
+  clock.at = 1200;
+  f.taskSignal(p, { kind: "stop", at: 1200 });
+  screen.input = true;
+  await sweep(1800);
+  p.workSince = 2000;
+  clock.at = 2500;
+  f.taskSignal(p, { kind: "approval", at: 2500, detail: "Bash" });
+  Object.assign(screen, { input: false, menu: true });
+  clock.at = 3000;
+  p.wrote(key, true, sent, 1000);
+  await sweep(5500);
+  const [a, b] = [...tasks.values()];
+  assert.deepEqual([a.state, b.state], ["completed", "approval"], `${JSON.stringify(key)} from an ended turn, its write back late, cancelled the next turn's question`);
+}
+console.log("ok   An Esc or Ctrl-C whose write comes back late interrupts only a turn it went in during");
 for (const [kind, fresh] of [["fail", false], ["approval", false], ["stop", true]] as const) {
   // A person's turn ends (its task completed), and Claude's next turn reports
   // a failure or a question before Loom reads any output of it: the output
