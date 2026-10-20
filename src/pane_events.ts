@@ -70,6 +70,12 @@ export class Settler {
     clearTimeout(this.timer);
     this.next = undefined;
   }
+
+  /** A new launch: what was settling, and turns ended that no event reported, were the last one's. */
+  restart() {
+    this.stop();
+    this.endsThen = this.ends();
+  }
 }
 
 /** The last KEEP_EVENTS events, numbered.

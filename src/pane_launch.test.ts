@@ -34,7 +34,7 @@ function fixture(over: Record<string, unknown> = {}) {
   runInContext(code, s);
   const p = Object.assign(new s.P(), {
     id: "pane-1", agent: "claude", sid: "sid-1", startup: "claude", effort: "", dead: true, disposed: false, th: { dir: "C:\\work" },
-    out: { id: 0 }, term: { cols: 80, rows: 24, write() {}, reset() {} }, paint() {}, retryCodexStartup() {}, settler: { see() {}, stop() {} },
+    out: { id: 0 }, term: { cols: 80, rows: 24, write() {}, reset() {} }, paint() {}, retryCodexStartup() {}, settler: { see() {}, stop() {}, restart() {} },
   }, over);
   return { p, native, calls, holdSessions: () => (hold = []), releaseSessions: () => hold!.splice(0).forEach((r) => r(true)) };
 }
@@ -99,6 +99,31 @@ for (const agent of ["claude", "codex"]) {
   releaseSessions();
   await up(relaunch);
   console.log(`ok   A ${agent} relaunch held in its session check never reports the last launch's exit as its own`);
+}
+{
+  // Review 2026-10-20, third round, 3: a turn ends, and the process exits and
+  // relaunches before that event settles. The new launch, back at idle, never
+  // reports the old launch's turn as its own.
+  const { p } = fixture({ ends: 0 });
+  const state = (x: any) => (x.dead ? "exited" : x.starting ? "starting" : x.waiting ? "waiting" : "idle");
+  const events: string[] = [];
+  p.settler = new Settler((old, st) => events.push(`${old}>${st} gen ${p.generation}`), 30, () => state(p), () => p.ends);
+  p.paint = () => p.settler.see(state(p));
+  const settle = () => new Promise((r) => setTimeout(r, 100));
+  assert.equal(await p.spawn(false), true);
+  p.starting = false;
+  p.paint();
+  await settle();
+  p.ends++;
+  p.waiting = true;
+  p.paint();
+  p.exited(0);
+  assert.equal(await p.spawn(true), true);
+  p.starting = false;
+  p.paint();
+  await settle();
+  assert.deepEqual(events, ["starting>idle gen 1"], "the last launch's ended turn settled under the new launch");
+  console.log("ok   A turn the last launch ended is never reported under the relaunch");
 }
 {
   // Review 2026-10-20, 1: under an alert, Claude's activity reads its screen

@@ -82,6 +82,14 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   s.see("idle");
   await sleep(60);
   check("work and back with no end on the way is still a blip", fired.length === 3);
+  // Third round, 3: a turn ends, and the pane restarts before that settles.
+  ends++;
+  s.see("waiting");
+  s.restart();
+  s.see("starting");
+  s.see("idle");
+  await sleep(60);
+  check("a turn the last launch ended is never the next launch's event", fired.length === 3);
 }
 
 {

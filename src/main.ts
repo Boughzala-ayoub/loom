@@ -2429,6 +2429,9 @@ class Pane {
     this.exitCode = undefined;
     // A new process: the last one's commands, exit codes and turns aren't its own.
     this.commands = this.turns = 0;
+    this.beganItself = this.sawIdle = false;
+    // The last launch's turns that ended before an event settled were its own.
+    this.settler.restart();
     this.lastFailed = this.lastExit = null;
     this.lastTurnAt = Date.now();
     this.turnSource = undefined;

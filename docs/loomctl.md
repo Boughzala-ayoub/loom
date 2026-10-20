@@ -1298,7 +1298,8 @@ background shell finishes or a scheduled wake-up fires, is one once Loom has
 seen Claude idle at its input and then its working line again with no input
 between, whether or not someone looked at its last alert, and it shows as
 `working`. A late signal of the turn before it ends nothing while Claude still
-works. Looking at a waiting pane moves it to `idle`,
+works. A turn that ended just before its pane restarted is the old launch's,
+never an event of the new one. Looking at a waiting pane moves it to `idle`,
 and that is an event too. A pane someone looks at within 2 seconds of its
 agent finishing goes from `working` straight to `idle`, so to hear every
 finished turn, take both `idle` and `waiting`. A pane's first state sends
