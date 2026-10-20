@@ -2506,7 +2506,9 @@ class Pane {
         this.startupOutput = (this.startupOutput + d).slice(-4096);
         this.retryCodexStartup();
       }
-      const readsScreen = this.agent === "codex" || this.agent === "opencode" || reportsTurns(this.agent);
+      // Claude's too: under an alert, activity reads its working line, and a
+      // read before xterm parses this chunk can miss its idle frame (review 2026-10-20, 1).
+      const readsScreen = this.agent === "codex" || this.agent === "opencode" || this.agent === "claude" || reportsTurns(this.agent);
       this.term.write(d, () => {
         ack();
         if (!this.disposed && readsScreen) this.activity();

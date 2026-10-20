@@ -30,7 +30,7 @@ function fixture(over: Record<string, unknown> = {}) {
     }
   };
   const s = createContext({ invoke, console, restoring: false, shuttingDown: false, outs: new Map(), ackOutput() {}, ownSession: () => false,
-    Channel: class { id = Math.random(); onmessage?: unknown }, launch: () => ["claude"], booted: async () => {}, claudeMarker: () => "" });
+    Channel: class { id = Math.random(); onmessage?: unknown }, launch: () => ["claude"], booted: async () => {}, claudeMarker: () => "", reportsTurns: () => false });
   runInContext(code, s);
   const p = Object.assign(new s.P(), {
     id: "pane-1", agent: "claude", sid: "sid-1", startup: "claude", effort: "", dead: true, disposed: false, th: { dir: "C:\\work" },
@@ -99,4 +99,19 @@ for (const agent of ["claude", "codex"]) {
   releaseSessions();
   await up(relaunch);
   console.log(`ok   A ${agent} relaunch held in its session check never reports the last launch's exit as its own`);
+}
+{
+  // Review 2026-10-20, 1: under an alert, Claude's activity reads its screen
+  // (its working line, its idle input), so it runs once xterm has parsed the
+  // chunk, never before: a read then would see the screen before it.
+  const { p } = fixture();
+  assert.equal(await p.spawn(false), true);
+  const parse: (() => void)[] = [], ran: number[] = [];
+  p.term.write = (_d: string, parsed: () => void) => void parse.push(parsed);
+  p.activity = () => ran.push(parse.length);
+  p.out.onmessage("Meandering");
+  assert.deepEqual(ran, [], "Claude's activity ran before xterm parsed the chunk");
+  parse.splice(0).forEach((parsed) => parsed());
+  assert.deepEqual(ran, [0]);
+  console.log("ok   Claude's activity reads its screen after xterm parses each chunk");
 }
