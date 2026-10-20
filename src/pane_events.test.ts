@@ -55,6 +55,23 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   s.see("waiting");
   await sleep(60);
   check("back at waiting before working settled is the next turn's end", fired.join() === "waiting>waiting" && s.settled === "waiting");
+  // Review 2026-10-20, 2: one turn's bell, looked at, then its Stop hook's late signal.
+  s.see("idle");
+  s.see("waiting");
+  await sleep(60);
+  check("a second signal of the same turn's end, no work between, sends nothing", fired.length === 1);
+  // Review 2026-10-20, 3: a quick turn whose end someone looks at at once.
+  s.see("idle");
+  await sleep(60);
+  s.see("working");
+  s.see("waiting");
+  s.see("idle");
+  await sleep(60);
+  check("back at idle after a turn ended on the way is that turn's end", fired.slice(1).join() === "waiting>idle,idle>idle" && s.settled === "idle");
+  s.see("working");
+  s.see("idle");
+  await sleep(60);
+  check("work and back with no end on the way is still a blip", fired.length === 3);
 }
 
 {

@@ -1286,8 +1286,11 @@ Tasks follow one piece of work. Pane events follow the panes themselves, with
 nothing to set up: when a pane settles into a new state and stays there for 2
 seconds, Loom records one event. A tool call that pauses output, or a blip
 that goes back to the old state within the 2 seconds, records nothing. Going
-back to `waiting` is never a blip: a turn shorter than 2 seconds, or a second
-question right after the first, records `waiting` to `waiting`. The
+back counts when a turn ended on the way, the pane working and then waiting:
+a turn shorter than 2 seconds records `waiting` to `waiting`, or `idle` to
+`idle` when someone looked at it at once, and so does a second question asked
+right after the first was answered. A second signal of one turn's end, with no
+work between, records nothing. The
 states are the ones `panes` prints and the pane's tag shows:
 `working`, `idle`, `waiting` (an agent finished or asks, until you look at
 it), `exited` and `starting`. A turn Claude begins by itself while waiting,

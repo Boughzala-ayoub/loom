@@ -4,7 +4,7 @@
 
 /** How long a new state must stand before it counts. Output that pauses for a
  * tool call, or a blip that goes back to the old state, sends nothing; a turn
- * shorter than this sends waiting>waiting. */
+ * shorter than this sends waiting>waiting, or idle>idle if looked at at once. */
 export const SETTLE_MS = 2000;
 /** Events kept for readers that fall behind. */
 export const KEEP_EVENTS = 500;
@@ -39,14 +39,20 @@ export class Settler {
     this.now = now;
   }
 
+  /** Since the state last settled: the pane worked, and then waited (a turn ended). */
+  private worked = false;
+  private ended = false;
+
   see(state: string) {
     if (this.settled === undefined) { this.settled = state; return; }
     if (state === this.next) return;
-    const left = this.next !== undefined;
-    this.stop();
-    // Only a new alert makes a pane wait: back at waiting, however soon, is
-    // the next turn's end or question, not a blip, and it counts.
-    if (state === this.settled && !(left && state === "waiting")) return;
+    this.clear();
+    if (state === "working") this.worked = true;
+    else if (state === "waiting" && this.worked) this.ended = true;
+    // Back where it settled is a blip, unless a turn ended on the way: one
+    // shorter than the settle time counts, looked at at once or not. A second
+    // signal of one turn's end, with no work between, doesn't.
+    if (state === this.settled && !this.ended) return this.reset();
     const since = Date.now();
     this.next = state;
     this.timer = setTimeout(() => {
@@ -55,13 +61,23 @@ export class Settler {
       if (now !== state) return this.see(now);
       const old = this.settled!;
       this.settled = state;
+      this.reset();
       this.fire(old, state, since);
     }, this.ms);
   }
 
   stop() {
+    this.clear();
+    this.reset();
+  }
+
+  private clear() {
     clearTimeout(this.timer);
     this.next = undefined;
+  }
+
+  private reset() {
+    this.worked = this.ended = false;
   }
 }
 
