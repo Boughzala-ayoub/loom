@@ -278,6 +278,10 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   check("another pane's same request is its own", seen.fresh("s2", reply).length === 1);
   check("a new request goes, the old one beside it doesn't", JSON.stringify(seen.fresh("s1", [...reply, "", "  @ash: done"])) === JSON.stringify(["@ash: done"]));
   check("on screen as a pane starts (a resumed session's): seen, not sent", seen.fresh("s3", reply, true).length === 0 && seen.fresh("s3", reply).length === 0);
+  // Review of 83804d2, 3: case is the request's own (Ash's paths are Linux's); only the marker's isn't.
+  const cased = new AshSeen();
+  check("requests differing only in case are both new", cased.fresh("s1", ["@ash: inspect /srv/Foo.log"]).length === 1 && cased.fresh("s1", ["@ash: inspect /srv/foo.log"]).length === 1);
+  check("the marker's case alone makes no new request", cased.fresh("s1", ["@ASH: inspect /srv/Foo.log", "", "@Ash:  inspect  /srv/foo.log"]).length === 0);
 
   // Review of 83804d2, 1: a request the terminal wrapped, read from a real xterm buffer, then reflowed by a resize.
   const { Terminal } = createRequire(import.meta.url)("@xterm/xterm") as typeof import("@xterm/xterm");

@@ -84,7 +84,9 @@ export function ashRequests(lines: string[]): string[] {
 
 /** Each pane's @ash requests seen so far, by their text with every space
  * removed: a redraw at another width (a resize, a resumed session) wraps one
- * differently, and it's still the one already sent.
+ * differently, and it's still the one already sent. Its case stays: Ash's
+ * paths are Linux's, where Foo.log and foo.log are two files. Only the
+ * marker's doesn't count.
  * ponytail: the last KEEP_ASKED per pane, in memory; an older one redrawn goes out again. */
 export class AshSeen {
   private seen = new Map<string, string[]>();
@@ -93,7 +95,7 @@ export class AshSeen {
   fresh(pane: string, lines: string[], startup = false): string[] {
     const keys = this.seen.get(pane) ?? [], out: string[] = [];
     for (const r of ashRequests(lines)) {
-      const key = r.replace(/\s+/g, "").toLowerCase();
+      const key = r.replace(/^@ash/i, "@ash").replace(/\s+/g, "");
       if (keys.includes(key)) continue;
       keys.push(key);
       if (keys.length > KEEP_ASKED) keys.shift();

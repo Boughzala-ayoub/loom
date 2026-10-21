@@ -1414,7 +1414,8 @@ live:
 Loom reads the requests in every mode, so a request seen while the mode was
 `full` or `off` isn't sent again after switching to `ash`. A request counts as
 the same one when only its spacing differs, as when a resize or a resumed
-session redraws it. Until a pane first settles `idle` or `waiting` after it
+session redraws it. Its case counts, since `Foo.log` and `foo.log` can be two
+files; only the case of `@ash` itself doesn't. Until a pane first settles `idle` or `waiting` after it
 starts, the requests on its screen are taken as seen, not sent, since a
 resumed session redraws its old ones, unless a turn of it ended already.
 `watch --panes` and `wait --until` get every event in every mode.
