@@ -24,7 +24,7 @@ import { claudeDivider, claudeComposer, readMenu, readFeedback, cursorKey, menuK
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
-import { ASH_LINES, ASH_LISTEN, AshSeen, Courier, hears, hookHeader, hookUrl, matches, PANE_ASH_LISTEN, PaneEventLog, SETTLE_MS, Settler, TAIL_LINES, TAIL_WIDTH, type AshListen, type PaneAshListen, type PaneEvent, type Webhook } from "./pane_events";
+import { ASH_LINES, ASH_LISTEN, AshSeen, bufferLines, Courier, hears, hookHeader, hookUrl, matches, PANE_ASH_LISTEN, PaneEventLog, SETTLE_MS, Settler, TAIL_LINES, TAIL_WIDTH, type AshListen, type PaneAshListen, type PaneEvent, type Webhook } from "./pane_events";
 import { newPushKey, pushRequest, type PushKey, type PushMessage, type PushSub } from "./push";
 import type { OverlayRow, OverlayState } from "./overlay";
 import { procsView, type Reading } from "./procs";
@@ -9424,14 +9424,14 @@ function paneEvent(p: Pane, old: string, state: string, since: number) {
   // Read in every mode, so switching to ash sends none seen before. Until a
   // launch first rests, what its screen shows is the startup's (a resumed
   // session redraws its old requests), unless a turn ended already.
-  const lines = tailLines(p, ASH_LINES).lines, ash = ashSeen.fresh(p.stableId, lines, !p.rested && !p.turns);
+  const ash = ashSeen.fresh(p.stableId, bufferLines(p.term.buffer.active, ASH_LINES, p.term.cols, p.agent !== "grok"), !p.rested && !p.turns);
   if (state === "idle" || state === "waiting") p.rested = true;
   const e = paneEvents.add({
     at: new Date(since).toISOString(), pane: p.id, stableId: p.stableId, ref: paneName(p), thread: p.th.name, threadId: p.th.id,
     agent: p.agent, title: p.label, old, state,
     asking: state === "waiting" && p.agent !== "shell" && !!readMenu(liveScreen(p, false), p.agent),
     exit: state === "exited" ? p.exitCode ?? null : null, generation: p.generation, turns: p.turns,
-    tail: lines.slice(-TAIL_LINES).map((l) => l.trimEnd().slice(0, TAIL_WIDTH)),
+    tail: tailLines(p, TAIL_LINES).lines.map((l) => l.trimEnd().slice(0, TAIL_WIDTH)),
     ...(ash.length ? { ash } : {}),
   });
   paneEventGate.notify();

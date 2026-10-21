@@ -1,7 +1,7 @@
 /** Pane state events: what `loomctl watch --panes`, `wait --until` and
  * webhooks hear when a pane settles into a new state. The parts that need no
  * Loom state, so they run under plain node; main.ts feeds them from paint(). */
-import { hash32 } from "./prompt.ts";
+import { claudeDivider, hash32 } from "./prompt.ts";
 
 /** How long a new state must stand before it counts. Output that pauses for a
  * tool call, or a blip that goes back to the old state, sends nothing; a turn
@@ -39,6 +39,30 @@ export const hears = (mode: AshListen, e: PaneEvent) => mode === "full" || (mode
 export const ASH_LINES = 500;
 const ASH = /^\s*(?:[●⏺•]\s*)?(@ash\b.*)$/i;
 const KEEP_ASKED = 100;
+
+/** The part of xterm's buffer a reader needs. */
+export type Rows = { length: number; getLine(y: number): { isWrapped: boolean; translateToString(trimRight?: boolean, start?: number, end?: number): string } | undefined };
+
+/** A buffer's last `n` rows as lines, up to its last with anything on it, each
+ * row cut at `cols` (the alternate screen keeps cells past it after a
+ * narrowing resize). A row xterm wrapped joins the line above it, so a long
+ * line reads the same at any width, and the rows start where a line does. Not
+ * after a rule: Claude pads its rules to the width, and xterm flags the row
+ * after one as its wrap. `wraps` false keeps every row as drawn: Grok cuts its
+ * rows at the width, yet xterm flags nearly every one as a wrap (liveScreen). */
+export function bufferLines(buf: Rows, n: number, cols: number, wraps = true): string[] {
+  let to = buf.length;
+  while (to > 0 && !buf.getLine(to - 1)?.translateToString(true, 0, cols).trim()) to--;
+  let from = Math.max(0, to - n);
+  while (wraps && from > 0 && buf.getLine(from)?.isWrapped) from--;
+  const lines: string[] = [];
+  for (let y = from; y < to; y++) {
+    const row = buf.getLine(y), text = row?.translateToString(false, 0, cols) ?? "", last = lines.length - 1;
+    if (wraps && row?.isWrapped && last >= 0 && !claudeDivider(lines[last])) lines[last] += text;
+    else lines.push(text);
+  }
+  return lines.map((l) => l.trimEnd());
+}
 
 /** The @ash requests in `lines`, a screen's last lines, oldest first: each
  * line that starts with @ash (after a message's bullet). An agent wraps a long

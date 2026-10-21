@@ -1,7 +1,9 @@
 // Self-check for pane state events. Run: node src/pane_events.test.ts
 // @ts-ignore Node-only test.
 import { createHmac } from "node:crypto";
-import { ashRequests, AshSeen, Courier, hears, hookHeader, hookTag, hookUrl, matches, MAX_QUEUE, PaneEventLog, RETRY_S, Settler, sign, type PaneEvent } from "./pane_events.ts";
+// @ts-ignore Node-only test.
+import { createRequire } from "node:module";
+import { ashRequests, AshSeen, bufferLines, Courier, hears, hookHeader, hookTag, hookUrl, matches, MAX_QUEUE, PaneEventLog, RETRY_S, Settler, sign, type PaneEvent } from "./pane_events.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean) {
@@ -276,6 +278,26 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   check("another pane's same request is its own", seen.fresh("s2", reply).length === 1);
   check("a new request goes, the old one beside it doesn't", JSON.stringify(seen.fresh("s1", [...reply, "", "  @ash: done"])) === JSON.stringify(["@ash: done"]));
   check("on screen as a pane starts (a resumed session's): seen, not sent", seen.fresh("s3", reply, true).length === 0 && seen.fresh("s3", reply).length === 0);
+
+  // Review of 83804d2, 1: a request the terminal wrapped, read from a real xterm buffer, then reflowed by a resize.
+  const { Terminal } = createRequire(import.meta.url)("@xterm/xterm") as typeof import("@xterm/xterm");
+  const term = new Terminal({ cols: 32, rows: 6, allowProposedApi: true });
+  const write = (data: string) => new Promise<void>((r) => term.write(data, r));
+  const wrapped = "@ash: inspect /srv/builds/alpha-backend.log and check the latest failure";
+  await write(`  ${wrapped}\r\n\r\n$ prompt`);
+  const xseen = new AshSeen(), read = (wraps = true) => bufferLines(term.buffer.active, 500, term.cols, wraps);
+  check("a request xterm wrapped is read whole", JSON.stringify(xseen.fresh("s1", read())) === JSON.stringify([wrapped]));
+  // Its three rows, a blank one and the prompt: three rows back starts inside it.
+  check("rows starting inside a wrapped line start at its first row", JSON.stringify(new AshSeen().fresh("s1", bufferLines(term.buffer.active, 3, term.cols))) === JSON.stringify([wrapped]));
+  term.resize(90, 6);
+  check("reflowed into one row by a resize: not sent again", xseen.fresh("s1", read()).length === 0);
+  // Claude pads a rule to the width, and xterm flags the row after it as its wrap.
+  term.resize(32, 6);
+  await write(`\r\n${"─".repeat(32)}  @ash: under a rule\r\n`);
+  check("a row after a rule is its own line, not the rule's wrap", JSON.stringify(xseen.fresh("s1", read())) === JSON.stringify(["@ash: under a rule"]));
+  // Grok cuts its rows at the width, yet xterm flags them as wraps: its rows stay as drawn.
+  await write("  @ash: grok rows stay rows as drawn, never joined\r\n");
+  check("Grok's rows aren't joined", read(false).some((l) => l.includes("@ash: grok")) && !read(false).some((l) => l.includes("@ash: grok") && l.includes("never joined")));
 
   const e = (ash?: string[]) => ({ ...event(), seq: 1, ...(ash ? { ash } : {}) });
   check("full hears every event, ash only one with a request, off none",

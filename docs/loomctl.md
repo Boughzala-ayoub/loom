@@ -1340,7 +1340,7 @@ that boots sends `starting` to `idle`.
 | `exit` | The process's exit code, for `exited`; otherwise `null` |
 | `generation`, `turns` | As in `panes --json` |
 | `tail` | The pane's last 10 lines, scrollback included, ending at its last line with anything on it, each cut at 200 characters |
-| `ash` | Only when there are some: the @ash requests in the pane's last 500 lines that no earlier event of the pane carried. A request is a line starting with `@ash` (after a message's bullet), joined with the lines an agent wrapped it onto: those under it indented to where its text starts, up to a blank one. One at the left edge, as a shell prints it, is its line alone |
+| `ash` | Only when there are some: the @ash requests in the pane's last 500 lines that no earlier event of the pane carried. A request is a line starting with `@ash` (after a message's bullet), read whole however the terminal wrapped it, and joined with the lines an agent wrapped it onto: those under it indented to where its text starts, up to a blank one. One at the left edge, as a shell prints it, is its line alone |
 
 Loom keeps the last 500 events in memory. They start over when Loom does.
 
