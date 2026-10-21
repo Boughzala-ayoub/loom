@@ -287,13 +287,15 @@ export class Courier {
     for (let i = this.queue.length - 1; i >= 0; i--) if (drop(this.queue[i].pane)) this.queue.splice(i, 1);
   }
 
-  /** One try: the status, or why there is none. */
-  async attempt(seq: number, body: string): Promise<number | string> {
+  /** One try: the status, or why there is none. A queued `job` goes only while
+   * still queued: Ash listening off (clear) drops it while it's signed too. */
+  async attempt(seq: number, body: string, job?: Courier["queue"][number]): Promise<number | string> {
     const headers: [string, string][] = [["Content-Type", "application/json"], ["X-Loom-Event", "pane-state"], ["X-Loom-Delivery", String(seq)]];
     try {
       if (this.hook.header) headers.push(hookHeader(this.hook.header));
       if (this.hook.secret) headers.push(["X-Loom-Signature", await sign(this.hook.secret, body)]);
       if (this.stopped) return "the webhook was removed"; // while signing
+      if (job && this.queue[0] !== job) return "dropped: Ash listening is off";
       return await this.post(this.hook.url, headers, body);
     } catch (e) {
       return String(e instanceof Error ? e.message : e);
@@ -318,13 +320,14 @@ export class Courier {
     const { seq, body, what } = job;
     // Removed or cleared during a retry's wait: the next try never goes out.
     for (let i = 0; !this.stopped && this.queue[0] === job; i++) {
-      const got = await this.attempt(seq, body);
+      const got = await this.attempt(seq, body, job);
       const tries = i ? ` after ${i + 1} tries` : "";
       if (typeof got === "number" && got >= 200 && got < 300) {
         this.sent++;
         this.lastOk = new Date().toISOString();
         return this.log(`Loom webhook ${this.tag}: event ${seq} (${what}) delivered, HTTP ${got}${tries}.`);
       }
+      if (this.queue[0] !== job) return; // dropped by clear: no failure, no retry
       const why = typeof got === "number" ? `HTTP ${got}` : got;
       const final = (typeof got === "number" && got >= 400 && got < 500 && got !== 408 && got !== 429) || i >= RETRY_S.length;
       if (final || this.stopped) return this.fail(job, `${why}${tries}`);

@@ -325,6 +325,25 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   held.clear((pane) => pane === "s1");
   check("one pane off drops only that pane's events", held.queue.map((j) => j.pane).join() === "s2");
   held.stop();
+
+  // Review of 83804d2, 2: off while a signed event is being prepared: signing is awaited, then nothing posts.
+  const sent: string[] = [];
+  const signing = new Courier({ url: "http://example.test", secret: "key" }, async (_url, _headers, body) => (sent.push(JSON.parse(body).stableId), 200), () => {});
+  signing.push(log.add(event({ stableId: "s1" })));
+  signing.clear();
+  await sleep(20);
+  check("off while signing: nothing posts", sent.length === 0);
+  signing.push(log.add(event({ stableId: "s1" })));
+  await sleep(20);
+  check("a later event still goes", sent.join() === "s1");
+  for (const id of ["s1", "s2"]) signing.push(log.add(event({ stableId: id })));
+  signing.clear((pane) => pane === "s1"); // s1's is signing
+  await sleep(20);
+  check("one pane off while its event signs: the other pane's still goes", sent.join() === "s1,s2");
+  signing.push(log.add(event({ stableId: "s1" })));
+  await sleep(20);
+  check("and that pane's next event too", sent.join() === "s1,s2,s1");
+  check("a webhook test still posts", (await signing.attempt(0, JSON.stringify({ seq: 0, test: true, stableId: "test" }))) === 200 && sent[sent.length - 1] === "test");
 }
 
 if (fails) throw new Error(`${fails} failed`);
