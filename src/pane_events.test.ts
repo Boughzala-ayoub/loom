@@ -299,6 +299,25 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   term.resize(32, 6);
   await write(`\r\n${"─".repeat(32)}  @ash: under a rule\r\n`);
   check("a row after a rule is its own line, not the rule's wrap", JSON.stringify(xseen.fresh("s1", read())) === JSON.stringify(["@ash: under a rule"]));
+  // Re-review of f95fa46: a wide character that can't fit in the last column moves to the next row,
+  // and xterm leaves that cell empty. Not a space: a space printed there is kept.
+  const edge = async (cols: number, text: string) => {
+    const t = new Terminal({ cols, rows: 6, allowProposedApi: true });
+    await new Promise<void>((r) => t.write(`${text}\r\n\r\n$ prompt`, r));
+    const seen = new AshSeen(), got = seen.fresh("s1", bufferLines(t.buffer.active, 500, cols));
+    t.resize(90, 6);
+    return { got, wide: ashRequests(bufferLines(t.buffer.active, 500, 90)), again: seen.fresh("s1", bufferLines(t.buffer.active, 500, 90)) };
+  };
+  const pathPrefix = "  @ash: inspect /srv/", wide = pathPrefix + "a".repeat(39 - pathPrefix.length - 1) + "界.log";
+  let w = await edge(39, wide);
+  check("a wide character wrapped to the next row adds no space", JSON.stringify(w.got) === JSON.stringify([wide.trim()]));
+  check("and reads the same once a resize puts it on one row, not sent again", JSON.stringify(w.wide) === JSON.stringify([wide.trim()]) && !w.again.length);
+  const open = "  @ash: open ", spaced = open + "x".repeat(24 - open.length - 1) + " next.log";
+  w = await edge(24, spaced);
+  check("a space printed in the last column stays", JSON.stringify(w.got) === JSON.stringify([spaced.trim()]) && !w.again.length);
+  const spacedWide = open + "x".repeat(24 - open.length - 1) + " 界.log";
+  w = await edge(24, spacedWide);
+  check("and stays before a wide character on the next row", JSON.stringify(w.got) === JSON.stringify([spacedWide.trim()]) && !w.again.length);
   // Grok cuts its rows at the width, yet xterm flags them as wraps: its rows stay as drawn.
   await write("  @ash: grok rows stay rows as drawn, never joined\r\n");
   check("Grok's rows aren't joined", read(false).some((l) => l.includes("@ash: grok")) && !read(false).some((l) => l.includes("@ash: grok") && l.includes("never joined")));

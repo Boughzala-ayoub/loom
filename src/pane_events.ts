@@ -41,7 +41,10 @@ const ASH = /^\s*(?:[●⏺•]\s*)?(@ash\b.*)$/i;
 const KEEP_ASKED = 100;
 
 /** The part of xterm's buffer a reader needs. */
-export type Rows = { length: number; getLine(y: number): { isWrapped: boolean; translateToString(trimRight?: boolean, start?: number, end?: number): string } | undefined };
+export type Rows = { length: number; getLine(y: number): {
+  isWrapped: boolean; translateToString(trimRight?: boolean, start?: number, end?: number): string;
+  getCell(x: number): { getChars(): string; getWidth(): number } | undefined;
+} | undefined };
 
 /** A buffer's last `n` rows as lines, up to its last with anything on it, each
  * row cut at `cols` (the alternate screen keeps cells past it after a
@@ -58,8 +61,12 @@ export function bufferLines(buf: Rows, n: number, cols: number, wraps = true): s
   const lines: string[] = [];
   for (let y = from; y < to; y++) {
     const row = buf.getLine(y), text = row?.translateToString(false, 0, cols) ?? "", last = lines.length - 1;
-    if (wraps && row?.isWrapped && last >= 0 && !claudeDivider(lines[last])) lines[last] += text;
-    else lines.push(text);
+    if (wraps && row?.isWrapped && last >= 0 && !claudeDivider(lines[last])) {
+      // A wide character that didn't fit in the last column starts this row, and
+      // xterm left that cell empty: not a space anyone printed.
+      const end = buf.getLine(y - 1)?.getCell(cols - 1), pad = end?.getChars() === "" && end.getWidth() === 1 && row.getCell(0)?.getWidth() === 2;
+      lines[last] = (pad ? lines[last].slice(0, -1) : lines[last]) + text;
+    } else lines.push(text);
   }
   return lines.map((l) => l.trimEnd());
 }
