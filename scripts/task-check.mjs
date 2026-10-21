@@ -3908,7 +3908,7 @@ try {
     assert.deepEqual([policy.all, policy.kinds, policy.newPanes, policy.panes.every((p) => p.notify === 'inherit' && p.finish && p.fail && p.blocked)],
       ['on', { finish: true, fail: true, blocked: true }, 'inherit', true], 'Default: every pane on, every kind, new panes inherit');
     const bell = (pane) => page.evaluate((id) => { const b = document.querySelector(`.pane[data-id="${id}"] .pane-head button.notify`); return b && { own: b.classList.contains('own'), off: b.classList.contains('off'), title: b.title }; }, pane);
-    assert.deepEqual(await bell(claude), { own: false, off: false, title: 'Task notices on, like every pane. Click to change.' });
+    assert.deepEqual(await bell(claude), { own: false, off: false, title: 'Task notices on, like every pane. Ash listening: every event, like every pane. Click to change.' });
     // Review 2026-10-03 15:52 (P2): every argument is checked before anything changes, so a refused command leaves
     // the policy, each pane's own setting, the journal's policy history and the saved settings as they were.
     {
@@ -3954,7 +3954,7 @@ try {
     assert.equal(relay.queued.length, 1, 'Queued, not sent yet');
     // Off for this pane, with A still queued: A must not go out.
     assert.equal((await cli('notify', 'work:1', 'off')).data.notify, 'off');
-    assert.deepEqual(await bell(claude), { own: true, off: true, title: 'Task notices off for this pane. Click to change.' });
+    assert.deepEqual(await bell(claude), { own: true, off: true, title: 'Task notices off for this pane. Ash listening: every event, like every pane. Click to change.' });
     await deliver();
     assert.deepEqual([relay.sent.length, relay.muted.includes(a.meta.seq)], [0, true], 'A queued notice of a pane turned off is not sent');
     const b = await finish('work:1', 'notice B, pane off');
@@ -3962,7 +3962,7 @@ try {
     assert.deepEqual([b.meta.notify, other.meta.notify], [false, true], 'Off for one pane only');
     // On again: nothing it held back goes out, only what comes after.
     await cli('notify', 'work:1', 'inherit');
-    assert.deepEqual(await bell(claude), { own: false, off: false, title: 'Task notices on, like every pane. Click to change.' });
+    assert.deepEqual(await bell(claude), { own: false, off: false, title: 'Task notices on, like every pane. Ash listening: every event, like every pane. Click to change.' });
     await ingest();
     await deliver();
     assert.deepEqual((await cli('notify', '--check', `${a.meta.seq},${b.meta.seq}`)).data, { [a.meta.seq]: false, [b.meta.seq]: false }, 'Still held back');
@@ -3976,7 +3976,7 @@ try {
     await cli('notify', 'work:3', 'on');
     const [d1, d3] = [await finish('work:1', 'notice D1, every pane off'), await finish('work:3', 'notice D3, its own on')];
     assert.deepEqual([d1.meta.notify, d3.meta.notify], [false, true], 'A pane on wins over every pane off');
-    assert.deepEqual(await bell(claude), { own: false, off: true, title: 'Task notices off, like every pane. Click to change.' });
+    assert.deepEqual(await bell(claude), { own: false, off: true, title: 'Task notices off, like every pane. Ash listening: every event, like every pane. Click to change.' });
     await cli('notify', '--all', 'on', '--fail', 'off');
     await cli('notify', 'work:3', 'inherit');
     await agent(claude, { busy: false, input: '' });

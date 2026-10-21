@@ -7,7 +7,7 @@ import { procsView, type Reading } from "../procs";
 
 type Theme = { name: string; scheme: string; current: boolean; vars: Record<string, string> };
 type Notify = { all: string; kinds: { finish: boolean; fail: boolean; blocked: boolean }; newPanes: string };
-type Settings = { sound: string; taskbar: string; overlay: string; awake: string; "plan-usage": string; font: string };
+type Settings = { sound: string; taskbar: string; overlay: string; awake: string; "plan-usage": string; font: string; "ash-listen"?: string };
 /** A paired phone: its id is the start of its token's SHA-256 (remote.rs), its times unix ms. */
 type Device = { id: string; name: string; paired: number | null; seen: number | null; push: boolean };
 type Remote = { phones: number; address: string | null; port: number; devices?: Device[] };
@@ -260,6 +260,8 @@ const current = themes.find((t) => t.current);
     setting("New agents", "", choice(notify.newPanes, [["inherit", "Like all"], ["on", "On"], ["off", "Off"]], (v) => run("notify", ["--new-panes", v], { change: true })), true),
     setting("Sound", "A chime on the PC when an agent wakes", toggle(settings.sound === "on", "Sound", (on) => run("set", ["sound", on ? "on" : "off"], { change: true }))),
     setting("Flash the taskbar", "When Loom isn't in front on the PC", toggle(settings.taskbar === "on", "Flash the taskbar", (on) => run("set", ["taskbar", on ? "on" : "off"], { change: true }))),
+    ...(settings["ash-listen"] ? [setting("Ash listening", "Which agent events go to the webhooks. An agent's own setting wins",
+      choice(settings["ash-listen"], [["full", "All"], ["ash", "@ash"], ["off", "Off"]], (v) => run("set", ["ash-listen", v], { change: true })), true)] : []),
   ));
 
   if (settings) {

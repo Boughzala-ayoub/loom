@@ -24,7 +24,7 @@ import { claudeDivider, claudeComposer, readMenu, readFeedback, cursorKey, menuK
 import { callerPath, discards, flag, keyBytes, LOSSES, num, onOff, paneRef, parseArgs, pruneSettled, sha256, str, table, type Args, type Loss, type Options } from "./cli";
 import { settingValue, allows, changeFields, claimManual, codexAsks, contextRecord, DEFAULT_NOTIFY, eventsAfter, fitBatch, isFinal, keptNotify, LOOM_TITLES, NOTIFY_KINDS, notifies, notifyDisposition, notifyKind, parseSignal, promptMatch, readJournal, route, sameNotify, taskContext, taskFields, taskRecord, TASK_STATES, unproven, writeJournal, type Change as TaskChange, type ManualEnter, type NotifyKind, type NotifySnapshot, type Signal, type Task, type TaskContext, type TaskEvent, type TaskSource, type TaskState } from "./task";
 import { TaskEventGate } from "./task_event_gate";
-import { Courier, hookHeader, hookUrl, matches, PaneEventLog, SETTLE_MS, Settler, TAIL_LINES, TAIL_WIDTH, type PaneEvent, type Webhook } from "./pane_events";
+import { ASH_LINES, ASH_LISTEN, AshSeen, Courier, hears, hookHeader, hookUrl, matches, PANE_ASH_LISTEN, PaneEventLog, SETTLE_MS, Settler, TAIL_LINES, TAIL_WIDTH, type AshListen, type PaneAshListen, type PaneEvent, type Webhook } from "./pane_events";
 import { newPushKey, pushRequest, type PushKey, type PushMessage, type PushSub } from "./push";
 import type { OverlayRow, OverlayState } from "./overlay";
 import { procsView, type Reading } from "./procs";
@@ -1394,7 +1394,7 @@ function applyTheme(t: Theme) {
 
 /** A pane as saved: the command it booted with, the claude session it owns,
  * and the session's last-known effort level (hook-reported; resume re-pins it). */
-type PaneState = { cmd: string; startupSettings?: { model?: string; effort?: string }; sid?: string; stableId?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off"; notifyIds?: string[] };
+type PaneState = { cmd: string; startupSettings?: { model?: string; effort?: string }; sid?: string; stableId?: string; effort?: string; sessionId?: string; groupIds?: string[]; notify?: "on" | "off"; notifyIds?: string[]; ashListen?: AshListen };
 /** A pane's task notices: every pane's setting (`inherit`), or its own on or off. */
 type PaneNotify = "inherit" | "on" | "off";
 /** Every pane's task notices, which kinds, and what a pane made from now on starts with. */
@@ -1454,6 +1454,7 @@ let speakShown = true; // Preferences → Speak button: the floating mic over th
 const OVERLAY_MODES = ["off", "background", "always"] as const;
 type OverlayMode = (typeof OVERLAY_MODES)[number];
 let overlayMode: OverlayMode = "off"; // Preferences → Agent overlay; persisted
+let ashListen: AshListen = "full"; // Preferences → Ash listening: which pane events the webhooks get; persisted
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) =>
   document.querySelector<T>(sel)!;
@@ -2032,6 +2033,8 @@ class Pane {
   inputSeq = 0;
   /** Its task notices: every pane's setting, or its own on or off (notifyPolicy). */
   notify: PaneNotify = "inherit";
+  /** Which of its events the webhooks get: its own mode, or the global one (Ash listening). */
+  ashListen: PaneAshListen = "inherit";
   /** Runtime ids of this saved pane, including launches from earlier Loom runs. */
   notifyIds: string[] = [this.id];
   /** This pane's own id across restarts, where `id` is new each start: saved with it and restored only into it. */
@@ -2419,6 +2422,8 @@ class Pane {
   /** The launch pty_spawn last started: what a stop kills. `launched` names a
    * launch while it still checks its session, before its process replaces this one. */
   private installed = 0;
+  /** This launch has settled idle or waiting (paneEvent). */
+  rested = false;
   private launching: Promise<void> = Promise.resolve();
   private starts = 0;
   /** A launch hasn't finished. A dead pane can be starting again (a restart
@@ -2442,7 +2447,7 @@ class Pane {
     this.exitCode = undefined;
     // A new process: the last one's commands, exit codes and turns aren't its own.
     this.commands = this.turns = 0;
-    this.beganItself = this.sawIdle = this.keyAtIdle = false;
+    this.beganItself = this.sawIdle = this.keyAtIdle = this.rested = false;
     this.endHeld = undefined;
     // The last launch's turns that ended before an event settled were its own.
     this.settler.restart();
@@ -2855,13 +2860,15 @@ class Pane {
       getCurrentWindow().requestUserAttention(UserAttentionType.Informational).catch(() => {});
   }
 
-  /** Its bell: on or off as its task notices are, marked when it has its own setting. */
+  /** Its bell: on or off as its task notices are, marked when it has its own
+   * setting, of those or of Ash listening. */
   paintBell() {
     const on = this.notify === "inherit" ? notifyPolicy.on : this.notify === "on";
     this.bell.replaceChildren(glyph(on ? "bell" : "bell-off"));
-    this.bell.classList.toggle("own", this.notify !== "inherit");
+    this.bell.classList.toggle("own", this.notify !== "inherit" || this.ashListen !== "inherit");
     this.bell.classList.toggle("off", !on);
-    this.bell.title = `Task notices ${this.notify === "inherit" ? `${on ? "on" : "off"}, like every pane` : `${this.notify} for this pane`}. Click to change.`;
+    const ash = this.ashListen === "inherit" ? `${ASH_LABEL[ashListen]}, like every pane` : `${ASH_LABEL[this.ashListen]} for this pane`;
+    this.bell.title = `Task notices ${this.notify === "inherit" ? `${on ? "on" : "off"}, like every pane` : `${this.notify} for this pane`}. Ash listening: ${ash}. Click to change.`;
     this.bell.setAttribute("aria-label", this.bell.title);
   }
 
@@ -3455,6 +3462,7 @@ class Thread {
     p.notify = st.notify === "on" || st.notify === "off" ? st.notify : this.restoring ? "inherit" : notifyPolicy.newPanes;
     if (this.restoring && Array.isArray(st.notifyIds)) p.notifyIds = [...new Set([...st.notifyIds.filter((id) => typeof id === "string" && id), p.id])];
     if (this.restoring && typeof st.stableId === "string" && st.stableId) p.stableId = st.stableId;
+    p.ashListen = ASH_LISTEN.find((m) => m === st.ashListen) ?? "inherit";
     if (startupTurns) for (const id of p.notifyIds) startupNotify.set(id, p.notify);
     p.paintBell();
     this.panes.push(p);
@@ -3746,7 +3754,7 @@ const flushSave = (): Promise<unknown> => {
         branch: t.branch,
         name: t.name,
         open: t.open,
-        panes: t.panes.map((p) => ({ cmd: p.startup, startupSettings: p.startupSettings, sid: p.sid, stableId: p.stableId, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify,
+        panes: t.panes.map((p) => ({ cmd: p.startup, startupSettings: p.startupSettings, sid: p.sid, stableId: p.stableId, sessionId: p.sessionId, effort: p.effort || undefined, groupIds: p.groupIds, notify: p.notify === "inherit" ? undefined : p.notify, ashListen: p.ashListen === "inherit" ? undefined : p.ashListen,
           notifyIds: p.notifyIds.filter((id) => journalUnreadable || id === p.id || typedTasks().some((t) => t.pane === id)) })),
         layout: t.layout,
         active: t.panes.indexOf(t.active!),
@@ -3774,6 +3782,7 @@ const flushSave = (): Promise<unknown> => {
       keepAwake,
       planUsage,
       webhooks,
+      ashListen,
       speakButton: speakShown,
       overlay: overlayMode,
       ui: { thread: threads.indexOf(current!), dashboard: dashboardOpen, dashboardCompact, sideOpen, changesOpen, sideQuery, sideW: { ...sideW },
@@ -5242,14 +5251,21 @@ async function setNotify(change: Partial<typeof notifyPolicy>, own?: { pane: Pan
 function setPaneNotify(p: Pane, v: PaneNotify) {
   return setNotify({}, { pane: p, value: v });
 }
-/** A pane's bell: like every pane, or its own on or off. */
+/** A pane's bell: its task notices like every pane, or its own on or off; and
+ * which of its events the webhooks get, the global Ash listening or its own. */
 const notifyMenu = (p: Pane): Menu => ({
   placeholder: "",
   rows: (list) => {
+    const head = (text: string) => list.append(Object.assign(document.createElement("div"), { className: "menu-note menu-head", textContent: text }));
+    head("Task notices");
     for (const [v, label] of [["inherit", `Like every pane (now ${notifyPolicy.on ? "on" : "off"})`], ["on", "On for this pane"], ["off", "Off for this pane"]] as const)
       menuItem(list, `${p.notify === v ? "✓ " : "   "}${label}`, () => void setPaneNotify(p, v).catch(notifyError));
+    head("Ash listening");
+    for (const [v, label] of [["inherit", `Follow global (now ${ASH_LABEL[ashListen]})`], ["full", "Every event"], ["ash", "@ash requests only"], ["off", "No events"]] as const)
+      menuItem(list, `${p.ashListen === v ? "✓ " : "   "}${label}`, () => setPaneAshListen(p, v));
   },
 });
+const ASH_LABEL: Record<AshListen, string> = { full: "every event", ash: "@ash requests", off: "off" };
 /** Each pane's notices as they stand: its setting, and whether each kind goes out now. */
 const notifyRow = (p: Pane) => ({
   pane: p.id, ref: paneName(p), notify: p.notify,
@@ -9264,6 +9280,8 @@ const paneData = (p: Pane) => ({
   zoomed: p.th.zoomed === p,
   // Which launch this is (send --gen takes it), and what a shell with Loom's prompt last reported.
   generation: p.generation, commands: p.commands, failed: p.lastFailed, exit: p.lastExit, atPrompt: p.atPrompt, turns: p.turns, notify: p.notify,
+  // Its own Ash listening (inherit: the global one), and the mode its events go out under now.
+  ashListen: p.ashListen, ashHears: listensTo(p),
   lastOutput: p.lastOut ? new Date(p.lastOut).toISOString() : null,
   ...paneSettings(p),
 });
@@ -9403,15 +9421,50 @@ const postHook = (url: string, headers: [string, string][], body: string) =>
 
 function paneEvent(p: Pane, old: string, state: string, since: number) {
   if (gone(p)) return;
+  // Read in every mode, so switching to ash sends none seen before. Until a
+  // launch first rests, what its screen shows is the startup's (a resumed
+  // session redraws its old requests), unless a turn ended already.
+  const lines = tailLines(p, ASH_LINES).lines, ash = ashSeen.fresh(p.stableId, lines, !p.rested && !p.turns);
+  if (state === "idle" || state === "waiting") p.rested = true;
   const e = paneEvents.add({
     at: new Date(since).toISOString(), pane: p.id, stableId: p.stableId, ref: paneName(p), thread: p.th.name, threadId: p.th.id,
     agent: p.agent, title: p.label, old, state,
     asking: state === "waiting" && p.agent !== "shell" && !!readMenu(liveScreen(p, false), p.agent),
     exit: state === "exited" ? p.exitCode ?? null : null, generation: p.generation, turns: p.turns,
-    tail: tailLines(p, TAIL_LINES).lines.map((l) => l.trimEnd().slice(0, TAIL_WIDTH)),
+    tail: lines.slice(-TAIL_LINES).map((l) => l.trimEnd().slice(0, TAIL_WIDTH)),
+    ...(ash.length ? { ash } : {}),
   });
   paneEventGate.notify();
-  for (const c of couriers) c.push(e);
+  if (hears(listensTo(p), e)) for (const c of couriers) c.push(e);
+}
+const ashSeen = new AshSeen();
+const listensTo = (p: Pane) => (p.ashListen === "inherit" ? ashListen : p.ashListen);
+
+/** Preferences → Ash listening, and loomctl set ash-listen: off drops what the webhooks still had waiting. */
+function setAshListen(mode: AshListen) {
+  ashListen = mode;
+  const panes = threads.flatMap((t) => t.panes), own = new Set(panes.filter((p) => listensTo(p) !== "off").map((p) => p.stableId));
+  if (mode === "off") for (const c of couriers) c.clear((pane) => !own.has(pane)); // a pane's own mode still holds
+  paintAshListen();
+  for (const p of panes) p.paintBell();
+  save();
+}
+/** A pane's own Ash listening (its bell's menu, loomctl set ash-listen --pane): off drops its events still waiting. */
+function setPaneAshListen(p: Pane, mode: PaneAshListen) {
+  p.ashListen = mode;
+  if (listensTo(p) === "off") for (const c of couriers) c.clear((pane) => pane === p.stableId);
+  p.paintBell();
+  save();
+}
+function paintAshListen() {
+  const b = $("#ash-listen");
+  b.textContent = ASH_LABEL[ashListen];
+  b.title = {
+    full: "Webhooks get every pane event. Click to send only events with a new @ash request",
+    ash: "Webhooks get only an event whose pane wrote a new @ash request. Click to send none",
+    off: "Webhooks get no pane events, and none wait to go later. Click to send every event",
+  }[ashListen];
+  b.setAttribute("aria-pressed", String(ashListen !== "off"));
 }
 
 /** Each delivery and failure, in loom.log, which outlasts the window. */
@@ -10609,7 +10662,8 @@ const CLI: Record<string, CliCommand> = {
       return {
         data: rows,
         text: rows.length ? table(rows.map((r) => [String(r.n), r.url, [r.threads.join(","), r.panes.join(","), r.states.join(",")].filter(Boolean).join(" ") || "every event",
-          `sent ${r.sent}${r.queued ? `, ${r.queued} waiting` : ""}${r.failures.length ? `, last failure ${r.failures[r.failures.length - 1].at}: ${r.failures[r.failures.length - 1].error}` : ""}`])) : "No webhooks.",
+          `sent ${r.sent}${r.queued ? `, ${r.queued} waiting` : ""}${r.failures.length ? `, last failure ${r.failures[r.failures.length - 1].at}: ${r.failures[r.failures.length - 1].error}` : ""}`])) +
+          { full: "", ash: "\nAsh listening is ash: only an event with a new @ash request goes out (loomctl set ash-listen).", off: "\nAsh listening is off: no event goes out (loomctl set ash-listen)." }[ashListen] : "No webhooks.",
       };
     },
   },
@@ -10764,12 +10818,25 @@ const CLI: Record<string, CliCommand> = {
     },
   },
   set: {
-    usage: "set [sound|taskbar|overlay|awake|plan-usage|font] [value]",
-    help: "Show the settings, or change one: on/off, overlay off/background/always, and font the terminals' size in points (8 to 24).",
+    usage: "set [sound|taskbar|overlay|awake|plan-usage|font|ash-listen] [value] | set ash-listen [inherit|full|ash|off] --pane P",
+    help: "Show the settings, or change one: on/off, overlay off/background/always, font the terminals' size in points (8 to 24), and ash-listen which pane events the webhooks get: full (every one), ash (only one with a new @ash request in its pane's output) or off (none, and none wait to go later). With --pane, one pane's own: inherit (the global one, its default) or a mode that overrides it.",
+    options: { pane: "string" },
     run: async (a) => {
+      const sel = str(a, "pane");
+      if (sel !== undefined) {
+        if (a._[0] !== "ash-listen") throw new Error("--pane goes with set ash-listen.");
+        const p = cliPane(sel), value = a._[1];
+        if (value !== undefined) {
+          const mode = PANE_ASH_LISTEN.find((m) => m === value);
+          if (!mode) throw new Error(`ash-listen --pane takes ${PANE_ASH_LISTEN.join(", ")}, not ${value}.`);
+          setPaneAshListen(p, mode);
+        }
+        const row = { pane: p.id, ref: paneName(p), "ash-listen": p.ashListen, hears: listensTo(p) };
+        return { data: row, text: `${row.ref} ash-listen ${p.ashListen}${p.ashListen === "inherit" ? ` (now ${row.hears})` : ""}` };
+      }
       const settings = () => ({
         sound: soundEnabled ? "on" : "off", taskbar: taskbarEnabled ? "on" : "off", overlay: overlayMode,
-        awake: keepAwake ? "on" : "off", "plan-usage": planUsage ? "on" : "off", font: String(fontSize),
+        awake: keepAwake ? "on" : "off", "plan-usage": planUsage ? "on" : "off", font: String(fontSize), "ash-listen": ashListen,
       });
       const key = a._[0];
       const value = a._[1];
@@ -10789,6 +10856,10 @@ const CLI: Record<string, CliCommand> = {
         const n = Number(value);
         if (!Number.isInteger(n) || n < 8 || n > 24) throw new Error(`font takes a size from 8 to 24, not ${value ?? "nothing"}.`);
         setFont(n);
+      } else if (key === "ash-listen") {
+        const mode = ASH_LISTEN.find((m) => m === value);
+        if (!mode) throw new Error(`ash-listen takes ${ASH_LISTEN.join(", ")}, not ${value ?? "nothing"}.`);
+        if (mode !== ashListen) setAshListen(mode);
       } else if (key !== undefined) {
         throw new Error(`No setting "${key}". loomctl set lists them.`);
       }
@@ -10954,6 +11025,7 @@ async function main() {
     speakButton?: boolean;
     overlay?: boolean | OverlayMode;
     webhooks?: Webhook[];
+    ashListen?: AshListen;
     ui?: { thread?: number; dashboard?: boolean; dashboardCompact?: boolean; sideOpen?: boolean; changesOpen?: boolean; sideQuery?: string;
       sideW?: { side?: number; changes?: number }; sideScroll?: number; foldedSections?: string[]; foldedDirs?: string[];
       panel?: "changes" | "files"; openDirs?: string[]; diffFull?: boolean };
@@ -10991,6 +11063,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
     try { return !!hookUrl(h.url) && (!h.header || !!hookHeader(h.header)); } catch { return false; }
   });
   syncCouriers();
+  ashListen = ASH_LISTEN.find((m) => m === saved.ashListen) ?? "full";
   speakShown = saved.speakButton !== false;
   // true was "in background" before there was an "always".
   overlayMode = saved.overlay === true ? "background" : OVERLAY_MODES.find(m => m === saved.overlay) ?? "off";
@@ -11227,6 +11300,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
     save();
   };
   if (overlayMode !== "off") void overlayWindow(false);
+  $("#ash-listen").onclick = () => setAshListen(ASH_LISTEN[(ASH_LISTEN.indexOf(ashListen) + 1) % ASH_LISTEN.length]);
   // Also on a timer: a focus change can pass without an event, and the times tick.
   setInterval(() => void readFocus(), 1000);
   micState("");
@@ -11235,6 +11309,7 @@ ${String(e)}`, { title: "Workspace could not be loaded", kind: "error" });
   paintNotifications();
   paintPlanUsage();
   paintOverlayPref();
+  paintAshListen();
   paintTheme();
   $("#layout").onclick = () => {
     if (!current) return;

@@ -1,7 +1,7 @@
 // Self-check for pane state events. Run: node src/pane_events.test.ts
 // @ts-ignore Node-only test.
 import { createHmac } from "node:crypto";
-import { Courier, hookHeader, hookTag, hookUrl, matches, MAX_QUEUE, PaneEventLog, RETRY_S, Settler, sign, type PaneEvent } from "./pane_events.ts";
+import { ashRequests, AshSeen, Courier, hears, hookHeader, hookTag, hookUrl, matches, MAX_QUEUE, PaneEventLog, RETRY_S, Settler, sign, type PaneEvent } from "./pane_events.ts";
 
 let fails = 0;
 function check(label: string, ok: boolean) {
@@ -244,6 +244,65 @@ const event = (over: Partial<PaneEvent> = {}): Omit<PaneEvent, "seq"> => ({
   signed.stop(); // the first try is signing
   await sleep(5);
   check("removed while signing: nothing is posted", posts === 1);
+}
+
+{
+  // Ash listening: an @ash request, however far up the agent's later lines pushed it.
+  const reply = [
+    "● Fixed it. The commit is local.",
+    "",
+    "  @ash: Should I also fix the Codex case (a late",
+    "  response clears its flag), or leave it?",
+    "",
+    "✻ Worked for 3m",
+    ...Array.from({ length: 30 }, (_, i) => `  ⎿  todo ${i}`),
+    "────────────────",
+    "❯ ",
+    "────────────────",
+  ];
+  const ask = "@ash: Should I also fix the Codex case (a late response clears its flag), or leave it?";
+  check("a request is its line and the ones that go on with it, joined", JSON.stringify(ashRequests(reply)) === JSON.stringify([ask]));
+  check("a bullet before it, a line of its own, and nothing mid-line or after a word",
+    JSON.stringify(ashRequests(["● @ash: done, a1b2c3d", "", "  reply ending with @ash: done", "", "mail@ash.com", "", "@ashes", "", "@ASH help"])) === JSON.stringify(["@ash: done, a1b2c3d", "@ASH help"]));
+  check("it stops at the next request, a box's edge or a tool's output", JSON.stringify(ashRequests(["  @ash: one", "  @ash: two", "  ⎿  ran", "", "● @ash: three", "  ─────"])) === JSON.stringify(["@ash: one", "@ash: two", "@ash: three"]));
+  check("at the left edge (a shell's output), the lines under it are their own", JSON.stringify(ashRequests(["@ash: check build 42", "line 1", "line 2"])) === JSON.stringify(["@ash: check build 42"]));
+  check("only lines at its text's indent go on with it", JSON.stringify(ashRequests(["  @ash: fix the", "  build", "    nested", "  more"])) === JSON.stringify(["@ash: fix the build"]));
+
+  const seen = new AshSeen();
+  check("new in a pane's output: it goes", JSON.stringify(seen.fresh("s1", reply)) === JSON.stringify([ask]));
+  check("still on screen at the next event: never twice", seen.fresh("s1", [...reply, "● Thanks.", "❯ "]).length === 0);
+  const narrow = ["  @ash: Should I also fix the", "  Codex case (a late response", "  clears its flag), or leave", "  it?", ""];
+  check("redrawn at another width: still the one sent", seen.fresh("s1", narrow).length === 0);
+  check("another pane's same request is its own", seen.fresh("s2", reply).length === 1);
+  check("a new request goes, the old one beside it doesn't", JSON.stringify(seen.fresh("s1", [...reply, "", "  @ash: done"])) === JSON.stringify(["@ash: done"]));
+  check("on screen as a pane starts (a resumed session's): seen, not sent", seen.fresh("s3", reply, true).length === 0 && seen.fresh("s3", reply).length === 0);
+
+  const e = (ash?: string[]) => ({ ...event(), seq: 1, ...(ash ? { ash } : {}) });
+  check("full hears every event, ash only one with a request, off none",
+    hears("full", e()) && hears("full", e([ask])) && !hears("ash", e()) && !hears("ash", e([])) && hears("ash", e([ask])) && !hears("off", e([ask])));
+
+  // Off: what waits is dropped, and the one being posted isn't tried again.
+  const log = new PaneEventLog();
+  let posts = 0, wake!: () => void;
+  const c = new Courier({ url: "http://h/x" }, async () => (posts++, 500), () => {}, () => new Promise<void>((r) => (wake = r)));
+  c.push(log.add(event()));
+  c.push(log.add(event()));
+  await sleep(5);
+  c.clear();
+  wake();
+  await sleep(5);
+  check("cleared: nothing waits and no retry goes out", posts === 1 && !c.queue.length);
+  c.push(log.add(event()));
+  await sleep(5);
+  check("cleared isn't removed: a later event still goes", posts === 2);
+  c.stop();
+  wake();
+  // One pane off: only its events still waiting go, the one in flight too.
+  const held = new Courier({ url: "http://h/x" }, () => new Promise<number>(() => {}), () => {}, async () => {});
+  for (const id of ["s1", "s2", "s1"]) held.push(log.add(event({ stableId: id })));
+  held.clear((pane) => pane === "s1");
+  check("one pane off drops only that pane's events", held.queue.map((j) => j.pane).join() === "s2");
+  held.stop();
 }
 
 if (fails) throw new Error(`${fails} failed`);

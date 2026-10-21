@@ -827,6 +827,15 @@ function paneActions() {
     bell.append(b);
   }
   items.push(el("p", "", "Task notices for this agent"), bell);
+  if (p.ashListen) {
+    const ash = el("div", "seg");
+    for (const [v, label] of [["inherit", "Default"], ["full", "All"], ["ash", "@ash"], ["off", "Off"]]) {
+      const b = button(label, () => { closeSheet(); void act(() => run("set", ["ash-listen", v, "--pane", p.id], { change: true }), `Ash listening: ${label.toLowerCase()}`); });
+      b.setAttribute("aria-pressed", String(p.ashListen === v));
+      ash.append(b);
+    }
+    items.push(el("p", "", "Ash listening for this agent: Default follows Settings"), ash);
+  }
   if (p.agent !== "shell") {
     // What the mic will use, read again as the sheet opens: someone at the PC may have changed it.
     const label = () => (lists ? `Dictation · ${pickLabel()}` : "Dictation");

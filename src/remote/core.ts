@@ -9,6 +9,7 @@ export type Pane = {
   id: string; ref: string; threadId: string; agent: Agent; title: string; state: string; lastOutput: string | null;
   stableId?: string; // the same pane's id after Loom restarts, when `id` is new (older Looms: none)
   model: string | null; effort: string | null; notify: string;
+  ashListen?: string; // its own Ash listening: inherit, full, ash or off (older Looms: none)
   context: { usedTokens: number; windowTokens: number; remainingPercent: number } | null;
 };
 /** One of the PC's + menu entries: what New thread and Add start. */

@@ -164,6 +164,7 @@ shows one.
 | `turns` | Agent panes: turns finished since it started. See [Knowing when work finished](#knowing-when-work-finished). |
 | `commands`, `failed`, `exit` | Shell panes: commands finished since it started, and whether the last failed, with its exit code (`null` when PowerShell can't say which) |
 | `atPrompt` | Shell panes: PowerShell's prompt is waiting for a command |
+| `ashListen`, `ashHears` | Its own Ash listening (`inherit`, the global one, by default, or `full`, `ash`, `off`), and the mode its events go to the webhooks under now. See Webhooks. |
 | `lastOutput` | When the pane last drew anything |
 
 `usage [claude|codex] --json` reads account plan usage through a shared five-minute cache, even while `set plan-usage off` is in effect. `--refresh` skips those five minutes, as the refresh button in the PC's plan panel does, but still waits out a rate limit's cooldown. Omit the provider for both. JSON includes `fetchedAt`, `nextRefreshAt` and `cached`. Rate limits can extend the cooldown. The object is keyed by provider and preserves `limits`, `stale`, `bankedResets` and `bankedResetExpiries` when available. A failed provider returns an `error` field. This command does not enable background polling.
@@ -585,6 +586,8 @@ when time runs out.
 | `set sound\|taskbar\|awake\|plan-usage on\|off` | Change one. |
 | `set overlay off\|background\|always` | When the agent overlay shows. |
 | `set font N` | The terminals' text size, 8 to 24 points, as Ctrl+= and Ctrl+- set it. |
+| `set ash-listen full\|ash\|off` | Which pane events the webhooks get, as Preferences' Ash listening sets it (see Webhooks). |
+| `set ash-listen inherit\|full\|ash\|off --pane P` | One pane's own, as its bell's menu sets it: `inherit` follows the global one. Without a mode, shows it. |
 | `startups [add <label> <command...> \| remove <label>]` | The agents and terminals the `+` menu offers, which `new` and `add --agent` pick from. |
 | `dictation` | The mic menu's languages and prefixes, each with its pick. `F4` and the phone's mic use the same pick. |
 | `dictation lang <code\|auto>` | Pick a language by its whisper code or its label, adding a new code to the list. `auto` detects it per clip. |
@@ -1337,6 +1340,7 @@ that boots sends `starting` to `idle`.
 | `exit` | The process's exit code, for `exited`; otherwise `null` |
 | `generation`, `turns` | As in `panes --json` |
 | `tail` | The pane's last 10 lines, scrollback included, ending at its last line with anything on it, each cut at 200 characters |
+| `ash` | Only when there are some: the @ash requests in the pane's last 500 lines that no earlier event of the pane carried. A request is a line starting with `@ash` (after a message's bullet), joined with the lines an agent wrapped it onto: those under it indented to where its text starts, up to a blank one. One at the left edge, as a shell prints it, is its line alone |
 
 Loom keeps the last 500 events in memory. They start over when Loom does.
 
@@ -1396,6 +1400,32 @@ HTTP status, also gets one line in Loom's log,
 its host and a hash of its address, such as `api2.cursor.sh #1a2b3c`, never
 the address, which can hold a secret. Loom sends through
 Windows' `curl.exe`, as for the phone's notifications.
+
+Ash listening, in Preferences, the phone's Settings or `loomctl set
+ash-listen`, picks which events the webhooks get, for all of them at once and
+live:
+
+| Mode | What goes out |
+| --- | --- |
+| `full` | Every event, the default |
+| `ash` | Only an event with an `ash` field: its pane wrote an @ash request no earlier event carried. Startups, idle reminders and turns without one send nothing |
+| `off` | Nothing. What was still waiting is dropped, so turning it back on sends no old events |
+
+Loom reads the requests in every mode, so a request seen while the mode was
+`full` or `off` isn't sent again after switching to `ash`. A request counts as
+the same one when only its spacing differs, as when a resize or a resumed
+session redraws it. Until a pane first settles `idle` or `waiting` after it
+starts, the requests on its screen are taken as seen, not sent, since a
+resumed session redraws its old ones, unless a turn of it ended already.
+`watch --panes` and `wait --until` get every event in every mode.
+
+A pane can have its own mode, which wins over the global one: in its bell's
+menu on the PC, its ⋯ sheet on the phone, or `loomctl set ash-listen <mode>
+--pane P`. `inherit`, the default, follows the global mode. The pane's mode is
+saved with it in the workspace file, so it outlasts a restart, and `panes
+--json` shows it as `ashListen`, with `ashHears` the mode in effect. Turning
+a pane off drops its events still waiting; turning the global mode off drops
+those of every pane without a mode of its own.
 
 To check a signature in Node:
 

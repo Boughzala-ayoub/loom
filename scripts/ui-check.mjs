@@ -37,6 +37,7 @@ try {
       if (location.search.includes('memory')) state.threads[2].panes.push({ cmd: 'claude' });
       if (location.search.includes('resume')) state.threads[0].panes = [{ cmd: 'codex' }, { cmd: 'codex' }];
       if (location.search.includes('close-race')) state.threads[0].zoomed = 0;
+      if (location.search.includes('ash-saved')) Object.assign(state, { ashListen: 'ash' }).threads[0].panes[0].ashListen = 'off';
       if (location.search.includes('hold-session')) state.threads[0].panes[0].sid = 'held-claude'; // resumes, so asks has_session
       if (location.search.includes('legacy')) state.threads[0].panes = [{ cmd: 'opencode', sid: 'old-placeholder-a' }, { cmd: 'opencode', sid: 'old-placeholder-b' }];
       if (location.search.includes('legacy-opencode2')) state.threads[0].panes.forEach(p => p.cmd = 'opencode2');
@@ -2160,7 +2161,31 @@ try {
       await bell.click();
       await page.locator('#pane-menu .menu-item', { hasText: 'Like every pane' }).click();
       assert.deepEqual(await bell.evaluate(b => [b.classList.contains('own'), b.classList.contains('off')]), [false, false]);
+      // Its Ash listening, in the same menu: global by default; its own shows in the menu, the bell and panes, and is saved with it.
+      const paneId = await bell.evaluate(b => b.closest('.pane').dataset.id);
+      const ashRow = async () => (await cli('panes')).data.find(p => p.id === paneId);
+      assert.deepEqual([(await ashRow()).ashListen, (await ashRow()).ashHears], ['inherit', 'full']);
+      await bell.click();
+      await page.locator('#pane-menu .menu-item', { hasText: '@ash requests only' }).click();
+      assert.deepEqual([(await ashRow()).ashListen, (await ashRow()).ashHears], ['ash', 'ash'], 'The menu sets the pane\'s own mode');
+      await page.waitForFunction(() => window.qa.saved.threads.some(t => t.panes.some(p => p.ashListen === 'ash')));
+      assert.equal(await bell.evaluate(b => b.classList.contains('own') && /Ash listening: @ash requests for this pane/.test(b.title)), true, 'The bell says so');
+      await bell.click();
+      assert.match(await page.locator('#pane-menu .menu-item', { hasText: '@ash requests only' }).textContent(), /^✓/);
+      await audit('notify-menu-ash');
+      await escape();
+      assert.equal((await cli('set', 'ash-listen', 'inherit', '--pane', paneId)).data['ash-listen'], 'inherit');
+      await bell.click();
+      assert.match(await page.locator('#pane-menu .menu-item', { hasText: 'Follow global' }).textContent(), /^✓ Follow global \(now every event\)/, 'The menu shows what loomctl set');
+      await escape();
+      await page.waitForFunction(() => window.qa.saved.threads.every(t => t.panes.every(p => p.ashListen === undefined)));
     }
+    // Saved Ash listening comes back when Loom starts: the global mode, and a pane's own with its record.
+    await page.goto(base + '?ash-saved');
+    await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
+    assert.equal((await cli('set')).data['ash-listen'], 'ash');
+    assert.equal(await page.locator('#ash-listen').textContent(), '@ash requests');
+    assert.deepEqual((await cli('panes')).data.filter(p => p.thread === 'search-polish').map(p => [p.ashListen, p.ashHears]), [['off', 'off'], ['inherit', 'ash']]);
     // The overview must observe every thread without consuming its notifications.
     await page.goto(base + '?dashboard');
     await page.waitForFunction(() => window.qa.panes.length === 4 && window.qa.saved);
@@ -2820,6 +2845,21 @@ try {
     assert.equal(await page.locator('#overlay-pref').textContent(), 'in background');
     assert.deepEqual(await overlayCalls(), [false], 'Turning it on builds the overlay hidden');
     await audit('overlay-preference');
+    // Ash listening: every event by default; the button and loomctl set ash-listen are one setting.
+    const ashButton = () => page.locator('#ash-listen').textContent();
+    assert.equal(await ashButton(), 'every event');
+    await page.click('#ash-listen');
+    await page.waitForFunction(() => window.qa.saved.ashListen === 'ash');
+    assert.equal(await ashButton(), '@ash requests');
+    assert.equal((await cli('set')).data['ash-listen'], 'ash', 'loomctl set shows what the button set');
+    await audit('ash-listen-preference');
+    assert.equal((await cli('set', 'ash-listen', 'off')).data['ash-listen'], 'off');
+    assert.equal(await ashButton(), 'off', 'The button shows what loomctl set');
+    await page.waitForFunction(() => window.qa.saved.ashListen === 'off');
+    assert.match((await cli('set', 'ash-listen', 'loud')).error ?? '', /ash-listen takes full, ash, off/);
+    await page.click('#ash-listen');
+    await page.waitForFunction(() => window.qa.saved.ashListen === 'full');
+    assert.equal(await ashButton(), 'every event');
     await escape();
     await page.evaluate(() => {
       const qa = window.qa;

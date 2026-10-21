@@ -21,7 +21,64 @@ export type PaneEvent = {
   asking: boolean;
   exit: number | null; generation: number; turns: number;
   tail: string[];
+  /** @ash requests in the pane's output that no event of it carried before (AshSeen). */
+  ash?: string[];
 };
+
+/** Which pane events the webhooks hear (loomctl set ash-listen, Preferences):
+ * every one, only one carrying a new @ash request, or none. watch --panes and
+ * wait --until hear every one either way. */
+export const ASH_LISTEN = ["full", "ash", "off"] as const;
+export type AshListen = (typeof ASH_LISTEN)[number];
+/** A pane's own: one of those, or inherit, the global one. */
+export const PANE_ASH_LISTEN = ["inherit", ...ASH_LISTEN] as const;
+export type PaneAshListen = (typeof PANE_ASH_LISTEN)[number];
+export const hears = (mode: AshListen, e: PaneEvent) => mode === "full" || (mode === "ash" && !!e.ash?.length);
+/** How far up an event looks for @ash requests: far past its tail, so lines an
+ * agent drew after its request (a todo list, a notice) don't hide it. */
+export const ASH_LINES = 500;
+const ASH = /^\s*(?:[●⏺•]\s*)?(@ash\b.*)$/i;
+const KEEP_ASKED = 100;
+
+/** The @ash requests in `lines`, a screen's last lines, oldest first: each
+ * line that starts with @ash (after a message's bullet). An agent wraps a long
+ * one onto lines indented to where its text starts (Claude's message text, 2
+ * columns in), so those lines join it, up to a blank one; one at the left edge
+ * (a shell's output) is its line alone. */
+export function ashRequests(lines: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = ASH.exec(lines[i]);
+    if (!m) continue;
+    const parts = [m[1].trim()], indent = " ".repeat(lines[i].length - m[1].length);
+    const goesOn = (l: string) => indent.length > 0 && l.startsWith(indent) && /^[^\s─━│┃╭╮╰╯┌┐└┘⎿]/.test(l.slice(indent.length)) && !ASH.test(l);
+    while (i + 1 < lines.length && parts.length < 20 && goesOn(lines[i + 1])) parts.push(lines[++i].trim());
+    out.push(parts.join(" ").replace(/\s+/g, " ").slice(0, 2000));
+  }
+  return out;
+}
+
+/** Each pane's @ash requests seen so far, by their text with every space
+ * removed: a redraw at another width (a resize, a resumed session) wraps one
+ * differently, and it's still the one already sent.
+ * ponytail: the last KEEP_ASKED per pane, in memory; an older one redrawn goes out again. */
+export class AshSeen {
+  private seen = new Map<string, string[]>();
+  /** Those in `lines` that no call saw for `pane`; all count as seen from now.
+   * A startup's are only seen: a resumed session redraws the old ones. */
+  fresh(pane: string, lines: string[], startup = false): string[] {
+    const keys = this.seen.get(pane) ?? [], out: string[] = [];
+    for (const r of ashRequests(lines)) {
+      const key = r.replace(/\s+/g, "").toLowerCase();
+      if (keys.includes(key)) continue;
+      keys.push(key);
+      if (keys.length > KEEP_ASKED) keys.shift();
+      if (!startup) out.push(r);
+    }
+    this.seen.set(pane, keys);
+    return out;
+  }
+}
 
 /** One pane's state as it settles. `see` gets what the UI shows on every
  * repaint; the first value is where the pane starts and sends nothing.
@@ -167,7 +224,7 @@ export type Failure = { at: string; seq: number; error: string };
  * events in order. A failure is retried after each of RETRY_S; a 4xx other
  * than 408 and 429 won't change on a retry and is dropped at once. */
 export class Courier {
-  readonly queue: { seq: number; body: string; what: string }[] = [];
+  readonly queue: { seq: number; body: string; what: string; pane: string }[] = [];
   readonly failures: Failure[] = [];
   sent = 0;
   lastOk: string | null = null;
@@ -188,7 +245,7 @@ export class Courier {
 
   push(e: PaneEvent) {
     if (this.stopped || !matches(this.hook, e)) return;
-    this.queue.push({ seq: e.seq, body: JSON.stringify(e), what: `${e.ref} ${e.old}>${e.state}` });
+    this.queue.push({ seq: e.seq, body: JSON.stringify(e), what: `${e.ref} ${e.old}>${e.state}`, pane: e.stableId });
     // While running, queue[0] is the one being delivered: the oldest waiting goes, never it.
     if (this.queue.length > MAX_QUEUE) this.fail(this.queue.splice(this.running ? 1 : 0, 1)[0], `dropped: more than ${MAX_QUEUE} deliveries waiting`);
     void this.run();
@@ -198,6 +255,12 @@ export class Courier {
   stop() {
     this.stopped = true;
     this.queue.length = 0;
+  }
+
+  /** Ash listening off, for the panes `drop` names by stable id (every one by
+   * default): what waits goes nowhere, and one being posted isn't tried again. */
+  clear(drop = (_pane: string) => true) {
+    for (let i = this.queue.length - 1; i >= 0; i--) if (drop(this.queue[i].pane)) this.queue.splice(i, 1);
   }
 
   /** One try: the status, or why there is none. */
@@ -229,8 +292,8 @@ export class Courier {
 
   private async deliver(job: Courier["queue"][number]) {
     const { seq, body, what } = job;
-    // Removed during a retry's wait: the next try never goes out.
-    for (let i = 0; !this.stopped; i++) {
+    // Removed or cleared during a retry's wait: the next try never goes out.
+    for (let i = 0; !this.stopped && this.queue[0] === job; i++) {
       const got = await this.attempt(seq, body);
       const tries = i ? ` after ${i + 1} tries` : "";
       if (typeof got === "number" && got >= 200 && got < 300) {

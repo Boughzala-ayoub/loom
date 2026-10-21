@@ -27,7 +27,7 @@ writeFileSync(profile, JSON.stringify({ silent: true, ui: { thread: 0 }, threads
 const pause = ms => new Promise(r => setTimeout(r, ms));
 
 // The receiver: /ok takes everything, /flaky refuses each delivery's first try, /gone is a 404.
-const got = { ok: [], flaky: [], gone: [] };
+const got = { ok: [], flaky: [], gone: [], ash: [] };
 const triedFlaky = new Set();
 const server = createServer((req, res) => {
   let body = '';
@@ -179,6 +179,75 @@ try {
   assert.equal((await ok('--json', 'webhook', 'list')).json.length, 2);
   await until('the workspace file to drop the webhook', () => JSON.parse(readFileSync(profile, 'utf8')).webhooks.length === 2, 5000);
   console.log('PASS webhook remove');
+
+  // Ash listening: which events the webhooks get, switched live and kept in the workspace file.
+  assert.equal((await ok('--json', 'set')).json['ash-listen'], 'full');
+  await fails(/ash-listen takes full, ash, off/, 'set', 'ash-listen', 'loud');
+  await ok('set', 'ash-listen', 'ash');
+  await until('the workspace file to keep ash-listen', () => JSON.parse(readFileSync(profile, 'utf8')).ashListen === 'ash', 5000);
+  await ok('webhook', 'add', `${base}/ash`);
+  await ok('restart', 'alpha:1', '--yes');
+  await ok('wait', 'alpha:1', '--until', 'idle', '--timeout', '60');
+  /** A command of over 2 s: a working and an idle event. Its last event. */
+  const turn = async cmd => {
+    await ok('send', 'alpha:1', cmd);
+    await ok('wait', 'alpha:1', '--until', 'working', '--timeout', '20');
+    return (await ok('--json', 'wait', 'alpha:1', '--until', 'idle', '--timeout', '30')).json.event;
+  };
+  // Built from two halves, so the command PowerShell echoes holds no "@ash" a wrapped row could start with.
+  let ev = await turn(`Start-Sleep 3; '@'+'ash: check build 42'; 1..30 | % { "line $_" }`);
+  assert.deepEqual(ev.ash, ['@ash: check build 42'], `The idle event carries the request:\n${ev.tail.join('\n')}`);
+  assert.ok(!ev.tail.some(l => l.includes('@ash')), 'The request was out of the 10-line tail, under 30 later lines');
+  await until('/ash to get the request', () => got.ash.length >= 1);
+  ev = await turn('1..4 | % { $_; Start-Sleep -Milliseconds 700 }');
+  assert.equal(ev.ash, undefined, 'The request still on screen is no new one');
+  await pause(1500);
+  assert.deepEqual(got.ash.map(h => [`${h.json.old}>${h.json.state}`, h.json.ash]), [['working>idle', ['@ash: check build 42']]], 'Only the event with the request went out, once: no startup, no working, no repeat');
+  await ok('set', 'ash-listen', 'off');
+  ev = await turn(`Start-Sleep 3; '@'+'ash: second request'`);
+  assert.deepEqual(ev.ash, ['@ash: second request'], 'watch and wait still get every event, its request too');
+  await ok('set', 'ash-listen', 'ash');
+  await turn('Start-Sleep 3');
+  await pause(1500);
+  assert.equal(got.ash.length, 1, 'Off sends nothing, and a request seen while off is not sent later');
+  await ok('set', 'ash-listen', 'full');
+  await turn('Start-Sleep 3');
+  await until('/ash to get every event again', () => got.ash.length >= 3);
+  assert.deepEqual(got.ash.slice(1).map(h => `${h.json.old}>${h.json.state}`), ['idle>working', 'working>idle']);
+  assert.match((await ok('set')).out, /ash-listen\s+full/);
+  await until('the workspace file to keep ash-listen full', () => JSON.parse(readFileSync(profile, 'utf8')).ashListen === 'full', 5000);
+  console.log('PASS ash-listen: ash sends a new @ash request once, however far up; off sends nothing; full sends all; the workspace keeps it');
+
+  // A pane's own mode wins over the global one, both ways, and the workspace keeps it with the pane.
+  const saved = () => JSON.parse(readFileSync(profile, 'utf8')).threads[0].panes[0];
+  const row = async () => (await ok('--json', 'panes')).json.find(p => p.ref === 'alpha:1');
+  let mine = await row();
+  assert.deepEqual([mine.ashListen, mine.ashHears], ['inherit', 'full'], 'A pane follows the global mode by default');
+  let own = (await ok('--json', 'set', 'ash-listen', 'off', '--pane', 'alpha:1')).json;
+  assert.deepEqual([own.ref, own['ash-listen'], own.hears], ['alpha:1', 'off', 'off']);
+  mine = await row();
+  assert.deepEqual([mine.ashListen, mine.ashHears], ['off', 'off'], 'panes --json shows the pane\'s own mode');
+  await until('the workspace file to keep the pane\'s own mode', () => saved().ashListen === 'off' && !!saved().stableId, 5000);
+  let sent = got.ash.length;
+  await turn('Start-Sleep 3');
+  await pause(1500);
+  assert.equal(got.ash.length, sent, 'The pane\'s own off wins over the global full');
+  await ok('set', 'ash-listen', 'ash');
+  own = (await ok('--json', 'set', 'ash-listen', 'full', '--pane', 'alpha:1')).json;
+  assert.equal(own.hears, 'full');
+  await turn('Start-Sleep 3');
+  await until('/ash to get the pane\'s events though the global mode is ash', () => got.ash.length >= sent + 2);
+  own = (await ok('--json', 'set', 'ash-listen', 'inherit', '--pane', 'alpha:1')).json;
+  assert.deepEqual([own['ash-listen'], own.hears], ['inherit', 'ash'], 'inherit follows the global mode again');
+  await until('the workspace file to drop the pane\'s own mode', () => saved().ashListen === undefined, 5000);
+  sent = got.ash.length;
+  await turn('Start-Sleep 3');
+  await pause(1500);
+  assert.equal(got.ash.length, sent, 'Back on the global ash: no request, nothing sent');
+  await fails(/ash-listen --pane takes inherit, full, ash, off/, 'set', 'ash-listen', 'loud', '--pane', 'alpha:1');
+  await fails(/--pane goes with set ash-listen/, 'set', 'font', '12', '--pane', 'alpha:1');
+  await ok('set', 'ash-listen', 'full');
+  console.log('PASS ash-listen --pane: a pane\'s own mode wins over the global one, shows in panes --json, and the workspace keeps it');
 } finally {
   follower?.kill();
   spawnSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { stdio: 'ignore' });

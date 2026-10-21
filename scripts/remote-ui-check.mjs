@@ -248,6 +248,7 @@ async function context(width, token = true, push = false) {
     for (let i = 0; i < (state.extra ?? 0); i++) threads.push(thread(`x${i}`, `Extra${i}`));
     if (state.changedTitle) threads[1].panes[0].title = 'Another agent has changed its title';
     if (state.shell) threads[1].panes[0].agent = 'shell';
+    for (const t of threads) for (const p of t.panes) p.ashListen = state.paneAsh?.[p.id] ?? 'inherit';
     // Loom restarted on the PC (restartPc): the same agents, with new pane ids and the sids saved with them.
     if (state.newIds) for (const t of threads) t.panes[0].id = `new-${t.panes[0].id}`;
     // again: restarted that many times more (new-a1, again-new-a1, again-again-new-a1).
@@ -283,7 +284,14 @@ async function context(width, token = true, push = false) {
       case 'bar': if (!req.url().endsWith('/api/bar')) return route.fulfill({ status: 404, json: { ok: false, error: 'Not found.' } });
         data = { cpu: state.cpu ?? 23.4, memory: { used: 13.3 * 1024 * MB, total: 15.6 * 1024 * MB }, remote: null, servers: state.servers ?? SERVERS }; break;
       // planUsage: the PC's Plan usage, 'on' unless a test turns it off.
-      case 'set': if (c.argv[0] === 'plan-usage' && c.argv[1]) state.planUsage = c.argv[1]; data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': state.planUsage ?? 'on', font: '13' }; break;
+      case 'set': {
+        if (c.argv[0] === 'plan-usage' && c.argv[1]) state.planUsage = c.argv[1];
+        // ash-listen: the global mode (state.ashListen), or with --pane one pane's own (state.paneAsh), as main.ts set does.
+        const pane = c.argv.includes('--pane') ? c.argv[c.argv.indexOf('--pane') + 1] : null;
+        if (c.argv[0] === 'ash-listen' && pane) { (state.paneAsh ??= {})[pane] = c.argv[1]; data = { pane, ref: pane, 'ash-listen': c.argv[1], hears: c.argv[1] === 'inherit' ? state.ashListen ?? 'full' : c.argv[1] }; break; }
+        if (c.argv[0] === 'ash-listen' && c.argv[1]) state.ashListen = c.argv[1];
+        data = { sound: 'on', taskbar: 'on', overlay: 'background', awake: 'off', 'plan-usage': state.planUsage ?? 'on', font: '13', 'ash-listen': state.ashListen ?? 'full' }; break;
+      }
       case 'notify': data = { all: 'on', kinds: { finish: true, fail: true, blocked: true }, newPanes: 'inherit' }; break;
       // devices: the phones as a newer Loom lists them (an older one has none); revoke <id> removes one, bare all.
       // refuseRevoke: Loom can't save the change.
@@ -435,7 +443,18 @@ try {
     await goto(p, '#/pane/a1', '#screen .line'); await fits(p, width, 'pane-question');
     // A phone gives an agent the whole screen, strip and tabs gone; wide, the strip stays in the list's column.
     assert.equal(await p.locator('#strip').isVisible(), width >= 900, `${width}: the strip beside an agent`); await p.click('#keys-btn'); await fits(p, width, 'keyboard');
-    await p.locator('#keys [data-key=fn]').click(); await fits(p, width, 'function-keys'); await p.click('#more'); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'pane-menu'); await close(p);
+    await p.locator('#keys [data-key=fn]').click(); await fits(p, width, 'function-keys'); await p.click('#more'); await p.locator('#sheet.on').waitFor(); await fits(p, width, 'pane-menu');
+    // This agent's own Ash listening: Default follows the PC's; a tap sets this pane's on the PC.
+    assert.equal(await p.locator('#sheet .seg', { hasText: '@ash' }).locator('button[aria-pressed=true]').textContent(), 'Default', `${width}: an agent follows the global Ash listening`);
+    await p.locator('#sheet .seg', { hasText: '@ash' }).locator('button', { hasText: 'Off' }).click();
+    await until(`${width}: this agent's Ash listening is off on the PC`, async () => state.paneAsh?.a1 === 'off');
+    // The phone reads the threads again 300 ms after a change (remote.ts hooks.changed): the sheet opened since shows it.
+    await until(`${width}: the sheet shows it`, async () => {
+      await p.click('#more'); await p.locator('#sheet.on').waitFor();
+      if ((await p.locator('#sheet .seg', { hasText: '@ash' }).locator('button[aria-pressed=true]').textContent()) === 'Off') return true;
+      await close(p); await pause(100);
+    });
+    await close(p); delete state.paneAsh;
     // Dictating: the recording bar in the box's place, then the Dictation sheet from ⋯.
     await p.click('#mic'); await p.locator('#rec .info b', { hasText: '0:01' }).waitFor(); await fits(p, width, 'recording'); await taps(p, width, '#rec'); await p.getByRole('button', { name: 'Cancel dictation' }).click();
     await p.click('#more'); await p.locator('#sheet button', { hasText: 'Dictation · English · /prompt' }).click(); await p.locator('#sheet.on .dict-row').first().waitFor(); await fits(p, width, 'dictation-sheet'); await taps(p, width, '#sheet'); await sheetButton(p, 'Done').click();
@@ -503,6 +522,12 @@ try {
     await goto(p, '#/usage', '#usage .provider'); await stripFits(p, width, 'usage'); await fits(p, width, 'usage'); await goto(p, '#/context/a1', '#context .bars'); await fits(p, width, 'context');
     state.planUsage = 'off'; await goto(p, '#/usage', '#usage .provider:has-text("Plan usage is off")'); await fits(p, width, 'usage-plan-off'); await taps(p, width, '#usage .provider'); state.planUsage = 'on';
     await goto(p, '#/settings', '#settings .group'); await stripFits(p, width, 'settings'); await fits(p, width, 'settings');
+    // Ash listening, the PC's global mode: the one set shows pressed, and a tap sets it there.
+    const ashSeg = p.locator('#settings .setting', { hasText: 'Ash listening' }).locator('.seg');
+    assert.equal(await ashSeg.locator('button[aria-pressed=true]').textContent(), 'All', `${width}: Ash listening shows the PC's mode`);
+    await ashSeg.locator('button', { hasText: '@ash' }).click();
+    await until(`${width}: @ash is set on the PC and shown`, async () => state.ashListen === 'ash' && (await ashSeg.locator('button[aria-pressed=true]').textContent()) === '@ash');
+    await fits(p, width, 'settings-ash-listen'); state.ashListen = 'full';
     await p.locator('#settings .setting', { hasText: 'Language and prefix' }).locator('button').click(); await p.locator('#sheet.on .dict-row').first().waitFor(); await fits(p, width, 'settings-dictation'); await sheetButton(p, 'Done').click(); await p.locator('#settings .setting').filter({ hasText: 'Theme' }).locator('button').click(); await fits(p, width, 'themes'); await close(p);
     await p.getByRole('button', { name: 'Unpair all', exact: true }).click(); await fits(p, width, 'unpair-confirm'); await close(p);
     // The paired phones, each with its Remove: none, this one alone, then three with a long name, which is cut
