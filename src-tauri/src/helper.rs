@@ -313,7 +313,13 @@ fn claude_event(p: &serde_json::Value) -> Option<serde_json::Value> {
     Some(match p["hook_event_name"].as_str()? {
         "UserPromptSubmit" => serde_json::json!({ "kind": "start", "match": prompt_match(p["prompt"].as_str()?) }),
         // Claude Code 2.1.288's Stop input has `last_assistant_message`, the text of the turn's last message.
-        "Stop" => response(serde_json::json!({ "kind": "stop" }), &p["last_assistant_message"]),
+        // `stop_hook_active`: another Stop hook sent this turn on, and it stops again (a prompt merged meanwhile
+        // included, seen in 2.1.307): main.ts turnOver tells its turn from a new one by it.
+        "Stop" => {
+            let mut stop = response(serde_json::json!({ "kind": "stop" }), &p["last_assistant_message"]);
+            if p["stop_hook_active"] == true { stop["continued"] = true.into(); }
+            stop
+        }
         "StopFailure" => {
             let error = text(&p["error"]).unwrap_or_else(|| "unknown".into());
             let detail = match text(&p["error_details"]) {
@@ -597,6 +603,7 @@ mod tests {
         assert_eq!(ev(json!({ "hook_event_name": "UserPromptSubmit", "prompt": "run the tests" })), Some(json!({ "kind": "start", "match": prompt_match("run the tests") })));
         assert_eq!(ev(json!({ "hook_event_name": "Stop", "stop_hook_active": false, "last_assistant_message": "done" })), Some(json!({ "kind": "stop", "response": prompt_match("done") })), "a Stop another hook may overrule, naming its final message");
         assert_eq!(ev(json!({ "hook_event_name": "Stop", "stop_hook_active": false })), Some(json!({ "kind": "stop" })), "no final message, none named");
+        assert_eq!(ev(json!({ "hook_event_name": "Stop", "stop_hook_active": true, "last_assistant_message": "done" })), Some(json!({ "kind": "stop", "response": prompt_match("done"), "continued": true })), "a Stop after another Stop hook sent the turn on");
         assert_eq!(prompt_match("Done.\r\n\r\nAll  tests pass."), prompt_match("Done.\nAll tests pass."), "named by its words, not its spacing");
         assert_eq!(ev(json!({ "hook_event_name": "StopFailure", "error": "rate_limit", "error_details": "429" })), Some(json!({ "kind": "fail", "detail": "rate_limit: 429" })));
         assert_eq!(ev(json!({ "hook_event_name": "StopFailure" })), Some(json!({ "kind": "fail", "detail": "unknown" })));

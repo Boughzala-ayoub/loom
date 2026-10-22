@@ -525,7 +525,11 @@ Each agent says "done" its own way, and Loom listens to all of them:
 
 - **codex** is launched with `-c tui.notifications=true`, `notification_method=osc9`
   and `notification_condition=always`, so it writes an OSC 9 sequence into the
-  pane when a turn ends or it wants an approval. No files, no hooks.
+  pane when a turn ends or it wants an approval. No files, no hooks. Codex
+  0.163 also sends OSC 7501 unasked. Loom takes its `blocked` as a question
+  where no OSC 9 named one, and `working` after it as the answer. Working
+  still comes from its title, because Codex reports `working` for as long as
+  a background terminal lives.
 - **opencode** gets Loom's plugin in its global config directory,
   `~\.config\opencode\plugins\loom.js`, or `$XDG_CONFIG_HOME/opencode/plugins/loom.js`.
   It writes
@@ -601,7 +605,14 @@ Each agent says "done" its own way, and Loom listens to all of them:
   in `~\.claude\settings.json`. Loom clears `MSYSTEM` and `SHELL` in Grok
   panes as it does in Cursor's, so the hooks run under PowerShell.
 - **claude** uses hooks, below. Terminal BEL and OSC 99 (kitty notifications)
-  count too, for anything else that rings.
+  count too, for anything else that rings. Claude 2.1.307 also asks whether
+  the terminal takes OSC 7501 status reports, and Loom answers from its PTY
+  reader before the page sees the query. From then on Claude says idle,
+  working, blocked or done itself. Loom reads Working from that, holds a Stop
+  until Claude says done, ends a turn Esc stopped when Claude says idle, and
+  spots a turn Claude began by itself when it says working with no input
+  since. The hooks still start, stop, fail and ask in its tasks. A Claude that
+  never answers is read off its screen as before.
 
 OpenCode's plugin, OMP, and Cursor's and Grok's hooks report Working and Waiting directly. Pending questions and
 permissions stay Waiting until answered. Child-session completion cannot mark

@@ -212,7 +212,8 @@ export type Task = {
 export type Signal = { at: number; launch?: number } & (
   | { kind: "start"; match?: string; token?: string; turn?: string }
   | { kind: "end"; matches?: string[]; turn?: string; token?: string; failed?: boolean | null; exit?: number | null; response?: string }
-  | { kind: "stop"; response?: string; turn?: string; session?: string; from?: number }
+  // continued: another Stop hook sent this turn on before it stopped again (Claude's stop_hook_active).
+  | { kind: "stop"; response?: string; turn?: string; session?: string; from?: number; continued?: true }
   | { kind: "fail"; detail?: string; turn?: string }
   | { kind: "approval"; detail?: string; turn?: string }
   | { kind: "resume" }
@@ -401,7 +402,7 @@ export function parseSignal(ev: unknown): Signal | null {
       return { ...base, kind: "approval", ...detail };
     case "stop":
       // Grok's: its session, and where its session log stood at the Stop (main.ts grokSettle).
-      return { ...base, kind: "stop", ...response, ...turn, ...(typeof e.session === "string" && e.session ? { session: e.session } : {}), ...(Number.isSafeInteger(e.from) && (e.from as number) >= 0 ? { from: e.from as number } : {}) };
+      return { ...base, kind: "stop", ...response, ...turn, ...(typeof e.session === "string" && e.session ? { session: e.session } : {}), ...(Number.isSafeInteger(e.from) && (e.from as number) >= 0 ? { from: e.from as number } : {}), ...(e.continued === true ? { continued: true as const } : {}) };
     case "idle":
       return { ...base, kind: "idle" };
     case "resume":

@@ -12,7 +12,7 @@ import { Settler } from "./pane_events.ts";
 import { readMenu, readFeedback, cursorKey, menuRev, menuKeys, readSurvey, interruptHint, grokRunning } from "./prompt.ts";
 
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
-const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "reportsHeld", "holdReports", "turnsSeen", "turnTasks", "reportsTurns", "closeTasks"]);
+const names = new Set(["startupTurns", "startupNotify", "finishTaskReplay", "paneContext", "contextOf", "keepContext", "turnTask", "enterTurn", "moveTask", "taskWrites", "holdSignals", "enterHeld", "taskSignal", "pendingContextTasks", "closedTaskContexts", "agentTurn", "adoptManual", "watched", "sweepTasks", "QUIET_MS", "keepTasks", "taskPruned", "agentReport", "agentEvents", "reportsHeld", "holdReports", "turnsSeen", "turnTasks", "reportsTurns", "closeTasks", "turnOver", "stopTurns", "turnUnclear"]);
 const pieces: string[] = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && names.has(node.name!.text)) pieces.push(node.getText(source));
@@ -85,7 +85,7 @@ console.log("ok   A later Enter hold preserves an earlier report's captured cont
   assert.deepEqual(JSON.parse(JSON.stringify(t.events.map((e: any) => [e.state, e.signal]))), [["accepted", "agent"], ["working", "agent"]]);
   assert.ok(taskWatch.get(t.id).stopAt > 0, "its Stop waits for Claude idle, as any turn's (sweepTasks)");
   assert.equal(taskWatch.get(t.id).response, "r1");
-  f.taskSignal(p, { kind: "stop", at: 12, response: "r2" });
+  f.taskSignal(p, { kind: "stop", at: 12, response: "r2", continued: true });
   assert.equal(tasks.size, 1, "another Stop hook sent Claude on: its next Stop is the same turn's");
   assert.equal(taskWatch.get(t.id).response, "r2");
 }
@@ -122,7 +122,7 @@ console.log("ok   A turn of Claude's no Enter explains becomes an agent task at 
 function swept() {
   const clock = { at: 0 }, pushed: string[] = [], screen = { busy: false, input: false, menu: false };
   const fx = fixture({ Date: class extends Date { static now() { return clock.at; } }, pushNotice: (_: unknown, e: any) => pushed.push(e.state),
-    shuttingDown: false, gone: () => false, sweepTimer: 0, clearInterval() {}, claudeWorking: () => screen.busy, interruptHint: () => false,
+    shuttingDown: false, gone: () => false, sweepTimer: 0, clearInterval() {}, claudeWorking: () => screen.busy, interruptHint: () => false, codexRunning: (s: string) => s === "Working",
     screenCells: () => [], liveScreen: () => "", readInput: () => ({ kind: screen.input ? "empty" : "unknown" }), readMenu: () => (screen.menu ? { question: [], options: ["Yes", "No"] } : null) });
   fx.f.finishTaskReplay();
   Object.assign(fx.p, { agent: "claude", dead: false, interruptAt: 0, screen: () => "" });
@@ -177,11 +177,11 @@ console.log("ok   Esc or Ctrl-C ends a turn Claude began by itself cancelled, ne
 
 // Pane's own busy, wake and activity, on the clock and timers the test runs.
 const paneClass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === "Pane")!;
-const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "keyAtIdle", "claudeStopped", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "askedAt", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
+const paneNames = new Set(["_busy", "busySince", "quietSince", "busy", "waiting", "waitingSince", "sawIdle", "beganItself", "endHeld", "keyAtIdle", "claudeWorks", "claudeStopped", "ends", "workSince", "workAt", "idle", "lastIn", "lastTurnAt", "turnSource", "turns", "opencodeStatus", "codexAsking", "askedAt", "begun", "promptAt", "cursorTurn", "grokStop", "grokTimer", "grokReads", "grokBusy", "grokReport", "grokSettle", "grokOver", "grokOutcome", "grokEnd", "grokDrop", "dispose", "cursorGen", "cursorEsc", "cursorEscs", "cursorAsking", "cursorAnswered", "cursorFeedback", "cursorQuestion", "cursorAsks", "cursorAskLater", "cursorAskSoon", "cursorPrompted", "answeredCursor", "sending", "cursorRuns", "programState", "claudeStatus", "codexStatus", "activity", "wake", "seen", "wrote", "answers", "programStatus", "mark", "commands", "lastFailed", "lastExit", "atPrompt", "receiptRunning"]);
 const paneCode = ts.transpileModule(`globalThis.Pane = class {\n${paneClass.members.filter((m) => m.name && paneNames.has(m.name.getText(source))).map((m) => m.getText(source)).join("\n")}\n};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 function claudePane(extra: Record<string, unknown> = {}) {
   const fx = swept(), timers: { due: number; run: (() => void) | null }[] = [];
-  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, agentReport: fx.f.agentReport, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, reportsHeld: fx.f.reportsHeld, reportsTurns: fx.f.reportsTurns, tasks: fx.tasks,
+  const s = createContext({ Date: class extends Date { static now() { return fx.clock.at; } }, beep() {}, taskbarEnabled: false, loomFocused: true, dashboardOpen: false, TextDecoder, atob, taskSignal: fx.f.taskSignal, agentReport: fx.f.agentReport, moveTask: fx.f.moveTask, holdReports: fx.f.holdReports, reportsHeld: fx.f.reportsHeld, reportsTurns: fx.f.reportsTurns, tasks: fx.tasks, watched: fx.f.watched,
     claudeWorking: () => fx.screen.busy, readInput: () => ({ kind: fx.screen.input ? "empty" : "unknown" }), screenCells: () => [],
     readMenu: () => (fx.screen.menu ? { question: [], options: ["Yes", "No"] } : null), liveScreen: () => "", ...extra,
     window: { setTimeout: (run: () => void, ms: number) => timers.push({ due: fx.clock.at + ms, run }) }, clearTimeout: (id: number) => { if (timers[id - 1]) timers[id - 1].run = null; } });
@@ -809,6 +809,495 @@ for (const [end, state, notice] of [["idle", "cancelled", []], ["error:msg=" + b
   assert.deepEqual([p.busy, p.commands], [false, 1]);
 }
 console.log("ok   OMP's own reports (OSC 7501) move its pane and its tasks as Claude's and Codex's do");
+{
+  // Claude 2.1.307 says what its session does once Loom answers its query
+  // (lib.rs status_queries), as probed 2026-10-22: idle, working, then done
+  // at a turn's end, idle 70 ms after an Esc. A turn it took up by itself
+  // (a background shell's notice) is working after done with no input since:
+  // it works under the alert it clears, and its Stop holds once Claude says
+  // done, its screen showing neither its input nor a working line.
+  const { p, tasks, pushed, clock, later, out, sweep, f } = claudePane({ turnReceipts() {} });
+  const say = (d: string) => p.programStatus(`state=${d}:app=claude-code`);
+  say("idle");
+  p.lastIn = clock.at = 1000;
+  say("working");
+  assert.equal(p.busy, true);
+  later(5000);
+  say("done");
+  p.wake(undefined, "bell");
+  out(6000);
+  later(8000);
+  assert.deepEqual([p.busy, p.waiting, p.turns], [false, true, 1], "its prompt redrawn under the alert read as work");
+  clock.at = 600_000;
+  say("working");
+  assert.deepEqual([p.busy, p.waiting], [true, false], "the turn it began by itself");
+  p.programStatus("state=working:app=claude-code:id=bg-1:title=YmFja2dyb3VuZA==");
+  p.programStatus("state=clear:id=bg-1");
+  assert.equal(p.programState, "working", "a background task's entry read as the session's own");
+  out(600_100);
+  later(660_000);
+  f.taskSignal(p, { kind: "stop", at: 660_000 });
+  const [t, ...more] = [...tasks.values()];
+  assert.equal(more.length, 0);
+  assert.deepEqual([t.source, t.state, t.startedAt], ["agent", "working", 600_000]);
+  await sweep(660_600);
+  assert.equal(t.state, "working", "a Stop held while Claude says it works on (another Stop hook sent it on)");
+  say("done");
+  await sweep(661_200);
+  assert.deepEqual([t.state, p.busy, pushed], ["completed", false, ["completed"]], "done held its Stop");
+}
+{
+  // Asked (its PermissionRequest hook), answered where Loom saw no key (Claude's
+  // own remote control), then Esc: no Stop hook runs, and it says idle.
+  const { p, tasks, pushed, clock, f } = claudePane();
+  const say = (d: string) => p.programStatus(`state=${d}:app=claude-code`);
+  say("idle");
+  const t = f.turnTask(p, "manual", model.promptMatch("A"), 900);
+  f.enterTurn(t, 900);
+  f.taskSignal(p, { kind: "start", at: 900, match: t.match });
+  p.lastIn = clock.at = 950;
+  say("working");
+  say(`blocked:kind=permission:msg=${btoa("Bash")}`);
+  assert.equal(p.busy, false, "asking read as work");
+  clock.at = 1000;
+  f.taskSignal(p, { kind: "approval", at: 1000, detail: "Bash" });
+  clock.at = 2000;
+  say("working");
+  assert.deepEqual([t.state, p.busy], ["working", true], "an answer Loom couldn't see");
+  clock.at = 3000;
+  say("idle");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, t.reason, p.busy, pushed], ["cancelled", "interrupted", false, ["approval"]], "Esc");
+  assert.equal([...tasks.values()].length, 1);
+}
+{
+  // Codex 0.163 says unasked when it waits on you. A question its notice
+  // didn't name (codexAsks) asks in its task, and working again is the
+  // answer, one Loom couldn't see too. One its notice named asks once.
+  const { p, pushed, clock, f } = claudePane({ codexRunning: (s: string) => s === "Working", interruptHint: () => false });
+  Object.assign(p, { agent: "codex", codexState: "Working" });
+  const t = f.turnTask(p, "submit", "", 1000);
+  f.enterTurn(t, 1000);
+  await f.moveTask(t, { state: "working", signal: "screen", correlation: "screen" }, 1500);
+  clock.at = 2000;
+  p.programStatus("state=working:app=codex");
+  assert.equal(p.busy, true);
+  p.programStatus("state=blocked:app=codex:kind=question");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, t.detail, p.codexAsking, p.busy], ["approval", "Codex asks (question)", true, false], "asking");
+  p.programStatus("state=working:app=codex");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, p.codexAsking, p.busy], ["working", false, true], "answered");
+  // Its OSC 9 notice came first, as Codex sends it before it redraws.
+  p.codexAsking = true;
+  f.taskSignal(p, { kind: "approval", at: 3000, detail: "Approval requested: npm test" });
+  p.programStatus("state=blocked:app=codex:kind=permission");
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual([t.state, t.detail, pushed], ["approval", "Approval requested: npm test", ["approval", "approval"]]);
+}
+for (const [how, state, notices] of [["no key", "completed", ["completed"]], ["Esc in Loom", "completed", ["completed"]], ["went on", "cancelled", []]] as const) {
+  // Review 2026-10-22, 1: turn A's Stop, then Claude says done; before the
+  // sweep holds that Stop, a turn B Claude began by itself is stopped, where
+  // Loom saw no key or by an Esc typed in Loom. B's interrupt is no end of
+  // A's: A completes. With no done (another Stop hook sent A on), the
+  // interrupt is A's own.
+  const { p, tasks, pushed, clock, f, sweep, screen } = claudePane({ turnReceipts() {} });
+  p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  const t = f.turnTask(p, "manual", model.promptMatch("A"), 1000);
+  f.enterTurn(t, 1000);
+  f.taskSignal(p, { kind: "start", at: 1000, match: t.match });
+  screen.busy = true;
+  p.programStatus("state=working:app=claude-code");
+  clock.at = 2000;
+  f.taskSignal(p, { kind: "stop", at: 2000 });
+  if (how !== "went on") {
+    Object.assign(screen, { busy: false, input: true });
+    p.programStatus("state=done:app=claude-code");
+    clock.at = 2100;
+    p.wake(undefined, "bell");
+    p.activity();
+    clock.at = 2200;
+    Object.assign(screen, { busy: true, input: false });
+    p.programStatus("state=working:app=claude-code");
+    p.activity();
+  }
+  clock.at = 2300;
+  if (how === "Esc in Loom") p.interruptAt = 2300;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=idle:app=claude-code");
+  p.activity();
+  await sweep(2600);
+  await sweep(4400);
+  assert.deepEqual([t.state, pushed], [state, notices], `${how}: the next turn's interrupt cancelled a turn Claude said was done`);
+  assert.equal([...tasks.values()].length, 1, how);
+}
+for (const how of ["late Stop", "held Enter", "late start", "queued"] as const) {
+  // Review 2026-10-22 round 2, 1: turn A's hooks are read only after Claude
+  // said done (its async Stop, a start polled late, or both held behind an
+  // Enter's write), then the next turn is stopped where Loom saw no key. A
+  // still completes. Or Claude takes up a prompt queued during A with no
+  // done between, and that prompt's turn is stopped before its own Stop: the
+  // same reports as a prompt merged after another Stop hook sent A on (round
+  // 7), so A ends unknown, and the queued prompt is interrupted.
+  const { p, tasks, pushed, clock, f, sweep, screen } = claudePane({ turnReceipts() {} });
+  p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  let t: any, release = () => {};
+  if (how !== "late Stop") {
+    t = f.turnTask(p, "manual", model.promptMatch("A"), 1000);
+    f.enterTurn(t, 1000);
+    if (how === "held Enter") release = f.holdSignals(p);
+    if (how !== "late start") f.taskSignal(p, { kind: "start", at: 1000, match: t.match });
+  }
+  const c = how === "queued" ? f.turnTask(p, "submit", model.promptMatch("C"), 1500) : undefined;
+  if (c) f.enterTurn(c, 1500);
+  screen.busy = true;
+  p.programStatus("state=working:app=claude-code");
+  clock.at = 2000;
+  if (how === "held Enter" || how === "queued") f.taskSignal(p, { kind: "stop", at: 2000 });
+  if (!c) {
+    Object.assign(screen, { busy: false, input: true });
+    p.programStatus("state=done:app=claude-code");
+  }
+  clock.at = 2050;
+  if (how === "late start") f.taskSignal(p, { kind: "start", at: 1000, match: t.match });
+  if (how === "late Stop" || how === "late start") f.taskSignal(p, { kind: "stop", at: 2000 });
+  release();
+  t ??= [...tasks.values()][0];
+  clock.at = 2100;
+  if (c) f.taskSignal(p, { kind: "start", at: 2100, match: c.match });
+  else {
+    p.wake(undefined, "bell");
+    p.activity();
+    clock.at = 2200;
+    Object.assign(screen, { busy: true, input: false });
+    p.programStatus("state=working:app=claude-code");
+    p.activity();
+  }
+  clock.at = 2300;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=idle:app=claude-code");
+  p.activity();
+  await sweep(2700);
+  assert.deepEqual([t.state, t.reason, pushed], c ? ["unknown", "interrupted", []] : ["completed", null, ["completed"]], `${how}: the next turn's interrupt cancelled a turn that was over`);
+  if (c) assert.deepEqual([c.state, c.reason], ["cancelled", "interrupted"], "the queued prompt's own turn went on");
+  assert.equal([...tasks.values()].length, c ? 2 : 1, how);
+}
+{
+  // Review 2026-10-22 round 3, 1: the sweep starts A off the screen before its
+  // start hook is read; that start then names A's prompt with no event of its
+  // own. A's Stop and done, then a turn Claude began by itself is stopped where
+  // Loom saw no key: A completes.
+  const { p, pushed, clock, f, sweep, screen } = claudePane({ turnReceipts() {} });
+  p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  const a = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(a, 1000);
+  screen.busy = true;
+  p.programStatus("state=working:app=claude-code");
+  await sweep(1100);
+  clock.at = 1200;
+  f.taskSignal(p, { kind: "start", at: 1000, match: a.match });
+  assert.deepEqual([a.correlation, [...a.events.filter((e: any) => e.state === "working").map((e: any) => e.signal)]], ["prompt", ["screen"]]);
+  clock.at = 2000;
+  f.taskSignal(p, { kind: "stop", at: 2000 });
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=done:app=claude-code");
+  clock.at = 2100;
+  p.wake(undefined, "bell");
+  p.activity();
+  clock.at = 2200;
+  Object.assign(screen, { busy: true, input: false });
+  p.programStatus("state=working:app=claude-code");
+  p.activity();
+  clock.at = 2300;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=idle:app=claude-code");
+  p.activity();
+  await sweep(2700);
+  assert.deepEqual([a.state, pushed], ["completed", ["completed"]], "a start read after the screen's was lost");
+}
+for (const how of ["delayed done", "queued, swept"] as const) {
+  // Review 2026-10-22 round 3, 2: Claude's done for A reaches the page after
+  // B's prompt was sent (its start hook ran at 2100, read at 2250), then B is
+  // stopped by an Esc in Loom: that Esc stops B, and A still completes. Or B
+  // was queued during A and the sweep started it off the screen: Claude takes
+  // it up with no done between, and the Esc comes before B's own Stop. That
+  // reads as a prompt merged after another Stop hook sent A on (round 7): A
+  // ends unknown, and B is interrupted.
+  const { p, pushed, clock, f, sweep, screen } = claudePane({ turnReceipts() {} });
+  p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  const a = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(a, 1000);
+  f.taskSignal(p, { kind: "start", at: 1000, match: a.match });
+  screen.busy = true;
+  p.programStatus("state=working:app=claude-code");
+  const sent = how === "delayed done" ? 2050 : 1500;
+  if (how === "queued, swept") clock.at = p.lastIn = sent;
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), sent);
+  if (how === "queued, swept") (f.enterTurn(b, sent), await sweep(1800));
+  clock.at = 2000;
+  f.taskSignal(p, { kind: "stop", at: 2000 });
+  if (how === "delayed done") {
+    clock.at = p.lastIn = sent;
+    f.enterTurn(b, sent);
+    clock.at = 2200;
+    Object.assign(screen, { busy: false, input: true });
+    p.programStatus("state=done:app=claude-code");
+    clock.at = 2250;
+  } else clock.at = 2100;
+  f.taskSignal(p, { kind: "start", at: 2100, match: b.match });
+  if (how === "delayed done") {
+    clock.at = 2300;
+    Object.assign(screen, { busy: true, input: false });
+    p.programStatus("state=working:app=claude-code");
+  }
+  clock.at = p.interruptAt = 2400;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=idle:app=claude-code");
+  p.activity();
+  await sweep(2700);
+  await sweep(4500);
+  assert.deepEqual([b.state, b.reason], ["cancelled", "interrupted"], `${how}: the turn the Esc stopped`);
+  await sweep(36_000);
+  assert.deepEqual([a.state, b.state, pushed], how === "queued, swept" ? ["unknown", "cancelled", []] : ["completed", "cancelled", ["completed"]], how);
+}
+for (const how of ["Stop read first", "Stop read after B began", "untracked, Stop read after B began"] as const) {
+  // Review 2026-10-22 round 4: Claude says A done at 2010. Its Stop hook ran
+  // at 2000, async, so Loom reads it within a poll or so: before or after a
+  // turn B Claude began by itself at 2200. B works a minute and is stopped
+  // where Loom saw no key. A's Stop reports A's turn, never B's: A completes.
+  // Untracked: A had no task, so its late Stop makes one (agentTurn).
+  const { p, pushed, clock, f, sweep, screen, tasks } = claudePane({ turnReceipts() {} });
+  p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  let a: any;
+  if (how !== "untracked, Stop read after B began") {
+    a = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+    f.enterTurn(a, 1000);
+    f.taskSignal(p, { kind: "start", at: 1000, match: a.match });
+  }
+  screen.busy = true;
+  p.programStatus("state=working:app=claude-code");
+  clock.at = 2010;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=done:app=claude-code");
+  const stopReadAt = how === "Stop read first" ? 2050 : 2210;
+  if (stopReadAt === 2050) (clock.at = 2050), f.taskSignal(p, { kind: "stop", at: 2000 });
+  clock.at = 2100;
+  p.wake(undefined, "bell");
+  p.activity();
+  clock.at = 2200;
+  Object.assign(screen, { busy: true, input: false });
+  p.programStatus("state=working:app=claude-code");
+  p.activity();
+  if (stopReadAt === 2210) (clock.at = 2210), f.taskSignal(p, { kind: "stop", at: 2000 });
+  a ??= [...tasks.values()][0];
+  for (const at of [5000, 30_000, 60_000]) await sweep(at);
+  assert.equal(a.state, "working", `${how}: A's Stop held while B works`);
+  clock.at = 65_000;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=idle:app=claude-code");
+  p.activity();
+  await sweep(65_500);
+  assert.deepEqual([a.state, a.reason, pushed], ["completed", null, ["completed"]], `${how}: B's interrupt cancelled A`);
+  assert.equal([...tasks.values()].length, 1, how);
+}
+{
+  // A's Stop read before Claude says A done leaves no done waiting for one.
+  // Prompt B's Stop, which another Stop hook sends on, is B's own: B is
+  // stopped where Loom saw no key, and that is B's interrupt.
+  const { p, pushed, clock, f, sweep, screen } = claudePane({ turnReceipts() {} });
+  p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  const a = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(a, 1000);
+  f.taskSignal(p, { kind: "start", at: 1000, match: a.match });
+  p.programStatus("state=working:app=claude-code");
+  clock.at = 2000;
+  f.taskSignal(p, { kind: "stop", at: 2000 });
+  p.programStatus("state=done:app=claude-code");
+  screen.input = true;
+  await sweep(2600);
+  assert.equal(a.state, "completed");
+  clock.at = p.lastIn = 3000;
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 3000);
+  f.enterTurn(b, 3000);
+  p.programStatus("state=working:app=claude-code");
+  f.taskSignal(p, { kind: "start", at: 3000, match: b.match });
+  clock.at = 4000;
+  f.taskSignal(p, { kind: "stop", at: 4000 });
+  clock.at = 5000;
+  p.programStatus("state=idle:app=claude-code");
+  await sweep(5600);
+  assert.deepEqual([b.state, b.reason, pushed], ["cancelled", "interrupted", ["completed"]], "B's Stop read as A's turn's");
+}
+for (const blocked of ["A's", "B's"] as const) {
+  // Review 2026-10-22 round 5: another Stop hook blocks A's first Stop, read
+  // at 1500, and A works on. Its last Stop, run at 2000, is read only at 2210,
+  // once a turn B Claude began by itself is working. B is stopped a minute
+  // later where Loom saw no key: A completes. Or A's one Stop is read first,
+  // and B's Stops (one another Stop hook blocks, then its last) come while
+  // A's still waits on Claude going idle: they go to A's task, as they did
+  // before Claude's own reports, and leave A's turn A's.
+  const { p, pushed, clock, f, sweep, screen, tasks } = claudePane({ turnReceipts() {} });
+  p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  const a = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(a, 1000);
+  f.taskSignal(p, { kind: "start", at: 1000, match: a.match });
+  screen.busy = true;
+  p.programStatus("state=working:app=claude-code");
+  clock.at = 1500;
+  f.taskSignal(p, { kind: "stop", at: blocked === "A's" ? 1500 : 2000 });
+  p.activity();
+  clock.at = 2010;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=done:app=claude-code");
+  clock.at = 2100;
+  p.wake(undefined, "bell");
+  p.activity();
+  clock.at = 2200;
+  Object.assign(screen, { busy: true, input: false });
+  p.programStatus("state=working:app=claude-code");
+  p.activity();
+  if (blocked === "A's") (clock.at = 2210), f.taskSignal(p, { kind: "stop", at: 2000, continued: true });
+  else {
+    clock.at = 30_000;
+    f.taskSignal(p, { kind: "stop", at: 30_000 });
+    clock.at = 40_000;
+    f.taskSignal(p, { kind: "stop", at: 40_000, continued: true });
+  }
+  for (const at of [5000, 30_000, 60_000]) await sweep(at);
+  clock.at = 65_000;
+  Object.assign(screen, { busy: false, input: true });
+  p.programStatus("state=idle:app=claude-code");
+  p.activity();
+  await sweep(65_500);
+  assert.deepEqual([a.state, a.reason, pushed], ["completed", null, ["completed"]], blocked === "A's" ? "A's last Stop, read once B began, read as B's" : "B's Stops moved A's turn to B's");
+  assert.equal([...tasks.values()].length, 1, blocked);
+}
+for (const reported of [false, true]) {
+  // Review 2026-10-22 round 6: another Stop hook blocks A's first Stop (1500)
+  // and A works on. A follow-up B is sent mid-turn: Claude reports its start
+  // at once (2000) and one Stop marks both (3000), which another Stop hook
+  // blocks too. Then the turn is stopped. B is no new turn after A's Stop: A
+  // and B are both interrupted, and neither notifies. With Claude's own
+  // reports or without them.
+  const { p, pushed, clock, f, sweep, screen } = claudePane({ turnReceipts() {} });
+  if (reported) p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  const a = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(a, 1000);
+  f.taskSignal(p, { kind: "start", at: 1000, match: a.match });
+  screen.busy = true;
+  if (reported) p.programStatus("state=working:app=claude-code");
+  clock.at = 1500;
+  f.taskSignal(p, { kind: "stop", at: 1500 });
+  clock.at = p.lastIn = 2000;
+  const b = f.turnTask(p, "submit", model.promptMatch("B"), 2000);
+  f.enterTurn(b, 2000);
+  f.taskSignal(p, { kind: "start", at: 2000, match: b.match });
+  clock.at = 3000;
+  f.taskSignal(p, { kind: "stop", at: 3000, continued: true });
+  await sweep(4000);
+  clock.at = p.interruptAt = 5000;
+  Object.assign(screen, { busy: false, input: true });
+  if (reported) p.programStatus("state=idle:app=claude-code");
+  await sweep(8000);
+  assert.deepEqual([a.state, a.reason, b.state, b.reason, pushed], ["cancelled", "interrupted", "cancelled", "interrupted", []], `${reported ? "reported" : "screen"}: a prompt merged into A's turn read as a new turn`);
+}
+for (const [how, reported] of [["queued", false], ["queued", true], ["merged, stopped early", false], ["merged, stopped early", true]] as const) {
+  // Review 2026-10-22 round 7. Queued: A's one Stop (2000) is its last; B,
+  // sent during A, starts its own turn at 2100 with no done between, and B's
+  // own Stop (3000, not continued) is blocked by another Stop hook; then B is
+  // stopped. A completed, B is interrupted. Merged, stopped early: another
+  // Stop hook blocks A's Stop (1500), B is merged at once (2000), and the turn
+  // is stopped before any later Stop. Claude's reports then are the ones a
+  // prompt queued as A ended gives (start, Stop, start, stopped): whether A
+  // had ended is unknown, and A says so rather than claim either.
+  const { p, pushed, clock, f, sweep, screen } = claudePane({ turnReceipts() {} });
+  if (reported) p.programStatus("state=idle:app=claude-code");
+  clock.at = p.lastIn = 1000;
+  const a = f.turnTask(p, "submit", model.promptMatch("A"), 1000);
+  f.enterTurn(a, 1000);
+  f.taskSignal(p, { kind: "start", at: 1000, match: a.match });
+  screen.busy = true;
+  if (reported) p.programStatus("state=working:app=claude-code");
+  const queued = how === "queued";
+  const sent = queued ? 1500 : 2000;
+  if (queued) {
+    clock.at = p.lastIn = sent;
+    var b = f.turnTask(p, "submit", model.promptMatch("B"), sent);
+    f.enterTurn(b, sent);
+    await sweep(1800);
+  }
+  clock.at = queued ? 2000 : 1500;
+  f.taskSignal(p, { kind: "stop", at: clock.at, response: "00000000000000a1" });
+  if (!queued) {
+    clock.at = p.lastIn = sent;
+    b = f.turnTask(p, "submit", model.promptMatch("B"), sent);
+    f.enterTurn(b, sent);
+  }
+  clock.at = queued ? 2100 : 2000;
+  f.taskSignal(p, { kind: "start", at: clock.at, match: b!.match });
+  if (queued) (clock.at = 3000), f.taskSignal(p, { kind: "stop", at: 3000, response: "00000000000000b2" });
+  await sweep(4000);
+  clock.at = p.interruptAt = 5000;
+  Object.assign(screen, { busy: false, input: true });
+  if (reported) p.programStatus("state=idle:app=claude-code");
+  await sweep(8000);
+  const ended = queued ? ["completed", null, ["completed"]] : ["unknown", "interrupted", []];
+  assert.deepEqual([a.state, a.reason, b!.state, b!.reason, pushed], [ended[0], ended[1], "cancelled", "interrupted", ended[2]], `${how}, ${reported ? "reported" : "screen"}`);
+  if (queued) assert.equal(a.events.at(-1).response, "00000000000000a1", "A completed naming B's final message");
+}
+{
+  // Review 2026-10-22, 2: Codex asks before the sweep has seen its turn begin,
+  // with no OSC 9 notice codexAsks reads. The task, still submitted then,
+  // asks once the sweep starts it, and works again once answered.
+  const { p, pushed, clock, f, sweep } = claudePane({ codexRunning: (s: string) => s === "Working", interruptHint: () => false });
+  Object.assign(p, { agent: "codex", codexState: "Working" });
+  const t = f.turnTask(p, "submit", "", 1000);
+  f.enterTurn(t, 1000);
+  clock.at = 1100;
+  p.programStatus("state=working:app=codex");
+  clock.at = 1200;
+  p.programStatus("state=blocked:app=codex:kind=question");
+  await sweep(1500);
+  assert.deepEqual([t.state, t.detail, p.codexAsking, pushed], ["approval", "Codex asks (question)", true, ["approval"]], "a question asked before the sweep started the turn");
+  clock.at = 2000;
+  p.programStatus("state=working:app=codex");
+  await sweep(2500);
+  assert.deepEqual([t.state, p.codexAsking], ["working", false], "answered");
+}
+for (const how of ["menu answered", "answer unseen"] as const) {
+  // Review 2026-10-22 round 2, 2: a Codex with OSC 9 alone asks in A's turn,
+  // and is answered where Loom saw no key: its menu goes, and A works on. Or
+  // Loom never sees the answer (a free-text question), and A still asks. A
+  // prompt B sent later starts working, not asking A's old question.
+  const { p, pushed, clock, f, sweep, screen } = claudePane({ codexRunning: (s: string) => s === "Working", interruptHint: () => false });
+  Object.assign(p, { agent: "codex", codexState: "Working" });
+  const a = f.turnTask(p, "submit", "A", 1000);
+  f.enterTurn(a, 1000);
+  await sweep(1500);
+  clock.at = 2000;
+  p.codexAsking = true; // its OSC 9 notice (codexAsks)
+  f.taskSignal(p, { kind: "approval", at: 2000, detail: "Question A" });
+  screen.menu = how === "menu answered";
+  await sweep(2500);
+  screen.menu = false;
+  await sweep(3000);
+  await sweep(5100);
+  if (how === "menu answered") assert.deepEqual([a.state, p.codexAsking], ["working", false], "the question answered where Loom saw no key still asks");
+  else assert.deepEqual([a.state, p.codexAsking], ["approval", true]);
+  const b = f.turnTask(p, "submit", "B", 6000);
+  f.enterTurn(b, 6000);
+  await sweep(6500);
+  assert.deepEqual([b.state, b.detail, pushed], ["working", null, ["approval"]], `${how}: a later prompt asked an earlier turn's question`);
+}
+console.log("ok   Claude's and Codex's own reports (OSC 7501) say what their hooks and notices can't");
 // Cursor's CLI (2026.10.01): an approval as its screen draws it, and its composer.
 const CURSOR_ASK = ` $  echo hi in .
 

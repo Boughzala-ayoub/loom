@@ -1947,8 +1947,13 @@ class Pane {
    * interrupted nothing, unless the working line shows again before the turn
    * ends, the key having come in half a redraw (activity). */
   private keyAtIdle = false;
-  /** Claude's working line is gone, and its input or a numbered question is on screen: sweepTasks' idle check. */
+  /** Claude runs a turn: as it says itself (programStatus), or its working line shows. */
+  private claudeWorks() {
+    return this.programState !== undefined ? this.programState === "working" : claudeWorking(this.screen(true));
+  }
+  /** Claude says it runs no turn, or its working line is gone, and its input or a numbered question is on screen: sweepTasks' idle check. */
   private claudeStopped() {
+    if (this.programState !== undefined) return this.programState !== "working";
     return !claudeWorking(this.screen(true)) && (readInput(screenCells(this), "claude").kind !== "unknown" || !!readMenu(liveScreen(this, false), "claude"));
   }
   /** Turns ended: the ones `turns` counts, and ones Claude began by itself, which it doesn't (pane events: Settler). */
@@ -1974,6 +1979,18 @@ class Pane {
   /** When the agent last asked (its approval signal, taskSignal): an answer,
    * Esc or Ctrl-C that went in before then was an earlier question's (wrote). */
   askedAt = 0;
+  /** What it asked then: a task Loom sees start while it still asks takes it (sweepTasks). */
+  asked: string | undefined;
+  /** Turns Claude said it began, working after idle, done or error
+   * (claudeStatus), and when the latest prompt its hooks reported started, by
+   * the hook's own time (taskSignal): the turn boundaries turnOver reads. */
+  begun = 0;
+  promptAt = 0;
+  /** The last turn Claude said was done whose Stop Loom hasn't read yet
+   * (claudeStatus), and the turn running when Loom last read a Stop that was
+   * that turn's own (taskSignal): which turn each Stop reports. */
+  doneUnread: number | undefined;
+  stoppedIn: number | undefined;
   /** Whether a Cursor turn runs, as its hooks' reports say, in order: from a
    * turn's start to its stop (agentReport, cursorRuns). Unset until this
    * launch's first, as when Loom couldn't add its hooks: then its "ctrl+c to
@@ -2010,9 +2027,10 @@ class Pane {
    * wrote). Text typed there hides its placeholder, so it holds until Cursor
    * draws its follow-up composer or a question, or a Ctrl-C goes in. */
   private cursorFeedback = false;
-  /** What OMP last said of itself (OSC 7501, programStatus): working,
-   * blocked, done, error or idle. Unset until this launch says one, and again
-   * once OMP quits (clear) and its shell's prompt has the pane. */
+  /** What OMP, Claude or Codex last said of its session (OSC 7501,
+   * programStatus): working, blocked, done, error or idle. Unset until this
+   * launch says one, and again once it quits (clear): OMP's shell's prompt has
+   * the pane then, and a Claude that never answered is read off its screen. */
   programState: string | undefined;
   label = ""; // appTitle as shown: spinner stripped, a name when there is none
   /** Where it was when it left its thread (keepContext). Every copy after is this one, last known. */
@@ -2467,6 +2485,7 @@ class Pane {
     this.cursorAnswered = undefined;
     this.cursorFeedback = false;
     this.programState = undefined;
+    this.doneUnread = undefined; // the last launch's turn's Stop is no report of this one's
     this.providerUsage = null;
     this.startupStarted = Date.now();
     // This launch is the pane's from here, starting through Codex's session check
@@ -2644,10 +2663,12 @@ class Pane {
       return;
     }
     const now = Date.now();
+    // Claude says itself whether it works (programStatus): its output says nothing then.
+    const told = () => this.agent === "claude" && this.programState !== undefined;
     // Half a redraw: a key read as typed at Claude's idle input (sending) came
     // while it still worked, and interrupted that turn after all. Read before
     // the echo window: the rest of the redraw comes within milliseconds.
-    if (this.keyAtIdle && claudeWorking(this.screen(true))) ((this.endHeld = undefined), (this.beganItself = this.keyAtIdle = false));
+    if (this.keyAtIdle && this.claudeWorks()) ((this.endHeld = undefined), (this.beganItself = this.keyAtIdle = false));
     if (now - this.lastIn < 300) return;
     if (!this.workSince || now - this.workAt >= 1500) this.workSince = now;
     this.workAt = now;
@@ -2655,17 +2676,24 @@ class Pane {
     // Quiet: a signal held during a turn Claude began by itself (wake) ends it
     // once Claude is also idle at its input or asks. A redraw split across
     // chunks can show neither working line nor input, but never for 1.5 s.
-    this.idle = window.setTimeout(() => ((this.busy = false), this.endHeld && this.claudeStopped() ? this.wake(undefined, this.endHeld) : this.paint()), 1500);
+    this.idle = window.setTimeout(() => (told() || (this.busy = false), this.endHeld && this.claudeStopped() ? this.wake(undefined, this.endHeld) : this.paint()), 1500);
     // A turn Claude began by itself (a background shell's notice, a wake-up)
     // has no Enter or hook start to announce it: its working line, back after
     // Loom saw it idle at its input with no input since, is one, its last
     // alert read or not, and it clears that alert. Under an alert, other output
     // is Claude redrawing its prompt, not work. Idle first, so the working line
     // still up as a turn ends (its Stop hooks running) isn't one. Read only
-    // while it may begin one: never during a turn you started.
-    if (this.agent === "claude" && !this.beganItself && this.lastIn <= this.lastTurnAt) {
+    // while it may begin one: never during a turn you started. Claude's own
+    // word says it as it changes (claudeStatus).
+    if (this.agent === "claude" && !told() && !this.beganItself && this.lastIn <= this.lastTurnAt) {
       if (!claudeWorking(this.screen(true))) this.sawIdle ||= readInput(screenCells(this), "claude").kind !== "unknown";
       else if (this.sawIdle) ((this.waiting = false), (this.beganItself = true));
+    }
+    if (told()) {
+      // Under an alert as for Codex: work shows once it's read.
+      const on = this.programState === "working" && !this.waiting;
+      if (on !== this.busy) ((this.busy = on), this.paint());
+      return;
     }
     if (this.busy || this.waiting) return;
     this.busy = true;
@@ -3054,10 +3082,17 @@ class Pane {
    * stopped it), and that it quit (clear). That is its report of a turn, as
    * Claude's hooks and Codex's notify are theirs: it moves the pane's tasks,
    * raises the alert where a turn ends or asks, and says whether the pane
-   * works (activity). A query (`?`) goes unanswered. */
+   * works (activity). Codex says the same unasked, and Claude once its query
+   * (`?`) is answered (lib.rs status_queries): their hooks and notify still
+   * report their turns, and this adds what those can't (claudeStatus,
+   * codexStatus). An entry with an `id` is a background task's or a
+   * subagent's, and its `state=clear:id=` is no quitting. */
   programStatus(data: string) {
     const state = /(?:^|:)state=(\w+)/.exec(data)?.[1];
-    if (this.agent !== "omp" || !state || state === this.programState) return;
+    if (!state || /(?:^|:)id=/.test(data) || state === this.programState) return;
+    if (this.agent === "claude") return this.claudeStatus(state);
+    if (this.agent === "codex") return this.codexStatus(state, /(?:^|:)kind=(\w+)/.exec(data)?.[1]);
+    if (this.agent !== "omp") return;
     const was = this.programState, at = Date.now();
     this.programState = state === "clear" ? undefined : state;
     let detail: string | undefined; // what it asks, or why it failed: base64 UTF-8
@@ -3071,6 +3106,54 @@ class Pane {
     if (this.programState) return this.activity();
     this.busy = false;
     this.paint();
+  }
+  /** Claude's own word on its session. Its hooks start, stop, fail and ask in
+   * its tasks, and its bell raises the alert: this adds what neither can say.
+   * Esc stops a turn with no hook (working or asking, then idle), an answer
+   * given where Loom can't see it sends one on (asking, then working), and a
+   * turn it began by itself is working again, after idle, with no input since
+   * the last turn (activity reads that off the screen where Claude never
+   * answered). Whether it works, and whether a Stop it reported holds
+   * (claudeStopped), read this too. */
+  private claudeStatus(state: string) {
+    const was = this.programState, at = Date.now();
+    this.programState = state === "clear" ? undefined : state;
+    if (state === "idle" && (was === "working" || was === "blocked")) {
+      taskSignal(this, { kind: "interrupt", at });
+      // As an Esc does (wrote): a signal held for the turn it stopped was an older turn's.
+      this.endHeld = undefined;
+      this.beganItself = this.keyAtIdle = false;
+    } else if (state === "done") {
+      // Its Stop hook runs async: Loom may read it only once the next turn began.
+      if (this.stoppedIn !== this.begun) this.doneUnread = this.begun;
+    } else if (state === "working" && was === "blocked") taskSignal(this, { kind: "resume", at });
+    else if (state === "working" && (was === "idle" || was === "done" || was === "error")) {
+      this.begun++; // a turn begins (turnOver)
+      if (!this.beganItself && this.lastIn <= this.lastTurnAt) {
+        this.waiting = false;
+        this.beganItself = true;
+        this.workSince = this.workAt = at; // where its task starts (agentTurn)
+      }
+    }
+    this.busy = this.programState === "working" && !this.waiting;
+    this.paint();
+  }
+  /** Codex's own word on its session, said unasked. Its title says whether a
+   * turn runs, as this can't: it says working while any background terminal
+   * lives. Asking (blocked) is a question where its notice didn't say one
+   * (codexAsks), and working again after is the answer, one given where Loom
+   * can't see it too (a free-text question's). */
+  private codexStatus(state: string, kind: string | undefined) {
+    const was = this.programState, at = Date.now();
+    this.programState = state === "clear" ? undefined : state;
+    if (state === "blocked") {
+      if (!this.codexAsking) taskSignal(this, { kind: "approval", at, detail: `Codex asks${kind ? ` (${kind})` : ""}` });
+      this.codexAsking = true;
+    } else if (was === "blocked") {
+      this.codexAsking = false;
+      if (state === "working") taskSignal(this, { kind: "resume", at });
+    }
+    this.activity();
   }
   /** Commands a shell with Loom's prompt finished (OSC 133 D), whether the last
    * failed, and its exit code when the prompt knows it exactly. */
@@ -4677,7 +4760,10 @@ let taskPruned = 0;
  * looked idle, the last Esc it judged, and when Claude's Stop hook said the
  * turn ended (the task completes once Claude is seen idle too) and the final
  * message that Stop named. */
-const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number; response?: string; ask?: { seq: number; seen?: boolean; gone?: number } }>();
+/** `stopAt`: when Loom read the task's latest Stop; `stopped`: when its turn's
+ * latest Stop hook ran, by its own time, the Claude turn its first Stop
+ * reported, and whether a later turn's Stop came since (turnOver). */
+const taskWatch = new Map<string, { quietSince?: number; escSeen?: number; stopAt?: number; stopped?: { at: number; begun: number; closed?: true }; response?: string; ask?: { seq: number; seen?: boolean; gone?: number } }>();
 const watched = (t: Task) => taskWatch.get(t.id) ?? taskWatch.set(t.id, {}).get(t.id)!;
 const paneById = (id: string) => threads.flatMap((t) => t.panes).find((p) => p.id === id);
 
@@ -5307,7 +5393,7 @@ async function enterTask(p: Pane, t: Task) {
  * defers takes where the pane is now (`ctx`) along, for its launch's tasks. */
 function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
   // As it asks, held or not: an answer written back later is judged by it (Pane.wrote).
-  if (s.kind === "approval" && (s.launch ?? p.generation) === p.generation) p.askedAt = s.at;
+  if (s.kind === "approval" && (s.launch ?? p.generation) === p.generation) ((p.askedAt = s.at), (p.asked = s.detail));
   const held = enterHeld.get(p.id);
   if (held) return void held.signals.push({ signal: { ...s, launch: s.launch ?? p.generation }, context: ctx });
   if (startupTurns) {
@@ -5316,7 +5402,22 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
     return void startupTurns.push(() => taskSignal(p, signal, now));
   }
   const launch = s.launch ?? p.generation;
+  if (s.kind === "start" && launch === p.generation) p.promptAt = Math.max(p.promptAt || 0, s.at);
+  // The Claude turn a Stop reports: the last one Claude said was done, if Loom
+  // hasn't read that one's Stop yet, else the one running (turnOver). Once per
+  // Stop, however often it's routed (agentTurn routes it again).
+  if (s.kind === "stop" && p.agent === "claude" && launch === p.generation && !stopTurns.has(s)) {
+    stopTurns.set(s, p.doneUnread ?? (p.stoppedIn = p.begun));
+    p.doneUnread = undefined;
+  }
   let open = [...tasks.values()].filter((t) => t.pane === p.id && t.gen === launch && t.events.length && !isFinal(t.state));
+  // An interrupt stops the turn running now, never one that was over. One
+  // that may have been ends unknown (turnOver).
+  if (s.kind === "interrupt") open = open.filter((t) => {
+    const over = turnOver(p, t);
+    if (over === "maybe") moveTask(t, unproven(t, { ...turnUnclear, signal: "interrupted" }), s.at, ctx);
+    return !over;
+  });
   // A report naming its turn goes to the task that turn's start moved, however
   // late, and never to a task another turn's start moved (turnTasks). Cursor's
   // question names the turn running when it shows (cursorAsks).
@@ -5338,14 +5439,52 @@ function taskSignal(p: Pane, s: Signal, ctx?: TaskContext) {
   if (adoptManual(p, s, launch, moved, ctx) || (!moved.length && agentTurn(p, s, launch, open, ctx))) return;
   for (const [t, c] of moved) {
     // The latest Stop's final message is the one its completion names.
-    if (c.signal === "stop") Object.assign(watched(t), { stopAt: Date.now(), response: s.kind === "stop" ? s.response : undefined });
+    // Its first Stop names its turn. A later one Claude says is continued
+    // (another Stop hook sent the turn on, a prompt merged since included) is
+    // that turn's, stopped again. Any other is a later turn's, read while this
+    // one waits for Claude to go idle: this turn ended at its last Stop, whose
+    // final message stays its own (turnOver).
+    if (c.signal === "stop") {
+      const w = watched(t), old = w.stopped, own = !old || (s.kind === "stop" && !!s.continued && !old.closed);
+      w.stopAt = Date.now();
+      w.stopped = !old ? { at: s.at, begun: stopTurns.get(s) ?? p.begun } : own ? { ...old, at: s.at } : { ...old, closed: true };
+      if (own) w.response = s.kind === "stop" ? s.response : undefined;
+    }
     else {
       // Asking after a Stop: another Stop hook sent Claude on, so that Stop ended nothing.
-      if (c.state === "approval") Object.assign(watched(t), { stopAt: undefined, response: undefined });
+      if (c.state === "approval") Object.assign(watched(t), { stopAt: undefined, stopped: undefined, response: undefined });
       moveTask(t, c, s.at, ctx);
     }
   }
 }
+
+/** The turn each Claude Stop reports (taskSignal), by the signal Loom read. */
+const stopTurns = new WeakMap<Signal, number>();
+
+/** Whether the Claude turn task `t` reached its Stop in is over (review
+ * 2026-10-22), so a later interrupt is no end of its. It is once a later
+ * turn's Stop came (one not continued), or Claude began a turn since the one
+ * that Stop reports. Claude's done is never weighed against a hook's time:
+ * they come by separate ways, and either can be late. A task with no Stop
+ * read yet is the running turn's.
+ * "maybe": a prompt started after its latest Stop, with no Stop since. That
+ * prompt was queued as its turn ended, or merged into its turn after another
+ * Stop hook sent it on; Claude's reports are the same either way (start,
+ * Stop, start, then stopped), until a Stop that says continued or not. A task
+ * stopped then ends unknown (turnUnclear).
+ * ponytail: Stops pair with dones in order, so a turn that ends done with no
+ * Stop hook lends its turn to the next Stop read before that one's own done,
+ * which then reads as over a turn early; that matters only if a Stop hook
+ * sends it on and it is stopped. And a Stop read only once the next turn has
+ * begun and been stopped still reads as that turn's. */
+function turnOver(p: Pane, t: Task): boolean | "maybe" {
+  const stopped = watched(t).stopped;
+  if (p.agent !== "claude" || !stopped) return false;
+  if (stopped.closed || stopped.begun < p.begun) return true;
+  return stopped.at < p.promptAt && "maybe";
+}
+/** How a task whose turn may have ended (turnOver) ends when Claude is stopped: never completed or cancelled on a guess. */
+const turnUnclear = { state: "unknown", reason: "interrupted", detail: "Claude was stopped after a later prompt began, and its reports don't say whether this task's turn had already ended" } as const;
 
 /** What a write means to the process, read as it's typed (Pane.sending). */
 type Meant = { gen: number; ends: number; answer: boolean; idle?: boolean; menu?: string; stop?: { turn?: string; at: number; release: () => void } };
@@ -5560,7 +5699,10 @@ function sweepTasks(closing = false) {
     // its title's run state says the turn still runs, and once it has one, it
     // alone does. A hint is read only where the agent draws it (interruptHint).
     const screen = p.screen(true);
+    // Claude says itself whether it runs a turn, or waits on you in one (Pane.programStatus).
+    const told = p.agent === "claude" && p.programState !== undefined;
     const busy = p.agent === "omp" ? p.programState === "working"
+      : told ? p.programState === "working" || p.programState === "blocked"
       : p.agent === "grok" ? p.grokBusy()
       : reportsTurns(p.agent) && p.cursorTurn !== undefined ? p.cursorTurn
       : p.agent === "codex" && p.codexState !== undefined ? codexRunning(p.codexState)
@@ -5568,11 +5710,14 @@ function sweepTasks(closing = false) {
     // Esc or Ctrl-C after the Enter (a turn Claude began by itself has none:
     // after it began) and after any Stop, judged once, 2 s on.
     const esc = p.interruptAt;
-    const escNew = esc > (t.submittedAt ?? t.startedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;
+    // Never in a turn that was over (turnOver): that key stopped a later one.
+    // In one that may have been, the task ends unknown.
+    const over = turnOver(p, t);
+    const escNew = over !== true && esc > (t.submittedAt ?? t.startedAt ?? Infinity) && esc > (w.stopAt ?? 0) && esc !== w.escSeen;
     if (escNew && now - esc >= 2000) {
       w.escSeen = esc;
       if (!busy) {
-        moveTask(t, unproven(t, { state: "cancelled", signal: "interrupt", reason: "interrupted" }));
+        moveTask(t, unproven(t, over ? { ...turnUnclear, signal: "interrupt" } : { state: "cancelled", signal: "interrupt", reason: "interrupted" }));
         continue;
       }
     }
@@ -5580,8 +5725,9 @@ function sweepTasks(closing = false) {
     // input line on screen (readInput reads it: a permission dialog, numbered
     // or not, takes its place and shows no hint either), and no numbered
     // question. An asking task holds none: an approval clears it (taskSignal),
-    // and route gives it no Stop.
-    const idleInput = () => readInput(screenCells(p), "claude").kind !== "unknown" && !readMenu(liveScreen(p, false), p.agent);
+    // and route gives it no Stop. Where Claude says itself, its turn being
+    // over (not busy) is that.
+    const idleInput = () => told || (readInput(screenCells(p), "claude").kind !== "unknown" && !readMenu(liveScreen(p, false), p.agent));
     if (w.stopAt !== undefined && !busy && (closing || now - w.stopAt >= 500) && !(escNew && w.escSeen !== esc) && idleInput()) {
       moveTask(t, unproven(t, { state: "completed", signal: "turn-end", ...(w.response ? { response: w.response } : {}) }));
       continue;
@@ -5604,12 +5750,22 @@ function sweepTasks(closing = false) {
       const seq = t.events[t.events.length - 1]?.seq ?? 0;
       const ask = w.ask?.seq === seq ? w.ask : (w.ask = { seq });
       if (p.agent !== "opencode" && readMenu(liveScreen(p, false), p.agent)) Object.assign(ask, { seen: true, gone: undefined });
-      else if (ask.seen && now - (ask.gone ??= now) >= 2000) moveTask(t, { state: "working", signal: "answered", detail: null });
+      else if (ask.seen && now - (ask.gone ??= now) >= 2000) {
+        moveTask(t, { state: "working", signal: "answered", detail: null });
+        // Answered: Codex asks no more, unless it says itself it still does (OSC 7501).
+        if (p.programState !== "blocked") p.codexAsking = false;
+      }
       continue;
     }
     if (busy) {
       w.quietSince = undefined;
-      if (t.state === "submitted") moveTask(t, { state: "working", signal: "screen", correlation: "screen" });
+      if (t.state === "submitted") {
+        moveTask(t, { state: "working", signal: "screen", correlation: "screen" });
+        // Codex asked after this task's Enter, before Loom saw its turn begin
+        // (route asks only working tasks): the question is this turn's. One
+        // asked before the Enter was an earlier turn's.
+        if (p.codexAsking && p.askedAt >= (t.submittedAt ?? Infinity)) moveTask(t, { state: "approval", signal: "approval", ...(p.asked ? { detail: p.asked } : {}) });
+      }
     } else if (now - (w.quietSince ??= now) >= QUIET_MS) {
       moveTask(t, { state: "unknown", signal: "quiet", reason: "no-end-signal" });
     }

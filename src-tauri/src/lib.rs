@@ -334,12 +334,31 @@ fn take_utf8(pending: &mut Vec<u8>) -> String {
     }
 }
 
+/// Claude Code asks whether the terminal takes OSC 7501 program status, and
+/// reports its state (main.ts programStatus) only once the query comes back
+/// ahead of the reply to the DA1 query it sends next. xterm.js answers that
+/// DA1 as the page parses the chunk, so the echo goes in from here, before
+/// the chunk leaves. Grok asks the same way.
+const STATUS_QUERY: &str = "\x1b]7501;?";
+
+/// Status queries in `text`, one split across reads too: `tail` carries the
+/// last read's end, a byte short of a query so none counts twice.
+fn status_queries(tail: &mut String, text: &str) -> usize {
+    let seen = format!("{tail}{text}");
+    let mut cut = seen.len().saturating_sub(STATUS_QUERY.len() - 1);
+    while !seen.is_char_boundary(cut) { cut += 1; }
+    *tail = seen[cut..].to_string();
+    seen.matches(STATUS_QUERY).count()
+}
+
 /// The console's output, read until it ends, to the emitter. Once the emitter
 /// is gone (the pane closed) the rest is read and dropped: before Windows 11
 /// 24H2, ClosePseudoConsole waits while its last frames sit unread in the pipe.
-fn pump(reader: &mut dyn Read, tx: std::sync::mpsc::SyncSender<String>) {
+/// `answer` echoes a status query back into the console (status_queries).
+fn pump(reader: &mut dyn Read, tx: std::sync::mpsc::SyncSender<String>, answer: impl Fn()) {
     let mut buf = [0u8; 8192];
     let mut pending = Vec::new();
+    let mut tail = String::new();
     let mut open = true;
     while let Ok(n) = reader.read(&mut buf) {
         if n == 0 {
@@ -348,6 +367,7 @@ fn pump(reader: &mut dyn Read, tx: std::sync::mpsc::SyncSender<String>) {
         if !open { continue; }
         pending.extend_from_slice(&buf[..n]);
         let text = take_utf8(&mut pending);
+        for _ in 0..status_queries(&mut tail, &text) { answer(); }
         open = text.is_empty() || tx.send(text).is_ok();
     }
 }
@@ -615,7 +635,12 @@ fn pty_spawn(
     let flow = Arc::new(output::Flow::default());
     let channel = on_out.id();
     app.state::<output::Flows>().0.lock().unwrap().insert(channel, (id.clone(), launch, flow.clone()));
-    std::thread::spawn(move || pump(&mut reader, tx));
+    // Through the pane's own writer, in order with its keys: no one awaits the echo's result.
+    let echo = input.clone();
+    std::thread::spawn(move || pump(&mut reader, tx, || {
+        let (reply, _) = tauri::async_runtime::channel(1);
+        let _ = echo.send((format!("{STATUS_QUERY}\x1b\\"), reply));
+    }));
     let output_flow = flow.clone();
     let output_app = app.clone();
     std::thread::spawn(move || {
@@ -3202,8 +3227,20 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
         drop(rx);
         let mut out = std::io::Cursor::new(vec![b'x'; 64 << 10]);
-        super::pump(&mut out, tx);
+        super::pump(&mut out, tx, || {});
         assert_eq!(out.position(), 64 << 10, "unread output can keep ClosePseudoConsole waiting");
+    }
+
+    #[test]
+    fn status_queries_are_answered_once_split_or_not() {
+        let mut tail = String::new();
+        assert_eq!(super::status_queries(&mut tail, "a\x1b]7501;?\x1b\\\x1b[c"), 1);
+        assert_eq!(super::status_queries(&mut tail, "x\x1b]75"), 0);
+        assert_eq!(super::status_queries(&mut tail, "01;?\x07"), 1, "split across two reads");
+        assert_eq!(super::status_queries(&mut tail, "y"), 0, "never again from the tail");
+        assert_eq!(super::status_queries(&mut tail, "\x1b]7501;state=idle:app=claude-code\x1b\\"), 0, "a report is no query");
+        let mut tail = "é".repeat(8);
+        assert_eq!(super::status_queries(&mut tail, "\x1b]7501;?\x1b\\"), 1, "the tail is cut on a character boundary");
     }
 
     #[test]
