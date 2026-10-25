@@ -6507,7 +6507,6 @@ async function openThread(st: ThreadState, panes: PaneState[], layout: LayoutMod
   await started;
   th.restoring = false;
   if (!threads.includes(th)) return th; // Closed while its processes were starting.
-  if (!th.panes.length) await th.addPane();
   save();
   void pollStats();
   return th;

@@ -3503,6 +3503,15 @@ try {
       assert.equal(await page.locator('#notification-taskbar').getAttribute('aria-pressed'), String(!silent), 'Migrate legacy taskbar setting');
       assert.equal(await page.evaluate(() => 'silent' in window.qa.saved), false, 'Save only the independent preferences');
     }
+    await page.evaluate(() => {
+      const saved = JSON.parse(localStorage.getItem('qa-state'));
+      saved.threads[1].panes = [];
+      localStorage.setItem('qa-state', JSON.stringify(saved));
+    });
+    await page.goto(base + '?restore');
+    await page.waitForFunction(() => window.qa.saved);
+    assert.deepEqual(await page.evaluate(() => window.qa.saved.threads[1].panes), [], 'A thread left empty stays empty after a relaunch');
+    assert.ok(await page.evaluate(() => !window.qa.calls.some(c => c.cmd === 'pty_spawn' && c.args.cwd === window.qa.saved.threads[1].dir)), 'No pane is started for the empty thread');
     await page.goto(base);
     await page.waitForFunction(() => document.querySelectorAll('.pane').length === 4 && window.qa.saved);
     if (width <= 760) await page.click('#side-toggle');
