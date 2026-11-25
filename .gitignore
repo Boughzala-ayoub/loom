@@ -30,3 +30,13 @@ src-tauri/.build
 
 # Loom's phone app build (android/build.mjs)
 android/out/
+
+# Local design studies, mockups & scratch notes
+IDEAS_*.md
+MCP_IDEAS.md
+REVIEW.md
+mockups/
+docs/*-study*.md
+docs/agent-experience-plan.md
+docs/fullscreen-mouse-investigation.md
+docs/performance-review-*.md

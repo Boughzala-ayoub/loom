@@ -9,6 +9,21 @@ another one.
 
 Tauri v2 (Rust backend, system WebView2) + xterm.js. No Electron, no Node at runtime.
 
+<table>
+  <tr>
+    <th align="center">Desktop Workspace (Threads · Overview · Changes · Command Palette · Usage)</th>
+    <th align="center">Phone Companion (Tailscale)</th>
+  </tr>
+  <tr>
+    <td align="center" width="74%">
+      <img src="docs/desktop-demo.webp" alt="Loom desktop workspace: multi-agent ConPTY panes, overview dashboard, inline git diff, command palette, and plan usage" />
+    </td>
+    <td align="center" width="26%">
+      <img src="docs/phone-demo.webp" alt="Loom phone companion: remote agent approvals, live terminal pane, git commit/push, and plan usage" />
+    </td>
+  </tr>
+</table>
+
 ## Requirements
 
 - **Windows 10/11** — WebView2 ships with Windows 11.
