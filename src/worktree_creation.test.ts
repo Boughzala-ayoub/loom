@@ -16,7 +16,7 @@ import ts from "typescript";
 const source = ts.createSourceFile("main.ts", readFileSync("src/main.ts", "utf8"), ts.ScriptTarget.Latest, true);
 const fn = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === "createThread")!;
 const code = ts.transpileModule(fn.getText(source) + "\nglobalThis.create = createThread;", { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-const dir = mkdtempSync(join(tmpdir(), "loom-create-unavailable-"));
+const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "loom-create-unavailable-")));
 const repo = join(dir, "repo"), parent = join(dir, "external"), wt = join(parent, "existing");
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "user.name=check", "-c", "user.email=check@loom", ...args], { encoding: "utf8" });
 try {
