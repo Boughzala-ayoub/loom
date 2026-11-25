@@ -1,13 +1,16 @@
-# Loom v3
+# Loom
 
-A thread-driven agentic terminal workspace for Windows, shaped like Orca. A
-**thread** is one branch of work in its own git worktree, with an agent running
-in it: `claude`, `codex`, `opencode`, Cursor's `cursor-agent` or xAI's `grok`. Threads sit in a sidebar grouped by
-repo; the current one shows its panes, real ConPTY terminals, in a grid. Cut
-as many threads as you like and every agent keeps running while you look at
-another one.
+[![CI](https://github.com/Boughzala-ayoub/loom/actions/workflows/ci.yml/badge.svg)](https://github.com/Boughzala-ayoub/loom/actions/workflows/ci.yml)
 
-Tauri v2 (Rust backend, system WebView2) + xterm.js. No Electron, no Node at runtime.
+A native Windows multi-agent terminal workspace built with **Tauri v2 (Rust + WebView2)** and **xterm.js** (no Electron, no Node runtime). Run multiple AI coding agents — `claude`, `codex`, `opencode`, `cursor-agent`, and `grok` — side by side across real ConPTY terminal grids, with optional per-thread Git worktree isolation, OSC state detection, built-in diff/commit review, and a paired phone companion over Tailscale.
+
+```text
+[ AI CLIs (Claude / Codex / OpenCode / Cursor / Grok) ]
+                         ↕  Windows ConPTY
+[ Rust / Tauri v2 Backend (worktrees, OSC state, git, whisper.cpp, remote server) ]
+                         ↕  Tauri IPC / WebSocket (Tailscale)
+[ Desktop WebView2 + xterm.js ]      [ Mobile Companion (remote.html) ]
+```
 
 <table>
   <tr>
@@ -16,13 +19,15 @@ Tauri v2 (Rust backend, system WebView2) + xterm.js. No Electron, no Node at run
   </tr>
   <tr>
     <td align="center" width="74%">
-      <img src="docs/desktop-demo.webp" alt="Loom desktop workspace: multi-agent ConPTY panes, overview dashboard, inline git diff, command palette, and plan usage" />
+      <img src="docs/desktop-demo.webp" alt="Loom desktop workspace UI design: multi-agent ConPTY panes, overview dashboard, inline git diff, command palette, and plan usage" />
     </td>
     <td align="center" width="26%">
-      <img src="docs/phone-demo.webp" alt="Loom phone companion: remote agent approvals, live terminal pane, git commit/push, and plan usage" />
+      <img src="docs/phone-demo.webp" alt="Loom phone companion UI: remote agent approvals, live terminal pane, git commit/push, and plan usage" />
     </td>
   </tr>
 </table>
+
+<sub>*UI walkthrough generated from Loom's interface mockups with synthetic workspace data.*</sub>
 
 ## Requirements
 
